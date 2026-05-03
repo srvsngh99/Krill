@@ -143,13 +143,37 @@ private func loadPhi(configData: Data, directory: URL) throws -> LoadedModel {
 private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(Gemma4Config.self, from: configData)
     let model = Gemma4ForCausalLM(config)
-    // Gemma 4 weights use "language_model." prefix for the text decoder.
-    // Strip it so keys match our model structure (model.layers.*, lm_head.*).
-    try loadWeights(
-        into: model, from: directory,
-        quantization: config.quantization,
-        keyPrefix: "language_model."
-    )
+
+    // Gemma 4: quantize with filter to exclude per_layer_model_projection (stays BF16)
+    if let q = config.quantization {
+        quantize(model: model, groupSize: q.groupSize, bits: q.bits) { name, _ in
+            !name.contains("per_layer_model_projection") && !name.contains("per_layer_projection_norm")
+        }
+    }
+
+    // Load weights with "language_model." prefix stripped
+    var flatWeights = try loadWeightArrays(from: directory)
+    var stripped: [String: MLXArray] = [:]
+    for (key, value) in flatWeights {
+        if key.hasPrefix("language_model.") {
+            stripped[String(key.dropFirst("language_model.".count))] = value
+        }
+    }
+    if !stripped.isEmpty { flatWeights = stripped }
+
+    // Handle tied embeddings
+    let hasLmHead = flatWeights.keys.contains { $0.hasPrefix("lm_head.") }
+    if !hasLmHead {
+        let embedKeys = flatWeights.keys.filter { $0.hasPrefix("model.embed_tokens.") && !$0.contains("per_layer") }
+        for key in embedKeys {
+            let lmKey = key.replacingOccurrences(of: "model.embed_tokens.", with: "lm_head.")
+            flatWeights[lmKey] = flatWeights[key]
+        }
+    }
+
+    let tuples = flatWeights.map { ($0.key, $0.value) }
+    let nested = ModuleParameters.unflattened(tuples)
+    try model.update(parameters: nested, verify: [])
 
     return LoadedModel(
         module: model,

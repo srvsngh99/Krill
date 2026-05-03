@@ -1,3 +1,4 @@
+import Foundation
 import MLX
 import MLXNN
 import MLXFast
@@ -5,10 +6,9 @@ import KLMCache
 
 // MARK: - Gemma 4 Config
 
-/// Configuration for Gemma 4 model family.
-/// Key differences from Gemma 2: hybrid sliding/global attention, partial RoPE,
-/// GELU activation (not GeGLU), dual KV head counts.
-public struct Gemma4Config: ModelConfig, Decodable, Sendable {
+/// Configuration for Gemma 4 model family (E2B, E4B, 12B, 27B, 31B).
+/// Complex architecture: PLE, dual head_dim, KV sharing, 4-norm blocks.
+public struct Gemma4Config: Decodable, Sendable {
     public let hiddenSize: Int
     public let intermediateSize: Int
     public let numAttentionHeads: Int
@@ -16,19 +16,19 @@ public struct Gemma4Config: ModelConfig, Decodable, Sendable {
     public let numHiddenLayers: Int
     public let vocabSize: Int
     public let rmsNormEps: Float
-    public let ropeTheta: Float
     public let maxPositionEmbeddings: Int
-    public let quantization: QuantizationConfig?
 
     // Gemma 4 specific
-    public let slidingWindowSize: Int
-    public let numGlobalKVHeads: Int
-    public let partialRotaryFactor: Float
-    public let globalRopeTheta: Float
-
-    // Gemma 4 has an explicit head_dim that may differ from hidden_size/num_heads
-    public let _explicitHeadDim: Int?
-    public var headDim: Int { _explicitHeadDim ?? (hiddenSize / numAttentionHeads) }
+    public let headDim: Int              // 256 for sliding layers
+    public let globalHeadDim: Int        // 512 for full attention layers
+    public let slidingWindow: Int
+    public let slidingWindowPattern: Int  // every Nth layer is full attention
+    public let hiddenSizePerLayerInput: Int  // PLE dimension (256)
+    public let numKVSharedLayers: Int    // layers sharing KV from earlier layers
+    public let useDoubleWideMlp: Bool
+    public let finalLogitSoftcapping: Float
+    public let tieWordEmbeddings: Bool
+    public let quantization: QuantizationConfig?
 
     enum CodingKeys: String, CodingKey {
         case hiddenSize = "hidden_size"
@@ -38,149 +38,172 @@ public struct Gemma4Config: ModelConfig, Decodable, Sendable {
         case numHiddenLayers = "num_hidden_layers"
         case vocabSize = "vocab_size"
         case rmsNormEps = "rms_norm_eps"
-        case ropeTheta = "rope_theta"
         case maxPositionEmbeddings = "max_position_embeddings"
+        case headDim = "head_dim"
+        case globalHeadDim = "global_head_dim"
+        case slidingWindow = "sliding_window"
+        case slidingWindowPattern = "sliding_window_pattern"
+        case hiddenSizePerLayerInput = "hidden_size_per_layer_input"
+        case numKVSharedLayers = "num_kv_shared_layers"
+        case useDoubleWideMlp = "use_double_wide_mlp"
+        case finalLogitSoftcapping = "final_logit_softcapping"
+        case tieWordEmbeddings = "tie_word_embeddings"
         case quantization
         case quantizationConfig = "quantization_config"
-        case slidingWindowSize = "sliding_window_size"
-        case numGlobalKVHeads = "num_global_key_value_heads"
-        case partialRotaryFactor = "partial_rotary_factor"
-        case globalRopeTheta = "global_rope_theta"
         case textConfig = "text_config"
-        case explicitHeadDim = "head_dim"
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
 
-        // Gemma 4 config is nested: top-level has text_config with decoder params
-        // Try nested first, fall back to flat
-        if let textContainer = try? c.nestedContainer(keyedBy: CodingKeys.self, forKey: .textConfig) {
-            hiddenSize = try textContainer.decode(Int.self, forKey: .hiddenSize)
-            intermediateSize = try textContainer.decode(Int.self, forKey: .intermediateSize)
-            numAttentionHeads = try textContainer.decode(Int.self, forKey: .numAttentionHeads)
-            numKeyValueHeads = try textContainer.decodeIfPresent(Int.self, forKey: .numKeyValueHeads)
-                ?? numAttentionHeads
-            numHiddenLayers = try textContainer.decode(Int.self, forKey: .numHiddenLayers)
-            vocabSize = try textContainer.decode(Int.self, forKey: .vocabSize)
-            rmsNormEps = try textContainer.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-6
-            ropeTheta = try textContainer.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10_000.0
-            maxPositionEmbeddings = try textContainer.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 262144
-            slidingWindowSize = try textContainer.decodeIfPresent(Int.self, forKey: .slidingWindowSize) ?? 1024
-            numGlobalKVHeads = try textContainer.decodeIfPresent(Int.self, forKey: .numGlobalKVHeads) ?? 4
-            partialRotaryFactor = try textContainer.decodeIfPresent(Float.self, forKey: .partialRotaryFactor) ?? 0.25
-            globalRopeTheta = try textContainer.decodeIfPresent(Float.self, forKey: .globalRopeTheta) ?? 1_000_000.0
-            _explicitHeadDim = try textContainer.decodeIfPresent(Int.self, forKey: .explicitHeadDim)
+        // Parse from nested text_config or flat
+        let tc: KeyedDecodingContainer<CodingKeys>
+        if let nested = try? c.nestedContainer(keyedBy: CodingKeys.self, forKey: .textConfig) {
+            tc = nested
         } else {
-            hiddenSize = try c.decode(Int.self, forKey: .hiddenSize)
-            intermediateSize = try c.decode(Int.self, forKey: .intermediateSize)
-            numAttentionHeads = try c.decode(Int.self, forKey: .numAttentionHeads)
-            numKeyValueHeads = try c.decodeIfPresent(Int.self, forKey: .numKeyValueHeads)
-                ?? numAttentionHeads
-            numHiddenLayers = try c.decode(Int.self, forKey: .numHiddenLayers)
-            vocabSize = try c.decode(Int.self, forKey: .vocabSize)
-            rmsNormEps = try c.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-6
-            ropeTheta = try c.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10_000.0
-            maxPositionEmbeddings = try c.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 262144
-            slidingWindowSize = try c.decodeIfPresent(Int.self, forKey: .slidingWindowSize) ?? 1024
-            numGlobalKVHeads = try c.decodeIfPresent(Int.self, forKey: .numGlobalKVHeads) ?? 4
-            partialRotaryFactor = try c.decodeIfPresent(Float.self, forKey: .partialRotaryFactor) ?? 0.25
-            globalRopeTheta = try c.decodeIfPresent(Float.self, forKey: .globalRopeTheta) ?? 1_000_000.0
-            _explicitHeadDim = try c.decodeIfPresent(Int.self, forKey: .explicitHeadDim)
+            tc = c
         }
-        // Quantization can be at top level or in text_config
+
+        hiddenSize = try tc.decode(Int.self, forKey: .hiddenSize)
+        intermediateSize = try tc.decode(Int.self, forKey: .intermediateSize)
+        numAttentionHeads = try tc.decode(Int.self, forKey: .numAttentionHeads)
+        numKeyValueHeads = try tc.decodeIfPresent(Int.self, forKey: .numKeyValueHeads) ?? 1
+        numHiddenLayers = try tc.decode(Int.self, forKey: .numHiddenLayers)
+        vocabSize = try tc.decode(Int.self, forKey: .vocabSize)
+        rmsNormEps = try tc.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-6
+        maxPositionEmbeddings = try tc.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 262144
+        headDim = try tc.decodeIfPresent(Int.self, forKey: .headDim) ?? 256
+        globalHeadDim = try tc.decodeIfPresent(Int.self, forKey: .globalHeadDim) ?? 512
+        slidingWindow = try tc.decodeIfPresent(Int.self, forKey: .slidingWindow) ?? 512
+        slidingWindowPattern = try tc.decodeIfPresent(Int.self, forKey: .slidingWindowPattern) ?? 5
+        hiddenSizePerLayerInput = try tc.decodeIfPresent(Int.self, forKey: .hiddenSizePerLayerInput) ?? 256
+        numKVSharedLayers = try tc.decodeIfPresent(Int.self, forKey: .numKVSharedLayers) ?? 20
+        useDoubleWideMlp = try tc.decodeIfPresent(Bool.self, forKey: .useDoubleWideMlp) ?? true
+        finalLogitSoftcapping = try tc.decodeIfPresent(Float.self, forKey: .finalLogitSoftcapping) ?? 30.0
+        tieWordEmbeddings = try tc.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings) ?? true
+
+        // Quantization at top level
         quantization = try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantization)
             ?? (try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantizationConfig))
     }
+
+    /// Whether a layer uses full attention (vs sliding window).
+    public func isFullAttention(layerIdx: Int) -> Bool {
+        (layerIdx + 1) % slidingWindowPattern == 0
+    }
+
+    /// Whether a layer shares KV from an earlier layer.
+    public func isKVShared(layerIdx: Int) -> Bool {
+        layerIdx >= (numHiddenLayers - numKVSharedLayers)
+    }
+
+    /// First layer index that shares KV.
+    public var firstKVSharedLayer: Int { numHiddenLayers - numKVSharedLayers }
+
+    // Conform to ModelConfig
+    public var ropeTheta: Float { 10_000.0 }
 }
 
-// MARK: - Gemma 4 Attention (hybrid sliding + global)
+// Explicit ModelConfig conformance
+extension Gemma4Config: ModelConfig {}
+
+// MARK: - Gemma 4 Attention
 
 class Gemma4Attention: Module {
     let numHeads: Int
     let numKVHeads: Int
-    let headDim: Int
-    let scale: Float
-    let isGlobal: Bool
-    let ropeDim: Int
+    let layerHeadDim: Int
+    let isFullAttn: Bool
 
     @ModuleInfo(key: "q_proj") var qProj: Linear
     @ModuleInfo(key: "k_proj") var kProj: Linear
     @ModuleInfo(key: "v_proj") var vProj: Linear
     @ModuleInfo(key: "o_proj") var oProj: Linear
+    @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
+    @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
 
     let rope: RoPE
 
     init(_ config: Gemma4Config, layerIdx: Int) {
         let dim = config.hiddenSize
         self.numHeads = config.numAttentionHeads
-        self.headDim = config.headDim
-        self.scale = 1.0 / Float(config.headDim).squareRoot()
+        self.numKVHeads = config.numKeyValueHeads
+        self.isFullAttn = config.isFullAttention(layerIdx: layerIdx)
+        self.layerHeadDim = isFullAttn ? config.globalHeadDim : config.headDim
 
-        // Gemma 4 alternates: 5 sliding-window layers then 1 global layer
-        self.isGlobal = (layerIdx % 6 == 5)
-        self.numKVHeads = isGlobal ? config.numGlobalKVHeads : config.numKeyValueHeads
+        let qSize = numHeads * layerHeadDim
+        let kvSize = numKVHeads * layerHeadDim
 
-        // Partial RoPE: only rotate a fraction of head dimensions
-        self.ropeDim = Int(Float(config.headDim) * config.partialRotaryFactor)
+        _qProj = ModuleInfo(wrappedValue: Linear(dim, qSize, bias: false), key: "q_proj")
+        _kProj = ModuleInfo(wrappedValue: Linear(dim, kvSize, bias: false), key: "k_proj")
+        _vProj = ModuleInfo(wrappedValue: Linear(dim, kvSize, bias: false), key: "v_proj")
+        _oProj = ModuleInfo(wrappedValue: Linear(qSize, dim, bias: false), key: "o_proj")
+        _qNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: layerHeadDim, eps: config.rmsNormEps), key: "q_norm")
+        _kNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: layerHeadDim, eps: config.rmsNormEps), key: "k_norm")
 
-        let ropeTheta = isGlobal ? config.globalRopeTheta : config.ropeTheta
-        self.rope = RoPE(dimensions: ropeDim, traditional: false, base: ropeTheta)
-
-        // Note: Q/K/V sizes use headDim (explicit, may differ from hidden_size/num_heads)
-        let qSize = numHeads * headDim
-        let kvSize = numKVHeads * headDim
-        _qProj = ModuleInfo(
-            wrappedValue: Linear(dim, qSize, bias: false), key: "q_proj")
-        _kProj = ModuleInfo(
-            wrappedValue: Linear(dim, kvSize, bias: false), key: "k_proj")
-        _vProj = ModuleInfo(
-            wrappedValue: Linear(dim, kvSize, bias: false), key: "v_proj")
-        _oProj = ModuleInfo(
-            wrappedValue: Linear(qSize, dim, bias: false), key: "o_proj")
+        // RoPE: full dims for sliding, partial (25%) for full attention
+        let ropeDim: Int
+        let ropeBase: Float
+        if isFullAttn {
+            ropeDim = layerHeadDim / 4  // partial_rotary_factor = 0.25
+            ropeBase = 1_000_000.0
+        } else {
+            ropeDim = layerHeadDim
+            ropeBase = 10_000.0
+        }
+        self.rope = RoPE(dimensions: ropeDim, traditional: false, base: ropeBase)
     }
 
     func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
 
-        var queries = qProj(x).reshaped(B, L, numHeads, headDim).transposed(0, 2, 1, 3)
-        var keys = kProj(x).reshaped(B, L, numKVHeads, headDim).transposed(0, 2, 1, 3)
-        var values = vProj(x).reshaped(B, L, numKVHeads, headDim).transposed(0, 2, 1, 3)
+        var q = qProj(x).reshaped(B, L, numHeads, layerHeadDim).transposed(0, 2, 1, 3)
+        var k = kProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
+        var v = vProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
 
-        // Apply partial RoPE (only to first ropeDim dimensions)
+        // Apply Q/K norms
+        q = qNorm(q)
+        k = kNorm(k)
+
+        // RoPE
         let offset = cache?.sequenceLength ?? 0
-        queries = rope(queries, offset: offset)
-        keys = rope(keys, offset: offset)
+        q = rope(q, offset: offset)
+        k = rope(k, offset: offset)
 
+        // KV cache
         if let cache {
-            (keys, values) = cache.update(keys: keys, values: values)
+            (k, v) = cache.update(keys: k, values: v)
         }
 
+        // Attention with scale=1.0 (Gemma 4 uses unit scale)
         let output = MLXFast.scaledDotProductAttention(
-            queries: queries, keys: keys, values: values, scale: scale, mask: mask)
+            queries: q, keys: k, values: v, scale: 1.0, mask: mask)
 
         return oProj(output.transposed(0, 2, 1, 3).reshaped(B, L, -1))
     }
 }
 
-// MARK: - Gemma 4 MLP (GELU, not GeGLU)
+// MARK: - Gemma 4 MLP (GeGLU, variable width)
 
 class Gemma4MLP: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
 
-    init(_ config: Gemma4Config) {
-        _gateProj = ModuleInfo(
-            wrappedValue: Linear(config.hiddenSize, config.intermediateSize, bias: false),
-            key: "gate_proj")
-        _upProj = ModuleInfo(
-            wrappedValue: Linear(config.hiddenSize, config.intermediateSize, bias: false),
-            key: "up_proj")
-        _downProj = ModuleInfo(
-            wrappedValue: Linear(config.intermediateSize, config.hiddenSize, bias: false),
-            key: "down_proj")
+    init(_ config: Gemma4Config, layerIdx: Int) {
+        let dim = config.hiddenSize
+        // KV-shared layers use double-wide MLP
+        let inter: Int
+        if config.useDoubleWideMlp && config.isKVShared(layerIdx: layerIdx) {
+            inter = config.intermediateSize * 2
+        } else {
+            inter = config.intermediateSize
+        }
+
+        _gateProj = ModuleInfo(wrappedValue: Linear(dim, inter, bias: false), key: "gate_proj")
+        _upProj = ModuleInfo(wrappedValue: Linear(dim, inter, bias: false), key: "up_proj")
+        _downProj = ModuleInfo(wrappedValue: Linear(inter, dim, bias: false), key: "down_proj")
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
@@ -188,84 +211,150 @@ class Gemma4MLP: Module {
     }
 }
 
-// MARK: - Gemma 4 Transformer Block
+// MARK: - Gemma 4 Transformer Block (4 norms + PLE gating)
 
-class Gemma4TransformerBlock: Module {
+class Gemma4Block: Module {
     @ModuleInfo(key: "self_attn") var selfAttn: Gemma4Attention
     @ModuleInfo(key: "mlp") var mlp: Gemma4MLP
     @ModuleInfo(key: "input_layernorm") var inputLayernorm: RMSNorm
-    @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayernorm: RMSNorm
+    @ModuleInfo(key: "post_attention_layernorm") var postAttnNorm: RMSNorm
+    @ModuleInfo(key: "pre_feedforward_layernorm") var preFfnNorm: RMSNorm
+    @ModuleInfo(key: "post_feedforward_layernorm") var postFfnNorm: RMSNorm
+    @ModuleInfo(key: "per_layer_input_gate") var pleGate: Linear
+    @ModuleInfo(key: "per_layer_projection") var pleProj: Linear
+    @ModuleInfo(key: "post_per_layer_input_norm") var pleNorm: RMSNorm
 
     init(_ config: Gemma4Config, layerIdx: Int) {
-        _selfAttn = ModuleInfo(
-            wrappedValue: Gemma4Attention(config, layerIdx: layerIdx), key: "self_attn")
-        _mlp = ModuleInfo(wrappedValue: Gemma4MLP(config), key: "mlp")
-        _inputLayernorm = ModuleInfo(
-            wrappedValue: RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps),
-            key: "input_layernorm")
-        _postAttentionLayernorm = ModuleInfo(
-            wrappedValue: RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps),
-            key: "post_attention_layernorm")
+        let dim = config.hiddenSize
+        let pleDim = config.hiddenSizePerLayerInput
+
+        _selfAttn = ModuleInfo(wrappedValue: Gemma4Attention(config, layerIdx: layerIdx), key: "self_attn")
+        _mlp = ModuleInfo(wrappedValue: Gemma4MLP(config, layerIdx: layerIdx), key: "mlp")
+        _inputLayernorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps), key: "input_layernorm")
+        _postAttnNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps), key: "post_attention_layernorm")
+        _preFfnNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps), key: "pre_feedforward_layernorm")
+        _postFfnNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps), key: "post_feedforward_layernorm")
+        _pleGate = ModuleInfo(wrappedValue: Linear(dim, pleDim, bias: false), key: "per_layer_input_gate")
+        _pleProj = ModuleInfo(wrappedValue: Linear(pleDim, dim, bias: false), key: "per_layer_projection")
+        _pleNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps), key: "post_per_layer_input_norm")
     }
 
-    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil) -> MLXArray {
-        let h = x + selfAttn(inputLayernorm(x), mask: mask, cache: cache)
-        return h + mlp(postAttentionLayernorm(h))
+    func callAsFunction(
+        _ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil,
+        perLayerInput: MLXArray? = nil
+    ) -> MLXArray {
+        // Attention
+        var h = x + postAttnNorm(selfAttn(inputLayernorm(x), mask: mask, cache: cache))
+
+        // FFN
+        h = h + postFfnNorm(mlp(preFfnNorm(h)))
+
+        // PLE gating
+        if let ple = perLayerInput {
+            let gate = gelu(pleGate(h))  // [B, L, 256]
+            let gated = gate * ple        // element-wise with PLE slice
+            let projected = pleProj(gated) // [B, L, 1536]
+            h = h + pleNorm(projected)
+        }
+
+        return h
     }
 }
 
 // MARK: - Gemma 4 Full Model
 
-class Gemma4ModelInner: Module {
+class Gemma4TextModel: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
-    @ModuleInfo(key: "layers") var layers: [Gemma4TransformerBlock]
+    @ModuleInfo(key: "embed_tokens_per_layer") var embedPerLayer: Embedding
+    @ModuleInfo(key: "per_layer_model_projection") var perLayerProj: Linear
+    @ModuleInfo(key: "per_layer_projection_norm") var perLayerNorm: RMSNorm
+    @ModuleInfo(key: "layers") var layers: [Gemma4Block]
     @ModuleInfo(key: "norm") var norm: RMSNorm
 
-    let hiddenSize: Int
+    let config: Gemma4Config
 
     init(_ config: Gemma4Config) {
-        self.hiddenSize = config.hiddenSize
+        self.config = config
+        let dim = config.hiddenSize
+        let pleDim = config.hiddenSizePerLayerInput
+        let pleTotal = config.numHiddenLayers * pleDim
+
         _embedTokens = ModuleInfo(
-            wrappedValue: Embedding(embeddingCount: config.vocabSize, dimensions: config.hiddenSize),
+            wrappedValue: Embedding(embeddingCount: config.vocabSize, dimensions: dim),
             key: "embed_tokens")
+        _embedPerLayer = ModuleInfo(
+            wrappedValue: Embedding(embeddingCount: config.vocabSize, dimensions: pleTotal),
+            key: "embed_tokens_per_layer")
+        _perLayerProj = ModuleInfo(
+            wrappedValue: Linear(dim, pleTotal, bias: false),
+            key: "per_layer_model_projection")
+        _perLayerNorm = ModuleInfo(
+            wrappedValue: RMSNorm(dimensions: pleDim, eps: config.rmsNormEps),
+            key: "per_layer_projection_norm")
         _layers = ModuleInfo(
-            wrappedValue: (0 ..< config.numHiddenLayers).map { i in
-                Gemma4TransformerBlock(config, layerIdx: i)
-            },
+            wrappedValue: (0 ..< config.numHiddenLayers).map { i in Gemma4Block(config, layerIdx: i) },
             key: "layers")
         _norm = ModuleInfo(
-            wrappedValue: RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps),
+            wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps),
             key: "norm")
     }
 
     func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
-        // Gemma scales embeddings by sqrt(hidden_size)
-        var x = embedTokens(tokens) * MLXArray(Float(hiddenSize).squareRoot())
-        let seqLen = x.dim(1)
-        let mask: MLXArray? = seqLen > 1 ? createAdditiveCausalMask(seqLen) : nil
+        let B = tokens.dim(0)
+        let L = tokens.dim(1)
+        let numLayers = config.numHiddenLayers
+        let pleDim = config.hiddenSizePerLayerInput
 
+        // Main embeddings (scaled by sqrt(hidden_size))
+        var h = embedTokens(tokens) * MLXArray(Float(config.hiddenSize).squareRoot())
+
+        // PLE: compute per-layer inputs
+        let pleEmbed = embedPerLayer(tokens) * MLXArray(Float(pleDim).squareRoot())
+        // Shape: [B, L, numLayers * pleDim] -> [B, L, numLayers, pleDim]
+
+        let projection = perLayerProj(h) * MLXArray(1.0 / Float(config.hiddenSize).squareRoot())
+        let projNormed = perLayerNorm(projection.reshaped(B * L * numLayers, pleDim))
+            .reshaped(B, L, numLayers * pleDim)
+
+        let combinedPLE = (projNormed + pleEmbed) * MLXArray(Float(0.7071067811865476))
+        // Split into per-layer slices: [B, L, pleDim] each
+
+        // Causal mask
+        let mask: MLXArray? = L > 1 ? createAdditiveCausalMask(L) : nil
+
+        // Forward through layers
         for (i, layer) in layers.enumerated() {
-            x = layer(x, mask: mask, cache: caches?[i])
+            let pleSlice = combinedPLE[0..., 0..., (i * pleDim) ..< ((i + 1) * pleDim)]
+            let cache = caches?[i]
+            h = layer(h, mask: mask, cache: cache, perLayerInput: pleSlice)
         }
-        return norm(x)
+
+        return norm(h)
     }
 }
 
+// MARK: - Gemma4ForCausalLM
+
 public class Gemma4ForCausalLM: Module {
-    @ModuleInfo(key: "model") var model: Gemma4ModelInner
+    @ModuleInfo(key: "model") var model: Gemma4TextModel
+    // Separate lm_head for logit projection (loaded from embed_tokens weights)
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 
     public let config: Gemma4Config
 
     public init(_ config: Gemma4Config) {
         self.config = config
-        _model = ModuleInfo(wrappedValue: Gemma4ModelInner(config), key: "model")
+        _model = ModuleInfo(wrappedValue: Gemma4TextModel(config), key: "model")
         _lmHead = ModuleInfo(
             wrappedValue: Linear(config.hiddenSize, config.vocabSize, bias: false),
             key: "lm_head")
     }
 
     public func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
-        lmHead(model(tokens, caches: caches))
+        let hidden = model(tokens, caches: caches)
+        let logits = lmHead(hidden)
+        // Logit soft-capping
+        let cap = config.finalLogitSoftcapping
+        return MLX.tanh(logits / cap) * cap
     }
 }
