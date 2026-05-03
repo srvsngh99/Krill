@@ -9,33 +9,25 @@ import KLMSampler
 ///
 /// The engine owns the model, tokenizer, and sampler. It provides a streaming
 /// generation interface via AsyncStream<TokenEvent>.
+/// Supports all model families: Llama, Qwen, Mistral, Gemma, Phi.
 public final class InferenceEngine: @unchecked Sendable {
-    private var model: LlamaForCausalLM?
+    private var loadedModel: LoadedModel?
     private var tokenizer: KLMTokenizer?
-    private var config: LlamaConfig?
     private let modelDirectory: URL
+
+    /// The detected model family (nil if not loaded).
+    public var family: String? { loadedModel?.family }
 
     public init(modelDirectory: URL) {
         self.modelDirectory = modelDirectory
     }
 
     /// Load the model and tokenizer from disk.
+    /// Auto-detects model family from config.json.
     public func load() async throws {
-        // Load config
-        let cfg = try loadConfig(from: modelDirectory)
-        self.config = cfg
-
-        // Build model
-        let llm = LlamaForCausalLM(cfg)
-
-        // Load weights (handles quantization if config specifies it)
-        try loadWeights(
-            into: llm,
-            from: modelDirectory,
-            quantization: cfg.quantization
-        )
-
-        self.model = llm
+        // Use unified loader (detects family, builds model, loads weights)
+        let loaded = try loadModel(from: modelDirectory)
+        self.loadedModel = loaded
 
         // Load tokenizer
         self.tokenizer = try await KLMTokenizer(from: modelDirectory)
@@ -43,7 +35,7 @@ public final class InferenceEngine: @unchecked Sendable {
 
     /// Check if the model is loaded and ready.
     public var isLoaded: Bool {
-        model != nil && tokenizer != nil
+        loadedModel != nil && tokenizer != nil
     }
 
     /// Generate tokens from a prompt, streaming results.
@@ -60,7 +52,7 @@ public final class InferenceEngine: @unchecked Sendable {
         params: SamplingParams = .greedy,
         maxTokens: Int = 512
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
-        guard let model, let tokenizer, let config else {
+        guard let loadedModel, let tokenizer else {
             let emptyStream = AsyncStream<TokenEvent> { $0.finish() }
             return (emptyStream, { nil })
         }
@@ -77,14 +69,15 @@ public final class InferenceEngine: @unchecked Sendable {
 
         let sampler = Sampler(params: params)
         let eosId = tokenizer.eosTokenId
-        let numLayers = config.numHiddenLayers
+        let numLayers = loadedModel.numLayers
+        let forwardFn = loadedModel.forward
 
         // Shared stats - populated after generation completes
         let statsHolder = StatsHolder()
 
-        // Capture model/tokenizer as nonisolated(unsafe) to suppress Sendable warnings.
+        // Capture as nonisolated(unsafe) to suppress Sendable warnings.
         // Safe because KrillLM is single-request, single-user by design (v1.0).
-        nonisolated(unsafe) let capturedModel = model
+        nonisolated(unsafe) let capturedForward = forwardFn
         nonisolated(unsafe) let capturedTokenizer = tokenizer
 
         let stream = AsyncStream<TokenEvent> { continuation in
@@ -99,7 +92,7 @@ public final class InferenceEngine: @unchecked Sendable {
                 // -- Prefill --
                 let inputArray = MLXArray(promptTokens.map { Int32($0) })
                     .reshaped(1, promptTokens.count)
-                let prefillLogits = capturedModel(inputArray, caches: caches)
+                let prefillLogits = capturedForward(inputArray, caches)
                 MLX.eval(prefillLogits)
                 prefillDuration = CFAbsoluteTimeGetCurrent() - startTime
 
@@ -134,7 +127,7 @@ public final class InferenceEngine: @unchecked Sendable {
 
                     // Forward pass for next token
                     let tokenInput = MLXArray([Int32(nextToken)]).reshaped(1, 1)
-                    let logits = capturedModel(tokenInput, caches: caches)
+                    let logits = capturedForward(tokenInput, caches)
                     MLX.eval(logits)
 
                     nextToken = sampler.sample(logits)
@@ -167,9 +160,8 @@ public final class InferenceEngine: @unchecked Sendable {
 
     /// Unload the model from memory and release resources.
     public func unload() {
-        model = nil
+        loadedModel = nil
         tokenizer = nil
-        config = nil
     }
 }
 
