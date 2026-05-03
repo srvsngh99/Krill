@@ -63,13 +63,20 @@ public final class KLMTokenizer: @unchecked Sendable {
 
     /// Apply chat template formatting for a conversation.
     ///
-    /// Formats messages as the model expects them (e.g., Llama 3 instruct format).
-    /// Uses the tokenizer's built-in applyChatTemplate (returns token IDs) then decodes,
-    /// or falls back to manual Llama 3 format.
+    /// Supports model-specific templates:
+    /// - Gemma 4: uses token IDs 105/106/107 for turn markers
+    /// - Llama 3: uses <|begin_of_text|> style markers
+    /// - Others: delegates to tokenizer's built-in template
     public func applyChatTemplate(messages: [[String: String]]) -> String {
         // Try using the tokenizer's built-in chat template (returns token IDs)
         if let tokenIds = try? tokenizer.applyChatTemplate(messages: messages) {
             return tokenizer.decode(tokens: tokenIds)
+        }
+
+        // Detect Gemma 4 by checking if token 105 decodes to a turn marker
+        let token105 = tokenizer.decode(tokens: [105])
+        if token105.contains("turn") || token105.contains("<|") {
+            return formatGemma4(messages: messages)
         }
 
         // Fallback: manual Llama 3 instruct format
@@ -81,6 +88,30 @@ public final class KLMTokenizer: @unchecked Sendable {
         }
         result += "<|start_header_id|>assistant<|end_header_id|>\n\n"
         return result
+    }
+
+    /// Gemma 4 chat template formatting.
+    /// Format: BOS + <|turn|>user\ncontent<turn|>\n<|turn|>model\n
+    private func formatGemma4(messages: [[String: String]]) -> String {
+        // Gemma 4 uses special token IDs directly, not text markers.
+        // We encode by building the token sequence and decoding back.
+        // BOS=2, <|turn|>=105, <turn|>=106, \n=107
+        var tokens: [Int] = [2]  // BOS
+        for msg in messages {
+            let role = msg["role"] ?? "user"
+            let content = msg["content"] ?? ""
+            tokens.append(105)  // <|turn|>
+            tokens += tokenizer.encode(text: role)
+            tokens.append(107)  // \n
+            tokens += tokenizer.encode(text: content)
+            tokens.append(106)  // <turn|>
+            tokens.append(107)  // \n
+        }
+        // Add model turn start
+        tokens.append(105)  // <|turn|>
+        tokens += tokenizer.encode(text: "model")
+        tokens.append(107)  // \n
+        return tokenizer.decode(tokens: tokens)
     }
 }
 
