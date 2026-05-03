@@ -29,9 +29,26 @@ public final class KLMTokenizer: @unchecked Sendable {
         }
     }
 
+    /// The BOS token ID (beginning of sequence).
+    public var bosTokenId: Int {
+        tokenizer.bosTokenId ?? 128000
+    }
+
     /// Encode a string to token IDs.
     public func encode(_ text: String) -> [Int] {
         tokenizer.encode(text: text)
+    }
+
+    /// Encode text that already includes special tokens (e.g., chat template output).
+    /// Strips the auto-added BOS token to avoid duplication.
+    public func encodeWithoutExtraBOS(_ text: String) -> [Int] {
+        var tokens = tokenizer.encode(text: text)
+        // If the tokenizer auto-added BOS and the text already starts with <|begin_of_text|>,
+        // we get a double BOS. Strip the first one.
+        if tokens.count >= 2 && tokens[0] == bosTokenId && tokens[1] == bosTokenId {
+            tokens.removeFirst()
+        }
+        return tokens
     }
 
     /// Decode token IDs back to a string.

@@ -93,13 +93,14 @@ public class LlamaForCausalLM: Module {
 /// Create an additive causal mask for self-attention during prefill.
 ///
 /// Returns a mask of shape `[1, 1, N, N]` where positions that should
-/// NOT be attended to have value -1e9 and valid positions have 0.
-func createAdditiveCausalMask(_ n: Int) -> MLXArray {
+/// NOT be attended to have a large negative value and valid positions have 0.
+/// Uses -1e4 in float16 (safe: fp16 max is ~65504).
+public func createAdditiveCausalMask(_ n: Int) -> MLXArray {
     let indices = MLXArray(0 ..< Int32(n))
     // mask[i, j] = true when j > i (future positions)
     let mask = expandedDimensions(indices, axis: 1) .< expandedDimensions(indices, axis: 0)
-    // Convert bool mask to additive: true -> -1e9, false -> 0
-    let additive = mask.asType(.float16) * Float(-1e9)
+    // Convert bool mask to additive: true -> -1e4 (safe for fp16), false -> 0
+    let additive = mask.asType(.float16) * Float16(-10000.0)
     // Add batch and head dimensions: [1, 1, N, N]
     return expandedDimensions(expandedDimensions(additive, axis: 0), axis: 0)
 }
