@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+*.xcodeproj/
+DerivedData/
+Package.resolved
+.DS_Store
+xcuserdata/
+*.metallib
+~/.krillm/
