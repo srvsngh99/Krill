@@ -8,7 +8,10 @@ struct VersionCommand: ParsableCommand {
     )
 
     func run() throws {
-        print("KrillLM v0.2.0 (Phase 2 Alpha)")
+        print("KrillLM v0.2.0")
+        print("By Sourav Singh / Sourav AI Labs")
+        print("https://github.com/srvsngh99/KrillLM")
+        print()
         print("Backend: mlx-swift (Apple MLX)")
         print("Platform: \(platform())")
         print("Chip: \(chipInfo())")

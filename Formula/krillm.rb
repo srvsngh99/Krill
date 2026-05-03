@@ -1,9 +1,9 @@
 # Homebrew formula for KrillLM
-# Install: brew tap souravailabs/krillm && brew install krillm
+# Install: brew tap srvsngh99/krillm && brew install krillm
 class Krillm < Formula
   desc "Fast local LLM inference CLI for Apple Silicon"
-  homepage "https://github.com/souravailabs/KrillLM"
-  url "https://github.com/souravailabs/KrillLM/releases/download/v0.2.0/krillm-0.2.0-arm64-apple-macos.tar.gz"
+  homepage "https://github.com/srvsngh99/KrillLM"
+  url "https://github.com/srvsngh99/KrillLM/releases/download/v0.2.0/krillm-0.2.0-arm64-apple-macos.tar.gz"
   sha256 "PLACEHOLDER_SHA256"
   license "MIT"
   version "0.2.0"
