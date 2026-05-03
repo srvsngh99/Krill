@@ -99,7 +99,7 @@ public final class InferenceEngine: @unchecked Sendable {
         messages.append(["role": "user", "content": prompt])
 
         let formatted = tokenizer.applyChatTemplate(messages: messages)
-        let promptTokens = tokenizer.encode(formatted)
+        let promptTokens = tokenizer.encodeWithoutExtraBOS(formatted)
 
         let sampler = Sampler(params: params)
         let eosId = tokenizer.eosTokenId

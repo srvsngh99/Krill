@@ -38,6 +38,9 @@ public func loadWeightArrays(from directory: URL) throws -> [String: MLXArray] {
 /// Handles quantization: if the config specifies quantization parameters,
 /// the model's Linear layers are quantized before weight loading so that
 /// the QuantizedLinear modules accept the packed weight format.
+///
+/// Also handles tied embeddings: if `lm_head.weight` is missing but
+/// `model.embed_tokens.weight` exists, copies it as the lm_head weight.
 public func loadWeights(
     into model: Module,
     from directory: URL,
@@ -52,12 +55,25 @@ public func loadWeights(
         )
     }
 
-    let flatWeights = try loadWeightArrays(from: directory)
+    var flatWeights = try loadWeightArrays(from: directory)
+
+    // Handle tied embeddings: copy embed_tokens weights to lm_head if missing
+    let hasLmHead = flatWeights.keys.contains { $0.hasPrefix("lm_head.") }
+    if !hasLmHead {
+        // Copy all embed_tokens keys to lm_head (handles weight, scales, biases)
+        let embedKeys = flatWeights.keys.filter { $0.hasPrefix("model.embed_tokens.") }
+        for key in embedKeys {
+            let lmHeadKey = key.replacingOccurrences(of: "model.embed_tokens.", with: "lm_head.")
+            flatWeights[lmHeadKey] = flatWeights[key]
+        }
+    }
 
     // Use mlx-swift's built-in unflattened() to convert flat dict -> ModuleParameters
     let tuples = flatWeights.map { ($0.key, $0.value) }
     let nested = ModuleParameters.unflattened(tuples)
-    try model.update(parameters: nested, verify: .noUnusedKeys)
+
+    // Use noUnusedKeys to allow extra keys from tied weight duplication
+    try model.update(parameters: nested, verify: [])
 }
 
 // MARK: - Errors

@@ -18,6 +18,7 @@ struct Krillm: AsyncParsableCommand {
             RemoveCommand.self,
             BenchCommand.self,
             QuantizeCommand.self,
+            DebugCommand.self,
             VersionCommand.self,
         ],
         defaultSubcommand: RunCommand.self
