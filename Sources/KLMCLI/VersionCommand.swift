@@ -8,7 +8,7 @@ struct VersionCommand: ParsableCommand {
     )
 
     func run() throws {
-        print("KrillLM v0.1.0 (Phase 1 MVP)")
+        print("KrillLM v0.2.0 (Phase 2 Alpha)")
         print("Backend: mlx-swift (Apple MLX)")
         print("Platform: \(platform())")
         print("Chip: \(chipInfo())")

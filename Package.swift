@@ -12,6 +12,8 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-transformers", from: "0.1.12"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),
+        .package(url: "https://github.com/apple/swift-nio", from: "2.70.0"),
+        .package(url: "https://github.com/apple/swift-crypto", from: "3.8.0"),
     ],
     targets: [
         .target(
@@ -44,6 +46,25 @@ let package = Package(
             ]
         ),
         .target(
+            name: "KLMRegistry",
+            dependencies: [
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "Logging", package: "swift-log"),
+            ]
+        ),
+        .target(
+            name: "KLMServer",
+            dependencies: [
+                "KLMEngine",
+                "KLMRegistry",
+                "KLMSampler",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "Logging", package: "swift-log"),
+            ]
+        ),
+        .target(
             name: "KLMEngine",
             dependencies: [
                 "KLMCore",
@@ -58,6 +79,8 @@ let package = Package(
             dependencies: [
                 "KLMEngine",
                 "KLMCore",
+                "KLMRegistry",
+                "KLMServer",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
             ]
@@ -65,6 +88,10 @@ let package = Package(
         .testTarget(
             name: "KLMCoreTests",
             dependencies: ["KLMCore", "KLMCache"]
+        ),
+        .testTarget(
+            name: "KLMRegistryTests",
+            dependencies: ["KLMRegistry"]
         ),
     ]
 )
