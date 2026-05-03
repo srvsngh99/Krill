@@ -20,6 +20,7 @@ let package = Package(
             name: "KLMCore",
             dependencies: [
                 "KLMCache",
+                "KLMKernels",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXFast", package: "mlx-swift"),
@@ -50,6 +51,7 @@ let package = Package(
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "MLXFast", package: "mlx-swift"),
             ],
             exclude: ["FusedSwiGLU.metal"]
         ),
