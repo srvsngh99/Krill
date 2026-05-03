@@ -8,7 +8,7 @@ import KLMCache
 /// Configuration for Gemma 4 model family.
 /// Key differences from Gemma 2: hybrid sliding/global attention, partial RoPE,
 /// GELU activation (not GeGLU), dual KV head counts.
-public struct Gemma4Config: ModelConfig, Codable, Sendable {
+public struct Gemma4Config: ModelConfig, Decodable, Sendable {
     public let hiddenSize: Int
     public let intermediateSize: Int
     public let numAttentionHeads: Int
@@ -26,7 +26,9 @@ public struct Gemma4Config: ModelConfig, Codable, Sendable {
     public let partialRotaryFactor: Float
     public let globalRopeTheta: Float
 
-    public var headDim: Int { hiddenSize / numAttentionHeads }
+    // Gemma 4 has an explicit head_dim that may differ from hidden_size/num_heads
+    public let _explicitHeadDim: Int?
+    public var headDim: Int { _explicitHeadDim ?? (hiddenSize / numAttentionHeads) }
 
     enum CodingKeys: String, CodingKey {
         case hiddenSize = "hidden_size"
@@ -39,29 +41,56 @@ public struct Gemma4Config: ModelConfig, Codable, Sendable {
         case ropeTheta = "rope_theta"
         case maxPositionEmbeddings = "max_position_embeddings"
         case quantization
+        case quantizationConfig = "quantization_config"
         case slidingWindowSize = "sliding_window_size"
         case numGlobalKVHeads = "num_global_key_value_heads"
         case partialRotaryFactor = "partial_rotary_factor"
         case globalRopeTheta = "global_rope_theta"
+        case textConfig = "text_config"
+        case explicitHeadDim = "head_dim"
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        hiddenSize = try c.decode(Int.self, forKey: .hiddenSize)
-        intermediateSize = try c.decode(Int.self, forKey: .intermediateSize)
-        numAttentionHeads = try c.decode(Int.self, forKey: .numAttentionHeads)
-        numKeyValueHeads = try c.decodeIfPresent(Int.self, forKey: .numKeyValueHeads)
-            ?? (try c.decode(Int.self, forKey: .numAttentionHeads))
-        numHiddenLayers = try c.decode(Int.self, forKey: .numHiddenLayers)
-        vocabSize = try c.decode(Int.self, forKey: .vocabSize)
-        rmsNormEps = try c.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-6
-        ropeTheta = try c.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10_000.0
-        maxPositionEmbeddings = try c.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 262144
+
+        // Gemma 4 config is nested: top-level has text_config with decoder params
+        // Try nested first, fall back to flat
+        if let textContainer = try? c.nestedContainer(keyedBy: CodingKeys.self, forKey: .textConfig) {
+            hiddenSize = try textContainer.decode(Int.self, forKey: .hiddenSize)
+            intermediateSize = try textContainer.decode(Int.self, forKey: .intermediateSize)
+            numAttentionHeads = try textContainer.decode(Int.self, forKey: .numAttentionHeads)
+            numKeyValueHeads = try textContainer.decodeIfPresent(Int.self, forKey: .numKeyValueHeads)
+                ?? numAttentionHeads
+            numHiddenLayers = try textContainer.decode(Int.self, forKey: .numHiddenLayers)
+            vocabSize = try textContainer.decode(Int.self, forKey: .vocabSize)
+            rmsNormEps = try textContainer.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-6
+            ropeTheta = try textContainer.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10_000.0
+            maxPositionEmbeddings = try textContainer.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 262144
+            slidingWindowSize = try textContainer.decodeIfPresent(Int.self, forKey: .slidingWindowSize) ?? 1024
+            numGlobalKVHeads = try textContainer.decodeIfPresent(Int.self, forKey: .numGlobalKVHeads) ?? 4
+            partialRotaryFactor = try textContainer.decodeIfPresent(Float.self, forKey: .partialRotaryFactor) ?? 0.25
+            globalRopeTheta = try textContainer.decodeIfPresent(Float.self, forKey: .globalRopeTheta) ?? 1_000_000.0
+            _explicitHeadDim = try textContainer.decodeIfPresent(Int.self, forKey: .explicitHeadDim)
+        } else {
+            hiddenSize = try c.decode(Int.self, forKey: .hiddenSize)
+            intermediateSize = try c.decode(Int.self, forKey: .intermediateSize)
+            numAttentionHeads = try c.decode(Int.self, forKey: .numAttentionHeads)
+            numKeyValueHeads = try c.decodeIfPresent(Int.self, forKey: .numKeyValueHeads)
+                ?? numAttentionHeads
+            numHiddenLayers = try c.decode(Int.self, forKey: .numHiddenLayers)
+            vocabSize = try c.decode(Int.self, forKey: .vocabSize)
+            rmsNormEps = try c.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-6
+            ropeTheta = try c.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10_000.0
+            maxPositionEmbeddings = try c.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 262144
+            slidingWindowSize = try c.decodeIfPresent(Int.self, forKey: .slidingWindowSize) ?? 1024
+            numGlobalKVHeads = try c.decodeIfPresent(Int.self, forKey: .numGlobalKVHeads) ?? 4
+            partialRotaryFactor = try c.decodeIfPresent(Float.self, forKey: .partialRotaryFactor) ?? 0.25
+            globalRopeTheta = try c.decodeIfPresent(Float.self, forKey: .globalRopeTheta) ?? 1_000_000.0
+            _explicitHeadDim = try c.decodeIfPresent(Int.self, forKey: .explicitHeadDim)
+        }
+        // Quantization can be at top level or in text_config
         quantization = try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantization)
-        slidingWindowSize = try c.decodeIfPresent(Int.self, forKey: .slidingWindowSize) ?? 1024
-        numGlobalKVHeads = try c.decodeIfPresent(Int.self, forKey: .numGlobalKVHeads) ?? 4
-        partialRotaryFactor = try c.decodeIfPresent(Float.self, forKey: .partialRotaryFactor) ?? 0.25
-        globalRopeTheta = try c.decodeIfPresent(Float.self, forKey: .globalRopeTheta) ?? 1_000_000.0
+            ?? (try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantizationConfig))
     }
 }
 
@@ -98,14 +127,17 @@ class Gemma4Attention: Module {
         let ropeTheta = isGlobal ? config.globalRopeTheta : config.ropeTheta
         self.rope = RoPE(dimensions: ropeDim, traditional: false, base: ropeTheta)
 
+        // Note: Q/K/V sizes use headDim (explicit, may differ from hidden_size/num_heads)
+        let qSize = numHeads * headDim
+        let kvSize = numKVHeads * headDim
         _qProj = ModuleInfo(
-            wrappedValue: Linear(dim, numHeads * headDim, bias: false), key: "q_proj")
+            wrappedValue: Linear(dim, qSize, bias: false), key: "q_proj")
         _kProj = ModuleInfo(
-            wrappedValue: Linear(dim, numKVHeads * headDim, bias: false), key: "k_proj")
+            wrappedValue: Linear(dim, kvSize, bias: false), key: "k_proj")
         _vProj = ModuleInfo(
-            wrappedValue: Linear(dim, numKVHeads * headDim, bias: false), key: "v_proj")
+            wrappedValue: Linear(dim, kvSize, bias: false), key: "v_proj")
         _oProj = ModuleInfo(
-            wrappedValue: Linear(numHeads * headDim, dim, bias: false), key: "o_proj")
+            wrappedValue: Linear(qSize, dim, bias: false), key: "o_proj")
     }
 
     func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil) -> MLXArray {
