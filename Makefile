@@ -24,8 +24,8 @@ metallib:
 		AIR_FILES="$$AIR_FILES /tmp/$$AIR"; \
 	done; \
 	if [ -n "$$AIR_FILES" ]; then \
-		xcrun -sdk macosx metallib $$AIR_FILES -o .build/debug/default.metallib 2>/dev/null; \
-		cp .build/debug/default.metallib .build/release/default.metallib 2>/dev/null; \
+		xcrun -sdk macosx metallib $$AIR_FILES -o .build/debug/mlx.metallib 2>/dev/null; \
+		cp .build/debug/mlx.metallib .build/release/mlx.metallib 2>/dev/null; \
 		echo "Metal shaders compiled."; \
 	else \
 		echo "WARNING: Metal Toolchain not installed. Run: xcodebuild -downloadComponent MetalToolchain"; \
