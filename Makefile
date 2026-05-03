@@ -7,8 +7,29 @@ VERSION = $(shell cat VERSION 2>/dev/null || echo "0.2.0")
 .PHONY: build release install uninstall clean test bench
 
 # Debug build (default)
-build:
+build: metallib
 	swift build
+
+# Compile MLX Metal shaders into metallib (required for GPU inference)
+metallib:
+	@echo "Compiling Metal shaders..."
+	@mkdir -p .build/debug .build/release
+	@METAL_DIR=.build/checkouts/mlx-swift/Source/Cmlx/mlx-generated/metal; \
+	INCLUDE_DIR=.build/checkouts/mlx-swift/Source/Cmlx/mlx/mlx/backend/metal/kernels; \
+	AIR_FILES=""; \
+	for f in $$METAL_DIR/*.metal $$METAL_DIR/**/*.metal; do \
+		[ -f "$$f" ] || continue; \
+		AIR=$$(basename $$f .metal).air; \
+		xcrun -sdk macosx metal -c -I"$$INCLUDE_DIR" "$$f" -o "/tmp/$$AIR" 2>/dev/null && \
+		AIR_FILES="$$AIR_FILES /tmp/$$AIR"; \
+	done; \
+	if [ -n "$$AIR_FILES" ]; then \
+		xcrun -sdk macosx metallib $$AIR_FILES -o .build/debug/default.metallib 2>/dev/null; \
+		cp .build/debug/default.metallib .build/release/default.metallib 2>/dev/null; \
+		echo "Metal shaders compiled."; \
+	else \
+		echo "WARNING: Metal Toolchain not installed. Run: xcodebuild -downloadComponent MetalToolchain"; \
+	fi
 
 # Optimized release build
 release:
