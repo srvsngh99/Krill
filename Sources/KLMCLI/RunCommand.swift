@@ -3,6 +3,7 @@ import Foundation
 import KLMEngine
 import KLMCore
 import KLMSampler
+import KLMRegistry
 
 struct RunCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -10,7 +11,7 @@ struct RunCommand: AsyncParsableCommand {
         abstract: "Load a model and run interactive chat or single-shot generation"
     )
 
-    @Argument(help: "Path to the model directory (mlx-community safetensors format)")
+    @Argument(help: "Model name (from registry) or path to model directory")
     var modelPath: String
 
     @Argument(help: "Optional prompt for single-shot mode (omit for interactive REPL)")
@@ -32,11 +33,21 @@ struct RunCommand: AsyncParsableCommand {
     var system: String?
 
     func run() async throws {
-        let modelDir = URL(fileURLWithPath: modelPath)
+        let modelDir: URL
+
+        // Resolve: check registry first, then treat as file path
+        let registry = Registry()
+        if registry.hasModel(modelPath) {
+            modelDir = registry.modelPath(modelPath)
+        } else {
+            modelDir = URL(fileURLWithPath: modelPath)
+        }
 
         // Validate directory exists
         guard FileManager.default.fileExists(atPath: modelDir.path) else {
-            print("Error: model directory not found: \(modelPath)")
+            print("Error: model '\(modelPath)' not found.")
+            print("Install with: krillm pull \(modelPath)")
+            print("Or provide a full path to a model directory.")
             throw ExitCode.failure
         }
 
