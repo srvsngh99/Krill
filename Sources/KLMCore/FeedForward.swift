@@ -1,9 +1,11 @@
 import MLX
 import MLXNN
+import KLMKernels
 
-/// SwiGLU feed-forward network.
+/// SwiGLU feed-forward network with fused Metal kernel.
 ///
 /// Computes: down_proj(silu(gate_proj(x)) * up_proj(x))
+/// Uses fused Metal kernel to avoid materializing the intermediate silu result.
 /// Standard in Llama, Qwen, and Mistral families.
 public class FeedForward: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
@@ -23,6 +25,10 @@ public class FeedForward: Module {
     }
 
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(silu(gateProj(x)) * upProj(x))
+        let gate = gateProj(x)
+        let up = upProj(x)
+        // Fused SwiGLU: single kernel pass instead of silu + multiply
+        let activated = KLMKernels.fusedSwiGLU(gate: gate, up: up)
+        return downProj(activated)
     }
 }

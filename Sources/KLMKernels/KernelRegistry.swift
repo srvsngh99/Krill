@@ -1,48 +1,66 @@
 import Foundation
 import MLX
 import MLXNN
+import MLXFast
 
-/// Registry for custom Metal kernels.
+/// Registry for custom fused Metal kernels.
 ///
-/// Provides Swift wrappers for the fused operations defined in .metal files.
-/// Each kernel is compiled at build time into a .metallib bundled with the binary.
+/// Uses MLX's JIT metalKernel API to dispatch fused operations that avoid
+/// materializing intermediate tensors, saving memory bandwidth.
 ///
 /// Available kernels:
 /// - `fusedSwiGLU`: silu(gate) * up in one pass (5-12% FFN speedup)
-/// - `fusedRMSNormResidual`: RMSNorm + residual add fused (3-5% decode win)
 public enum KLMKernels {
+
+    /// JIT-compiled fused SwiGLU kernel.
+    /// Computes output[i] = silu(gate[i]) * up[i] without materializing silu(gate).
+    private static let _fusedSwiGLUKernel: MLXFast.MLXFastKernel = {
+        MLXFast.metalKernel(
+            name: "fused_swiglu",
+            inputNames: ["gate", "up"],
+            outputNames: ["out"],
+            source: """
+                uint elem = thread_position_in_grid.x;
+                float g = float(gate[elem]);
+                float u = float(up[elem]);
+                float sig = 1.0f / (1.0f + exp(-g));
+                out[elem] = half(g * sig * u);
+            """,
+            ensureRowContiguous: true
+        )
+    }()
 
     /// Apply fused SwiGLU: output = silu(gate) * up
     ///
-    /// Faster than separate silu(gate) then element-wise multiply, because
-    /// it avoids materializing the intermediate silu result tensor.
+    /// Dispatches a custom Metal kernel that computes silu(gate) * up in a single
+    /// pass, avoiding the intermediate tensor allocation for silu(gate).
+    /// This saves one full read+write of the intermediate_size tensor per layer.
     ///
-    /// Falls back to standard MLX ops if the custom kernel is unavailable.
+    /// - Parameters:
+    ///   - gate: Output of gate_proj, shape [B*L, intermediate_size]
+    ///   - up: Output of up_proj, shape [B*L, intermediate_size]
+    /// - Returns: silu(gate) * up, same shape
     public static func fusedSwiGLU(gate: MLXArray, up: MLXArray) -> MLXArray {
-        // For v1.0, use MLX ops directly (the kernel dispatch via MLX's
-        // custom_kernel API requires metallib embedding which is Phase 4+).
-        // The .metal file documents the kernel for when we add dispatch.
-        //
-        // This path is still faster than naive because MLX fuses elementwise
-        // ops in its lazy graph evaluation.
-        return silu(gate) * up
+        let totalElements = gate.size
+        // Threadgroup: use 256 threads (standard for elementwise)
+        let threadGroup = min(256, totalElements)
+        let grid = (totalElements + threadGroup - 1) / threadGroup * threadGroup
+
+        let results = _fusedSwiGLUKernel(
+            [gate, up],
+            grid: (grid, 1, 1),
+            threadGroup: (threadGroup, 1, 1),
+            outputShapes: [gate.shape],
+            outputDTypes: [gate.dtype]
+        )
+        return results[0]
     }
 
-    /// Check if custom Metal kernels are available (compiled metallib present).
-    public static var isAvailable: Bool {
-        // Will be true once we embed the .metallib at build time
-        // For now, returns false and all callers use MLX fallback
-        guard let bundlePath = Bundle.main.path(forResource: "KrillLMKernels", ofType: "metallib") else {
-            return false
-        }
-        return FileManager.default.fileExists(atPath: bundlePath)
-    }
+    /// Custom kernels are always available (JIT compiled via MLX metalKernel API).
+    public static var isAvailable: Bool { true }
 
-    /// Kernel performance hints for the bench command.
+    /// Kernel status for diagnostics.
     public static var status: String {
-        if isAvailable {
-            return "Custom Metal kernels: active (fused_swiglu, fused_rmsnorm_residual)"
-        }
-        return "Custom Metal kernels: using MLX fallback (compile metallib for +5-12% speedup)"
+        "Custom Metal kernels: active (fused_swiglu via JIT)"
     }
 }
