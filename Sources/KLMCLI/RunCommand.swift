@@ -32,6 +32,15 @@ struct RunCommand: AsyncParsableCommand {
     @Option(name: .long, help: "System prompt")
     var system: String?
 
+    @Option(name: .long, help: "Image file path for vision models")
+    var image: String?
+
+    @Option(name: .long, help: "Audio file path for audio models")
+    var audio: String?
+
+    @Option(name: .long, help: "Tools JSON file for function calling")
+    var tools: String?
+
     func run() async throws {
         let modelDir: URL
 
