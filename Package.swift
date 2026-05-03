@@ -46,6 +46,14 @@ let package = Package(
             ]
         ),
         .target(
+            name: "KLMKernels",
+            dependencies: [
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+            ],
+            exclude: ["FusedSwiGLU.metal"]
+        ),
+        .target(
             name: "KLMRegistry",
             dependencies: [
                 .product(name: "Crypto", package: "swift-crypto"),
