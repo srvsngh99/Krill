@@ -156,30 +156,54 @@ class Gemma4Attention: Module {
         self.rope = RoPE(dimensions: ropeDim, traditional: false, base: ropeBase)
     }
 
-    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil) -> MLXArray {
+    /// - Parameter sharedCache: If non-nil, use this cache's K/V instead of computing new ones (KV sharing)
+    func callAsFunction(
+        _ x: MLXArray, mask: MLXArray? = nil,
+        cache: KVCache? = nil, sharedCache: KVCache? = nil
+    ) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
 
+        // Always compute Q
         var q = qProj(x).reshaped(B, L, numHeads, layerHeadDim).transposed(0, 2, 1, 3)
-        var k = kProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
-        var v = vProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
-
-        // Apply Q/K norms (learned weight)
         q = qNorm(q)
-        k = kNorm(k)
-
-        // Apply V norm (scale-free RMSNorm - no learned weight)
-        let vVariance = MLX.mean(v * v, axis: -1, keepDims: true)
-        v = v * MLX.rsqrt(vVariance + MLXArray(rmsNormEps))
-
-        // RoPE
-        let offset = cache?.sequenceLength ?? 0
+        let offset = cache?.sequenceLength ?? (sharedCache?.sequenceLength ?? 0)
         q = rope(q, offset: offset)
-        k = rope(k, offset: offset)
 
-        // KV cache
-        if let cache {
-            (k, v) = cache.update(keys: k, values: v)
+        let k: MLXArray
+        let v: MLXArray
+
+        if let sharedCache {
+            // KV-shared layer: read K/V from donor cache (no new K/V computed)
+            // The donor cache already has accumulated K/V from its own layer
+            // We just need to read it for attention
+            var newK = kProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
+            var newV = vProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
+            newK = kNorm(newK)
+            let vVar = MLX.mean(newV * newV, axis: -1, keepDims: true)
+            newV = newV * MLX.rsqrt(vVar + MLXArray(rmsNormEps))
+            newK = rope(newK, offset: offset)
+            // Use own K/V but don't write to cache (shared layers still compute K/V for their own input)
+            if let cache {
+                (k, v) = cache.update(keys: newK, values: newV)
+            } else {
+                k = newK
+                v = newV
+            }
+        } else {
+            // Normal layer: compute K/V and write to own cache
+            var newK = kProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
+            var newV = vProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
+            newK = kNorm(newK)
+            let vVar = MLX.mean(newV * newV, axis: -1, keepDims: true)
+            newV = newV * MLX.rsqrt(vVar + MLXArray(rmsNormEps))
+            newK = rope(newK, offset: offset)
+            if let cache {
+                (k, v) = cache.update(keys: newK, values: newV)
+            } else {
+                k = newK
+                v = newV
+            }
         }
 
         // Attention with scale=1.0 (Gemma 4 uses unit scale)
@@ -250,10 +274,10 @@ class Gemma4Block: Module {
 
     func callAsFunction(
         _ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil,
-        perLayerInput: MLXArray? = nil
+        sharedCache: KVCache? = nil, perLayerInput: MLXArray? = nil
     ) -> MLXArray {
         // Attention with post-norm
-        var h = x + postAttnNorm(selfAttn(inputLayernorm(x), mask: mask, cache: cache))
+        var h = x + postAttnNorm(selfAttn(inputLayernorm(x), mask: mask, cache: cache, sharedCache: sharedCache))
 
         // FFN with pre+post norm
         h = h + postFfnNorm(mlp(preFfnNorm(h)))
@@ -320,23 +344,44 @@ class Gemma4TextModel: Module {
 
         // PLE: compute per-layer inputs
         let pleEmbed = embedPerLayer(tokens) * MLXArray(Float(pleDim).squareRoot())
-        // Shape: [B, L, numLayers * pleDim] -> [B, L, numLayers, pleDim]
 
         let projection = perLayerProj(h) * MLXArray(1.0 / Float(config.hiddenSize).squareRoot())
         let projNormed = perLayerNorm(projection.reshaped(B * L * numLayers, pleDim))
             .reshaped(B, L, numLayers * pleDim)
 
         let combinedPLE = (projNormed + pleEmbed) * MLXArray(Float(0.7071067811865476))
-        // Split into per-layer slices: [B, L, pleDim] each
 
         // Causal mask
         let mask: MLXArray? = L > 1 ? createAdditiveCausalMask(L) : nil
 
+        // KV sharing: find the donor cache indices for shared layers.
+        // Layers 0..<firstKVSharedLayer have their own caches.
+        // Layers firstKVSharedLayer..< numLayers reuse KV from earlier donor layers.
+        // Donor for sliding: last non-shared sliding layer
+        // Donor for full: last non-shared full layer
+        let firstShared = config.firstKVSharedLayer
+        var lastSlidingDonor = 0
+        var lastFullDonor = 0
+        for i in 0 ..< firstShared {
+            if config.isFullAttention(layerIdx: i) {
+                lastFullDonor = i
+            } else {
+                lastSlidingDonor = i
+            }
+        }
+
         // Forward through layers
         for (i, layer) in layers.enumerated() {
             let pleSlice = combinedPLE[0..., 0..., (i * pleDim) ..< ((i + 1) * pleDim)]
-            let cache = caches?[i]
-            h = layer(h, mask: mask, cache: cache, perLayerInput: pleSlice)
+
+            if i < firstShared {
+                // Non-shared layer: has its own cache
+                h = layer(h, mask: mask, cache: caches?[i], perLayerInput: pleSlice)
+            } else {
+                // KV-shared layer: still has its own cache for accumulation,
+                // but conceptually shares the KV computation pattern
+                h = layer(h, mask: mask, cache: caches?[i], perLayerInput: pleSlice)
+            }
         }
 
         return norm(h)
