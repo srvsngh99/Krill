@@ -123,6 +123,7 @@ class Gemma4Attention: Module {
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
 
     let rope: RoPE
+    let rmsNormEps: Float
 
     init(_ config: Gemma4Config, layerIdx: Int) {
         let dim = config.hiddenSize
@@ -130,6 +131,7 @@ class Gemma4Attention: Module {
         self.numKVHeads = config.numKeyValueHeads
         self.isFullAttn = config.isFullAttention(layerIdx: layerIdx)
         self.layerHeadDim = isFullAttn ? config.globalHeadDim : config.headDim
+        self.rmsNormEps = config.rmsNormEps
 
         let qSize = numHeads * layerHeadDim
         let kvSize = numKVHeads * layerHeadDim
@@ -162,9 +164,13 @@ class Gemma4Attention: Module {
         var k = kProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
         var v = vProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
 
-        // Apply Q/K norms
+        // Apply Q/K norms (learned weight)
         q = qNorm(q)
         k = kNorm(k)
+
+        // Apply V norm (scale-free RMSNorm - no learned weight)
+        let vVariance = MLX.mean(v * v, axis: -1, keepDims: true)
+        v = v * MLX.rsqrt(vVariance + MLXArray(rmsNormEps))
 
         // RoPE
         let offset = cache?.sequenceLength ?? 0
@@ -223,6 +229,7 @@ class Gemma4Block: Module {
     @ModuleInfo(key: "per_layer_input_gate") var pleGate: Linear
     @ModuleInfo(key: "per_layer_projection") var pleProj: Linear
     @ModuleInfo(key: "post_per_layer_input_norm") var pleNorm: RMSNorm
+    @ModuleInfo(key: "layer_scalar") var layerScalar: MLXArray
 
     init(_ config: Gemma4Config, layerIdx: Int) {
         let dim = config.hiddenSize
@@ -237,16 +244,18 @@ class Gemma4Block: Module {
         _pleGate = ModuleInfo(wrappedValue: Linear(dim, pleDim, bias: false), key: "per_layer_input_gate")
         _pleProj = ModuleInfo(wrappedValue: Linear(pleDim, dim, bias: false), key: "per_layer_projection")
         _pleNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps), key: "post_per_layer_input_norm")
+        // Learned per-layer scalar (ranges from ~0.018 to ~0.87)
+        _layerScalar = ModuleInfo(wrappedValue: MLXArray([Float(1.0)]), key: "layer_scalar")
     }
 
     func callAsFunction(
         _ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil,
         perLayerInput: MLXArray? = nil
     ) -> MLXArray {
-        // Attention
+        // Attention with post-norm
         var h = x + postAttnNorm(selfAttn(inputLayernorm(x), mask: mask, cache: cache))
 
-        // FFN
+        // FFN with pre+post norm
         h = h + postFfnNorm(mlp(preFfnNorm(h)))
 
         // PLE gating
@@ -257,7 +266,8 @@ class Gemma4Block: Module {
             h = h + pleNorm(projected)
         }
 
-        return h
+        // Per-layer scaling (critical for output quality)
+        return h * layerScalar
     }
 }
 
