@@ -79,8 +79,11 @@ let package = Package(
             dependencies: [
                 "KLMEngine",
                 "KLMCore",
+                "KLMCache",
+                "KLMSampler",
                 "KLMRegistry",
                 "KLMServer",
+                .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
             ]
