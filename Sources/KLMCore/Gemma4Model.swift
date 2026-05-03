@@ -166,6 +166,41 @@ class Gemma4Attention: Module {
         }
     }
 
+    /// Apply RoPE, handling proportional (split-half) for full attention layers.
+    private func applyRoPE(_ x: MLXArray, offset: Int) -> MLXArray {
+        if isFullAttn {
+            // ProportionalRoPE: split head into halves, rotate first 64 dims of each
+            // x shape: [B, H, L, headDim=512]
+            let halfDim = layerHeadDim / 2  // 256
+            let rotateDims = 64  // 128 total / 2 halves
+
+            let leftHalf = x[0..., 0..., 0..., ..<halfDim]      // [B,H,L,256]
+            let rightHalf = x[0..., 0..., 0..., halfDim...]      // [B,H,L,256]
+
+            // Extract dims to rotate
+            let leftRotate = leftHalf[0..., 0..., 0..., ..<rotateDims]   // [B,H,L,64]
+            let leftKeep = leftHalf[0..., 0..., 0..., rotateDims...]     // [B,H,L,192]
+            let rightRotate = rightHalf[0..., 0..., 0..., ..<rotateDims] // [B,H,L,64]
+            let rightKeep = rightHalf[0..., 0..., 0..., rotateDims...]   // [B,H,L,192]
+
+            // Concatenate the dims to rotate and apply RoPE
+            let toRotate = concatenated([leftRotate, rightRotate], axis: -1) // [B,H,L,128]
+            let rotated = rope(toRotate, offset: offset)                     // [B,H,L,128]
+
+            // Split back
+            let leftRotated = rotated[0..., 0..., 0..., ..<rotateDims]    // [B,H,L,64]
+            let rightRotated = rotated[0..., 0..., 0..., rotateDims...]   // [B,H,L,64]
+
+            // Reassemble
+            let newLeft = concatenated([leftRotated, leftKeep], axis: -1)   // [B,H,L,256]
+            let newRight = concatenated([rightRotated, rightKeep], axis: -1) // [B,H,L,256]
+            return concatenated([newLeft, newRight], axis: -1)               // [B,H,L,512]
+        } else {
+            // Standard RoPE for sliding attention
+            return rope(x, offset: offset)
+        }
+    }
+
     /// - Parameter sharedCache: If non-nil, use this cache's K/V instead of computing new ones (KV sharing)
     func callAsFunction(
         _ x: MLXArray, mask: MLXArray? = nil,
@@ -178,7 +213,7 @@ class Gemma4Attention: Module {
         var q = qProj(x).reshaped(B, L, numHeads, layerHeadDim).transposed(0, 2, 1, 3)
         q = qNorm(q)
         let offset = cache?.sequenceLength ?? (sharedCache?.sequenceLength ?? 0)
-        q = rope(q, offset: offset)
+        q = applyRoPE(q, offset: offset)
 
         let k: MLXArray
         let v: MLXArray
@@ -191,7 +226,7 @@ class Gemma4Attention: Module {
             newK = kNorm(newK)
             let vVar = MLX.mean(newV * newV, axis: -1, keepDims: true)
             newV = newV * MLX.rsqrt(vVar + MLXArray(rmsNormEps))
-            newK = rope(newK, offset: offset)
+            newK = applyRoPE(newK, offset: offset)
             // For shared layers: just use own K/V directly (no cache append)
             // The donor's cache provides historical context via the cache passed as 'cache'
             if let cache {
@@ -207,7 +242,7 @@ class Gemma4Attention: Module {
             newK = kNorm(newK)
             let vVar = MLX.mean(newV * newV, axis: -1, keepDims: true)
             newV = newV * MLX.rsqrt(vVar + MLXArray(rmsNormEps))
-            newK = rope(newK, offset: offset)
+            newK = applyRoPE(newK, offset: offset)
             if let cache {
                 (k, v) = cache.update(keys: newK, values: newV)
             } else {
