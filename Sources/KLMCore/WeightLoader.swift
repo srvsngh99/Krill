@@ -41,10 +41,14 @@ public func loadWeightArrays(from directory: URL) throws -> [String: MLXArray] {
 ///
 /// Also handles tied embeddings: if `lm_head.weight` is missing but
 /// `model.embed_tokens.weight` exists, copies it as the lm_head weight.
+///
+/// - Parameter keyPrefix: Optional prefix to strip from weight keys (e.g., "language_model."
+///   for Gemma 4 which nests text weights under that prefix).
 public func loadWeights(
     into model: Module,
     from directory: URL,
-    quantization: QuantizationConfig? = nil
+    quantization: QuantizationConfig? = nil,
+    keyPrefix: String? = nil
 ) throws {
     // Quantize the model if needed (converts Linear -> QuantizedLinear)
     if let q = quantization {
@@ -56,6 +60,20 @@ public func loadWeights(
     }
 
     var flatWeights = try loadWeightArrays(from: directory)
+
+    // Strip key prefix if specified (e.g., "language_model." for Gemma 4)
+    if let prefix = keyPrefix {
+        var stripped: [String: MLXArray] = [:]
+        for (key, value) in flatWeights {
+            if key.hasPrefix(prefix) {
+                stripped[String(key.dropFirst(prefix.count))] = value
+            }
+            // Also keep non-prefixed keys (e.g., if some weights are at top level)
+        }
+        if !stripped.isEmpty {
+            flatWeights = stripped
+        }
+    }
 
     // Handle tied embeddings: copy embed_tokens weights to lm_head if missing
     let hasLmHead = flatWeights.keys.contains { $0.hasPrefix("lm_head.") }

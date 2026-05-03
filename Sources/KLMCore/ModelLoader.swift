@@ -143,7 +143,13 @@ private func loadPhi(configData: Data, directory: URL) throws -> LoadedModel {
 private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(Gemma4Config.self, from: configData)
     let model = Gemma4ForCausalLM(config)
-    try loadWeights(into: model, from: directory, quantization: config.quantization)
+    // Gemma 4 weights use "language_model." prefix for the text decoder.
+    // Strip it so keys match our model structure (model.layers.*, lm_head.*).
+    try loadWeights(
+        into: model, from: directory,
+        quantization: config.quantization,
+        keyPrefix: "language_model."
+    )
 
     return LoadedModel(
         module: model,
