@@ -102,6 +102,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         // OpenAI endpoints
         case (.POST, "/v1/chat/completions"):
             handleChatCompletions(context: context, body: body)
+        case (.POST, "/v1/completions"):
+            handleCompletions(context: context, body: body)
         case (.GET, "/v1/models"):
             handleModels(context: context)
 
@@ -113,9 +115,15 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         case (.GET, "/api/tags"):
             handleOllamaTags(context: context)
 
-        // Health
+        // Health and metrics
         case (.GET, "/healthz"), (.GET, "/health"):
-            sendJSON(context: context, status: .ok, body: ["status": "ok"])
+            sendJSON(context: context, status: .ok, body: [
+                "status": "ok",
+                "model_loaded": engine.isLoaded,
+                "family": engine.family ?? "none"
+            ])
+        case (.GET, "/metrics"):
+            handleMetrics(context: context)
 
         default:
             sendJSON(context: context, status: .notFound,
@@ -244,6 +252,94 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             ]
             self.sendJSON(context: ctx, status: .ok, body: response)
         }
+    }
+
+    // MARK: - OpenAI: POST /v1/completions
+
+    private func handleCompletions(context: ChannelHandlerContext, body: ByteBuffer) {
+        guard let json = parseJSON(body) else {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid JSON"])
+            return
+        }
+
+        let prompt = json["prompt"] as? String ?? ""
+        let maxTokens = json["max_tokens"] as? Int ?? 256
+        let temperature = json["temperature"] as? Double ?? 0.0
+        let params = SamplingParams(temperature: Float(temperature))
+
+        nonisolated(unsafe) let ctx = context
+        nonisolated(unsafe) let eng = engine
+
+        Task {
+            let (tokenStream, getStats) = eng.generate(
+                prompt: prompt, params: params, maxTokens: maxTokens)
+
+            var fullText = ""
+            for await event in tokenStream {
+                if event.isEnd { break }
+                fullText += event.text
+            }
+
+            let stats = getStats()
+            let response: [String: Any] = [
+                "id": "cmpl-\(UUID().uuidString.prefix(8))",
+                "object": "text_completion",
+                "created": Int(Date().timeIntervalSince1970),
+                "choices": [[
+                    "text": fullText,
+                    "index": 0,
+                    "finish_reason": "stop"
+                ]],
+                "usage": [
+                    "prompt_tokens": stats?.promptTokens ?? 0,
+                    "completion_tokens": stats?.generatedTokens ?? 0,
+                    "total_tokens": (stats?.promptTokens ?? 0) + (stats?.generatedTokens ?? 0)
+                ]
+            ]
+            self.sendJSON(context: ctx, status: .ok, body: response)
+        }
+    }
+
+    // MARK: - Metrics: GET /metrics
+
+    private func handleMetrics(context: ChannelHandlerContext) {
+        // Prometheus text format
+        let uptime = ProcessInfo.processInfo.systemUptime
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
+        let _ = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        let residentMB = Double(info.resident_size) / 1_048_576
+
+        let body = """
+        # HELP krillm_up Whether the server is up
+        # TYPE krillm_up gauge
+        krillm_up 1
+        # HELP krillm_model_loaded Whether a model is loaded
+        # TYPE krillm_model_loaded gauge
+        krillm_model_loaded \(engine.isLoaded ? 1 : 0)
+        # HELP krillm_resident_memory_mb Process resident memory in MB
+        # TYPE krillm_resident_memory_mb gauge
+        krillm_resident_memory_mb \(String(format: "%.1f", residentMB))
+        # HELP krillm_uptime_seconds Process uptime in seconds
+        # TYPE krillm_uptime_seconds counter
+        krillm_uptime_seconds \(String(format: "%.0f", uptime))
+        """
+
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: "text/plain; version=0.0.4")
+        let data = body.data(using: .utf8) ?? Data()
+        headers.add(name: "Content-Length", value: "\(data.count)")
+        let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
+
+        context.write(wrapOutboundOut(.head(head)), promise: nil)
+        var buf = context.channel.allocator.buffer(capacity: data.count)
+        buf.writeBytes(data)
+        context.write(wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
+        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
     }
 
     // MARK: - OpenAI: GET /v1/models
