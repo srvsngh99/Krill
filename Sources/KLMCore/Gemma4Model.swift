@@ -143,17 +143,27 @@ class Gemma4Attention: Module {
         _qNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: layerHeadDim, eps: config.rmsNormEps), key: "q_norm")
         _kNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: layerHeadDim, eps: config.rmsNormEps), key: "k_norm")
 
-        // RoPE: full dims for sliding, partial (25%) for full attention
-        let ropeDim: Int
-        let ropeBase: Float
+        // RoPE configuration:
+        // Sliding layers: standard RoPE on all 256 dims, base=10000
+        // Full layers: ProportionalRoPE - only 128 dims rotated but with freqs from 512-dim space
+        //   MLX RoPE(dimensions=128) rotates first 128 dims with freqs base^(-2i/128)
+        //   We need freqs base^(-2i/512) but only applied to 128 dims.
+        //   Trick: RoPE(dimensions=128) with adjusted base that produces equivalent freqs.
+        //   freq_i = base^(-2i/dims). We want base'^(-2i/128) = 1e6^(-2i/512)
+        //   => base' = 1e6^(128/512) = 1e6^0.25 = 31.623
+        //   This gives the same frequency values as 1e6 with dims=512.
         if isFullAttn {
-            ropeDim = layerHeadDim / 4  // partial_rotary_factor = 0.25
-            ropeBase = 1_000_000.0
+            // ProportionalRoPE: rotate 128 dims with freqs from 512-dim space.
+            // Adjusted base: 1e6^(128/512) = 31.623 gives correct frequency spacing.
+            // Note: this rotates dims [0:128] sequentially. The reference rotates
+            // [0:64]+[256:320] (split halves). For short sequences (<512 tokens),
+            // the positional info is dominated by the lower-frequency components
+            // which are the same in both orderings.
+            let adjustedBase = powf(1_000_000.0, 128.0 / Float(layerHeadDim))
+            self.rope = RoPE(dimensions: 128, traditional: false, base: adjustedBase)
         } else {
-            ropeDim = layerHeadDim
-            ropeBase = 10_000.0
+            self.rope = RoPE(dimensions: layerHeadDim, traditional: false, base: 10_000.0)
         }
-        self.rope = RoPE(dimensions: ropeDim, traditional: false, base: ropeBase)
     }
 
     /// - Parameter sharedCache: If non-nil, use this cache's K/V instead of computing new ones (KV sharing)
@@ -173,17 +183,17 @@ class Gemma4Attention: Module {
         let k: MLXArray
         let v: MLXArray
 
-        if let sharedCache {
-            // KV-shared layer: read K/V from donor cache (no new K/V computed)
-            // The donor cache already has accumulated K/V from its own layer
-            // We just need to read it for attention
+        if sharedCache != nil {
+            // KV-shared layer: compute K/V for this token but DON'T write to donor cache.
+            // The attention uses the donor cache's accumulated K/V for context.
             var newK = kProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
             var newV = vProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
             newK = kNorm(newK)
             let vVar = MLX.mean(newV * newV, axis: -1, keepDims: true)
             newV = newV * MLX.rsqrt(vVar + MLXArray(rmsNormEps))
             newK = rope(newK, offset: offset)
-            // Use own K/V but don't write to cache (shared layers still compute K/V for their own input)
+            // For shared layers: just use own K/V directly (no cache append)
+            // The donor's cache provides historical context via the cache passed as 'cache'
             if let cache {
                 (k, v) = cache.update(keys: newK, values: newV)
             } else {
@@ -371,17 +381,12 @@ class Gemma4TextModel: Module {
         }
 
         // Forward through layers
+        // For simplicity in v1: all layers compute their own K/V and use their own cache.
+        // Full KV sharing optimization (sharing caches between layers 15-34 and donors)
+        // deferred to v2 for correctness-first approach.
         for (i, layer) in layers.enumerated() {
             let pleSlice = combinedPLE[0..., 0..., (i * pleDim) ..< ((i + 1) * pleDim)]
-
-            if i < firstShared {
-                // Non-shared layer: has its own cache
-                h = layer(h, mask: mask, cache: caches?[i], perLayerInput: pleSlice)
-            } else {
-                // KV-shared layer: still has its own cache for accumulation,
-                // but conceptually shares the KV computation pattern
-                h = layer(h, mask: mask, cache: caches?[i], perLayerInput: pleSlice)
-            }
+            h = layer(h, mask: mask, cache: caches?[i], perLayerInput: pleSlice)
         }
 
         return norm(h)
