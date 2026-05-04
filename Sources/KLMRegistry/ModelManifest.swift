@@ -89,7 +89,10 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case qwen
     case mistral
     case gemma
+    case gemma4
     case phi
+    case glm
+    case deepseek
 
     /// Detect model family from HuggingFace config.json's `architectures` field.
     public static func detect(from configJSON: [String: Any]) -> ModelFamily? {
@@ -103,10 +106,14 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         }
 
         let archLower = arch.lowercased()
+        // Order matters: check specific before generic
+        if archLower.contains("gemma4") { return .gemma4 }
+        if archLower.contains("gemma") { return .gemma }
+        if archLower.contains("chatglm") || archLower.contains("glm") { return .glm }
+        if archLower.contains("deepseek") { return .deepseek }
         if archLower.contains("llama") { return .llama }
         if archLower.contains("qwen") { return .qwen }
         if archLower.contains("mistral") { return .mistral }
-        if archLower.contains("gemma") { return .gemma }
         if archLower.contains("phi") { return .phi }
         return nil
     }
@@ -117,7 +124,10 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         case "qwen2", "qwen3": return .qwen
         case "mistral": return .mistral
         case "gemma", "gemma2", "gemma3": return .gemma
+        case "gemma4", "gemma4_text": return .gemma4
         case "phi", "phi3": return .phi
+        case "chatglm", "glm", "glm4_moe": return .glm
+        case "deepseek_v3": return .deepseek
         default: return nil
         }
     }
