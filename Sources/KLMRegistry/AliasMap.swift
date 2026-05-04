@@ -104,4 +104,34 @@ private let aliases: [String: ResolvedModel] = [
     "phi-4-mini": ResolvedModel(
         repo: "mlx-community/phi-4-mini-instruct-4bit",
         name: "phi-4-mini", family: .phi, params: "3.8B", quant: "4bit", context: 131072),
+
+    // DeepSeek R1 Distill (dense models - use Qwen/Llama architecture)
+    "deepseek-r1-7b": ResolvedModel(
+        repo: "mlx-community/DeepSeek-R1-Distill-Qwen-7B-4bit",
+        name: "deepseek-r1-7b", family: .qwen, params: "7B", quant: "4bit", context: 131072),
+    "deepseek-r1-14b": ResolvedModel(
+        repo: "mlx-community/DeepSeek-R1-Distill-Qwen-14B-4bit",
+        name: "deepseek-r1-14b", family: .qwen, params: "14B", quant: "4bit", context: 131072),
+    "deepseek-r1-8b": ResolvedModel(
+        repo: "mlx-community/DeepSeek-R1-Distill-Llama-8B-4bit",
+        name: "deepseek-r1-8b", family: .llama, params: "8B", quant: "4bit", context: 131072),
+
+    // Gemma 4 (all variants - text mode)
+    "gemma-4-e2b": ResolvedModel(
+        repo: "mlx-community/gemma-4-e2b-it-4bit",
+        name: "gemma-4-e2b", family: .gemma4, params: "2B", quant: "4bit", context: 131072),
+    "gemma-4-e4b": ResolvedModel(
+        repo: "mlx-community/gemma-4-e4b-it-4bit",
+        name: "gemma-4-e4b", family: .gemma4, params: "4B", quant: "4bit", context: 131072),
+    "gemma-4-12b": ResolvedModel(
+        repo: "mlx-community/gemma-4-12b-it-4bit",
+        name: "gemma-4-12b", family: .gemma4, params: "12B", quant: "4bit", context: 131072),
+    "gemma-4-27b": ResolvedModel(
+        repo: "mlx-community/gemma-4-27b-it-4bit",
+        name: "gemma-4-27b", family: .gemma4, params: "27B", quant: "4bit", context: 131072),
+
+    // GLM-4
+    "glm-4-9b": ResolvedModel(
+        repo: "mlx-community/glm-4-9b-chat-4bit",
+        name: "glm-4-9b", family: .glm, params: "9B", quant: "4bit", context: 131072),
 ]

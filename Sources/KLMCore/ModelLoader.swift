@@ -42,7 +42,17 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
     let modelType = configJSON["model_type"] as? String ?? ""
     let arch = architectures.first?.lowercased() ?? ""
 
-    if arch.contains("llama") || modelType == "llama" {
+    // Order matters: check specific patterns before generic ones
+    if arch.contains("gemma4") || modelType == "gemma4_text" || modelType == "gemma4" {
+        return try loadGemma4(configData: configData, directory: directory)
+    } else if arch.contains("chatglm") || arch.contains("glm") || modelType == "chatglm" {
+        return try loadGLM(configData: configData, directory: directory)
+    } else if arch.contains("deepseek") || modelType == "deepseek_v3" {
+        // Full DeepSeek V3 MoE - not yet supported, suggest distill variants
+        throw ModelLoadError.unsupportedArchitecture(
+            "DeepSeek V3 MoE (671B) requires MoE support (coming soon). "
+            + "Use DeepSeek-R1-Distill variants instead: krillm pull deepseek-r1-7b")
+    } else if arch.contains("llama") || modelType == "llama" {
         return try loadLlama(configData: configData, directory: directory)
     } else if arch.contains("qwen") || modelType.hasPrefix("qwen") {
         return try loadQwen(configData: configData, directory: directory)
@@ -125,6 +135,64 @@ private func loadPhi(configData: Data, directory: URL) throws -> LoadedModel {
         module: model,
         numLayers: config.numHiddenLayers,
         family: "phi",
+        forward: { tokens, caches in model(tokens, caches: caches) },
+        vocabSize: config.vocabSize
+    )
+}
+
+private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(Gemma4Config.self, from: configData)
+    let model = Gemma4ForCausalLM(config)
+
+    // Gemma 4: quantize with filter to exclude per_layer_model_projection (stays BF16)
+    if let q = config.quantization {
+        quantize(model: model, groupSize: q.groupSize, bits: q.bits) { name, _ in
+            !name.contains("per_layer_model_projection") && !name.contains("per_layer_projection_norm")
+        }
+    }
+
+    // Load weights with "language_model." prefix stripped
+    var flatWeights = try loadWeightArrays(from: directory)
+    var stripped: [String: MLXArray] = [:]
+    for (key, value) in flatWeights {
+        if key.hasPrefix("language_model.") {
+            stripped[String(key.dropFirst("language_model.".count))] = value
+        }
+    }
+    if !stripped.isEmpty { flatWeights = stripped }
+
+    // Handle tied embeddings
+    let hasLmHead = flatWeights.keys.contains { $0.hasPrefix("lm_head.") }
+    if !hasLmHead {
+        let embedKeys = flatWeights.keys.filter { $0.hasPrefix("model.embed_tokens.") && !$0.contains("per_layer") }
+        for key in embedKeys {
+            let lmKey = key.replacingOccurrences(of: "model.embed_tokens.", with: "lm_head.")
+            flatWeights[lmKey] = flatWeights[key]
+        }
+    }
+
+    let tuples = flatWeights.map { ($0.key, $0.value) }
+    let nested = ModuleParameters.unflattened(tuples)
+    try model.update(parameters: nested, verify: [])
+
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "gemma4",
+        forward: { tokens, caches in model(tokens, caches: caches) },
+        vocabSize: config.vocabSize
+    )
+}
+
+private func loadGLM(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(GLMConfig.self, from: configData)
+    let model = GLMForCausalLM(config)
+    try loadWeights(into: model, from: directory, quantization: config.quantization)
+
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "glm",
         forward: { tokens, caches in model(tokens, caches: caches) },
         vocabSize: config.vocabSize
     )

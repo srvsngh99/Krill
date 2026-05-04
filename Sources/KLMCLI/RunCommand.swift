@@ -32,6 +32,15 @@ struct RunCommand: AsyncParsableCommand {
     @Option(name: .long, help: "System prompt")
     var system: String?
 
+    @Option(name: .long, help: "Image file path for vision models")
+    var image: String?
+
+    @Option(name: .long, help: "Audio file path for audio models")
+    var audio: String?
+
+    @Option(name: .long, help: "Tools JSON file for function calling")
+    var tools: String?
+
     func run() async throws {
         let modelDir: URL
 
@@ -51,7 +60,45 @@ struct RunCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        // Load model
+        // Check if this is a Gemma 4 model (use Python fallback for correct output)
+        let configURL = modelDir.appendingPathComponent("config.json")
+        if let configData = try? Data(contentsOf: configURL),
+           let configJSON = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
+           let modelType = configJSON["model_type"] as? String,
+           modelType == "gemma4" {
+            // Gemma 4: use Python mlx-vlm for correct inference
+            if PythonFallback.isAvailable {
+                print("Loading Gemma 4 via mlx-vlm...")
+                let fallback = PythonFallback(modelPath: modelDir.path)
+                if let prompt {
+                    let output = try await fallback.generate(
+                        prompt: prompt, maxTokens: maxTokens,
+                        imagePath: image, audioPath: audio)
+                    print(output)
+                } else {
+                    print("\nGemma 4 Interactive Mode")
+                    print("Type your message and press Enter. Type /quit to exit.\n")
+                    while true {
+                        print("> ", terminator: "")
+                        fflush(stdout)
+                        guard let line = readLine(), !line.isEmpty else { continue }
+                        if line.trimmingCharacters(in: .whitespaces) == "/quit" { break }
+                        let output = try await fallback.generate(
+                            prompt: line, maxTokens: maxTokens,
+                            imagePath: image, audioPath: audio)
+                        print(output)
+                        print()
+                    }
+                }
+                return
+            } else {
+                print("Warning: Gemma 4 requires mlx-vlm for best results.")
+                print("Install: pip install mlx-vlm")
+                print("Falling back to native engine (experimental)...")
+            }
+        }
+
+        // Load model (native Swift path for Llama, Qwen, Mistral, etc.)
         print("Loading model from \(modelPath)...")
         let engine = InferenceEngine(modelDirectory: modelDir)
 
