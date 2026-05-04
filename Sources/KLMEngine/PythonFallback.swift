@@ -74,17 +74,26 @@ public final class PythonFallback: @unchecked Sendable {
             generateArgs += ", audio=\"\(audio)\""
         }
 
+        // Build multimodal prefix tokens
+        var mediaPrefix = ""
+        if imagePath != nil { mediaPrefix += "<|image|>" }
+        if audioPath != nil { mediaPrefix += "<|audio|>" }
+
+        var kwargs: [String] = []
+        if let img = imagePath { kwargs.append("image=[\"\(img)\"]") }
+        if let audio = audioPath { kwargs.append("audio=\"\(audio)\"") }
+        let kwargsStr = kwargs.isEmpty ? "" : ", " + kwargs.joined(separator: ", ")
+
         let script = """
         from mlx_vlm import load, generate
         model, processor = load("\(modelPath)")
         tok = processor.tokenizer
-        # Gemma 4 manual chat template (tokenizer has no built-in template)
         bos = tok.decode([2])
         turn_start = tok.decode([105])
         turn_end = tok.decode([106])
         newline = tok.decode([107])
-        prompt = f'{bos}{turn_start}user{newline}\(escapedPrompt){turn_end}{newline}{turn_start}model{newline}'
-        result = generate(model, processor, prompt=prompt, max_tokens=\(maxTokens)\(generateArgs), verbose=False)
+        prompt = f'{bos}{turn_start}user{newline}\(mediaPrefix)\(escapedPrompt){turn_end}{newline}{turn_start}model{newline}'
+        result = generate(model, processor, prompt=prompt, max_tokens=\(maxTokens)\(kwargsStr), verbose=False)
         text = result.text if hasattr(result, 'text') else str(result)
         print(text.strip())
         """
