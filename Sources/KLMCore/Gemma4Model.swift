@@ -225,7 +225,7 @@ class Gemma4Attention: Module {
             var newV = vProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
             newK = kNorm(newK)
             let vVar = MLX.mean(newV * newV, axis: -1, keepDims: true)
-            newV = newV * MLX.rsqrt(vVar + MLXArray(rmsNormEps))
+            newV = newV * MLX.rsqrt(vVar + MLXArray(rmsNormEps).asType(newV.dtype))
             newK = applyRoPE(newK, offset: offset)
             // For shared layers: just use own K/V directly (no cache append)
             // The donor's cache provides historical context via the cache passed as 'cache'
@@ -241,7 +241,7 @@ class Gemma4Attention: Module {
             var newV = vProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
             newK = kNorm(newK)
             let vVar = MLX.mean(newV * newV, axis: -1, keepDims: true)
-            newV = newV * MLX.rsqrt(vVar + MLXArray(rmsNormEps))
+            newV = newV * MLX.rsqrt(vVar + MLXArray(rmsNormEps).asType(newV.dtype))
             newK = applyRoPE(newK, offset: offset)
             if let cache {
                 (k, v) = cache.update(keys: newK, values: newV)
@@ -385,19 +385,24 @@ class Gemma4TextModel: Module {
         let pleDim = config.hiddenSizePerLayerInput
 
         // Main embeddings (scaled by sqrt(hidden_size))
-        var h = embedTokens(tokens) * MLXArray(Float(config.hiddenSize).squareRoot())
+        // CRITICAL: scalars must be BF16 to avoid promoting quantized matmuls to float32
+        let embedScale = MLXArray(Float(config.hiddenSize).squareRoot()).asType(.bfloat16)
+        var h = embedTokens(tokens) * embedScale
 
         // PLE: compute per-layer inputs
-        let pleEmbed = embedPerLayer(tokens) * MLXArray(Float(pleDim).squareRoot())
+        let pleScale = MLXArray(Float(pleDim).squareRoot()).asType(.bfloat16)
+        let pleEmbed = embedPerLayer(tokens) * pleScale
 
-        let projection = perLayerProj(h) * MLXArray(1.0 / Float(config.hiddenSize).squareRoot())
+        let projScale = MLXArray(1.0 / Float(config.hiddenSize).squareRoot()).asType(.bfloat16)
+        let projection = perLayerProj(h) * projScale
         let projNormed = perLayerNorm(projection.reshaped(B * L * numLayers, pleDim))
             .reshaped(B, L, numLayers * pleDim)
 
-        let combinedPLE = (projNormed + pleEmbed) * MLXArray(Float(0.7071067811865476))
+        let combineScale = MLXArray(Float(0.7071067811865476)).asType(.bfloat16)
+        let combinedPLE = (projNormed + pleEmbed) * combineScale
 
         // Causal mask
-        let mask: MLXArray? = L > 1 ? createAdditiveCausalMask(L) : nil
+        let mask: MLXArray? = L > 1 ? createAdditiveCausalMask(L, dtype: .bfloat16) : nil
 
         // KV sharing: find the donor cache indices for shared layers.
         // Layers 0..<firstKVSharedLayer have their own caches.

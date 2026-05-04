@@ -94,13 +94,13 @@ public class LlamaForCausalLM: Module {
 ///
 /// Returns a mask of shape `[1, 1, N, N]` where positions that should
 /// NOT be attended to have a large negative value and valid positions have 0.
-/// Uses -1e4 in float16 (safe: fp16 max is ~65504).
-public func createAdditiveCausalMask(_ n: Int) -> MLXArray {
+public func createAdditiveCausalMask(_ n: Int, dtype: DType = .float16) -> MLXArray {
     let indices = MLXArray(0 ..< Int32(n))
     // mask[i, j] = true when j > i (future positions)
     let mask = expandedDimensions(indices, axis: 1) .< expandedDimensions(indices, axis: 0)
-    // Convert bool mask to additive: true -> -1e4 (safe for fp16), false -> 0
-    let additive = mask.asType(.float16) * Float16(-10000.0)
+    // Convert bool mask to additive: true -> large negative, false -> 0
+    // Dtype matches the model's compute type (fp16 for Llama, bf16 for Gemma 4)
+    let additive = mask.asType(dtype) * Float(-10000.0)
     // Add batch and head dimensions: [1, 1, N, N]
     return expandedDimensions(expandedDimensions(additive, axis: 0), axis: 0)
 }
