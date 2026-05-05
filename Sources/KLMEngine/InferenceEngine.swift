@@ -131,6 +131,14 @@ public final class InferenceEngine: @unchecked Sendable {
         let formatted = tokenizer.applyChatTemplate(messages: messages)
         let promptTokens = tokenizer.encodeWithoutExtraBOS(formatted)
 
+        guard !promptTokens.isEmpty else {
+            let emptyStream = AsyncStream<TokenEvent> { continuation in
+                continuation.yield(TokenEvent(tokenId: 0, text: "", elapsed: 0, isEnd: true))
+                continuation.finish()
+            }
+            return (emptyStream, { nil })
+        }
+
         let sampler = Sampler(params: params)
         let eosId = tokenizer.eosTokenId
         let numLayers = loadedModel.numLayers
@@ -160,12 +168,12 @@ public final class InferenceEngine: @unchecked Sendable {
                 if usePrefixCache {
                     if let hit = capturedPrefixCache.lookup(
                         tokens: promptTokens, modelId: capturedModelId
-                    ) {
+                    ), !hit.keys.isEmpty {
                         // Restore KV state from cache
                         for (i, cache) in caches.enumerated() {
                             if i < hit.keys.count, let k = hit.keys[i].first,
                                i < hit.values.count, let v = hit.values[i].first {
-                                let _ = cache.update(keys: k, values: v)
+                                cache.restore(keys: k, values: v)
                             }
                         }
                         prefillStartIdx = hit.prefixLength
@@ -191,16 +199,23 @@ public final class InferenceEngine: @unchecked Sendable {
 
                 // -- Store in prefix cache (write-behind, non-blocking) --
                 if usePrefixCache && !cacheHit && promptTokens.count >= 32 {
-                    // Extract KV state for caching
-                    // Note: in production, we'd extract from caches directly.
-                    // Simplified: store the token list for future lookup keying.
-                    // Full KV extraction requires cache to expose its arrays.
-                    capturedPrefixCache.store(
-                        tokens: promptTokens,
-                        modelId: capturedModelId,
-                        keys: [],  // KV extraction deferred to cache API enhancement
-                        values: []
-                    )
+                    // Extract real KV state from each layer cache.
+                    var snapshotKeys: [[MLXArray]] = []
+                    var snapshotValues: [[MLXArray]] = []
+                    for cache in caches {
+                        if let snap = cache.snapshot() {
+                            snapshotKeys.append([snap.keys])
+                            snapshotValues.append([snap.values])
+                        }
+                    }
+                    if !snapshotKeys.isEmpty {
+                        capturedPrefixCache.store(
+                            tokens: promptTokens,
+                            modelId: capturedModelId,
+                            keys: snapshotKeys,
+                            values: snapshotValues
+                        )
+                    }
                 }
 
                 // Sample first token

@@ -145,7 +145,12 @@ extension Puller {
             throw PullerError.invalidRepo(repo)
         }
 
-        let (data, response) = try await URLSession.shared.data(from: url)
+        var request = URLRequest(url: url)
+        if let token = ProcessInfo.processInfo.environment["HF_TOKEN"] {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -165,6 +170,12 @@ extension Puller {
     }
 
     /// Download a single file from HuggingFace Hub and return its SHA256 hash.
+    ///
+    /// Supports:
+    /// - Bearer auth via `HF_TOKEN` environment variable
+    /// - Resume via `Range` header when a `.partial` file already exists
+    /// - Retry with exponential backoff (3 attempts: 1s, 2s, 4s)
+    /// - Incremental SHA256 hashing to avoid loading large files into memory
     private func downloadFile(
         repo: String,
         filename: String,
@@ -175,24 +186,95 @@ extension Puller {
             throw PullerError.invalidRepo(repo)
         }
 
-        let (tempURL, response) = try await URLSession.shared.download(from: url)
-        guard let httpResponse = response as? HTTPURLResponse,
-              httpResponse.statusCode == 200 else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            throw PullerError.httpError(code, "Failed to download \(filename)")
-        }
-
-        // Move to destination
+        let hfToken = ProcessInfo.processInfo.environment["HF_TOKEN"]
         let fm = FileManager.default
-        if fm.fileExists(atPath: destination.path) {
-            try fm.removeItem(at: destination)
-        }
-        try fm.moveItem(at: tempURL, to: destination)
+        let partialURL = destination.appendingPathExtension("partial")
 
-        // Compute SHA256
-        let fileData = try Data(contentsOf: destination)
-        let hash = SHA256.hash(data: fileData)
-        return hash.map { String(format: "%02x", $0) }.joined()
+        let maxAttempts = 3
+        var lastError: Error = PullerError.httpError(0, "No attempts made")
+
+        for attempt in 0..<maxAttempts {
+            if attempt > 0 {
+                let delay = UInt64(1 << (attempt - 1)) * 1_000_000_000
+                try await Task.sleep(nanoseconds: delay)
+            }
+
+            do {
+                // Build the request, resuming from partial file if present
+                var request = URLRequest(url: url)
+                if let token = hfToken {
+                    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                }
+
+                var resumeOffset: Int64 = 0
+                if fm.fileExists(atPath: partialURL.path) {
+                    let attrs = try fm.attributesOfItem(atPath: partialURL.path)
+                    if let existingSize = attrs[.size] as? Int64, existingSize > 0 {
+                        resumeOffset = existingSize
+                        request.setValue("bytes=\(existingSize)-", forHTTPHeaderField: "Range")
+                    }
+                }
+
+                let (tempURL, response) = try await URLSession.shared.download(for: request)
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw PullerError.httpError(0, "No HTTP response for \(filename)")
+                }
+
+                let status = httpResponse.statusCode
+                // 200 = full content, 206 = partial content (resume accepted)
+                guard status == 200 || status == 206 else {
+                    throw PullerError.httpError(status, "Failed to download \(filename)")
+                }
+
+                if status == 206 && resumeOffset > 0 {
+                    // Append downloaded bytes to the existing partial file
+                    let outputHandle = try FileHandle(forWritingTo: partialURL)
+                    defer { try? outputHandle.close() }
+                    outputHandle.seekToEndOfFile()
+                    let newData = try Data(contentsOf: tempURL)
+                    outputHandle.write(newData)
+                    try? fm.removeItem(at: tempURL)
+                } else {
+                    // Full download — replace any existing partial with the new temp file
+                    if fm.fileExists(atPath: partialURL.path) {
+                        try fm.removeItem(at: partialURL)
+                    }
+                    try fm.moveItem(at: tempURL, to: partialURL)
+                }
+
+                // Move partial → final destination
+                if fm.fileExists(atPath: destination.path) {
+                    try fm.removeItem(at: destination)
+                }
+                try fm.moveItem(at: partialURL, to: destination)
+
+                // Compute SHA256 incrementally to avoid large in-memory allocisons
+                let sha256 = try incrementalSHA256(of: destination)
+                return sha256
+
+            } catch {
+                lastError = error
+                logger.warning("Download attempt \(attempt + 1)/\(maxAttempts) failed for \(filename): \(error)")
+            }
+        }
+
+        throw lastError
+    }
+
+    /// Compute SHA256 of a file by reading it in 1 MB chunks.
+    private func incrementalSHA256(of fileURL: URL) throws -> String {
+        let chunkSize = 1024 * 1024  // 1 MB
+        let handle = try FileHandle(forReadingFrom: fileURL)
+        defer { try? handle.close() }
+
+        var hasher = SHA256()
+        while true {
+            guard let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+        }
+
+        let digest = hasher.finalize()
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 }
 

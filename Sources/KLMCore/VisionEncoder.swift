@@ -216,13 +216,13 @@ class VisionMLP: Module {
 ///   - targetSize: Target size (must be divisible by 48)
 /// - Returns: Normalized image tensor [1, H, W, 3]
 public func preprocessImage(_ imageData: Data, targetSize: Int = 672) -> MLXArray? {
-    // Note: Full implementation would use CoreGraphics to decode and resize.
-    // This is a placeholder showing the expected output format.
+    // TODO: Not yet implemented. Full implementation requires CoreGraphics to
+    // decode the image and resize it to targetSize x targetSize, then normalize
+    // pixel values to [-1, 1].
     // Production impl: CGImage -> resize to targetSize x targetSize -> normalize to [-1, 1]
     guard !imageData.isEmpty else { return nil }
 
-    // For now, create a dummy tensor with correct shape
-    // Real implementation uses platform image APIs
-    let size = targetSize
-    return MLXArray.zeros([1, size, size, 3]).asType(.float16)
+    // Return nil with a clear indication this is not implemented
+    print("[KrillLM] Warning: Vision preprocessing not yet implemented. Image input will be ignored.")
+    return nil
 }

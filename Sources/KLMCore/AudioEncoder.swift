@@ -210,20 +210,10 @@ public func computeMelSpectrogram(
     sampleRate: Int = 16000,
     melBins: Int = 128,
     frameMs: Int = 40
-) -> MLXArray {
-    // Frame parameters
-    let frameSamples = sampleRate * frameMs / 1000  // 640 samples per frame at 16kHz/40ms
-    let hopSamples = frameSamples  // Non-overlapping frames
-    let numSamples = waveform.dim(0)
-    let numFrames = numSamples / hopSamples
-
-    guard numFrames > 0 else {
-        return MLXArray.zeros([1, 1, melBins]).asType(.float16)
-    }
-
-    // Note: Full mel spectrogram computation requires FFT + mel filterbank.
-    // In production, this would use vDSP/Accelerate for the STFT.
-    // For now, return a placeholder with correct shape.
+) -> MLXArray? {
+    // TODO: Not yet implemented. Full implementation requires FFT + mel filterbank
+    // via vDSP/Accelerate for the STFT.
     // Real implementation: STFT -> power spectrum -> mel filterbank -> log
-    return MLXArray.zeros([1, numFrames, melBins]).asType(.float16)
+    print("[KrillLM] Warning: Audio preprocessing not yet implemented. Audio input will be ignored.")
+    return nil
 }
