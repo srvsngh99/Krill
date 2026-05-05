@@ -1,4 +1,5 @@
 import Foundation
+import os
 import MLX
 import KLMCore
 import KLMCache
@@ -26,7 +27,8 @@ public final class InferenceEngine: @unchecked Sendable {
     private var specDecoder: SpeculativeDecoder?
 
     /// True while a model swap is in progress. Checked by server to return 503.
-    public private(set) var isSwapping: Bool = false
+    private let _isSwapping = OSAllocatedUnfairLock(initialState: false)
+    public var isSwapping: Bool { _isSwapping.withLock { $0 } }
 
     /// The detected model family (nil if not loaded).
     public var family: String? { loadedModel?.family }
@@ -57,8 +59,8 @@ public final class InferenceEngine: @unchecked Sendable {
     /// Swap the current model for a new one at the given directory.
     /// Loads the new model first — if loading fails, the previous model remains active.
     public func swap(modelDirectory newDir: URL) async throws {
-        isSwapping = true
-        defer { isSwapping = false }
+        _isSwapping.withLock { $0 = true }
+        defer { _isSwapping.withLock { $0 = false } }
 
         // Load new model into temporaries before touching current state.
         let newModel = try loadModel(from: newDir)

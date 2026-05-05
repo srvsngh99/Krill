@@ -83,7 +83,7 @@ class KrillLMClient:
         system: str | None = None,
         max_tokens: int = 512,
         temperature: float = 0.7,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncGenerator[str, None]:
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
