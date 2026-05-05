@@ -7,3 +7,6 @@ Package.resolved
 xcuserdata/
 *.metallib
 ~/.krillm/
+tools/telegram-manager/.venv/
+__pycache__/
+*.pyc

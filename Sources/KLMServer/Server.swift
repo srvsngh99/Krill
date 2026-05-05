@@ -101,16 +101,30 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         switch (head.method, path) {
         // OpenAI endpoints
         case (.POST, "/v1/chat/completions"):
+            guard requireModel(context: context) else { return }
             handleChatCompletions(context: context, body: body)
         case (.POST, "/v1/completions"):
+            guard requireModel(context: context) else { return }
             handleCompletions(context: context, body: body)
         case (.GET, "/v1/models"):
             handleModels(context: context)
 
+        // Model management
+        case (.POST, "/v1/models/load"):
+            handleLoadModel(context: context, body: body)
+        case (.POST, "/v1/models/unload"):
+            handleUnloadModel(context: context)
+
+        // Status
+        case (.GET, "/v1/status"):
+            handleStatus(context: context)
+
         // Ollama endpoints
         case (.POST, "/api/chat"):
+            guard requireModel(context: context) else { return }
             handleOllamaChat(context: context, body: body)
         case (.POST, "/api/generate"):
+            guard requireModel(context: context) else { return }
             handleOllamaGenerate(context: context, body: body)
         case (.GET, "/api/tags"):
             handleOllamaTags(context: context)
@@ -120,6 +134,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             sendJSON(context: context, status: .ok, body: [
                 "status": "ok",
                 "model_loaded": engine.isLoaded,
+                "model": engine.modelName ?? "none",
                 "family": engine.family ?? "none"
             ])
         case (.GET, "/metrics"):
@@ -129,6 +144,15 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             sendJSON(context: context, status: .notFound,
                      body: ["error": "Not found: \(head.method) \(path)"])
         }
+    }
+
+    /// Guard: returns false and sends 503 if no model is loaded.
+    private func requireModel(context: ChannelHandlerContext) -> Bool {
+        if engine.isLoaded { return true }
+        sendJSON(context: context, status: .serviceUnavailable, body: [
+            "error": "No model loaded. POST /v1/models/load to load one, or restart with --model."
+        ])
+        return false
     }
 
     // MARK: - OpenAI: POST /v1/chat/completions
@@ -471,6 +495,95 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             ]
         }
         sendJSON(context: context, status: .ok, body: ["models": models])
+    }
+
+    // MARK: - Model Management: POST /v1/models/load
+
+    private func handleLoadModel(context: ChannelHandlerContext, body: ByteBuffer) {
+        guard let json = parseJSON(body),
+              let modelName = json["model"] as? String else {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Missing 'model' field"])
+            return
+        }
+
+        nonisolated(unsafe) let ctx = context
+        nonisolated(unsafe) let eng = engine
+        let reg = registry
+
+        Task {
+            // Resolve model path from registry or filesystem
+            let modelDir: URL
+            if reg.hasModel(modelName) {
+                modelDir = reg.modelPath(modelName)
+            } else if FileManager.default.fileExists(atPath: modelName) {
+                modelDir = URL(fileURLWithPath: modelName)
+            } else {
+                self.sendJSON(context: ctx, status: .notFound,
+                         body: ["error": "Model '\(modelName)' not found. Install with: krillm pull \(modelName)"])
+                return
+            }
+
+            do {
+                try await eng.swap(modelDirectory: modelDir)
+                self.sendJSON(context: ctx, status: .ok, body: [
+                    "status": "loaded",
+                    "model": eng.modelName ?? modelName,
+                    "family": eng.family ?? "unknown"
+                ])
+            } catch {
+                self.sendJSON(context: ctx, status: .internalServerError,
+                         body: ["error": "Failed to load model: \(error)"])
+            }
+        }
+    }
+
+    // MARK: - Model Management: POST /v1/models/unload
+
+    private func handleUnloadModel(context: ChannelHandlerContext) {
+        engine.unload()
+        sendJSON(context: context, status: .ok, body: [
+            "status": "unloaded"
+        ])
+    }
+
+    // MARK: - Status: GET /v1/status
+
+    private func handleStatus(context: ChannelHandlerContext) {
+        let uptime = ProcessInfo.processInfo.systemUptime
+
+        // Process memory
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
+        let _ = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        let residentMB = Double(info.resident_size) / 1_048_576
+
+        // Installed models
+        let installed = registry.listModels().map { $0.name }
+
+        var response: [String: Any] = [
+            "status": engine.isLoaded ? "ready" : "idle",
+            "model_loaded": engine.isLoaded,
+            "uptime_seconds": Int(uptime),
+            "memory_mb": Int(residentMB),
+            "installed_models": installed,
+            "version": "0.2.0"
+        ]
+
+        if engine.isLoaded {
+            response["model"] = engine.modelName ?? "unknown"
+            response["family"] = engine.family ?? "unknown"
+            if let loadedAt = engine.loadedAt {
+                response["model_loaded_at"] = ISO8601DateFormatter().string(from: loadedAt)
+                response["model_uptime_seconds"] = Int(Date().timeIntervalSince(loadedAt))
+            }
+        }
+
+        sendJSON(context: context, status: .ok, body: response)
     }
 
     // MARK: - Helpers

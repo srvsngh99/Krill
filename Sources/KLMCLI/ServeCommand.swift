@@ -22,10 +22,11 @@ struct ServeCommand: AsyncParsableCommand {
     func run() async throws {
         let registry = Registry()
 
-        // Resolve model path
-        let modelDir: URL
+        let engine: InferenceEngine
+
         if let model {
-            // Check if it's an installed model name
+            // Resolve model path
+            let modelDir: URL
             if registry.hasModel(model) {
                 modelDir = registry.modelPath(model)
             } else if FileManager.default.fileExists(atPath: model) {
@@ -37,19 +38,29 @@ struct ServeCommand: AsyncParsableCommand {
             }
 
             print("Loading model from \(modelDir.path)...")
-            let engine = InferenceEngine(modelDirectory: modelDir)
+            engine = InferenceEngine(modelDirectory: modelDir)
             try await engine.load()
             print("Model loaded.")
-
-            let server = KLMServer(host: host, port: port, engine: engine, registry: registry)
-            try await server.start()
         } else {
-            print("Starting server without pre-loaded model.")
-            print("Models will be loaded on first request.")
-            // Create engine with a placeholder - in production we'd have lazy loading
-            let engine = InferenceEngine(modelDirectory: URL(fileURLWithPath: "/tmp"))
-            let server = KLMServer(host: host, port: port, engine: engine, registry: registry)
-            try await server.start()
+            // Start without a model — callers use POST /v1/models/load to load one.
+            // We pick the first installed model's directory as a placeholder base
+            // (only the directory is stored; no weights are loaded until load() is called).
+            let base: URL
+            if let first = registry.listModels().first {
+                base = registry.modelPath(first.name)
+            } else {
+                base = URL(fileURLWithPath: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".krillm").path)
+            }
+            engine = InferenceEngine(modelDirectory: base)
+            print("Server starting in API-only mode (no model pre-loaded).")
+            print("Load a model via:  POST http://\(host):\(port)/v1/models/load  {\"model\": \"<name>\"}")
+            let installed = registry.listModels().map(\.name)
+            if !installed.isEmpty {
+                print("Installed models: \(installed.joined(separator: ", "))")
+            }
         }
+
+        let server = KLMServer(host: host, port: port, engine: engine, registry: registry)
+        try await server.start()
     }
 }
