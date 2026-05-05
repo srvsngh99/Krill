@@ -6,7 +6,7 @@ import os
 BOT_TOKEN: str = os.environ.get("KRILLM_TG_TOKEN", "")
 
 # Comma-separated Telegram user IDs allowed to use the bot.
-# If empty, all users are allowed (NOT recommended for production).
+# REQUIRED — the bot refuses all users when this is not set.
 ALLOWED_USERS: list[int] = [
     int(uid.strip())
     for uid in os.environ.get("KRILLM_TG_USERS", "").split(",")

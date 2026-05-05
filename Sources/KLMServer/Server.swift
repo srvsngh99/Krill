@@ -70,6 +70,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let engine: InferenceEngine
     private let registry: Registry
     private let logger = Logger(label: "krillm.http")
+    private let startedAt = Date()
 
     private var requestHead: HTTPRequestHead?
     private var body: ByteBuffer = ByteBuffer()
@@ -146,8 +147,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    /// Guard: returns false and sends 503 if no model is loaded.
+    /// Guard: returns false and sends 503 if no model is loaded or a swap is in progress.
     private func requireModel(context: ChannelHandlerContext) -> Bool {
+        if engine.isSwapping {
+            sendJSON(context: context, status: .serviceUnavailable, body: [
+                "error": "Model swap in progress. Please retry shortly."
+            ])
+            return false
+        }
         if engine.isLoaded { return true }
         sendJSON(context: context, status: .serviceUnavailable, body: [
             "error": "No model loaded. POST /v1/models/load to load one, or restart with --model."
@@ -507,33 +514,37 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
+        // Only allow loading models from the registry — no arbitrary filesystem paths.
+        let reg = registry
+        guard reg.hasModel(modelName) else {
+            sendJSON(context: context, status: .notFound,
+                     body: ["error": "Model '\(modelName)' not found. Install with: krillm pull \(modelName)"])
+            return
+        }
+        let modelDir = reg.modelPath(modelName)
+
+        let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         nonisolated(unsafe) let eng = engine
-        let reg = registry
 
         Task {
-            // Resolve model path from registry or filesystem
-            let modelDir: URL
-            if reg.hasModel(modelName) {
-                modelDir = reg.modelPath(modelName)
-            } else if FileManager.default.fileExists(atPath: modelName) {
-                modelDir = URL(fileURLWithPath: modelName)
-            } else {
-                self.sendJSON(context: ctx, status: .notFound,
-                         body: ["error": "Model '\(modelName)' not found. Install with: krillm pull \(modelName)"])
-                return
-            }
-
             do {
                 try await eng.swap(modelDirectory: modelDir)
-                self.sendJSON(context: ctx, status: .ok, body: [
-                    "status": "loaded",
-                    "model": eng.modelName ?? modelName,
-                    "family": eng.family ?? "unknown"
-                ])
+                let model = eng.modelName ?? modelName
+                let family = eng.family ?? "unknown"
+                eventLoop.execute {
+                    self.sendJSON(context: ctx, status: .ok, body: [
+                        "status": "loaded",
+                        "model": model,
+                        "family": family
+                    ])
+                }
             } catch {
-                self.sendJSON(context: ctx, status: .internalServerError,
-                         body: ["error": "Failed to load model: \(error)"])
+                let errMsg = String(describing: error).prefix(200)
+                eventLoop.execute {
+                    self.sendJSON(context: ctx, status: .internalServerError,
+                                  body: ["error": "Failed to load model: \(errMsg)"])
+                }
             }
         }
     }
@@ -550,7 +561,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     // MARK: - Status: GET /v1/status
 
     private func handleStatus(context: ChannelHandlerContext) {
-        let uptime = ProcessInfo.processInfo.systemUptime
+        let serverUptime = Date().timeIntervalSince(startedAt)
 
         // Process memory
         var info = mach_task_basic_info()
@@ -568,7 +579,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         var response: [String: Any] = [
             "status": engine.isLoaded ? "ready" : "idle",
             "model_loaded": engine.isLoaded,
-            "uptime_seconds": Int(uptime),
+            "uptime_seconds": Int(serverUptime),
             "memory_mb": Int(residentMB),
             "installed_models": installed,
             "version": "0.2.0"

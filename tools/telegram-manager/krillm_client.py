@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import json
-from typing import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 
 import httpx
 
@@ -122,7 +122,7 @@ class KrillLMClient:
             )
         return path
 
-    async def pull_model(self, model: str) -> AsyncIterator[str]:
+    async def pull_model(self, model: str) -> AsyncGenerator[str, None]:
         """Pull a model via CLI, yielding stdout lines as progress."""
         cli = self._find_cli()
         proc = await asyncio.create_subprocess_exec(

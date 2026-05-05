@@ -25,6 +25,9 @@ public final class InferenceEngine: @unchecked Sendable {
     /// Optional speculative decoder (loaded separately via loadDraftModel).
     private var specDecoder: SpeculativeDecoder?
 
+    /// True while a model swap is in progress. Checked by server to return 503.
+    public private(set) var isSwapping: Bool = false
+
     /// The detected model family (nil if not loaded).
     public var family: String? { loadedModel?.family }
 
@@ -52,12 +55,20 @@ public final class InferenceEngine: @unchecked Sendable {
     }
 
     /// Swap the current model for a new one at the given directory.
+    /// Loads the new model first — if loading fails, the previous model remains active.
     public func swap(modelDirectory newDir: URL) async throws {
+        isSwapping = true
+        defer { isSwapping = false }
+
+        // Load new model into temporaries before touching current state.
+        let newModel = try loadModel(from: newDir)
+        let newTokenizer = try await KLMTokenizer(from: newDir)
+
+        // Success — now swap atomically.
         unload()
         self.modelDirectory = newDir
-        let loaded = try loadModel(from: newDir)
-        self.loadedModel = loaded
-        self.tokenizer = try await KLMTokenizer(from: newDir)
+        self.loadedModel = newModel
+        self.tokenizer = newTokenizer
         self.loadedAt = Date()
     }
 

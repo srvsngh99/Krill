@@ -8,9 +8,10 @@ import logging
 import sys
 import textwrap
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -33,10 +34,15 @@ client = KrillLMClient()
 
 
 def authorized(func):
-    """Only allow configured user IDs. Passthrough if ALLOWED_USERS is empty."""
+    """Only allow configured user IDs. Denies all if ALLOWED_USERS is empty."""
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
-        if ALLOWED_USERS and (user is None or user.id not in ALLOWED_USERS):
+        if not ALLOWED_USERS:
+            await update.message.reply_text(
+                "Bot not configured. Set KRILLM_TG_USERS to your Telegram user ID."
+            )
+            return
+        if user is None or user.id not in ALLOWED_USERS:
             await update.message.reply_text("Not authorized.")
             return
         return await func(update, context)
@@ -158,11 +164,37 @@ async def cmd_rm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     model = context.args[0]
-    try:
-        result = await client.remove_model(model)
-        await update.message.reply_text(f"<code>{html.escape(result or 'Removed.')}</code>", parse_mode=ParseMode.HTML)
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Yes, delete", callback_data=f"rm_confirm:{model}"),
+            InlineKeyboardButton("Cancel", callback_data="rm_cancel"),
+        ]
+    ])
+    await update.message.reply_text(
+        f"Delete model <code>{html.escape(model)}</code>? This cannot be undone.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
+
+
+async def handle_rm_callback(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "rm_cancel":
+        await query.edit_message_text("Cancelled.")
+        return
+
+    if query.data and query.data.startswith("rm_confirm:"):
+        model = query.data.split(":", 1)[1]
+        try:
+            result = await client.remove_model(model)
+            await query.edit_message_text(
+                f"<code>{html.escape(result or 'Removed.')}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e:
+            await query.edit_message_text(f"Error: {e}")
 
 
 # ── Inference ────────────────────────────────────────────────────────
@@ -265,7 +297,6 @@ async def cmd_health(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         h = await client.health()
         loaded = h.get("model_loaded", False)
         model = h.get("model", "none")
-        emoji = "green" if loaded else "yellow"
         await update.message.reply_text(
             f"Status: <code>{h.get('status', '?')}</code>\n"
             f"Model loaded: <code>{loaded}</code> ({html.escape(str(model))})",
@@ -352,14 +383,22 @@ def main() -> None:
     app.add_handler(CommandHandler("health", cmd_health))
     app.add_handler(CommandHandler("bench", cmd_bench))
 
+    # Callback queries (e.g. /rm confirmation)
+    app.add_handler(CallbackQueryHandler(handle_rm_callback, pattern=r"^rm_"))
+
     # Plain text → streaming chat
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # Close the httpx client on shutdown
+    async def shutdown(_: Application) -> None:
+        await client.close()
+    app.post_shutdown = shutdown
 
     log.info("KrillLM Telegram Manager starting...")
     if ALLOWED_USERS:
         log.info("Authorized users: %s", ALLOWED_USERS)
     else:
-        log.warning("No KRILLM_TG_USERS set — bot is open to ALL users!")
+        log.warning("No KRILLM_TG_USERS set — bot will deny all users!")
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
