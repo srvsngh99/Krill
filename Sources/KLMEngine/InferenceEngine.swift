@@ -98,19 +98,35 @@ public final class InferenceEngine: @unchecked Sendable {
         specDecoder != nil
     }
 
-    /// Generate tokens from a prompt, streaming results.
+    /// Generate tokens from a single prompt string (convenience wrapper).
+    public func generate(
+        prompt: String,
+        systemPrompt: String? = nil,
+        params: SamplingParams = .greedy,
+        maxTokens: Int = 512,
+        useSpeculative: Bool = false,
+        usePrefixCache: Bool = true
+    ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
+        var messages: [[String: String]] = []
+        if let sys = systemPrompt {
+            messages.append(["role": "system", "content": sys])
+        }
+        messages.append(["role": "user", "content": prompt])
+        return generate(messages: messages, params: params, maxTokens: maxTokens,
+                        useSpeculative: useSpeculative, usePrefixCache: usePrefixCache)
+    }
+
+    /// Generate tokens from a full conversation history, streaming results.
     ///
     /// - Parameters:
-    ///   - prompt: The user's input text
-    ///   - systemPrompt: Optional system prompt
+    ///   - messages: Array of `["role": ..., "content": ...]` messages (full chat history)
     ///   - params: Sampling parameters
     ///   - maxTokens: Maximum tokens to generate
     ///   - useSpeculative: Enable speculative decoding (requires draft model loaded)
     ///   - usePrefixCache: Enable prefix cache lookup/store
     /// - Returns: AsyncStream of TokenEvents + stats accessor
     public func generate(
-        prompt: String,
-        systemPrompt: String? = nil,
+        messages: [[String: String]],
         params: SamplingParams = .greedy,
         maxTokens: Int = 512,
         useSpeculative: Bool = false,
@@ -120,13 +136,6 @@ public final class InferenceEngine: @unchecked Sendable {
             let emptyStream = AsyncStream<TokenEvent> { $0.finish() }
             return (emptyStream, { nil })
         }
-
-        // Build messages and encode
-        var messages: [[String: String]] = []
-        if let sys = systemPrompt {
-            messages.append(["role": "system", "content": sys])
-        }
-        messages.append(["role": "user", "content": prompt])
 
         let formatted = tokenizer.applyChatTemplate(messages: messages)
         let promptTokens = tokenizer.encodeWithoutExtraBOS(formatted)
@@ -182,24 +191,39 @@ public final class InferenceEngine: @unchecked Sendable {
                 }
 
                 // -- Prefill (only un-cached portion) --
-                let tokensToProcess = Array(promptTokens[prefillStartIdx...])
-                let prefillLogits: MLXArray
-
-                if tokensToProcess.isEmpty {
-                    // Full cache hit - just need logits for last position
-                    let lastToken = MLXArray([Int32(promptTokens.last!)]).reshaped(1, 1)
-                    prefillLogits = capturedForward(lastToken, caches)
+                // Cache stores KV for promptTokens[0..<prefixLength]. On a hit we
+                // still need to forward at least the last cached token to obtain
+                // logits for sampling, but we must NOT let that token extend the KV
+                // (it's already present). We achieve this by always forwarding
+                // promptTokens[prefillStartIdx...] — and on a full cache hit
+                // (prefillStartIdx == promptTokens.count) we forward only the final
+                // token after truncating it out of the cache so it gets re-appended
+                // cleanly (net zero length change).
+                let tokensToProcess: [Int]
+                if prefillStartIdx >= promptTokens.count {
+                    // Full cache hit: trim the last token from restored KV and
+                    // re-forward it to get logits without duplication.
+                    let trimmedLength = max(0, prefillStartIdx - 1)
+                    for cache in caches {
+                        cache.truncate(to: trimmedLength)
+                    }
+                    tokensToProcess = [promptTokens.last!]
                 } else {
-                    let inputArray = MLXArray(tokensToProcess.map { Int32($0) })
-                        .reshaped(1, tokensToProcess.count)
-                    prefillLogits = capturedForward(inputArray, caches)
+                    tokensToProcess = Array(promptTokens[prefillStartIdx...])
                 }
+
+                let inputArray = MLXArray(tokensToProcess.map { Int32($0) })
+                    .reshaped(1, tokensToProcess.count)
+                let prefillLogits = capturedForward(inputArray, caches)
                 MLX.eval(prefillLogits)
                 prefillDuration = CFAbsoluteTimeGetCurrent() - startTime
 
-                // -- Store in prefix cache (write-behind, non-blocking) --
+                // -- Store in prefix cache (write-behind) --
+                // We cache KV for the full prompt (all tokens that have been
+                // forwarded). On the next request with the same prefix, the
+                // restored KV will cover all prompt tokens, and the "full cache
+                // hit" path above trims the last token and re-forwards it.
                 if usePrefixCache && !cacheHit && promptTokens.count >= 32 {
-                    // Extract real KV state from each layer cache.
                     var snapshotKeys: [[MLXArray]] = []
                     var snapshotValues: [[MLXArray]] = []
                     for cache in caches {
@@ -228,14 +252,21 @@ public final class InferenceEngine: @unchecked Sendable {
                     // === Speculative Decoding Path ===
                     let draftCaches = makeKVCaches(numLayers: specDec.totalRounds == 0 ? numLayers : numLayers)
 
-                    while generatedCount < maxTokens {
-                        if nextToken == eosId {
-                            continuation.yield(TokenEvent(
-                                tokenId: nextToken, text: "",
-                                elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
-                            break
-                        }
+                    // Emit the first token sampled from prefill logits — specDec.step
+                    // only returns tokens *after* lastToken, so we must yield it here.
+                    if nextToken == eosId {
+                        continuation.yield(TokenEvent(
+                            tokenId: nextToken, text: "",
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
+                    } else {
+                        let firstText = capturedTokenizer.decode(token: nextToken)
+                        continuation.yield(TokenEvent(
+                            tokenId: nextToken, text: firstText,
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                        generatedCount += 1
+                    }
 
+                    while generatedCount < maxTokens && nextToken != eosId {
                         // Speculative step: get multiple tokens at once
                         let accepted = specDec.step(
                             lastToken: nextToken,

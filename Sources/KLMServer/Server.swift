@@ -204,35 +204,32 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             topK: topK
         )
 
-        // Fix 7: Build full conversation prompt from all messages.
-        let systemPrompt = messages.first(where: { ($0["role"] as? String) == "system" })?["content"] as? String
-        let conversationParts: [String] = messages.compactMap { msg in
+        // Convert messages to the format expected by the engine's chat template.
+        let chatMessages: [[String: String]] = messages.compactMap { msg in
             guard let role = msg["role"] as? String,
-                  let content = msg["content"] as? String,
-                  role != "system" else { return nil }
-            return "\(role): \(content)"
+                  let content = msg["content"] as? String else { return nil }
+            return ["role": role, "content": content]
         }
-        let prompt = conversationParts.joined(separator: "\n")
 
-        guard !prompt.isEmpty else {
-            sendJSON(context: context, status: .badRequest, body: ["error": "No user message"])
+        guard !chatMessages.isEmpty else {
+            sendJSON(context: context, status: .badRequest, body: ["error": "No valid messages"])
             return
         }
 
         if stream {
             handleStreamingCompletion(
-                context: context, prompt: prompt, systemPrompt: systemPrompt,
+                context: context, messages: chatMessages,
                 params: params, maxTokens: maxTokens)
         } else {
             handleNonStreamingCompletion(
-                context: context, prompt: prompt, systemPrompt: systemPrompt,
+                context: context, messages: chatMessages,
                 params: params, maxTokens: maxTokens)
         }
     }
 
     private func handleStreamingCompletion(
         context: ChannelHandlerContext,
-        prompt: String, systemPrompt: String?,
+        messages: [[String: String]],
         params: SamplingParams, maxTokens: Int
     ) {
         // Send SSE headers
@@ -248,7 +245,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             let (tokenStream, _) = eng.generate(
-                prompt: prompt, systemPrompt: systemPrompt,
+                messages: messages,
                 params: params, maxTokens: maxTokens)
 
             let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
@@ -280,7 +277,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func handleNonStreamingCompletion(
         context: ChannelHandlerContext,
-        prompt: String, systemPrompt: String?,
+        messages: [[String: String]],
         params: SamplingParams, maxTokens: Int
     ) {
         let eventLoop = context.eventLoop
@@ -289,7 +286,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             let (tokenStream, getStats) = eng.generate(
-                prompt: prompt, systemPrompt: systemPrompt,
+                messages: messages,
                 params: params, maxTokens: maxTokens)
 
             var fullContent = ""
@@ -447,22 +444,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        // Fix 7: Build full conversation prompt from all messages.
-        let systemPrompt = messages.first(where: { ($0["role"] as? String) == "system" })?["content"] as? String
-        let conversationParts: [String] = messages.compactMap { msg in
+        // Convert messages to the format expected by the engine's chat template.
+        let chatMessages: [[String: String]] = messages.compactMap { msg in
             guard let role = msg["role"] as? String,
-                  let content = msg["content"] as? String,
-                  role != "system" else { return nil }
-            return "\(role): \(content)"
+                  let content = msg["content"] as? String else { return nil }
+            return ["role": role, "content": content]
         }
-        let prompt = conversationParts.joined(separator: "\n")
 
-        guard !prompt.isEmpty else {
-            sendJSON(context: context, status: .badRequest, body: ["error": "No user message"])
+        guard !chatMessages.isEmpty else {
+            sendJSON(context: context, status: .badRequest, body: ["error": "No valid messages"])
             return
         }
 
-        // Fix 7: Parse additional sampling parameters.
+        // Parse sampling parameters.
         let options = json["options"] as? [String: Any] ?? [:]
         let temperature = options["temperature"] as? Double ?? 0.0
         let topP = options["top_p"] as? Double ?? 1.0
@@ -479,7 +473,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let modelName = engine.modelName ?? json["model"] as? String ?? "unknown"
 
         if stream {
-            // Fix 5: Send HTTP response head before streaming body chunks.
             var streamHeaders = HTTPHeaders()
             streamHeaders.add(name: "Content-Type", value: "application/x-ndjson")
             streamHeaders.add(name: "Transfer-Encoding", value: "chunked")
@@ -489,7 +482,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             let (tokenStream, _) = eng.generate(
-                prompt: prompt, systemPrompt: systemPrompt, params: params, maxTokens: 2048)
+                messages: chatMessages, params: params, maxTokens: 2048)
 
             if stream {
                 for await event in tokenStream {
