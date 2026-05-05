@@ -244,7 +244,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         context.write(wrapOutboundOut(.head(head)), promise: nil)
 
         nonisolated(unsafe) let ctx = context
-        nonisolated(unsafe) let eng = engine
+        let eng = engine
 
         Task {
             let (tokenStream, _) = eng.generate(
@@ -285,7 +285,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     ) {
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
-        nonisolated(unsafe) let eng = engine
+        let eng = engine
 
         Task {
             let (tokenStream, getStats) = eng.generate(
@@ -335,7 +335,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
-        nonisolated(unsafe) let eng = engine
+        let eng = engine
 
         Task {
             let (tokenStream, getStats) = eng.generate(
@@ -475,7 +475,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
-        nonisolated(unsafe) let eng = engine
+        let eng = engine
         let modelName = engine.modelName ?? json["model"] as? String ?? "unknown"
 
         if stream {
@@ -562,7 +562,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
-        nonisolated(unsafe) let eng = engine
+        let eng = engine
 
         Task {
             let (tokenStream, _) = eng.generate(
@@ -624,7 +624,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
-        nonisolated(unsafe) let eng = engine
+        let eng = engine
 
         Task {
             do {
