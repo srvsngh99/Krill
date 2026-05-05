@@ -5,6 +5,11 @@ import Foundation
 ///
 /// Shells out to `python3 -c "from mlx_vlm import ..."` for inference.
 /// This is a temporary bridge until the native Swift implementation is perfected.
+///
+/// Python resolution order:
+///   1. `KRILLM_PYTHON` environment variable (explicit override)
+///   2. `~/.krillm/venv/bin/python3` (managed venv)
+///   3. System `python3` via `/usr/bin/env`
 public final class PythonFallback: @unchecked Sendable {
 
     private let modelPath: String
@@ -13,21 +18,38 @@ public final class PythonFallback: @unchecked Sendable {
         self.modelPath = modelPath
     }
 
-    /// Python executable path (checks venv and system).
-    private static let pythonPath: String? = {
-        // Check known venv first
-        let venvPython = "/private/tmp/mlx_debug_env/bin/python3"
-        if FileManager.default.fileExists(atPath: venvPython) {
-            return venvPython
+    /// Candidate venv paths to search, in priority order.
+    private static let venvSearchPaths: [String] = {
+        var paths: [String] = []
+        // 1. Explicit override from environment
+        if let envPython = ProcessInfo.processInfo.environment["KRILLM_PYTHON"] {
+            paths.append(envPython)
         }
-        // Check system python
+        // 2. KrillLM managed venv
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        paths.append("\(home)/.krillm/venv/bin/python3")
+        // 3. Common mlx venv locations
+        paths.append("\(home)/.venv/bin/python3")
+        paths.append("/opt/homebrew/bin/python3")
+        return paths
+    }()
+
+    /// Resolved Python executable path. Checks venvs first, falls back to system python3.
+    private static let pythonPath: String? = {
+        for path in venvSearchPaths {
+            if FileManager.default.fileExists(atPath: path) {
+                return path
+            }
+        }
+        // Fallback: system python3 via env
         return "/usr/bin/env"
     }()
 
     private static let pythonArgs: [String] = {
-        let venvPython = "/private/tmp/mlx_debug_env/bin/python3"
-        if FileManager.default.fileExists(atPath: venvPython) {
-            return []  // venvPython is the full path
+        for path in venvSearchPaths {
+            if FileManager.default.fileExists(atPath: path) {
+                return []  // direct path, no args needed
+            }
         }
         return ["python3"]  // env will find python3
     }()

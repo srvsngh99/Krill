@@ -1,4 +1,5 @@
 import Foundation
+import os
 import MLX
 import KLMCore
 import KLMCache
@@ -17,7 +18,7 @@ import KLMSampler
 public final class InferenceEngine: @unchecked Sendable {
     private var loadedModel: LoadedModel?
     private var tokenizer: KLMTokenizer?
-    private let modelDirectory: URL
+    private var modelDirectory: URL
 
     /// Prefix cache for reusing KV state across requests.
     public let prefixCache: PrefixCache
@@ -25,11 +26,21 @@ public final class InferenceEngine: @unchecked Sendable {
     /// Optional speculative decoder (loaded separately via loadDraftModel).
     private var specDecoder: SpeculativeDecoder?
 
+    /// True while a model swap is in progress. Checked by server to return 503.
+    private let _isSwapping = OSAllocatedUnfairLock(initialState: false)
+    public var isSwapping: Bool { _isSwapping.withLock { $0 } }
+
     /// The detected model family (nil if not loaded).
     public var family: String? { loadedModel?.family }
 
+    /// The loaded model's directory name (useful for display/status).
+    public var modelName: String? { isLoaded ? modelDirectory.lastPathComponent : nil }
+
     /// Model identifier for cache keying.
     private var modelId: String { modelDirectory.lastPathComponent }
+
+    /// Timestamp when the model was loaded (nil if not loaded).
+    public private(set) var loadedAt: Date?
 
     public init(modelDirectory: URL, prefixCache: PrefixCache? = nil) {
         self.modelDirectory = modelDirectory
@@ -42,6 +53,25 @@ public final class InferenceEngine: @unchecked Sendable {
         let loaded = try loadModel(from: modelDirectory)
         self.loadedModel = loaded
         self.tokenizer = try await KLMTokenizer(from: modelDirectory)
+        self.loadedAt = Date()
+    }
+
+    /// Swap the current model for a new one at the given directory.
+    /// Loads the new model first — if loading fails, the previous model remains active.
+    public func swap(modelDirectory newDir: URL) async throws {
+        _isSwapping.withLock { $0 = true }
+        defer { _isSwapping.withLock { $0 = false } }
+
+        // Load new model into temporaries before touching current state.
+        let newModel = try loadModel(from: newDir)
+        let newTokenizer = try await KLMTokenizer(from: newDir)
+
+        // Success — now swap atomically.
+        unload()
+        self.modelDirectory = newDir
+        self.loadedModel = newModel
+        self.tokenizer = newTokenizer
+        self.loadedAt = Date()
     }
 
     /// Load a draft model for speculative decoding.
@@ -267,6 +297,7 @@ public final class InferenceEngine: @unchecked Sendable {
         loadedModel = nil
         tokenizer = nil
         specDecoder = nil
+        loadedAt = nil
     }
 }
 
