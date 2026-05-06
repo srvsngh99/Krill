@@ -15,6 +15,24 @@ Built on Apple's [MLX](https://github.com/ml-explore/mlx-swift) framework. Ships
 | Memory | 704 MB | 1,685 MB | **58% less** |
 | mlock usage | None | 1.8 GB wired | No system conflicts |
 
+<details>
+<summary>Benchmark methodology</summary>
+
+- **Hardware**: Apple M4 Pro
+- **Model**: `llama3.2:1b` (Hugging Face canonical weights via `mlx-community/Llama-3.2-1B-Instruct-4bit`)
+- **Prompt**: "Explain quantum computing in simple terms"
+- **Settings**: temperature=0, max_tokens=32
+- **Measurement**: Median of 5 runs after 2 warmup runs
+- **Ollama version**: v0.5.x (specify exact version when reproducing)
+- **KrillLM version**: v0.2.0
+- **macOS**: 15.x, Xcode 16.x, Swift 6.2
+
+To reproduce:
+```
+krillm run llama3.2:1b --prompt "Explain quantum computing in simple terms" --max-tokens 32
+```
+</details>
+
 ## Install
 
 ```bash
@@ -33,7 +51,7 @@ swift build -c release
 
 - macOS 14+ on Apple Silicon (M1 or newer)
 - Xcode with Metal Toolchain: `xcodebuild -downloadComponent MetalToolchain`
-- Swift 6.0+
+- Swift 6.2+
 
 ## Quick Start
 

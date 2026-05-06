@@ -60,6 +60,12 @@ struct RunCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        // Validate unsupported flags early
+        if tools != nil {
+            print("Error: --tools is not yet supported for native inference. This feature is under development.")
+            throw ExitCode.failure
+        }
+
         // Check if this is a Gemma 4 model (use Python fallback for correct output)
         let configURL = modelDir.appendingPathComponent("config.json")
         if let configData = try? Data(contentsOf: configURL),
@@ -96,6 +102,12 @@ struct RunCommand: AsyncParsableCommand {
                 print("Install: pip install mlx-vlm")
                 print("Falling back to native engine (experimental)...")
             }
+        }
+
+        // Image/audio are only supported via the Gemma 4 Python bridge
+        if image != nil || audio != nil {
+            print("Error: --image/--audio is only supported for Gemma 4 models via the Python bridge.")
+            throw ExitCode.failure
         }
 
         // Load model (native Swift path for Llama, Qwen, Mistral, etc.)

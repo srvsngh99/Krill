@@ -8,7 +8,7 @@ import Logging
 /// ~/.krillm/
 ///   models/
 ///     manifests/       # <name>.json manifest files
-///     blobs/           # content-addressed model files (sha256 named dirs)
+///     blobs/           # model weight directories (named by model identifier)
 ///   cache/             # prefix cache (Phase 3)
 ///   config.toml        # user configuration (Phase 2+)
 /// ```

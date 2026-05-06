@@ -34,6 +34,30 @@ public final class KVCache: @unchecked Sendable {
         return (newK, newV)
     }
 
+    /// Return a snapshot of the current KV arrays, or nil if no state has been cached yet.
+    public func snapshot() -> (keys: MLXArray, values: MLXArray)? {
+        guard let k = _keys, let v = _values else { return nil }
+        return (k, v)
+    }
+
+    /// Restore KV state directly (used when replaying a prefix-cache hit).
+    public func restore(keys: MLXArray, values: MLXArray) {
+        _keys = keys
+        _values = values
+    }
+
+    /// Truncate cached KV state to the given sequence length.
+    ///
+    /// Both keys and values use shape `[B, heads, seq, head_dim]` (seq on axis 2),
+    /// matching the layout assumed by `update`.
+    public func truncate(to sequenceLength: Int) {
+        guard let k = _keys, let v = _values else { return }
+        let currentLen = k.dim(2)
+        guard sequenceLength < currentLen else { return }
+        _keys = k[0..., 0..., 0 ..< sequenceLength, 0...]
+        _values = v[0..., 0..., 0 ..< sequenceLength, 0...]
+    }
+
     /// Discard all cached state for a new generation.
     public func reset() {
         _keys = nil

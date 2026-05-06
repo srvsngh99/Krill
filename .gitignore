@@ -2,8 +2,8 @@
 .swiftpm/
 *.xcodeproj/
 DerivedData/
-Package.resolved
 .DS_Store
+dist/
 xcuserdata/
 *.metallib
 ~/.krillm/

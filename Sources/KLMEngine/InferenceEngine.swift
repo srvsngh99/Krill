@@ -98,19 +98,35 @@ public final class InferenceEngine: @unchecked Sendable {
         specDecoder != nil
     }
 
-    /// Generate tokens from a prompt, streaming results.
+    /// Generate tokens from a single prompt string (convenience wrapper).
+    public func generate(
+        prompt: String,
+        systemPrompt: String? = nil,
+        params: SamplingParams = .greedy,
+        maxTokens: Int = 512,
+        useSpeculative: Bool = false,
+        usePrefixCache: Bool = true
+    ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
+        var messages: [[String: String]] = []
+        if let sys = systemPrompt {
+            messages.append(["role": "system", "content": sys])
+        }
+        messages.append(["role": "user", "content": prompt])
+        return generate(messages: messages, params: params, maxTokens: maxTokens,
+                        useSpeculative: useSpeculative, usePrefixCache: usePrefixCache)
+    }
+
+    /// Generate tokens from a full conversation history, streaming results.
     ///
     /// - Parameters:
-    ///   - prompt: The user's input text
-    ///   - systemPrompt: Optional system prompt
+    ///   - messages: Array of `["role": ..., "content": ...]` messages (full chat history)
     ///   - params: Sampling parameters
     ///   - maxTokens: Maximum tokens to generate
     ///   - useSpeculative: Enable speculative decoding (requires draft model loaded)
     ///   - usePrefixCache: Enable prefix cache lookup/store
     /// - Returns: AsyncStream of TokenEvents + stats accessor
     public func generate(
-        prompt: String,
-        systemPrompt: String? = nil,
+        messages: [[String: String]],
         params: SamplingParams = .greedy,
         maxTokens: Int = 512,
         useSpeculative: Bool = false,
@@ -121,15 +137,16 @@ public final class InferenceEngine: @unchecked Sendable {
             return (emptyStream, { nil })
         }
 
-        // Build messages and encode
-        var messages: [[String: String]] = []
-        if let sys = systemPrompt {
-            messages.append(["role": "system", "content": sys])
-        }
-        messages.append(["role": "user", "content": prompt])
-
         let formatted = tokenizer.applyChatTemplate(messages: messages)
         let promptTokens = tokenizer.encodeWithoutExtraBOS(formatted)
+
+        guard !promptTokens.isEmpty else {
+            let emptyStream = AsyncStream<TokenEvent> { continuation in
+                continuation.yield(TokenEvent(tokenId: 0, text: "", elapsed: 0, isEnd: true))
+                continuation.finish()
+            }
+            return (emptyStream, { nil })
+        }
 
         let sampler = Sampler(params: params)
         let eosId = tokenizer.eosTokenId
@@ -156,51 +173,70 @@ public final class InferenceEngine: @unchecked Sendable {
                 let caches = makeKVCaches(numLayers: numLayers)
 
                 // -- Prefix Cache Lookup --
-                var prefillStartIdx = 0
+                // Only accept FULL prefix hits (cached tokens == prompt tokens).
+                // Partial hits are unsafe: the causal mask is built for the new
+                // span length only, but attention keys include the restored prefix,
+                // causing shape mismatch or incorrect masking. Until cache-aware
+                // mask construction is implemented, we skip partial hits.
                 if usePrefixCache {
                     if let hit = capturedPrefixCache.lookup(
                         tokens: promptTokens, modelId: capturedModelId
-                    ) {
-                        // Restore KV state from cache
+                    ), !hit.keys.isEmpty, hit.prefixLength == promptTokens.count {
+                        // Full exact hit — restore KV for all prompt tokens.
                         for (i, cache) in caches.enumerated() {
                             if i < hit.keys.count, let k = hit.keys[i].first,
                                i < hit.values.count, let v = hit.values[i].first {
-                                let _ = cache.update(keys: k, values: v)
+                                cache.restore(keys: k, values: v)
                             }
                         }
-                        prefillStartIdx = hit.prefixLength
                         cacheHit = true
                     }
                 }
 
-                // -- Prefill (only un-cached portion) --
-                let tokensToProcess = Array(promptTokens[prefillStartIdx...])
-                let prefillLogits: MLXArray
-
-                if tokensToProcess.isEmpty {
-                    // Full cache hit - just need logits for last position
-                    let lastToken = MLXArray([Int32(promptTokens.last!)]).reshaped(1, 1)
-                    prefillLogits = capturedForward(lastToken, caches)
+                // -- Prefill --
+                // On a full cache hit we already have KV for the entire prompt.
+                // We truncate the last position and re-forward that single token
+                // to get logits without duplicating a KV entry.
+                // On a miss we forward the entire prompt normally.
+                let tokensToProcess: [Int]
+                if cacheHit {
+                    let trimmedLength = max(0, promptTokens.count - 1)
+                    for cache in caches {
+                        cache.truncate(to: trimmedLength)
+                    }
+                    tokensToProcess = [promptTokens.last!]
                 } else {
-                    let inputArray = MLXArray(tokensToProcess.map { Int32($0) })
-                        .reshaped(1, tokensToProcess.count)
-                    prefillLogits = capturedForward(inputArray, caches)
+                    tokensToProcess = promptTokens
                 }
+
+                let inputArray = MLXArray(tokensToProcess.map { Int32($0) })
+                    .reshaped(1, tokensToProcess.count)
+                let prefillLogits = capturedForward(inputArray, caches)
                 MLX.eval(prefillLogits)
                 prefillDuration = CFAbsoluteTimeGetCurrent() - startTime
 
-                // -- Store in prefix cache (write-behind, non-blocking) --
+                // -- Store in prefix cache (write-behind) --
+                // We cache KV for the full prompt (all tokens that have been
+                // forwarded). On the next request with the same prefix, the
+                // restored KV will cover all prompt tokens, and the "full cache
+                // hit" path above trims the last token and re-forwards it.
                 if usePrefixCache && !cacheHit && promptTokens.count >= 32 {
-                    // Extract KV state for caching
-                    // Note: in production, we'd extract from caches directly.
-                    // Simplified: store the token list for future lookup keying.
-                    // Full KV extraction requires cache to expose its arrays.
-                    capturedPrefixCache.store(
-                        tokens: promptTokens,
-                        modelId: capturedModelId,
-                        keys: [],  // KV extraction deferred to cache API enhancement
-                        values: []
-                    )
+                    var snapshotKeys: [[MLXArray]] = []
+                    var snapshotValues: [[MLXArray]] = []
+                    for cache in caches {
+                        if let snap = cache.snapshot() {
+                            snapshotKeys.append([snap.keys])
+                            snapshotValues.append([snap.values])
+                        }
+                    }
+                    if !snapshotKeys.isEmpty {
+                        capturedPrefixCache.store(
+                            tokens: promptTokens,
+                            modelId: capturedModelId,
+                            keys: snapshotKeys,
+                            values: snapshotValues
+                        )
+                    }
                 }
 
                 // Sample first token
@@ -213,14 +249,21 @@ public final class InferenceEngine: @unchecked Sendable {
                     // === Speculative Decoding Path ===
                     let draftCaches = makeKVCaches(numLayers: specDec.totalRounds == 0 ? numLayers : numLayers)
 
-                    while generatedCount < maxTokens {
-                        if nextToken == eosId {
-                            continuation.yield(TokenEvent(
-                                tokenId: nextToken, text: "",
-                                elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
-                            break
-                        }
+                    // Emit the first token sampled from prefill logits — specDec.step
+                    // only returns tokens *after* lastToken, so we must yield it here.
+                    if nextToken == eosId {
+                        continuation.yield(TokenEvent(
+                            tokenId: nextToken, text: "",
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
+                    } else {
+                        let firstText = capturedTokenizer.decode(token: nextToken)
+                        continuation.yield(TokenEvent(
+                            tokenId: nextToken, text: firstText,
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                        generatedCount += 1
+                    }
 
+                    while generatedCount < maxTokens && nextToken != eosId {
                         // Speculative step: get multiple tokens at once
                         let accepted = specDec.step(
                             lastToken: nextToken,

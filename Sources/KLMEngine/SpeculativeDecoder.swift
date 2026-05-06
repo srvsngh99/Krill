@@ -82,6 +82,10 @@ public final class SpeculativeDecoder: @unchecked Sendable {
             verifyTokens.append(Int32(t))
         }
         let verifyInput = MLXArray(verifyTokens).reshaped(1, verifyTokens.count)
+
+        // Record sequence length before verification so we can roll back on rejection.
+        let previousLength = targetCaches.first?.sequenceLength ?? 0
+
         let targetLogits = targetModel.forward(verifyInput, targetCaches)
         MLX.eval(targetLogits)
 
@@ -102,6 +106,15 @@ public final class SpeculativeDecoder: @unchecked Sendable {
                 accepted.append(targetToken)
                 allAccepted = false
                 break
+            }
+        }
+
+        // Roll back KV state for rejected tokens so the cache reflects exactly
+        // the tokens that were accepted.
+        if !allAccepted {
+            let acceptedLength = previousLength + accepted.count
+            for cache in targetCaches {
+                cache.truncate(to: acceptedLength)
             }
         }
 

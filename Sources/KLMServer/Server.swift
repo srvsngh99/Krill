@@ -72,6 +72,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let logger = Logger(label: "krillm.http")
     private let startedAt = Date()
 
+    private let maxBodySize = 10 * 1024 * 1024  // 10 MB
+
     private var requestHead: HTTPRequestHead?
     private var body: ByteBuffer = ByteBuffer()
 
@@ -89,6 +91,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             body.clear()
         case .body(var buf):
             body.writeBuffer(&buf)
+            if body.readableBytes > maxBodySize {
+                let head = HTTPResponseHead(version: .http1_1, status: .payloadTooLarge)
+                context.write(wrapOutboundOut(.head(head)), promise: nil)
+                context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+                context.close(promise: nil)
+                requestHead = nil
+                return
+            }
         case .end:
             guard let head = requestHead else { return }
             handleRequest(context: context, head: head, body: body)
@@ -173,34 +183,53 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let messages = json["messages"] as? [[String: Any]] ?? []
         let stream = json["stream"] as? Bool ?? false
         let maxTokens = json["max_tokens"] as? Int ?? 512
-        let temperature = json["temperature"] as? Double ?? 0.0
 
-        // Extract last user message as prompt
-        let userMessages = messages.filter { ($0["role"] as? String) == "user" }
-        let systemMessages = messages.filter { ($0["role"] as? String) == "system" }
-        guard let lastUser = userMessages.last,
-              let prompt = lastUser["content"] as? String else {
-            sendJSON(context: context, status: .badRequest, body: ["error": "No user message"])
+        // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
+        if let requestedModel = json["model"] as? String,
+           let loadedModel = engine.modelName,
+           requestedModel != loadedModel {
+            sendJSON(context: context, status: .badRequest, body: [
+                "error": "Requested model '\(requestedModel)' is not loaded. Currently loaded: '\(loadedModel)'."
+            ])
             return
         }
-        let systemPrompt = (systemMessages.last?["content"] as? String)
 
-        let params = SamplingParams(temperature: Float(temperature))
+        // Fix 7: Parse additional sampling parameters.
+        let temperature = json["temperature"] as? Double ?? 0.0
+        let topP = json["top_p"] as? Double ?? 1.0
+        let topK = json["top_k"] as? Int ?? 0
+        let params = SamplingParams(
+            temperature: Float(temperature),
+            topP: Float(topP),
+            topK: topK
+        )
+
+        // Convert messages to the format expected by the engine's chat template.
+        let chatMessages: [[String: String]] = messages.compactMap { msg in
+            guard let role = msg["role"] as? String,
+                  let content = msg["content"] as? String else { return nil }
+            return ["role": role, "content": content]
+        }
+
+        guard !chatMessages.isEmpty else {
+            sendJSON(context: context, status: .badRequest, body: ["error": "No valid messages"])
+            return
+        }
 
         if stream {
             handleStreamingCompletion(
-                context: context, prompt: prompt, systemPrompt: systemPrompt,
+                context: context, messages: chatMessages,
                 params: params, maxTokens: maxTokens)
         } else {
             handleNonStreamingCompletion(
-                context: context, prompt: prompt, systemPrompt: systemPrompt,
+                context: context, messages: chatMessages,
                 params: params, maxTokens: maxTokens)
         }
     }
 
     private func handleStreamingCompletion(
         context: ChannelHandlerContext,
-        prompt: String, systemPrompt: String?,
+        messages: [[String: String]],
         params: SamplingParams, maxTokens: Int
     ) {
         // Send SSE headers
@@ -212,11 +241,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         context.write(wrapOutboundOut(.head(head)), promise: nil)
 
         nonisolated(unsafe) let ctx = context
-        nonisolated(unsafe) let eng = engine
+        let eng = engine
 
         Task {
             let (tokenStream, _) = eng.generate(
-                prompt: prompt, systemPrompt: systemPrompt,
+                messages: messages,
                 params: params, maxTokens: maxTokens)
 
             let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
@@ -226,37 +255,38 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     let chunk = sseChunk(id: id, content: nil, finishReason: "stop")
                     var buf = ctx.channel.allocator.buffer(capacity: chunk.utf8.count)
                     buf.writeString(chunk)
-                    ctx.write(self.wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
+                    self.writeOnLoop(ctx, .body(.byteBuffer(buf)))
 
                     // Send [DONE]
                     let done = "data: [DONE]\n\n"
                     var doneBuf = ctx.channel.allocator.buffer(capacity: done.utf8.count)
                     doneBuf.writeString(done)
-                    ctx.write(self.wrapOutboundOut(.body(.byteBuffer(doneBuf))), promise: nil)
+                    self.writeOnLoop(ctx, .body(.byteBuffer(doneBuf)))
                     break
                 }
 
                 let chunk = sseChunk(id: id, content: event.text, finishReason: nil)
                 var buf = ctx.channel.allocator.buffer(capacity: chunk.utf8.count)
                 buf.writeString(chunk)
-                ctx.writeAndFlush(self.wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
+                self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
             }
 
-            ctx.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+            self.writeOnLoop(ctx, .end(nil), flush: true)
         }
     }
 
     private func handleNonStreamingCompletion(
         context: ChannelHandlerContext,
-        prompt: String, systemPrompt: String?,
+        messages: [[String: String]],
         params: SamplingParams, maxTokens: Int
     ) {
+        let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
-        nonisolated(unsafe) let eng = engine
+        let eng = engine
 
         Task {
             let (tokenStream, getStats) = eng.generate(
-                prompt: prompt, systemPrompt: systemPrompt,
+                messages: messages,
                 params: params, maxTokens: maxTokens)
 
             var fullContent = ""
@@ -281,7 +311,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "total_tokens": (stats?.promptTokens ?? 0) + (stats?.generatedTokens ?? 0)
                 ]
             ]
-            self.sendJSON(context: ctx, status: .ok, body: response)
+            eventLoop.execute {
+                self.sendJSON(context: ctx, status: .ok, body: response)
+            }
         }
     }
 
@@ -298,8 +330,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let temperature = json["temperature"] as? Double ?? 0.0
         let params = SamplingParams(temperature: Float(temperature))
 
+        let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
-        nonisolated(unsafe) let eng = engine
+        let eng = engine
 
         Task {
             let (tokenStream, getStats) = eng.generate(
@@ -327,7 +360,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "total_tokens": (stats?.promptTokens ?? 0) + (stats?.generatedTokens ?? 0)
                 ]
             ]
-            self.sendJSON(context: ctx, status: .ok, body: response)
+            eventLoop.execute {
+                self.sendJSON(context: ctx, status: .ok, body: response)
+            }
         }
     }
 
@@ -398,26 +433,56 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let messages = json["messages"] as? [[String: Any]] ?? []
         let stream = json["stream"] as? Bool ?? true
 
-        let userMessages = messages.filter { ($0["role"] as? String) == "user" }
-        let systemMessages = messages.filter { ($0["role"] as? String) == "system" }
-        guard let lastUser = userMessages.last,
-              let prompt = lastUser["content"] as? String else {
-            sendJSON(context: context, status: .badRequest, body: ["error": "No user message"])
+        // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
+        if let requestedModel = json["model"] as? String,
+           requestedModel != "unknown",
+           let loadedModel = engine.modelName,
+           requestedModel != loadedModel {
+            sendJSON(context: context, status: .badRequest, body: [
+                "error": "Requested model '\(requestedModel)' is not loaded. Currently loaded: '\(loadedModel)'."
+            ])
             return
         }
-        let systemPrompt = (systemMessages.last?["content"] as? String)
 
+        // Convert messages to the format expected by the engine's chat template.
+        let chatMessages: [[String: String]] = messages.compactMap { msg in
+            guard let role = msg["role"] as? String,
+                  let content = msg["content"] as? String else { return nil }
+            return ["role": role, "content": content]
+        }
+
+        guard !chatMessages.isEmpty else {
+            sendJSON(context: context, status: .badRequest, body: ["error": "No valid messages"])
+            return
+        }
+
+        // Parse sampling parameters.
         let options = json["options"] as? [String: Any] ?? [:]
         let temperature = options["temperature"] as? Double ?? 0.0
-        let params = SamplingParams(temperature: Float(temperature))
+        let topP = options["top_p"] as? Double ?? 1.0
+        let topK = options["top_k"] as? Int ?? 0
+        let params = SamplingParams(
+            temperature: Float(temperature),
+            topP: Float(topP),
+            topK: topK
+        )
 
+        let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
-        nonisolated(unsafe) let eng = engine
-        let modelName = json["model"] as? String ?? "unknown"
+        let eng = engine
+        let modelName = engine.modelName ?? json["model"] as? String ?? "unknown"
+
+        if stream {
+            var streamHeaders = HTTPHeaders()
+            streamHeaders.add(name: "Content-Type", value: "application/x-ndjson")
+            streamHeaders.add(name: "Transfer-Encoding", value: "chunked")
+            let streamHead = HTTPResponseHead(version: .http1_1, status: .ok, headers: streamHeaders)
+            context.write(wrapOutboundOut(.head(streamHead)), promise: nil)
+        }
 
         Task {
             let (tokenStream, _) = eng.generate(
-                prompt: prompt, systemPrompt: systemPrompt, params: params, maxTokens: 2048)
+                messages: chatMessages, params: params, maxTokens: 2048)
 
             if stream {
                 for await event in tokenStream {
@@ -430,10 +495,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     var buf = ctx.channel.allocator.buffer(capacity: data.count + 1)
                     buf.writeBytes(data)
                     buf.writeString("\n")
-                    ctx.writeAndFlush(self.wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
+                    // Fix 4: dispatch writes onto the event loop.
+                    self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
                     if event.isEnd { break }
                 }
-                ctx.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+                self.writeOnLoop(ctx, .end(nil), flush: true)
             } else {
                 var fullContent = ""
                 for await event in tokenStream {
@@ -445,7 +511,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "message": ["role": "assistant", "content": fullContent],
                     "done": true
                 ]
-                self.sendJSON(context: ctx, status: .ok, body: response)
+                eventLoop.execute {
+                    self.sendJSON(context: ctx, status: .ok, body: response)
+                }
             }
         }
     }
@@ -460,13 +528,34 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let prompt = json["prompt"] as? String ?? ""
         let system = json["system"] as? String
-        let modelName = json["model"] as? String ?? "unknown"
+
+        // Fix 7: Model validation.
+        if let requestedModel = json["model"] as? String,
+           requestedModel != "unknown",
+           let loadedModel = engine.modelName,
+           requestedModel != loadedModel {
+            sendJSON(context: context, status: .badRequest, body: [
+                "error": "Requested model '\(requestedModel)' is not loaded. Currently loaded: '\(loadedModel)'."
+            ])
+            return
+        }
+
+        let modelName = engine.modelName ?? json["model"] as? String ?? "unknown"
+
+        // Fix 7: Parse additional sampling parameters.
         let options = json["options"] as? [String: Any] ?? [:]
         let temperature = options["temperature"] as? Double ?? 0.0
-        let params = SamplingParams(temperature: Float(temperature))
+        let topP = options["top_p"] as? Double ?? 1.0
+        let topK = options["top_k"] as? Int ?? 0
+        let params = SamplingParams(
+            temperature: Float(temperature),
+            topP: Float(topP),
+            topK: topK
+        )
 
+        let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
-        nonisolated(unsafe) let eng = engine
+        let eng = engine
 
         Task {
             let (tokenStream, _) = eng.generate(
@@ -483,7 +572,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 "response": fullResponse,
                 "done": true
             ]
-            self.sendJSON(context: ctx, status: .ok, body: response)
+            // Fix 4: dispatch write back onto the event loop.
+            eventLoop.execute {
+                self.sendJSON(context: ctx, status: .ok, body: response)
+            }
         }
     }
 
@@ -525,7 +617,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
-        nonisolated(unsafe) let eng = engine
+        let eng = engine
 
         Task {
             do {
@@ -598,6 +690,26 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     // MARK: - Helpers
+
+    /// Write a response part on the channel's event loop.
+    /// If already on the event loop, writes immediately; otherwise dispatches via execute.
+    private func writeOnLoop(_ context: ChannelHandlerContext, _ part: HTTPServerResponsePart, flush: Bool = false) {
+        if context.eventLoop.inEventLoop {
+            if flush {
+                context.writeAndFlush(wrapOutboundOut(part), promise: nil)
+            } else {
+                context.write(wrapOutboundOut(part), promise: nil)
+            }
+        } else {
+            context.eventLoop.execute {
+                if flush {
+                    context.writeAndFlush(self.wrapOutboundOut(part), promise: nil)
+                } else {
+                    context.write(self.wrapOutboundOut(part), promise: nil)
+                }
+            }
+        }
+    }
 
     private func parseJSON(_ buffer: ByteBuffer) -> [String: Any]? {
         var buf = buffer
