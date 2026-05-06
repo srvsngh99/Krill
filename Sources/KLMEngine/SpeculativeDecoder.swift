@@ -13,8 +13,8 @@ import KLMSampler
 /// Adaptive K: rolls acceptance rate over last 16 verifications. If acceptance
 /// rate < 0.4, drops K to 2. If > 0.8, raises K to 6.
 public final class SpeculativeDecoder: @unchecked Sendable {
-    private let targetModel: LoadedModel
-    private let draftModel: LoadedModel
+    private let targetModel: LoadedModel?
+    private let draftModel: LoadedModel?
     private let sampler: Sampler
 
     private var adaptiveK: Int
@@ -46,6 +46,31 @@ public final class SpeculativeDecoder: @unchecked Sendable {
         self.sampler = Sampler(params: SamplingParams(temperature: temperature))
     }
 
+    internal convenience init(initialKForTesting initialK: Int) {
+        self.init(targetModel: nil, draftModel: nil, initialK: initialK)
+    }
+
+    private init(
+        targetModel: LoadedModel?,
+        draftModel: LoadedModel?,
+        initialK: Int,
+        temperature: Float = 0.0
+    ) {
+        self.targetModel = targetModel
+        self.draftModel = draftModel
+        self.adaptiveK = initialK
+        self.sampler = Sampler(params: SamplingParams(temperature: temperature))
+    }
+
+    internal var currentKForTesting: Int {
+        adaptiveK
+    }
+
+    @discardableResult
+    internal func recordVerificationForTesting(acceptedTokenCount: Int, proposedTokenCount: Int) -> Double {
+        recordVerification(acceptedTokenCount: acceptedTokenCount, proposedTokenCount: proposedTokenCount)
+    }
+
     /// Run one speculative decode step.
     ///
     /// - Parameters:
@@ -58,6 +83,10 @@ public final class SpeculativeDecoder: @unchecked Sendable {
         targetCaches: [KVCache],
         draftCaches: [KVCache]
     ) -> [Int] {
+        guard let targetModel, let draftModel else {
+            preconditionFailure("SpeculativeDecoder.step requires target and draft models")
+        }
+
         let k = adaptiveK
 
         // Draft: generate K tokens greedily
@@ -127,19 +156,24 @@ public final class SpeculativeDecoder: @unchecked Sendable {
             accepted.append(bonusToken)
         }
 
-        // Update stats
-        let rate = Double(accepted.count - 1) / Double(k) // -1 because last is either rejection replacement or bonus
+        recordVerification(acceptedTokenCount: accepted.count, proposedTokenCount: k)
+
+        return accepted
+    }
+
+    private func recordVerification(acceptedTokenCount: Int, proposedTokenCount k: Int) -> Double {
+        // -1 because the last returned token is either a rejection replacement or a bonus token.
+        let rate = Double(acceptedTokenCount - 1) / Double(k)
         acceptanceHistory.append(rate)
         if acceptanceHistory.count > historyWindow {
             acceptanceHistory.removeFirst()
         }
-        totalAccepted += accepted.count
+        totalAccepted += acceptedTokenCount
         totalRounds += 1
 
-        // Adapt K
         adaptK()
 
-        return accepted
+        return rate
     }
 
     /// Reset internal state for a new generation.

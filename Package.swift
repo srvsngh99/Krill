@@ -100,15 +100,39 @@ let package = Package(
         ),
         .testTarget(
             name: "KLMCoreTests",
-            dependencies: ["KLMCore", "KLMCache"]
+            dependencies: [
+                "KLMCore",
+                "KLMCache",
+                .product(name: "MLX", package: "mlx-swift"),
+            ]
         ),
         .testTarget(
             name: "KLMEngineTests",
-            dependencies: ["KLMEngine", "KLMCache", "KLMSampler"]
+            dependencies: [
+                "KLMEngine",
+                "KLMCache",
+                "KLMSampler",
+                .product(name: "MLX", package: "mlx-swift"),
+            ]
+        ),
+        .testTarget(
+            name: "KLMServerTests",
+            dependencies: [
+                "KLMServer",
+                "KLMEngine",
+                "KLMRegistry",
+                "KLMSampler",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+            ]
         ),
         .testTarget(
             name: "KLMRegistryTests",
-            dependencies: ["KLMRegistry"]
+            dependencies: [
+                "KLMRegistry",
+                .product(name: "Crypto", package: "swift-crypto"),
+            ]
         ),
     ]
 )

@@ -1,12 +1,39 @@
 import XCTest
+import MLX
 @testable import KLMEngine
 @testable import KLMCache
+@testable import KLMSampler
 
 /// Tests for speculative decoding first-token emission and rejection rollback.
 ///
-/// These tests verify the behavioral contracts of the speculative decode path
-/// without requiring real model weights or Metal GPU access.
+/// These tests verify the behavioral contracts of the speculative decode path.
 final class SpeculativeDecodingTests: XCTestCase {
+    private func requireMLX() throws {
+        #if os(macOS) && arch(arm64) && canImport(MLX)
+        if ProcessInfo.processInfo.environment["KLM_SKIP_MLX_TESTS"] == "1" {
+            throw XCTSkip("MLX tests skipped by KLM_SKIP_MLX_TESTS")
+        }
+        guard hasLoadableMLXMetalLibrary() else {
+            throw XCTSkip("MLX Metal library is not available in the test bundle")
+        }
+        #else
+        throw XCTSkip("MLX-backed tests require macOS arm64 with MLX/Metal")
+        #endif
+    }
+
+    private func withMLX<T>(_ body: () throws -> T) throws -> T {
+        try requireMLX()
+        if ProcessInfo.processInfo.environment["KLM_MLX_TEST_DEVICE"] == "gpu" {
+            return try body()
+        }
+
+        // These tests validate MLX tensor semantics, not GPU performance. Run
+        // them on CPU by default so missing SwiftPM metallib resources do not
+        // abort the process before XCTest can report a skip/failure.
+        return try Device.withDefaultDevice(.cpu) {
+            try body()
+        }
+    }
 
     // MARK: - Test 4: First token must be emitted before speculative step
 
@@ -68,61 +95,171 @@ final class SpeculativeDecodingTests: XCTestCase {
 
     // MARK: - Test 5: KV rollback logic on rejection
 
-    func testRollbackLengthCalculation() {
-        // After target model forward of K verify tokens:
-        // - previousLength: KV length before verification
-        // - accepted.count: how many tokens were accepted (or replaced)
-        // - Final length should be previousLength + accepted.count
-        let previousLength = 10
-        let K = 4
-        let acceptedCount = 2  // rejected at position 2
+    func testKVCacheRollbackTruncatesRejectedVerifyTokens() throws {
+        try withMLX {
+            let cache = KVCache()
+            _ = cache.update(
+                keys: kvTensor(start: 0, count: 10),
+                values: kvTensor(start: 1_000, count: 10)
+            )
 
-        let afterVerifyLength = previousLength + K  // 14 (before rollback)
-        let expectedAfterRollback = previousLength + acceptedCount  // 12
+            let previousLength = cache.sequenceLength
+            _ = cache.update(
+                keys: kvTensor(start: 100, count: 4),
+                values: kvTensor(start: 1_100, count: 4)
+            )
 
-        XCTAssertEqual(afterVerifyLength, 14)
-        XCTAssertEqual(expectedAfterRollback, 12)
-        XCTAssertLessThan(expectedAfterRollback, afterVerifyLength,
-            "Rollback should reduce KV length to previous + accepted only")
+            XCTAssertEqual(cache.sequenceLength, 14)
+
+            let acceptedCount = 2
+            cache.truncate(to: previousLength + acceptedCount)
+
+            let snapshot = try XCTUnwrap(cache.snapshot())
+            MLX.eval(snapshot.keys, snapshot.values)
+
+            XCTAssertEqual(cache.sequenceLength, 12)
+            XCTAssertEqual(snapshot.keys.shape, [1, 1, 12, 1])
+            XCTAssertEqual(snapshot.values.shape, [1, 1, 12, 1])
+            XCTAssertEqual(
+                snapshot.keys.asArray(Float.self),
+                (0 ..< 10).map { Float($0) } + [100, 101]
+            )
+            XCTAssertEqual(
+                snapshot.values.asArray(Float.self),
+                (1_000 ..< 1_010).map { Float($0) } + [1_100, 1_101]
+            )
+        }
     }
 
-    func testNoRollbackOnFullAcceptance() {
-        // When all K tokens accepted, no truncation needed.
-        // Additionally, a bonus token is generated (K+1 total new tokens).
-        let previousLength = 10
-        let K = 4
-        let allAccepted = true
+    func testKVCacheFullAcceptanceKeepsVerifiedTokensAndBonusToken() throws {
+        try withMLX {
+            let cache = KVCache()
+            _ = cache.update(
+                keys: kvTensor(start: 0, count: 10),
+                values: kvTensor(start: 1_000, count: 10)
+            )
+            _ = cache.update(
+                keys: kvTensor(start: 100, count: 4),
+                values: kvTensor(start: 1_100, count: 4)
+            )
+            _ = cache.update(
+                keys: kvTensor(start: 200, count: 1),
+                values: kvTensor(start: 1_200, count: 1)
+            )
 
-        let finalLength: Int
-        if allAccepted {
-            finalLength = previousLength + K + 1  // bonus token
-        } else {
-            finalLength = previousLength + K  // would truncate
+            XCTAssertEqual(cache.sequenceLength, 15)
+
+            let snapshot = try XCTUnwrap(cache.snapshot())
+            MLX.eval(snapshot.keys, snapshot.values)
+            XCTAssertEqual(snapshot.keys.asArray(Float.self).suffix(5), [100, 101, 102, 103, 200])
+            XCTAssertEqual(snapshot.values.asArray(Float.self).suffix(5), [1_100, 1_101, 1_102, 1_103, 1_200])
         }
+    }
 
-        XCTAssertEqual(finalLength, 15,
-            "Full acceptance yields K+1 new tokens (including bonus)")
+    // MARK: - Sampler behavior on real logits
+
+    func testSamplerGreedySelectsArgmaxFromRealLogits() throws {
+        try withMLX {
+            let logits = MLXArray([0.1, -1.0, 4.25, 2.0] as [Float]).reshaped(1, 4)
+            let sampler = Sampler(params: .greedy)
+
+            XCTAssertEqual(sampler.sample(logits), 2)
+        }
+    }
+
+    func testSamplerUsesLastPositionForFirstTokenFromPrefillLogits() throws {
+        try withMLX {
+            let prefillLogits = MLXArray([
+                0.1, 8.0, 0.3, 0.4,
+                0.2, 0.5, 0.7, 6.0,
+            ] as [Float], [1, 2, 4])
+            let sampler = Sampler(params: .greedy)
+
+            XCTAssertEqual(sampler.sample(prefillLogits), 3)
+        }
     }
 
     // MARK: - Test 5: Acceptance rate and adaptive K
 
-    func testAdaptiveKDecreasesOnLowAcceptance() {
-        // If acceptance rate < 0.4, K should decrease
-        let currentK = 4
-        let rate = 0.3
-        let minK = 2
+    func testAdaptiveKDecreasesOnLowAcceptanceThroughDecoderState() {
+        let decoder = SpeculativeDecoder(initialKForTesting: 4)
 
-        let newK = rate < 0.4 && currentK > minK ? currentK - 1 : currentK
-        XCTAssertEqual(newK, 3, "Low acceptance rate should decrease K")
+        let rate = decoder.recordVerificationForTesting(
+            acceptedTokenCount: 1,
+            proposedTokenCount: 4
+        )
+
+        XCTAssertEqual(rate, 0)
+        XCTAssertEqual(decoder.acceptanceRate, 0)
+        XCTAssertEqual(decoder.currentKForTesting, 3)
+        XCTAssertEqual(decoder.totalRounds, 1)
+        XCTAssertEqual(decoder.totalAccepted, 1)
     }
 
-    func testAdaptiveKIncreasesOnHighAcceptance() {
-        // If acceptance rate > 0.8, K should increase
-        let currentK = 4
-        let rate = 0.9
-        let maxK = 6
+    func testAdaptiveKIncreasesOnFullAcceptanceThroughDecoderState() {
+        let decoder = SpeculativeDecoder(initialKForTesting: 4)
 
-        let newK = rate > 0.8 && currentK < maxK ? currentK + 1 : currentK
-        XCTAssertEqual(newK, 5, "High acceptance rate should increase K")
+        let rate = decoder.recordVerificationForTesting(
+            acceptedTokenCount: 5,
+            proposedTokenCount: 4
+        )
+
+        XCTAssertEqual(rate, 1)
+        XCTAssertEqual(decoder.acceptanceRate, 1)
+        XCTAssertEqual(decoder.currentKForTesting, 5)
+        XCTAssertEqual(decoder.totalRounds, 1)
+        XCTAssertEqual(decoder.totalAccepted, 5)
+    }
+
+    func testAdaptiveKUsesRollingAcceptanceHistory() {
+        let decoder = SpeculativeDecoder(initialKForTesting: 4)
+
+        for _ in 0 ..< 20 {
+            decoder.recordVerificationForTesting(
+                acceptedTokenCount: 5,
+                proposedTokenCount: 4
+            )
+        }
+
+        XCTAssertEqual(decoder.acceptanceRate, 1)
+        XCTAssertEqual(decoder.currentKForTesting, 6)
+        XCTAssertEqual(decoder.totalRounds, 20)
+    }
+
+    private func kvTensor(start: Int, count: Int) -> MLXArray {
+        MLXArray((start ..< start + count).map { Float($0) }, [1, 1, count, 1])
+    }
+
+    private func hasLoadableMLXMetalLibrary() -> Bool {
+        let fm = FileManager.default
+        let names = Set(["default.metallib", "mlx.metallib"])
+        let directRoots = [
+            Bundle.main.resourceURL,
+            Bundle.main.bundleURL,
+            Bundle.main.executableURL?.deletingLastPathComponent(),
+        ]
+
+        for root in directRoots.compactMap({ $0 }) {
+            for name in names {
+                if fm.fileExists(atPath: root.appendingPathComponent(name).path)
+                    || fm.fileExists(atPath: root.appendingPathComponent("Resources").appendingPathComponent(name).path) {
+                    return true
+                }
+            }
+        }
+
+        let buildRoot = URL(fileURLWithPath: fm.currentDirectoryPath)
+            .appendingPathComponent(".build")
+        guard let enumerator = fm.enumerator(
+            at: buildRoot,
+            includingPropertiesForKeys: nil
+        ) else {
+            return false
+        }
+
+        for case let url as URL in enumerator where names.contains(url.lastPathComponent) {
+            return true
+        }
+        return false
     }
 }
