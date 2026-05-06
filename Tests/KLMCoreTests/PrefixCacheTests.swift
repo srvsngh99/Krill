@@ -1,19 +1,23 @@
 import XCTest
 @testable import KLMCache
 
+#if canImport(MLX)
+import MLX
+#endif
+
 /// Tests for PrefixCache exact-hit replay and partial-hit fallback.
-///
-/// These tests verify the cache lookup logic and engine-side checks
-/// without requiring Metal/MLX (no actual tensor operations).
 final class PrefixCacheTests: XCTestCase {
 
     private func makeTempCache() -> PrefixCache {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("krillm-prefix-test-\(UUID().uuidString)")
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: dir)
+        }
         return PrefixCache(cacheDir: dir, maxMemoryEntries: 4, minPrefixLength: 4)
     }
 
-    // MARK: - Test 1: Cache miss when nothing stored
+    // MARK: - Cache miss behavior
 
     func testLookupReturnsNilForEmptyCache() {
         let cache = makeTempCache()
@@ -21,52 +25,13 @@ final class PrefixCacheTests: XCTestCase {
         XCTAssertNil(hit, "Empty cache should always miss")
     }
 
-    // MARK: - Test 2: Below minimum prefix length
-
     func testBelowMinPrefixReturnsNil() {
         let cache = makeTempCache()  // minPrefixLength=4
         let hit = cache.lookup(tokens: [1, 2, 3], modelId: "test")
         XCTAssertNil(hit, "Tokens below minPrefixLength should never hit")
     }
 
-    // MARK: - Test 2: Partial-hit engine rejection logic
-
-    func testEngineRejectsPartialHit() {
-        // Simulates the engine's check:
-        // Only use hit if hit.prefixLength == promptTokens.count
-        let promptTokens = Array(0..<12)
-
-        // Simulate a partial hit that covers fewer tokens
-        let hitPrefixLength = 8
-        let isFullHit = hitPrefixLength == promptTokens.count
-
-        XCTAssertFalse(isFullHit,
-            "Engine must reject hits where prefixLength != promptTokens.count")
-    }
-
-    func testEngineAcceptsFullHit() {
-        let promptTokens = Array(0..<10)
-        let hitPrefixLength = 10
-        let isFullHit = hitPrefixLength == promptTokens.count
-
-        XCTAssertTrue(isFullHit,
-            "Engine must accept hits where prefixLength == promptTokens.count")
-    }
-
-    // MARK: - Test 1: Full-hit KV truncate-and-re-forward contract
-
-    func testFullHitTruncateContract() {
-        // Verifies the engine's full-hit invariant:
-        // After restore (len=N), truncate to N-1, then forward 1 token → net len = N
-        let originalLength = 10
-        let truncatedLength = originalLength - 1  // 9
-        let afterReforward = truncatedLength + 1  // 10
-
-        XCTAssertEqual(afterReforward, originalLength,
-            "Truncate-last + re-forward should restore original KV length")
-    }
-
-    // MARK: - Test: Different modelId is a miss
+    // MARK: - Model isolation miss behavior
 
     func testDifferentModelIdMisses() {
         // Even with the same tokens, different modelId should not match.
@@ -78,7 +43,7 @@ final class PrefixCacheTests: XCTestCase {
         XCTAssertNil(hit)
     }
 
-    // MARK: - Test: Memory count tracking
+    // MARK: - Memory count tracking
 
     func testMemoryCountStartsAtZero() {
         let cache = makeTempCache()
@@ -90,4 +55,172 @@ final class PrefixCacheTests: XCTestCase {
         cache.clear()
         XCTAssertEqual(cache.memoryCount, 0)
     }
+
+    // MARK: - MLX-backed prefix cache behavior
+
+    func testStoreAndExactLookupReturnsKVArrays() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = makeTempCache()
+            let tokens = Array(0 ..< 6)
+            let keys = [
+                [makeKV(seqLen: tokens.count, start: 10)],
+                [makeKV(seqLen: tokens.count, start: 100)],
+            ]
+            let values = [
+                [makeKV(seqLen: tokens.count, start: 1_000)],
+                [makeKV(seqLen: tokens.count, start: 2_000)],
+            ]
+
+            cache.store(tokens: tokens, modelId: "model-a", keys: keys, values: values)
+
+            let hit = try XCTUnwrap(cache.lookup(tokens: tokens, modelId: "model-a"))
+            XCTAssertEqual(hit.prefixLength, tokens.count)
+            XCTAssertEqual(hit.keys.count, 2)
+            XCTAssertEqual(hit.values.count, 2)
+            XCTAssertEqual(hit.keys[0][0].shape, [1, 2, 6, 2])
+            XCTAssertEqual(hit.values[1][0].shape, [1, 2, 6, 2])
+            XCTAssertEqual(hit.keys[0][0].asArray(Int32.self), keys[0][0].asArray(Int32.self))
+            XCTAssertEqual(hit.keys[1][0].asArray(Int32.self), keys[1][0].asArray(Int32.self))
+            XCTAssertEqual(hit.values[0][0].asArray(Int32.self), values[0][0].asArray(Int32.self))
+            XCTAssertEqual(hit.values[1][0].asArray(Int32.self), values[1][0].asArray(Int32.self))
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    func testFullHitTruncateAndReforwardKeepsOriginalLength() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = makeTempCache()
+            let tokens = Array(0 ..< 6)
+            let storedKeys = makeKV(seqLen: tokens.count, start: 10)
+            let storedValues = makeKV(seqLen: tokens.count, start: 100)
+            cache.store(
+                tokens: tokens,
+                modelId: "model-a",
+                keys: [[storedKeys]],
+                values: [[storedValues]]
+            )
+
+            let hit = try XCTUnwrap(cache.lookup(tokens: tokens, modelId: "model-a"))
+            XCTAssertEqual(hit.prefixLength, tokens.count)
+
+            let kvCache = KVCache()
+            kvCache.restore(keys: hit.keys[0][0], values: hit.values[0][0])
+            kvCache.truncate(to: tokens.count - 1)
+            _ = kvCache.update(
+                keys: storedKeys[0..., 0..., (tokens.count - 1) ..< tokens.count, 0...],
+                values: storedValues[0..., 0..., (tokens.count - 1) ..< tokens.count, 0...]
+            )
+
+            let snapshot = try XCTUnwrap(kvCache.snapshot())
+            XCTAssertEqual(kvCache.sequenceLength, tokens.count)
+            XCTAssertEqual(snapshot.keys.shape, [1, 2, 6, 2])
+            XCTAssertEqual(snapshot.values.shape, [1, 2, 6, 2])
+            XCTAssertEqual(snapshot.keys.asArray(Int32.self), storedKeys.asArray(Int32.self))
+            XCTAssertEqual(snapshot.values.asArray(Int32.self), storedValues.asArray(Int32.self))
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    func testCrossModelIsolationWithStoredKVArrays() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = makeTempCache()
+            let tokens = Array(0 ..< 5)
+            let modelAKeys = makeKV(seqLen: tokens.count, start: 10)
+            let modelAValues = makeKV(seqLen: tokens.count, start: 100)
+            let modelBKeys = makeKV(seqLen: tokens.count, start: 1_000)
+            let modelBValues = makeKV(seqLen: tokens.count, start: 2_000)
+
+            cache.store(
+                tokens: tokens,
+                modelId: "model-a",
+                keys: [[modelAKeys]],
+                values: [[modelAValues]]
+            )
+
+            XCTAssertNil(cache.lookup(tokens: tokens, modelId: "model-b"))
+
+            cache.store(
+                tokens: tokens,
+                modelId: "model-b",
+                keys: [[modelBKeys]],
+                values: [[modelBValues]]
+            )
+
+            let hitA = try XCTUnwrap(cache.lookup(tokens: tokens, modelId: "model-a"))
+            let hitB = try XCTUnwrap(cache.lookup(tokens: tokens, modelId: "model-b"))
+            XCTAssertEqual(hitA.prefixLength, tokens.count)
+            XCTAssertEqual(hitB.prefixLength, tokens.count)
+            XCTAssertEqual(hitA.keys[0][0].asArray(Int32.self), modelAKeys.asArray(Int32.self))
+            XCTAssertEqual(hitA.values[0][0].asArray(Int32.self), modelAValues.asArray(Int32.self))
+            XCTAssertEqual(hitB.keys[0][0].asArray(Int32.self), modelBKeys.asArray(Int32.self))
+            XCTAssertEqual(hitB.values[0][0].asArray(Int32.self), modelBValues.asArray(Int32.self))
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    #if canImport(MLX) && os(macOS) && arch(arm64)
+    private func withMLXCPU(_ body: () throws -> Void) throws {
+        guard Self.mlxMetalLibraryAvailable else {
+            throw XCTSkip("MLX Metal library is unavailable in this test bundle.")
+        }
+
+        try Device.withDefaultDevice(.cpu) {
+            try body()
+        }
+    }
+
+    private static let mlxMetalLibraryAvailable: Bool = {
+        let fileManager = FileManager.default
+        let names = Set(["default.metallib", "mlx.metallib"])
+        let directRoots = [
+            Bundle.main.resourceURL,
+            Bundle.main.bundleURL,
+            Bundle.main.executableURL?.deletingLastPathComponent(),
+        ]
+
+        for root in directRoots.compactMap({ $0 }) {
+            for name in names {
+                if fileManager.fileExists(atPath: root.appendingPathComponent(name).path)
+                    || fileManager.fileExists(atPath: root.appendingPathComponent("Resources").appendingPathComponent(name).path) {
+                    return true
+                }
+            }
+        }
+
+        let buildRoot = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent(".build")
+        guard let enumerator = fileManager.enumerator(
+            at: buildRoot,
+            includingPropertiesForKeys: nil
+        ) else {
+            return false
+        }
+
+        for case let url as URL in enumerator where names.contains(url.lastPathComponent) {
+            return true
+        }
+        return false
+    }()
+
+    private func makeKV(
+        batch: Int = 1,
+        heads: Int = 2,
+        seqLen: Int,
+        headDim: Int = 2,
+        start: Int32
+    ) -> MLXArray {
+        let count = batch * heads * seqLen * headDim
+        let values = (0 ..< count).map { start + Int32($0) }
+        return MLXArray(values, [batch, heads, seqLen, headDim])
+    }
+    #endif
 }

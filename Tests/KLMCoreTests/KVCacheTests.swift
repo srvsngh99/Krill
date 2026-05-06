@@ -1,25 +1,14 @@
 import XCTest
 @testable import KLMCache
 
+#if canImport(MLX)
+import MLX
+#endif
+
 /// Tests for KVCache snapshot/restore/truncate behavior.
-///
-/// Note: Tests that create MLXArray instances require Metal GPU access.
-/// They are skipped in environments where Metal is unavailable.
 final class KVCacheTests: XCTestCase {
 
-    /// Check if MLX/Metal is available for testing.
-    private var metalAvailable: Bool {
-        // Try to import MLX and create a simple array.
-        // If Metal isn't available, MLX will fatal error on first use.
-        // We detect this by checking if the metallib loaded successfully.
-        #if canImport(MLX)
-        return true  // Compilation check — runtime check via guard in each test
-        #else
-        return false
-        #endif
-    }
-
-    // MARK: - Test 3: Basic KVCache contract (no MLX required)
+    // MARK: - Basic KVCache contract (no MLX required)
 
     func testEmptyCacheHasZeroLength() {
         let cache = KVCache()
@@ -40,4 +29,266 @@ final class KVCacheTests: XCTestCase {
         cache.truncate(to: 5)
         XCTAssertEqual(cache.sequenceLength, 0, "Truncating empty cache should be no-op")
     }
+
+    // MARK: - MLX-backed KV behavior
+
+    func testUpdateReturnsExpectedShapesAndSequenceLength() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = KVCache()
+            let result = cache.update(
+                keys: makeKV(seqLen: 2, headDim: 4, start: 10),
+                values: makeKV(seqLen: 2, headDim: 4, start: 100)
+            )
+
+            XCTAssertEqual(result.0.shape, [1, 2, 2, 4])
+            XCTAssertEqual(result.1.shape, [1, 2, 2, 4])
+            XCTAssertEqual(cache.sequenceLength, 2)
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    func testUpdateConcatenatesAlongSequenceAxis() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = KVCache()
+            _ = cache.update(
+                keys: makeKV(seqLen: 1, headDim: 3, start: 0),
+                values: makeKV(seqLen: 1, headDim: 3, start: 50)
+            )
+            let result = cache.update(
+                keys: makeKV(seqLen: 2, headDim: 3, start: 100),
+                values: makeKV(seqLen: 2, headDim: 3, start: 150)
+            )
+
+            XCTAssertEqual(result.0.shape, [1, 2, 3, 3])
+            XCTAssertEqual(result.0.asArray(Int32.self), [
+                0, 1, 2,
+                100, 101, 102,
+                103, 104, 105,
+                3, 4, 5,
+                106, 107, 108,
+                109, 110, 111,
+            ])
+            XCTAssertEqual(result.1.asArray(Int32.self), [
+                50, 51, 52,
+                150, 151, 152,
+                153, 154, 155,
+                53, 54, 55,
+                156, 157, 158,
+                159, 160, 161,
+            ])
+            XCTAssertEqual(cache.sequenceLength, 3)
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    func testSnapshotReturnsCurrentStateShape() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = KVCache()
+            _ = cache.update(
+                keys: makeKV(seqLen: 3, headDim: 2, start: 10),
+                values: makeKV(seqLen: 3, headDim: 2, start: 20)
+            )
+
+            let snapshot = try XCTUnwrap(cache.snapshot())
+            XCTAssertEqual(snapshot.keys.shape, [1, 2, 3, 2])
+            XCTAssertEqual(snapshot.values.shape, [1, 2, 3, 2])
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    func testRestoreOverwritesStateAndSetsSequenceLength() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = KVCache()
+            _ = cache.update(
+                keys: makeKV(seqLen: 4, headDim: 2, start: 0),
+                values: makeKV(seqLen: 4, headDim: 2, start: 20)
+            )
+
+            let restoredKeys = makeKV(seqLen: 2, headDim: 2, start: 200)
+            let restoredValues = makeKV(seqLen: 2, headDim: 2, start: 300)
+            cache.restore(keys: restoredKeys, values: restoredValues)
+
+            let snapshot = try XCTUnwrap(cache.snapshot())
+            XCTAssertEqual(cache.sequenceLength, 2)
+            XCTAssertEqual(snapshot.keys.shape, [1, 2, 2, 2])
+            XCTAssertEqual(snapshot.values.shape, [1, 2, 2, 2])
+            XCTAssertEqual(snapshot.keys.asArray(Int32.self), restoredKeys.asArray(Int32.self))
+            XCTAssertEqual(snapshot.values.asArray(Int32.self), restoredValues.asArray(Int32.self))
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    func testTruncateSlicesSequenceAxisAndBeyondLengthIsNoop() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = KVCache()
+            _ = cache.update(
+                keys: makeKV(seqLen: 4, headDim: 2, start: 0),
+                values: makeKV(seqLen: 4, headDim: 2, start: 100)
+            )
+
+            cache.truncate(to: 3)
+            var snapshot = try XCTUnwrap(cache.snapshot())
+            XCTAssertEqual(cache.sequenceLength, 3)
+            XCTAssertEqual(snapshot.keys.shape, [1, 2, 3, 2])
+            XCTAssertEqual(snapshot.values.shape, [1, 2, 3, 2])
+            XCTAssertEqual(snapshot.keys.asArray(Int32.self), [
+                0, 1,
+                2, 3,
+                4, 5,
+                8, 9,
+                10, 11,
+                12, 13,
+            ])
+            XCTAssertEqual(snapshot.values.asArray(Int32.self), [
+                100, 101,
+                102, 103,
+                104, 105,
+                108, 109,
+                110, 111,
+                112, 113,
+            ])
+
+            let keysAfterTruncate = snapshot.keys.asArray(Int32.self)
+            let valuesAfterTruncate = snapshot.values.asArray(Int32.self)
+            cache.truncate(to: 6)
+
+            snapshot = try XCTUnwrap(cache.snapshot())
+            XCTAssertEqual(cache.sequenceLength, 3)
+            XCTAssertEqual(snapshot.keys.shape, [1, 2, 3, 2])
+            XCTAssertEqual(snapshot.values.shape, [1, 2, 3, 2])
+            XCTAssertEqual(snapshot.keys.asArray(Int32.self), keysAfterTruncate)
+            XCTAssertEqual(snapshot.values.asArray(Int32.self), valuesAfterTruncate)
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    func testResetAfterUpdateClearsState() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = KVCache()
+            _ = cache.update(
+                keys: makeKV(seqLen: 2, start: 10),
+                values: makeKV(seqLen: 2, start: 20)
+            )
+
+            cache.reset()
+
+            XCTAssertEqual(cache.sequenceLength, 0)
+            XCTAssertNil(cache.snapshot())
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    func testUpdateAfterRestoreConcatenates() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = KVCache()
+            cache.restore(
+                keys: makeKV(seqLen: 2, headDim: 2, start: 200),
+                values: makeKV(seqLen: 2, headDim: 2, start: 300)
+            )
+
+            let result = cache.update(
+                keys: makeKV(seqLen: 1, headDim: 2, start: 400),
+                values: makeKV(seqLen: 1, headDim: 2, start: 500)
+            )
+
+            XCTAssertEqual(cache.sequenceLength, 3)
+            XCTAssertEqual(result.0.shape, [1, 2, 3, 2])
+            XCTAssertEqual(result.1.shape, [1, 2, 3, 2])
+            XCTAssertEqual(result.0.asArray(Int32.self), [
+                200, 201,
+                202, 203,
+                400, 401,
+                204, 205,
+                206, 207,
+                402, 403,
+            ])
+            XCTAssertEqual(result.1.asArray(Int32.self), [
+                300, 301,
+                302, 303,
+                500, 501,
+                304, 305,
+                306, 307,
+                502, 503,
+            ])
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    #if canImport(MLX) && os(macOS) && arch(arm64)
+    private func withMLXCPU(_ body: () throws -> Void) throws {
+        guard Self.mlxMetalLibraryAvailable else {
+            throw XCTSkip("MLX Metal library is unavailable in this test bundle.")
+        }
+
+        try Device.withDefaultDevice(.cpu) {
+            try body()
+        }
+    }
+
+    private static let mlxMetalLibraryAvailable: Bool = {
+        let fileManager = FileManager.default
+        let names = Set(["default.metallib", "mlx.metallib"])
+        let directRoots = [
+            Bundle.main.resourceURL,
+            Bundle.main.bundleURL,
+            Bundle.main.executableURL?.deletingLastPathComponent(),
+        ]
+
+        for root in directRoots.compactMap({ $0 }) {
+            for name in names {
+                if fileManager.fileExists(atPath: root.appendingPathComponent(name).path)
+                    || fileManager.fileExists(atPath: root.appendingPathComponent("Resources").appendingPathComponent(name).path) {
+                    return true
+                }
+            }
+        }
+
+        let buildRoot = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+            .appendingPathComponent(".build")
+        guard let enumerator = fileManager.enumerator(
+            at: buildRoot,
+            includingPropertiesForKeys: nil
+        ) else {
+            return false
+        }
+
+        for case let url as URL in enumerator where names.contains(url.lastPathComponent) {
+            return true
+        }
+        return false
+    }()
+
+    private func makeKV(
+        batch: Int = 1,
+        heads: Int = 2,
+        seqLen: Int,
+        headDim: Int = 2,
+        start: Int32
+    ) -> MLXArray {
+        let count = batch * heads * seqLen * headDim
+        let values = (0 ..< count).map { start + Int32($0) }
+        return MLXArray(values, [batch, heads, seqLen, headDim])
+    }
+    #endif
 }

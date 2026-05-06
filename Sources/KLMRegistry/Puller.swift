@@ -8,6 +8,9 @@ import Logging
 /// with progress reporting and SHA256 verification.
 public final class Puller: @unchecked Sendable {
     private let registry: Registry
+    private let httpClient: any PullerHTTPClient
+    private let tokenProvider: @Sendable () -> String?
+    private let sleeper: @Sendable (UInt64) async throws -> Void
     private let logger = Logger(label: "krillm.puller")
 
     /// Progress callback: (bytesDownloaded, totalBytes, currentFile)
@@ -15,6 +18,29 @@ public final class Puller: @unchecked Sendable {
 
     public init(registry: Registry) {
         self.registry = registry
+        self.httpClient = URLSessionPullerHTTPClient(session: .shared)
+        self.tokenProvider = {
+            ProcessInfo.processInfo.environment["HF_TOKEN"]
+        }
+        self.sleeper = { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
+        }
+    }
+
+    init(
+        registry: Registry,
+        httpClient: any PullerHTTPClient,
+        tokenProvider: @escaping @Sendable () -> String? = {
+            ProcessInfo.processInfo.environment["HF_TOKEN"]
+        },
+        sleeper: @escaping @Sendable (UInt64) async throws -> Void = { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
+        }
+    ) {
+        self.registry = registry
+        self.httpClient = httpClient
+        self.tokenProvider = tokenProvider
+        self.sleeper = sleeper
     }
 
     /// Pull a model from HuggingFace Hub.
@@ -131,26 +157,43 @@ public final class Puller: @unchecked Sendable {
 
 // MARK: - HuggingFace Hub API
 
+protocol PullerHTTPClient: Sendable {
+    func data(for request: URLRequest) async throws -> (Data, URLResponse)
+    func download(for request: URLRequest) async throws -> (URL, URLResponse)
+}
+
+private struct URLSessionPullerHTTPClient: PullerHTTPClient {
+    let session: URLSession
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        try await session.data(for: request, delegate: nil)
+    }
+
+    func download(for request: URLRequest) async throws -> (URL, URLResponse) {
+        try await session.download(for: request, delegate: nil)
+    }
+}
+
 /// File info from HuggingFace Hub API
-private struct HFFileInfo {
+struct HFFileInfo {
     let name: String
     let size: Int64
 }
 
 extension Puller {
     /// List files in a HuggingFace repo via the API.
-    private func listRepoFiles(repo: String) async throws -> [HFFileInfo] {
+    func listRepoFiles(repo: String) async throws -> [HFFileInfo] {
         let urlString = "https://huggingface.co/api/models/\(repo)"
         guard let url = URL(string: urlString) else {
             throw PullerError.invalidRepo(repo)
         }
 
         var request = URLRequest(url: url)
-        if let token = ProcessInfo.processInfo.environment["HF_TOKEN"] {
+        if let token = tokenProvider() {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await httpClient.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -176,7 +219,7 @@ extension Puller {
     /// - Resume via `Range` header when a `.partial` file already exists
     /// - Retry with exponential backoff (3 attempts: 1s, 2s, 4s)
     /// - Incremental SHA256 hashing to avoid loading large files into memory
-    private func downloadFile(
+    func downloadFile(
         repo: String,
         filename: String,
         destination: URL
@@ -186,7 +229,7 @@ extension Puller {
             throw PullerError.invalidRepo(repo)
         }
 
-        let hfToken = ProcessInfo.processInfo.environment["HF_TOKEN"]
+        let hfToken = tokenProvider()
         let fm = FileManager.default
         let partialURL = destination.appendingPathExtension("partial")
 
@@ -196,7 +239,7 @@ extension Puller {
         for attempt in 0..<maxAttempts {
             if attempt > 0 {
                 let delay = UInt64(1 << (attempt - 1)) * 1_000_000_000
-                try await Task.sleep(nanoseconds: delay)
+                try await sleeper(delay)
             }
 
             do {
@@ -215,7 +258,7 @@ extension Puller {
                     }
                 }
 
-                let (tempURL, response) = try await URLSession.shared.download(for: request)
+                let (tempURL, response) = try await httpClient.download(for: request)
                 guard let httpResponse = response as? HTTPURLResponse else {
                     throw PullerError.httpError(0, "No HTTP response for \(filename)")
                 }
@@ -262,7 +305,7 @@ extension Puller {
     }
 
     /// Compute SHA256 of a file by reading it in 1 MB chunks.
-    private func incrementalSHA256(of fileURL: URL) throws -> String {
+    func incrementalSHA256(of fileURL: URL) throws -> String {
         let chunkSize = 1024 * 1024  // 1 MB
         let handle = try FileHandle(forReadingFrom: fileURL)
         defer { try? handle.close() }

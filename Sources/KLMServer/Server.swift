@@ -31,6 +31,13 @@ public final class KLMServer: Sendable {
         self.registry = registry
     }
 
+    internal static func _makeHTTPHandlerForTesting(
+        engine: InferenceEngine,
+        registry: Registry
+    ) -> any ChannelHandler & Sendable {
+        HTTPHandler(engine: engine, registry: registry)
+    }
+
     /// Start the HTTP server (blocks until shutdown).
     public func start() async throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
@@ -72,7 +79,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let logger = Logger(label: "krillm.http")
     private let startedAt = Date()
 
-    private let maxBodySize = 10 * 1024 * 1024  // 10 MB
+    private let maxBodySize = ServerLimits.maxBodySize
 
     private var requestHead: HTTPRequestHead?
     private var body: ByteBuffer = ByteBuffer()
@@ -180,12 +187,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        let messages = json["messages"] as? [[String: Any]] ?? []
-        let stream = json["stream"] as? Bool ?? false
-        let maxTokens = json["max_tokens"] as? Int ?? 512
+        let request = ServerParsing.openAIChatRequest(from: json)
 
         // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
-        if let requestedModel = json["model"] as? String,
+        if let requestedModel = request.requestedModel,
            let loadedModel = engine.modelName,
            requestedModel != loadedModel {
             sendJSON(context: context, status: .badRequest, body: [
@@ -194,36 +199,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        // Fix 7: Parse additional sampling parameters.
-        let temperature = json["temperature"] as? Double ?? 0.0
-        let topP = json["top_p"] as? Double ?? 1.0
-        let topK = json["top_k"] as? Int ?? 0
-        let params = SamplingParams(
-            temperature: Float(temperature),
-            topP: Float(topP),
-            topK: topK
-        )
-
-        // Convert messages to the format expected by the engine's chat template.
-        let chatMessages: [[String: String]] = messages.compactMap { msg in
-            guard let role = msg["role"] as? String,
-                  let content = msg["content"] as? String else { return nil }
-            return ["role": role, "content": content]
-        }
-
-        guard !chatMessages.isEmpty else {
+        guard !request.messages.isEmpty else {
             sendJSON(context: context, status: .badRequest, body: ["error": "No valid messages"])
             return
         }
 
-        if stream {
+        if request.stream {
             handleStreamingCompletion(
-                context: context, messages: chatMessages,
-                params: params, maxTokens: maxTokens)
+                context: context, messages: request.messages,
+                params: request.sampling.samplingParams, maxTokens: request.maxTokens)
         } else {
             handleNonStreamingCompletion(
-                context: context, messages: chatMessages,
-                params: params, maxTokens: maxTokens)
+                context: context, messages: request.messages,
+                params: request.sampling.samplingParams, maxTokens: request.maxTokens)
         }
     }
 
@@ -430,11 +418,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        let messages = json["messages"] as? [[String: Any]] ?? []
-        let stream = json["stream"] as? Bool ?? true
+        let request = ServerParsing.ollamaChatRequest(from: json)
 
         // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
-        if let requestedModel = json["model"] as? String,
+        if let requestedModel = request.requestedModel,
            requestedModel != "unknown",
            let loadedModel = engine.modelName,
            requestedModel != loadedModel {
@@ -444,47 +431,27 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        // Convert messages to the format expected by the engine's chat template.
-        let chatMessages: [[String: String]] = messages.compactMap { msg in
-            guard let role = msg["role"] as? String,
-                  let content = msg["content"] as? String else { return nil }
-            return ["role": role, "content": content]
-        }
-
-        guard !chatMessages.isEmpty else {
+        guard !request.messages.isEmpty else {
             sendJSON(context: context, status: .badRequest, body: ["error": "No valid messages"])
             return
         }
 
-        // Parse sampling parameters.
-        let options = json["options"] as? [String: Any] ?? [:]
-        let temperature = options["temperature"] as? Double ?? 0.0
-        let topP = options["top_p"] as? Double ?? 1.0
-        let topK = options["top_k"] as? Int ?? 0
-        let params = SamplingParams(
-            temperature: Float(temperature),
-            topP: Float(topP),
-            topK: topK
-        )
-
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let eng = engine
-        let modelName = engine.modelName ?? json["model"] as? String ?? "unknown"
+        let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
 
-        if stream {
-            var streamHeaders = HTTPHeaders()
-            streamHeaders.add(name: "Content-Type", value: "application/x-ndjson")
-            streamHeaders.add(name: "Transfer-Encoding", value: "chunked")
-            let streamHead = HTTPResponseHead(version: .http1_1, status: .ok, headers: streamHeaders)
-            context.write(wrapOutboundOut(.head(streamHead)), promise: nil)
+        if request.stream {
+            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
         }
 
         Task {
             let (tokenStream, _) = eng.generate(
-                messages: chatMessages, params: params, maxTokens: 2048)
+                messages: request.messages,
+                params: request.sampling.samplingParams,
+                maxTokens: request.maxTokens)
 
-            if stream {
+            if request.stream {
                 for await event in tokenStream {
                     let chunk: [String: Any] = [
                         "model": modelName,
@@ -542,16 +509,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let modelName = engine.modelName ?? json["model"] as? String ?? "unknown"
 
-        // Fix 7: Parse additional sampling parameters.
-        let options = json["options"] as? [String: Any] ?? [:]
-        let temperature = options["temperature"] as? Double ?? 0.0
-        let topP = options["top_p"] as? Double ?? 1.0
-        let topK = options["top_k"] as? Int ?? 0
-        let params = SamplingParams(
-            temperature: Float(temperature),
-            topP: Float(topP),
-            topK: topK
-        )
+        let params = ServerParsing.ollamaSamplingOptions(from: json).samplingParams
 
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
@@ -712,12 +670,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func parseJSON(_ buffer: ByteBuffer) -> [String: Any]? {
-        var buf = buffer
-        guard let bytes = buf.readBytes(length: buf.readableBytes) else {
-            return nil
-        }
-        let data = Data(bytes)
-        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        ServerParsing.jsonObject(from: buffer)
     }
 
     private func sendJSON(context: ChannelHandlerContext, status: HTTPResponseStatus, body: [String: Any]) {
