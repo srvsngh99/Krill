@@ -173,43 +173,40 @@ public final class InferenceEngine: @unchecked Sendable {
                 let caches = makeKVCaches(numLayers: numLayers)
 
                 // -- Prefix Cache Lookup --
-                var prefillStartIdx = 0
+                // Only accept FULL prefix hits (cached tokens == prompt tokens).
+                // Partial hits are unsafe: the causal mask is built for the new
+                // span length only, but attention keys include the restored prefix,
+                // causing shape mismatch or incorrect masking. Until cache-aware
+                // mask construction is implemented, we skip partial hits.
                 if usePrefixCache {
                     if let hit = capturedPrefixCache.lookup(
                         tokens: promptTokens, modelId: capturedModelId
-                    ), !hit.keys.isEmpty {
-                        // Restore KV state from cache
+                    ), !hit.keys.isEmpty, hit.prefixLength == promptTokens.count {
+                        // Full exact hit — restore KV for all prompt tokens.
                         for (i, cache) in caches.enumerated() {
                             if i < hit.keys.count, let k = hit.keys[i].first,
                                i < hit.values.count, let v = hit.values[i].first {
                                 cache.restore(keys: k, values: v)
                             }
                         }
-                        prefillStartIdx = hit.prefixLength
                         cacheHit = true
                     }
                 }
 
-                // -- Prefill (only un-cached portion) --
-                // Cache stores KV for promptTokens[0..<prefixLength]. On a hit we
-                // still need to forward at least the last cached token to obtain
-                // logits for sampling, but we must NOT let that token extend the KV
-                // (it's already present). We achieve this by always forwarding
-                // promptTokens[prefillStartIdx...] — and on a full cache hit
-                // (prefillStartIdx == promptTokens.count) we forward only the final
-                // token after truncating it out of the cache so it gets re-appended
-                // cleanly (net zero length change).
+                // -- Prefill --
+                // On a full cache hit we already have KV for the entire prompt.
+                // We truncate the last position and re-forward that single token
+                // to get logits without duplicating a KV entry.
+                // On a miss we forward the entire prompt normally.
                 let tokensToProcess: [Int]
-                if prefillStartIdx >= promptTokens.count {
-                    // Full cache hit: trim the last token from restored KV and
-                    // re-forward it to get logits without duplication.
-                    let trimmedLength = max(0, prefillStartIdx - 1)
+                if cacheHit {
+                    let trimmedLength = max(0, promptTokens.count - 1)
                     for cache in caches {
                         cache.truncate(to: trimmedLength)
                     }
                     tokensToProcess = [promptTokens.last!]
                 } else {
-                    tokensToProcess = Array(promptTokens[prefillStartIdx...])
+                    tokensToProcess = promptTokens
                 }
 
                 let inputArray = MLXArray(tokensToProcess.map { Int32($0) })
