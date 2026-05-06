@@ -103,6 +103,10 @@ let package = Package(
             dependencies: ["KLMCore", "KLMCache"]
         ),
         .testTarget(
+            name: "KLMEngineTests",
+            dependencies: ["KLMEngine", "KLMCache", "KLMSampler"]
+        ),
+        .testTarget(
             name: "KLMRegistryTests",
             dependencies: ["KLMRegistry"]
         ),
