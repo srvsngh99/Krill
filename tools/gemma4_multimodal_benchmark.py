@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ollama-bin", default="ollama")
     parser.add_argument("--ollama-host", default="http://127.0.0.1:11434")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
+    parser.add_argument("--engine", choices=["both", "krillm", "ollama"], default="both")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -107,14 +108,33 @@ def ensure_assets(output_path: str, image: Optional[str], audio: Optional[str]) 
 
 
 def krill_quantization(model_path: str) -> dict[str, Any]:
-    config_path = Path(model_path) / "config.json"
+    path = Path(model_path)
+    if (path / "config.json").exists():
+        config_path = path / "config.json"
+    else:
+        try:
+            from huggingface_hub import hf_hub_download
+
+            config_path = Path(hf_hub_download(repo_id=model_path, filename="config.json"))
+        except Exception as exc:
+            return {
+                "model": model_path,
+                "quantization": {},
+                "quantization_class": "unknown",
+                "metadata_error": str(exc),
+            }
     config = json.loads(config_path.read_text(encoding="utf-8"))
     quant = config.get("quantization") or config.get("quantization_config") or {}
+    quant_class = "bf16" if str(config.get("dtype", "")).lower() == "bfloat16" and not quant else "unknown"
+    if quant.get("bits"):
+        quant_class = f"{quant.get('bits')}-bit"
     return {
+        "model": model_path,
         "model_type": config.get("model_type"),
         "architectures": config.get("architectures"),
+        "dtype": config.get("dtype"),
         "quantization": quant,
-        "quantization_class": f"{quant.get('bits')}-bit" if quant.get("bits") else "unknown",
+        "quantization_class": quant_class,
         "has_vision_config": "vision_config" in config,
         "has_audio_config": "audio_config" in config,
         "image_token_id": config.get("image_token_id"),
@@ -143,12 +163,34 @@ def ollama_show(ollama_bin: str, model: str, timeout: float) -> dict[str, Any]:
                 break
             capabilities.append(stripped)
     quant = quant_match.group(1) if quant_match else "unknown"
+    quant_class = "bf16" if quant.upper() == "BF16" else ("f16" if quant.upper() == "F16" else ("4-bit" if quant.startswith("Q4") else quant))
     return {
         "raw": text,
         "parameters": parameter_match.group(1).strip() if parameter_match else None,
         "quantization": quant,
-        "quantization_class": "4-bit" if quant.startswith("Q4") else quant,
+        "quantization_class": quant_class,
         "capabilities": capabilities,
+    }
+
+
+def quantization_comparison(krill_quant: Optional[dict[str, Any]], ollama_quant: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not krill_quant or not ollama_quant:
+        return {
+            "strict_equal": False,
+            "class_equal": False,
+            "label": "single-engine run",
+            "note": "Only one engine was benchmarked in this report.",
+        }
+    strict_equal = krill_quant.get("quantization") == ollama_quant.get("quantization")
+    class_equal = krill_quant.get("quantization_class") == ollama_quant.get("quantization_class")
+    note = ""
+    if class_equal and not strict_equal:
+        note = "Precision class matches, but model formats and runtime layouts may differ."
+    return {
+        "strict_equal": strict_equal,
+        "class_equal": class_equal,
+        "label": "precision-class equivalent" if class_equal else "mismatch",
+        "note": note,
     }
 
 
@@ -342,43 +384,49 @@ def main() -> int:
         },
     ]
 
-    krill_quant = krill_quantization(args.krill_model)
-    ollama_quant = ollama_show(args.ollama_bin, args.ollama_model, args.timeout)
-    quantization_comparison = {
-        "strict_equal": krill_quant["quantization"] == ollama_quant["quantization"],
-        "class_equal": krill_quant["quantization_class"] == ollama_quant["quantization_class"],
-        "label": "4-bit-class equivalent" if krill_quant["quantization_class"] == ollama_quant["quantization_class"] else "mismatch",
-        "note": "MLX affine 4-bit and GGUF Q4_K_M are not the same quantizer.",
-    }
+    include_krillm = args.engine in ("both", "krillm")
+    include_ollama = args.engine in ("both", "ollama")
+    krill_quant = krill_quantization(args.krill_model) if include_krillm else None
+    ollama_quant = ollama_show(args.ollama_bin, args.ollama_model, args.timeout) if include_ollama else None
 
-    load_start = time.perf_counter()
-    model, processor = load(args.krill_model)
-    krill_load_s = time.perf_counter() - load_start
+    model = None
+    processor = None
+    krill_load_s = None
+    if include_krillm:
+        load_start = time.perf_counter()
+        model, processor = load(args.krill_model)
+        krill_load_s = time.perf_counter() - load_start
 
     results: dict[str, Any] = {}
     for task in tasks:
         for _ in range(args.warmup):
-            run_krill_task(model, processor, task, args.temperature, args.top_p, measured=False)
-            run_ollama_task(args, task, measured=False)
+            if include_krillm:
+                run_krill_task(model, processor, task, args.temperature, args.top_p, measured=False)
+            if include_ollama:
+                run_ollama_task(args, task, measured=False)
 
-        krill_runs = [
-            run_krill_task(model, processor, task, args.temperature, args.top_p, measured=True)
-            for _ in range(args.runs)
-        ]
-        ollama_runs = [run_ollama_task(args, task, measured=True) for _ in range(args.runs)]
-        results[task["name"]] = {
+        task_results: dict[str, Any] = {
             "prompt": task["prompt"],
             "max_tokens": task["max_tokens"],
             "media": {k: task[k] for k in ("image", "audio") if k in task},
-            "krillm": {"runs": krill_runs, "summary": summarize([run for run in krill_runs if run])},
-            "ollama": {"runs": ollama_runs, "summary": summarize([run for run in ollama_runs if run])},
         }
+        if include_krillm:
+            krill_runs = [
+                run_krill_task(model, processor, task, args.temperature, args.top_p, measured=True)
+                for _ in range(args.runs)
+            ]
+            task_results["krillm"] = {"runs": krill_runs, "summary": summarize([run for run in krill_runs if run])}
+        if include_ollama:
+            ollama_runs = [run_ollama_task(args, task, measured=True) for _ in range(args.runs)]
+            task_results["ollama"] = {"runs": ollama_runs, "summary": summarize([run for run in ollama_runs if run])}
+        results[task["name"]] = task_results
 
     report = {
         "status": "ok",
         "benchmark": {
             "krill_model": args.krill_model,
             "ollama_model": args.ollama_model,
+            "engine": args.engine,
             "runs": args.runs,
             "warmup": args.warmup,
             "temperature": args.temperature,
@@ -393,7 +441,7 @@ def main() -> int:
         "quantization": {
             "krillm": krill_quant,
             "ollama": ollama_quant,
-            "comparison": quantization_comparison,
+            "comparison": quantization_comparison(krill_quant, ollama_quant),
         },
         "krillm_model_load_s": krill_load_s,
         "results": results,
@@ -402,7 +450,14 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"Benchmark report: {output}")
-    print(json.dumps({name: value["krillm"]["summary"] | {"ollama": value["ollama"]["summary"]} for name, value in results.items()}, indent=2, sort_keys=True))
+    compact = {}
+    for name, value in results.items():
+        compact[name] = {
+            engine: engine_result["summary"]
+            for engine, engine_result in value.items()
+            if engine in ("krillm", "ollama")
+        }
+    print(json.dumps(compact, indent=2, sort_keys=True))
     return 0
 
 
