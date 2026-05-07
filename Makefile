@@ -14,8 +14,10 @@ BENCH_MAX_TOKENS ?= 32
 BENCH_RUNS ?= 5
 BENCH_WARMUP ?= 2
 BENCH_OUTPUT ?= .build/benchmarks/krillm-vs-ollama.json
+KRILLM_PYTHON ?= $(HOME)/.krillm/venv/bin/python3
+KRILLM_VENV_PYTHON ?= python3
 
-.PHONY: build release install uninstall clean test bench bench-compare metallib dist version
+.PHONY: build release install uninstall clean test bench bench-compare setup-mlx-vlm metallib dist version
 
 # Debug build (default)
 build:
@@ -114,6 +116,15 @@ bench-compare:
 		--runs $(BENCH_RUNS) \
 		--warmup $(BENCH_WARMUP) \
 		--output "$(BENCH_OUTPUT)"
+
+# Install the Python bridge used by Gemma 4 image/audio support.
+setup-mlx-vlm:
+	@if [ ! -x "$(KRILLM_PYTHON)" ]; then \
+		echo "Creating KrillLM Python venv at $(HOME)/.krillm/venv"; \
+		$(KRILLM_VENV_PYTHON) -m venv "$(HOME)/.krillm/venv"; \
+	fi
+	$(KRILLM_PYTHON) -m pip install -U pip mlx-vlm
+	$(KRILLM_PYTHON) -c "from mlx_vlm import load; print('mlx-vlm available')"
 
 # Clean build artifacts
 clean:

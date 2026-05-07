@@ -209,7 +209,7 @@ public enum FallbackError: Error, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .pythonFailed(let msg): return "Python fallback failed: \(msg.prefix(200))"
+        case .pythonFailed(let msg): return "Python fallback failed: \(msg.prefix(2000))"
         case .notAvailable: return "Python mlx-vlm not installed (pip install mlx-vlm)"
         }
     }

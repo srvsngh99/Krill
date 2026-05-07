@@ -119,8 +119,9 @@ Gemma 4 image/audio support is routed through the Python `mlx-vlm` bridge. The n
 Install the bridge dependency:
 
 ```bash
-python3 -m pip install mlx-vlm
-# Optional: force a specific interpreter
+make setup-mlx-vlm
+
+# Optional: force a specific interpreter instead of ~/.krillm/venv/bin/python3
 export KRILLM_PYTHON=/path/to/venv/bin/python3
 ```
 
@@ -133,6 +134,9 @@ python3 -c "from mlx_vlm import load; print('ok')"
 # Image/audio route through mlx-vlm for Gemma 4
 krillm run gemma-4-e2b "Describe this image" --image ./sample.jpg --max-tokens 64
 krillm run gemma-4-e2b "Transcribe or summarize this audio" --audio ./sample.wav --max-tokens 64
+
+# Test image and audio separately. Gemma 4 E2B is large enough that combined
+# image+audio prompts should be treated as a separate load/performance test.
 
 # Without mlx-vlm, Gemma 4 media fails loudly instead of falling back to native text-only inference.
 KRILLM_PYTHON=/usr/bin/python3 krillm run gemma-4-e2b "Describe this image" --image ./sample.jpg
