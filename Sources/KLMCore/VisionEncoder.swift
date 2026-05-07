@@ -3,6 +3,23 @@ import MLX
 import MLXNN
 import MLXFast
 
+public enum MultimodalPreprocessingError: Error, CustomStringConvertible {
+    case emptyImageData
+    case imagePreprocessingUnavailable
+    case audioPreprocessingUnavailable
+
+    public var description: String {
+        switch self {
+        case .emptyImageData:
+            return "Image preprocessing failed: image data is empty"
+        case .imagePreprocessingUnavailable:
+            return "Native image preprocessing is not implemented. Use Gemma 4 through the mlx-vlm Python bridge."
+        case .audioPreprocessingUnavailable:
+            return "Native audio preprocessing is not implemented. Use Gemma 4 through the mlx-vlm Python bridge."
+        }
+    }
+}
+
 // MARK: - Vision Encoder (SigLIP2-style for Gemma 4)
 
 /// SigLIP2-based vision encoder for Gemma 4 multimodal models.
@@ -215,14 +232,10 @@ class VisionMLP: Module {
 ///   - imageData: Raw image data (PNG/JPEG)
 ///   - targetSize: Target size (must be divisible by 48)
 /// - Returns: Normalized image tensor [1, H, W, 3]
-public func preprocessImage(_ imageData: Data, targetSize: Int = 672) -> MLXArray? {
-    // TODO: Not yet implemented. Full implementation requires CoreGraphics to
-    // decode the image and resize it to targetSize x targetSize, then normalize
-    // pixel values to [-1, 1].
-    // Production impl: CGImage -> resize to targetSize x targetSize -> normalize to [-1, 1]
-    guard !imageData.isEmpty else { return nil }
+public func preprocessImage(_ imageData: Data, targetSize: Int = 672) throws -> MLXArray {
+    guard !imageData.isEmpty else {
+        throw MultimodalPreprocessingError.emptyImageData
+    }
 
-    // Return nil with a clear indication this is not implemented
-    print("[KrillLM] Warning: Vision preprocessing not yet implemented. Image input will be ignored.")
-    return nil
+    throw MultimodalPreprocessingError.imagePreprocessingUnavailable
 }

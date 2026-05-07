@@ -206,14 +206,10 @@ class ConformerConv: Module {
 ///   - frameMs: Frame duration in milliseconds (default 40)
 /// - Returns: Log-mel spectrogram [1, numFrames, melBins]
 public func computeMelSpectrogram(
-    waveform: MLXArray,
+    waveform: MLXArray? = nil,
     sampleRate: Int = 16000,
     melBins: Int = 128,
     frameMs: Int = 40
-) -> MLXArray? {
-    // TODO: Not yet implemented. Full implementation requires FFT + mel filterbank
-    // via vDSP/Accelerate for the STFT.
-    // Real implementation: STFT -> power spectrum -> mel filterbank -> log
-    print("[KrillLM] Warning: Audio preprocessing not yet implemented. Audio input will be ignored.")
-    return nil
+) throws -> MLXArray {
+    throw MultimodalPreprocessingError.audioPreprocessingUnavailable
 }

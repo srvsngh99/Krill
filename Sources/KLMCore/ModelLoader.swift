@@ -2,6 +2,7 @@ import Foundation
 import MLX
 import MLXNN
 import KLMCache
+import KLMRuntime
 
 /// Unified model loader that auto-detects the model family from config.json
 /// and instantiates the correct architecture.
@@ -29,6 +30,8 @@ public struct LoadedModel: @unchecked Sendable {
 /// Reads config.json from the model directory, detects the architecture,
 /// instantiates the model, quantizes if needed, and loads weights.
 public func loadModel(from directory: URL) throws -> LoadedModel {
+    try MLXMetalRuntime.validateForNativeInference()
+
     let configURL = directory.appendingPathComponent("config.json")
     let configData = try Data(contentsOf: configURL)
 

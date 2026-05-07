@@ -32,13 +32,13 @@ struct RunCommand: AsyncParsableCommand {
     @Option(name: .long, help: "System prompt")
     var system: String?
 
-    @Option(name: .long, help: "Image file path for vision models")
+    @Option(name: .long, help: "Image file path for Gemma 4 via mlx-vlm")
     var image: String?
 
-    @Option(name: .long, help: "Audio file path for audio models")
+    @Option(name: .long, help: "Audio file path for Gemma 4 via mlx-vlm")
     var audio: String?
 
-    @Option(name: .long, help: "Tools JSON file for function calling")
+    @Option(name: .long, help: "Tools JSON file for function calling (not yet supported)")
     var tools: String?
 
     func run() async throws {
@@ -62,18 +62,25 @@ struct RunCommand: AsyncParsableCommand {
 
         // Validate unsupported flags early
         if tools != nil {
-            print("Error: --tools is not yet supported for native inference. This feature is under development.")
+            print("Error: --tools is not yet supported. Tool definitions are not loaded, sent to the model, or executed by krillm run yet.")
             throw ExitCode.failure
+        }
+
+        if let image {
+            try validateInputFile(image, flagName: "--image")
+        }
+        if let audio {
+            try validateInputFile(audio, flagName: "--audio")
         }
 
         // Check if this is a Gemma 4 model (use Python fallback for correct output)
         let configURL = modelDir.appendingPathComponent("config.json")
         if let configData = try? Data(contentsOf: configURL),
            let configJSON = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
-           let modelType = configJSON["model_type"] as? String,
-           modelType == "gemma4" {
+           isGemma4Config(configJSON) {
             // Gemma 4: use Python mlx-vlm for correct inference
-            if PythonFallback.isAvailable {
+            let availability = PythonFallback.checkAvailability()
+            if availability.isAvailable {
                 print("Loading Gemma 4 via mlx-vlm...")
                 let fallback = PythonFallback(modelPath: modelDir.path)
                 if let prompt {
@@ -98,7 +105,15 @@ struct RunCommand: AsyncParsableCommand {
                 }
                 return
             } else {
-                print("Warning: Gemma 4 requires mlx-vlm for best results.")
+                if image != nil || audio != nil {
+                    print("Error: Gemma 4 image/audio input requires mlx-vlm; native Swift Gemma 4 is text-only.")
+                    print("Detected Python: \(availability.pythonCommand.isEmpty ? "none" : availability.pythonCommand)")
+                    print("Dependency check: \(availability.detail)")
+                    print("Install: pip install mlx-vlm")
+                    throw ExitCode.failure
+                }
+                print("Warning: Gemma 4 native Swift inference is text-only and experimental.")
+                print("mlx-vlm dependency check: \(availability.detail)")
                 print("Install: pip install mlx-vlm")
                 print("Falling back to native engine (experimental)...")
             }
@@ -138,6 +153,22 @@ struct RunCommand: AsyncParsableCommand {
                 params: params, maxTokens: maxTokens
             )
         }
+    }
+}
+
+private func isGemma4Config(_ configJSON: [String: Any]) -> Bool {
+    let modelType = configJSON["model_type"] as? String
+    let architectures = configJSON["architectures"] as? [String] ?? []
+    return modelType == "gemma4"
+        || modelType == "gemma4_text"
+        || architectures.contains { $0.lowercased().contains("gemma4") }
+}
+
+private func validateInputFile(_ path: String, flagName: String) throws {
+    var isDirectory: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+        print("Error: \(flagName) file not found: \(path)")
+        throw ExitCode.failure
     }
 }
 

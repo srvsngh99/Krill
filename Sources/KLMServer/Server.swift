@@ -119,10 +119,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         switch (head.method, path) {
         // OpenAI endpoints
         case (.POST, "/v1/chat/completions"):
-            guard requireModel(context: context) else { return }
             handleChatCompletions(context: context, body: body)
         case (.POST, "/v1/completions"):
-            guard requireModel(context: context) else { return }
             handleCompletions(context: context, body: body)
         case (.GET, "/v1/models"):
             handleModels(context: context)
@@ -139,10 +137,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         // Ollama endpoints
         case (.POST, "/api/chat"):
-            guard requireModel(context: context) else { return }
             handleOllamaChat(context: context, body: body)
         case (.POST, "/api/generate"):
-            guard requireModel(context: context) else { return }
             handleOllamaGenerate(context: context, body: body)
         case (.GET, "/api/tags"):
             handleOllamaTags(context: context)
@@ -187,7 +183,16 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        let request = ServerParsing.openAIChatRequest(from: json)
+        let request: ServerChatRequest
+        do {
+            request = try ServerParsing.openAIChatRequest(from: json)
+        } catch let error as ServerRequestError {
+            sendJSON(context: context, status: .badRequest, body: ["error": error.message])
+            return
+        } catch {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid request"])
+            return
+        }
 
         // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
         if let requestedModel = request.requestedModel,
@@ -198,6 +203,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             ])
             return
         }
+
+        guard requireModel(context: context) else { return }
 
         guard !request.messages.isEmpty else {
             sendJSON(context: context, status: .badRequest, body: ["error": "No valid messages"])
@@ -299,9 +306,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "total_tokens": (stats?.promptTokens ?? 0) + (stats?.generatedTokens ?? 0)
                 ]
             ]
-            eventLoop.execute {
-                self.sendJSON(context: ctx, status: .ok, body: response)
-            }
+            self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
         }
     }
 
@@ -313,10 +318,27 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        let prompt = json["prompt"] as? String ?? ""
-        let maxTokens = json["max_tokens"] as? Int ?? 256
-        let temperature = json["temperature"] as? Double ?? 0.0
-        let params = SamplingParams(temperature: Float(temperature))
+        let request: ServerCompletionRequest
+        do {
+            request = try ServerParsing.openAICompletionRequest(from: json)
+        } catch let error as ServerRequestError {
+            sendJSON(context: context, status: .badRequest, body: ["error": error.message])
+            return
+        } catch {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid request"])
+            return
+        }
+
+        if let requestedModel = request.requestedModel,
+           let loadedModel = engine.modelName,
+           requestedModel != loadedModel {
+            sendJSON(context: context, status: .badRequest, body: [
+                "error": "Requested model '\(requestedModel)' is not loaded. Currently loaded: '\(loadedModel)'."
+            ])
+            return
+        }
+
+        guard requireModel(context: context) else { return }
 
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
@@ -324,7 +346,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             let (tokenStream, getStats) = eng.generate(
-                prompt: prompt, params: params, maxTokens: maxTokens)
+                prompt: request.prompt,
+                params: request.sampling.samplingParams,
+                maxTokens: request.maxTokens)
 
             var fullText = ""
             for await event in tokenStream {
@@ -348,9 +372,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "total_tokens": (stats?.promptTokens ?? 0) + (stats?.generatedTokens ?? 0)
                 ]
             ]
-            eventLoop.execute {
-                self.sendJSON(context: ctx, status: .ok, body: response)
-            }
+            self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
         }
     }
 
@@ -418,7 +440,16 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        let request = ServerParsing.ollamaChatRequest(from: json)
+        let request: ServerChatRequest
+        do {
+            request = try ServerParsing.ollamaChatRequest(from: json)
+        } catch let error as ServerRequestError {
+            sendJSON(context: context, status: .badRequest, body: ["error": error.message])
+            return
+        } catch {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid request"])
+            return
+        }
 
         // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
         if let requestedModel = request.requestedModel,
@@ -430,6 +461,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             ])
             return
         }
+
+        guard requireModel(context: context) else { return }
 
         guard !request.messages.isEmpty else {
             sendJSON(context: context, status: .badRequest, body: ["error": "No valid messages"])
@@ -478,9 +511,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "message": ["role": "assistant", "content": fullContent],
                     "done": true
                 ]
-                eventLoop.execute {
-                    self.sendJSON(context: ctx, status: .ok, body: response)
-                }
+                self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
             }
         }
     }
@@ -493,11 +524,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        let prompt = json["prompt"] as? String ?? ""
-        let system = json["system"] as? String
+        let request: ServerGenerateRequest
+        do {
+            request = try ServerParsing.ollamaGenerateRequest(from: json)
+        } catch let error as ServerRequestError {
+            sendJSON(context: context, status: .badRequest, body: ["error": error.message])
+            return
+        } catch {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid request"])
+            return
+        }
 
         // Fix 7: Model validation.
-        if let requestedModel = json["model"] as? String,
+        if let requestedModel = request.requestedModel,
            requestedModel != "unknown",
            let loadedModel = engine.modelName,
            requestedModel != loadedModel {
@@ -507,32 +546,53 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        let modelName = engine.modelName ?? json["model"] as? String ?? "unknown"
+        guard requireModel(context: context) else { return }
 
-        let params = ServerParsing.ollamaSamplingOptions(from: json).samplingParams
+        let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
 
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let eng = engine
 
+        if request.stream {
+            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
+        }
+
         Task {
             let (tokenStream, _) = eng.generate(
-                prompt: prompt, systemPrompt: system, params: params, maxTokens: 2048)
+                prompt: request.prompt,
+                systemPrompt: request.system,
+                params: request.sampling.samplingParams,
+                maxTokens: request.maxTokens)
 
-            var fullResponse = ""
-            for await event in tokenStream {
-                if event.isEnd { break }
-                fullResponse += event.text
-            }
+            if request.stream {
+                for await event in tokenStream {
+                    let chunk: [String: Any] = [
+                        "model": modelName,
+                        "response": event.text,
+                        "done": event.isEnd
+                    ]
+                    let data = try! JSONSerialization.data(withJSONObject: chunk)
+                    var buf = ctx.channel.allocator.buffer(capacity: data.count + 1)
+                    buf.writeBytes(data)
+                    buf.writeString("\n")
+                    self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
+                    if event.isEnd { break }
+                }
+                self.writeOnLoop(ctx, .end(nil), flush: true)
+            } else {
+                var fullResponse = ""
+                for await event in tokenStream {
+                    if event.isEnd { break }
+                    fullResponse += event.text
+                }
 
-            let response: [String: Any] = [
-                "model": modelName,
-                "response": fullResponse,
-                "done": true
-            ]
-            // Fix 4: dispatch write back onto the event loop.
-            eventLoop.execute {
-                self.sendJSON(context: ctx, status: .ok, body: response)
+                let response: [String: Any] = [
+                    "model": modelName,
+                    "response": fullResponse,
+                    "done": true
+                ]
+                self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
             }
         }
     }
@@ -659,11 +719,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 context.write(wrapOutboundOut(part), promise: nil)
             }
         } else {
+            nonisolated(unsafe) let ctx = context
             context.eventLoop.execute {
                 if flush {
-                    context.writeAndFlush(self.wrapOutboundOut(part), promise: nil)
+                    ctx.writeAndFlush(self.wrapOutboundOut(part), promise: nil)
                 } else {
-                    context.write(self.wrapOutboundOut(part), promise: nil)
+                    ctx.write(self.wrapOutboundOut(part), promise: nil)
                 }
             }
         }
@@ -678,7 +739,26 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             context.close(promise: nil)
             return
         }
+        sendJSONData(context: context, status: status, data: data)
+    }
 
+    private func sendJSONOnLoop(
+        context: ChannelHandlerContext,
+        eventLoop: EventLoop,
+        status: HTTPResponseStatus,
+        body: [String: Any]
+    ) {
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else {
+            writeOnLoop(context, .end(nil), flush: true)
+            return
+        }
+        nonisolated(unsafe) let ctx = context
+        eventLoop.execute {
+            self.sendJSONData(context: ctx, status: status, data: data)
+        }
+    }
+
+    private func sendJSONData(context: ChannelHandlerContext, status: HTTPResponseStatus, data: Data) {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
         headers.add(name: "Content-Length", value: "\(data.count)")

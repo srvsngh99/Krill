@@ -18,6 +18,12 @@ public final class PythonFallback: @unchecked Sendable {
         self.modelPath = modelPath
     }
 
+    public struct Availability: Equatable, Sendable {
+        public let pythonCommand: String
+        public let isAvailable: Bool
+        public let detail: String
+    }
+
     /// Candidate venv paths to search, in priority order.
     private static let venvSearchPaths: [String] = {
         var paths: [String] = []
@@ -56,15 +62,48 @@ public final class PythonFallback: @unchecked Sendable {
 
     /// Check if Python mlx-vlm is available.
     public static var isAvailable: Bool {
-        guard let python = pythonPath else { return false }
+        checkAvailability().isAvailable
+    }
+
+    /// Check Python and mlx-vlm availability, including a human-readable reason.
+    public static func checkAvailability() -> Availability {
+        guard let python = pythonPath else {
+            return Availability(
+                pythonCommand: "",
+                isAvailable: false,
+                detail: "No Python executable found")
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
         process.arguments = pythonArgs + ["-c", "from mlx_vlm import load; print('ok')"]
         process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
+        let errPipe = Pipe()
+        process.standardError = errPipe
+        do {
+            try process.run()
+        } catch {
+            return Availability(
+                pythonCommand: ([python] + pythonArgs).joined(separator: " "),
+                isAvailable: false,
+                detail: "Unable to run Python: \(error.localizedDescription)")
+        }
         process.waitUntilExit()
-        return process.terminationStatus == 0
+        if process.terminationStatus == 0 {
+            return Availability(
+                pythonCommand: ([python] + pythonArgs).joined(separator: " "),
+                isAvailable: true,
+                detail: "mlx-vlm available")
+        }
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        let err = String(data: errData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = err?.isEmpty == false
+            ? err!
+            : "Python mlx-vlm not installed (pip install mlx-vlm)"
+        return Availability(
+            pythonCommand: ([python] + pythonArgs).joined(separator: " "),
+            isAvailable: false,
+            detail: detail)
     }
 
     /// Generate text using Python mlx-vlm.
@@ -83,42 +122,12 @@ public final class PythonFallback: @unchecked Sendable {
         imagePath: String? = nil,
         audioPath: String? = nil
     ) async throws -> String {
-        let escapedPrompt = prompt
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\n", with: "\\n")
-
-        var generateArgs = ""
-        if let img = imagePath {
-            generateArgs += ", image=\"\(img)\""
-        }
-        if let audio = audioPath {
-            generateArgs += ", audio=\"\(audio)\""
-        }
-
-        // Build multimodal prefix tokens
-        var mediaPrefix = ""
-        if imagePath != nil { mediaPrefix += "<|image|>" }
-        if audioPath != nil { mediaPrefix += "<|audio|>" }
-
-        var kwargs: [String] = []
-        if let img = imagePath { kwargs.append("image=[\"\(img)\"]") }
-        if let audio = audioPath { kwargs.append("audio=\"\(audio)\"") }
-        let kwargsStr = kwargs.isEmpty ? "" : ", " + kwargs.joined(separator: ", ")
-
-        let script = """
-        from mlx_vlm import load, generate
-        model, processor = load("\(modelPath)")
-        tok = processor.tokenizer
-        bos = tok.decode([2])
-        turn_start = tok.decode([105])
-        turn_end = tok.decode([106])
-        newline = tok.decode([107])
-        prompt = f'{bos}{turn_start}user{newline}\(mediaPrefix)\(escapedPrompt){turn_end}{newline}{turn_start}model{newline}'
-        result = generate(model, processor, prompt=prompt, max_tokens=\(maxTokens)\(kwargsStr), verbose=False)
-        text = result.text if hasattr(result, 'text') else str(result)
-        print(text.strip())
-        """
+        let script = Self.buildScript(
+            modelPath: modelPath,
+            prompt: prompt,
+            maxTokens: maxTokens,
+            imagePath: imagePath,
+            audioPath: audioPath)
 
         guard let python = PythonFallback.pythonPath else {
             throw FallbackError.notAvailable
@@ -143,6 +152,54 @@ public final class PythonFallback: @unchecked Sendable {
 
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         return (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func buildScript(
+        modelPath: String,
+        prompt: String,
+        maxTokens: Int,
+        imagePath: String?,
+        audioPath: String?
+    ) -> String {
+        var mediaPrefix = ""
+        if imagePath != nil { mediaPrefix += "<|image|>" }
+        if audioPath != nil { mediaPrefix += "<|audio|>" }
+
+        var kwargsLines: [String] = []
+        if let imagePath {
+            kwargsLines.append("kwargs[\"image\"] = [\(pythonStringLiteral(imagePath))]")
+        }
+        if let audioPath {
+            kwargsLines.append("kwargs[\"audio\"] = \(pythonStringLiteral(audioPath))")
+        }
+        let kwargsBlock = kwargsLines.isEmpty
+            ? "pass"
+            : kwargsLines.joined(separator: "\n")
+
+        return """
+        from mlx_vlm import load, generate
+        model, processor = load(\(pythonStringLiteral(modelPath)))
+        tok = processor.tokenizer
+        bos = tok.decode([2])
+        turn_start = tok.decode([105])
+        turn_end = tok.decode([106])
+        newline = tok.decode([107])
+        user_prompt = \(pythonStringLiteral(prompt))
+        media_prefix = \(pythonStringLiteral(mediaPrefix))
+        kwargs = {}
+        \(kwargsBlock)
+        prompt = f'{bos}{turn_start}user{newline}{media_prefix}{user_prompt}{turn_end}{newline}{turn_start}model{newline}'
+        result = generate(model, processor, prompt=prompt, max_tokens=\(maxTokens), verbose=False, **kwargs)
+        text = result.text if hasattr(result, 'text') else str(result)
+        print(text.strip())
+        """
+    }
+
+    private static func pythonStringLiteral(_ value: String) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        let data = (try? encoder.encode(value)) ?? Data("\"\"".utf8)
+        return String(data: data, encoding: .utf8) ?? "\"\""
     }
 }
 
