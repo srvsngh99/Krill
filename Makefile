@@ -14,10 +14,15 @@ BENCH_MAX_TOKENS ?= 32
 BENCH_RUNS ?= 5
 BENCH_WARMUP ?= 2
 BENCH_OUTPUT ?= .build/benchmarks/krillm-vs-ollama.json
+GEMMA4_BENCH_OUTPUT ?= .build/benchmarks/gemma4-e2b-multimodal-4bit.json
+GEMMA4_KRILL_MODEL ?= $(HOME)/.krillm/models/blobs/gemma-4-e2b
+GEMMA4_OLLAMA_MODEL ?= gemma4:e2b
+GEMMA4_BENCH_RUNS ?= 3
+GEMMA4_BENCH_WARMUP ?= 1
 KRILLM_PYTHON ?= $(HOME)/.krillm/venv/bin/python3
 KRILLM_VENV_PYTHON ?= python3
 
-.PHONY: build release install uninstall clean test bench bench-compare setup-mlx-vlm metallib dist version
+.PHONY: build release install uninstall clean test bench bench-compare bench-gemma4-multimodal setup-mlx-vlm metallib dist version
 
 # Debug build (default)
 build:
@@ -116,6 +121,15 @@ bench-compare:
 		--runs $(BENCH_RUNS) \
 		--warmup $(BENCH_WARMUP) \
 		--output "$(BENCH_OUTPUT)"
+
+# Gemma 4 text/image/audio comparison against Ollama. Runs modalities separately.
+bench-gemma4-multimodal:
+	$(KRILLM_PYTHON) tools/gemma4_multimodal_benchmark.py \
+		--krill-model "$(GEMMA4_KRILL_MODEL)" \
+		--ollama-model "$(GEMMA4_OLLAMA_MODEL)" \
+		--runs $(GEMMA4_BENCH_RUNS) \
+		--warmup $(GEMMA4_BENCH_WARMUP) \
+		--output "$(GEMMA4_BENCH_OUTPUT)"
 
 # Install the Python bridge used by Gemma 4 image/audio support.
 setup-mlx-vlm:

@@ -35,6 +35,15 @@ Prerequisites:
 
 The harness exits `77` and writes an actionable skip report when `ollama`, the Ollama daemon, or either model is missing. `krillm bench <model>` remains available for the native synthetic-token benchmark.
 
+For Gemma 4 text/image/audio comparison, install the Python bridge and run:
+
+```bash
+make setup-mlx-vlm
+make bench-gemma4-multimodal
+```
+
+This writes `.build/benchmarks/gemma4-e2b-multimodal-4bit.json`. The harness benchmarks text, image, and audio separately and records the exact quantization metadata. KrillLM's local Gemma 4 E2B checkpoint uses MLX affine 4-bit; Ollama `gemma4:e2b` reports `Q4_K_M`, so the default report labels this as a 4-bit-class comparison, not bit-identical quantization.
+
 ## Install
 
 ```bash
