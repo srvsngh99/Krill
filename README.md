@@ -44,6 +44,41 @@ make bench-gemma4-multimodal
 
 This writes `.build/benchmarks/gemma4-e2b-multimodal-4bit.json`. The harness benchmarks text, image, and audio separately and records the exact quantization metadata. KrillLM's local Gemma 4 E2B checkpoint uses MLX affine 4-bit; Ollama `gemma4:e2b` reports `Q4_K_M`, so the default report labels this as a 4-bit-class comparison, not bit-identical quantization.
 
+### Server-mode benchmarking
+
+For fair warm-server-vs-warm-server comparison (no CLI process startup overhead):
+
+```bash
+# Start KrillLM server
+krillm serve --model llama-3.2-1b --port 11435
+
+# In another terminal
+make bench-compare KRILLM_URL=http://127.0.0.1:11435
+```
+
+### Release benchmark gate
+
+Evaluate benchmark reports against release thresholds (1.5x decode, 0.67x wall time):
+
+```bash
+# Run against existing benchmark report
+make bench-release-gate
+
+# With custom report
+make bench-release-gate GATE_INPUT=.build/benchmarks/krillm-vs-ollama.json
+
+# Sequential comparison (disk-constrained)
+make bench-release-gate GATE_KRILLM=krillm.json GATE_OLLAMA=ollama.json
+```
+
+The gate writes `.build/benchmarks/release-gate.json` with per-metric pass/fail, geometric mean speedup, worst metric, and bottleneck classification.
+
+### Performance claims
+
+KrillLM is competitive with Ollama on Gemma4 E2B decode throughput on Apple Silicon and can exceed Ollama in some local 4-bit-class decode tests. Ollama is currently stronger on Gemma4 multimodal prefill and some wall-time metrics. KrillLM's next performance milestone is a fully native Gemma4 multimodal path with a release gate targeting 1.5x to 3x speedup over Ollama.
+
+Performance claims in this README are not updated unless `make bench-release-gate` passes and the report is committed or linked.
+
 ## Install
 
 ```bash

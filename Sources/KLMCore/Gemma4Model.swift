@@ -378,7 +378,20 @@ class Gemma4TextModel: Module {
             key: "norm")
     }
 
-    func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
+    /// Forward pass with optional multimodal embedding injection.
+    ///
+    /// - Parameters:
+    ///   - tokens: Input token IDs [B, L]
+    ///   - caches: Per-layer KV caches
+    ///   - imageEmbeddings: Vision encoder output to replace image_token_id positions [1, numImageTokens, hiddenSize]
+    ///   - audioEmbeddings: Audio encoder output to replace audio_token_id positions [1, numAudioTokens, hiddenSize]
+    ///   - imageTokenId: Token ID for image placeholder (default 258880)
+    ///   - audioTokenId: Token ID for audio placeholder (default 258881)
+    func callAsFunction(
+        _ tokens: MLXArray, caches: [KVCache]? = nil,
+        imageEmbeddings: MLXArray? = nil, audioEmbeddings: MLXArray? = nil,
+        imageTokenId: Int = 258880, audioTokenId: Int = 258881
+    ) -> MLXArray {
         let B = tokens.dim(0)
         let L = tokens.dim(1)
         let numLayers = config.numHiddenLayers
@@ -388,6 +401,14 @@ class Gemma4TextModel: Module {
         // CRITICAL: scalars must be BF16 to avoid promoting quantized matmuls to float32
         let embedScale = MLXArray(Float(config.hiddenSize).squareRoot()).asType(.bfloat16)
         var h = embedTokens(tokens) * embedScale
+
+        // Inject multimodal embeddings at placeholder token positions
+        if let imgEmb = imageEmbeddings {
+            h = injectEmbeddings(h, tokens: tokens, embeddings: imgEmb, tokenId: imageTokenId)
+        }
+        if let audEmb = audioEmbeddings {
+            h = injectEmbeddings(h, tokens: tokens, embeddings: audEmb, tokenId: audioTokenId)
+        }
 
         // PLE: compute per-layer inputs
         let pleScale = MLXArray(Float(pleDim).squareRoot()).asType(.bfloat16)
@@ -453,8 +474,71 @@ public class Gemma4ForCausalLM: Module {
     public func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
         let hidden = model(tokens, caches: caches)
         let logits = lmHead(hidden)
-        // Logit soft-capping
         let cap = config.finalLogitSoftcapping
         return MLX.tanh(logits / cap) * cap
     }
+
+    /// Forward pass with multimodal embedding injection.
+    public func callAsFunction(
+        _ tokens: MLXArray, caches: [KVCache]? = nil,
+        imageEmbeddings: MLXArray? = nil, audioEmbeddings: MLXArray? = nil,
+        imageTokenId: Int = 258880, audioTokenId: Int = 258881
+    ) -> MLXArray {
+        let hidden = model(
+            tokens, caches: caches,
+            imageEmbeddings: imageEmbeddings, audioEmbeddings: audioEmbeddings,
+            imageTokenId: imageTokenId, audioTokenId: audioTokenId)
+        let logits = lmHead(hidden)
+        let cap = config.finalLogitSoftcapping
+        return MLX.tanh(logits / cap) * cap
+    }
+}
+
+// MARK: - Multimodal Embedding Injection
+
+/// Replace token embeddings at placeholder positions with encoder outputs.
+///
+/// For each position where tokens == tokenId, the corresponding embedding
+/// is replaced with the next embedding from the encoder output sequence.
+private func injectEmbeddings(
+    _ embeddings: MLXArray, tokens: MLXArray,
+    embeddings replacement: MLXArray, tokenId: Int
+) -> MLXArray {
+    // tokens: [B, L], embeddings: [B, L, D], replacement: [1, N, D]
+    // Find positions where token == tokenId
+    let mask = tokens .== MLXArray(Int32(tokenId))  // [B, L]
+
+    // Expand mask to [B, L, 1] for broadcasting
+    let maskExpanded = mask.reshaped(mask.dim(0), mask.dim(1), 1).asType(embeddings.dtype)
+
+    // The replacement embeddings need to be padded/aligned to match sequence length.
+    // Simple approach: create a replacement tensor of same shape, fill placeholder positions.
+    let B = embeddings.dim(0)
+    let L = embeddings.dim(1)
+    let D = embeddings.dim(2)
+    let N = replacement.dim(1)
+
+    // Build replacement row: pad replacement embeddings to length L
+    // Positions without the token ID will be zero (masked out by maskExpanded anyway)
+    let padded: MLXArray
+    if N >= L {
+        padded = replacement[0..., ..<L, 0...]
+    } else {
+        let zeros = MLXArray.zeros([1, L - N, D]).asType(replacement.dtype)
+        padded = concatenated([replacement, zeros], axis: 1)
+    }
+
+    // Tile to batch size if needed
+    let paddedB: MLXArray
+    if B > 1 {
+        // Repeat along batch dimension
+        var tiles = [Int](repeating: 1, count: padded.ndim)
+        tiles[0] = B
+        paddedB = MLX.tiled(padded, repetitions: tiles)
+    } else {
+        paddedB = padded
+    }
+
+    // Replace: where mask is true use replacement, else keep original
+    return embeddings * (1 - maskExpanded) + paddedB * maskExpanded
 }

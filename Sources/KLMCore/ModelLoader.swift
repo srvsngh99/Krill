@@ -21,6 +21,10 @@ public struct LoadedModel: @unchecked Sendable {
     /// Forward pass returning logits
     public let forward: (MLXArray, [KVCache]?) -> MLXArray
 
+    /// Multimodal forward pass (tokens, caches, imageEmbeddings, audioEmbeddings) -> logits
+    /// Only set for models that support native multimodal (e.g. Gemma4).
+    public let multimodalForward: ((MLXArray, [KVCache]?, MLXArray?, MLXArray?) -> MLXArray)?
+
     /// Vocab size for validation
     public let vocabSize: Int
 }
@@ -83,6 +87,7 @@ private func loadLlama(configData: Data, directory: URL) throws -> LoadedModel {
         numLayers: config.numHiddenLayers,
         family: "llama",
         forward: { tokens, caches in model(tokens, caches: caches) },
+        multimodalForward: nil,
         vocabSize: config.vocabSize
     )
 }
@@ -97,6 +102,7 @@ private func loadQwen(configData: Data, directory: URL) throws -> LoadedModel {
         numLayers: config.numHiddenLayers,
         family: "qwen",
         forward: { tokens, caches in model(tokens, caches: caches) },
+        multimodalForward: nil,
         vocabSize: config.vocabSize
     )
 }
@@ -111,6 +117,7 @@ private func loadMistral(configData: Data, directory: URL) throws -> LoadedModel
         numLayers: config.numHiddenLayers,
         family: "mistral",
         forward: { tokens, caches in model(tokens, caches: caches) },
+        multimodalForward: nil,
         vocabSize: config.vocabSize
     )
 }
@@ -125,6 +132,7 @@ private func loadGemma(configData: Data, directory: URL) throws -> LoadedModel {
         numLayers: config.numHiddenLayers,
         family: "gemma",
         forward: { tokens, caches in model(tokens, caches: caches) },
+        multimodalForward: nil,
         vocabSize: config.vocabSize
     )
 }
@@ -139,6 +147,7 @@ private func loadPhi(configData: Data, directory: URL) throws -> LoadedModel {
         numLayers: config.numHiddenLayers,
         family: "phi",
         forward: { tokens, caches in model(tokens, caches: caches) },
+        multimodalForward: nil,
         vocabSize: config.vocabSize
     )
 }
@@ -183,6 +192,10 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
         numLayers: config.numHiddenLayers,
         family: "gemma4",
         forward: { tokens, caches in model(tokens, caches: caches) },
+        multimodalForward: { tokens, caches, imageEmb, audioEmb in
+            model(tokens, caches: caches,
+                  imageEmbeddings: imageEmb, audioEmbeddings: audioEmb)
+        },
         vocabSize: config.vocabSize
     )
 }
@@ -197,6 +210,7 @@ private func loadGLM(configData: Data, directory: URL) throws -> LoadedModel {
         numLayers: config.numHiddenLayers,
         family: "glm",
         forward: { tokens, caches in model(tokens, caches: caches) },
+        multimodalForward: nil,
         vocabSize: config.vocabSize
     )
 }

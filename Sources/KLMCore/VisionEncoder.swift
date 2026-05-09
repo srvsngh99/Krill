@@ -2,6 +2,10 @@ import Foundation
 import MLX
 import MLXNN
 import MLXFast
+#if canImport(CoreGraphics) && canImport(ImageIO)
+import CoreGraphics
+import ImageIO
+#endif
 
 public enum MultimodalPreprocessingError: Error, CustomStringConvertible {
     case emptyImageData
@@ -226,16 +230,98 @@ class VisionMLP: Module {
 
 // MARK: - Image Preprocessing
 
-/// Preprocess an image file for the vision encoder.
+/// Preprocess an image file for the Gemma 4 vision encoder (SigLIP2).
+///
+/// Pipeline:
+///   1. Decode PNG/JPEG via CoreGraphics
+///   2. Resize longest side to targetSize, maintain aspect ratio
+///   3. Pad to make both dimensions divisible by (patchSize * poolingKernel) = 48
+///   4. Normalize: pixel / 255 → [0,1] → (x - 0.5) / 0.5 → [-1, 1]
 ///
 /// - Parameters:
 ///   - imageData: Raw image data (PNG/JPEG)
-///   - targetSize: Target size (must be divisible by 48)
-/// - Returns: Normalized image tensor [1, H, W, 3]
-public func preprocessImage(_ imageData: Data, targetSize: Int = 672) throws -> MLXArray {
+///   - targetSize: Target longest-side size (default 672, must be divisible by 48)
+///   - patchSize: Patch size for the vision encoder (default 16)
+///   - poolingKernel: Spatial pooling kernel size (default 3)
+/// - Returns: Normalized image tensor [1, H, W, 3] in bfloat16
+public func preprocessImage(
+    _ imageData: Data,
+    targetSize: Int = 672,
+    patchSize: Int = 16,
+    poolingKernel: Int = 3
+) throws -> MLXArray {
     guard !imageData.isEmpty else {
         throw MultimodalPreprocessingError.emptyImageData
     }
 
+    #if canImport(CoreGraphics) && canImport(ImageIO)
+    let blockSize = patchSize * poolingKernel  // 48
+
+    // Decode image
+    guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+          let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        throw MultimodalPreprocessingError.emptyImageData
+    }
+
+    let origW = cgImage.width
+    let origH = cgImage.height
+
+    // Resize: fit longest side to targetSize, maintain aspect ratio
+    let scale = Float(targetSize) / Float(max(origW, origH))
+    var newW = Int(Float(origW) * scale)
+    var newH = Int(Float(origH) * scale)
+
+    // Pad up to nearest multiple of blockSize
+    newW = ((newW + blockSize - 1) / blockSize) * blockSize
+    newH = ((newH + blockSize - 1) / blockSize) * blockSize
+
+    // Render into RGBA bitmap
+    let bitsPerComponent = 8
+    let bytesPerRow = newW * 4
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    guard let context = CGContext(
+        data: nil,
+        width: newW,
+        height: newH,
+        bitsPerComponent: bitsPerComponent,
+        bytesPerRow: bytesPerRow,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else {
+        throw MultimodalPreprocessingError.emptyImageData
+    }
+
+    // White background for padding area
+    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: newW, height: newH))
+
+    // Draw image centered (padding on right/bottom)
+    let drawW = Int(Float(origW) * scale)
+    let drawH = Int(Float(origH) * scale)
+    context.draw(cgImage, in: CGRect(x: 0, y: newH - drawH, width: drawW, height: drawH))
+
+    guard let data = context.data else {
+        throw MultimodalPreprocessingError.emptyImageData
+    }
+
+    // Extract RGB from RGBA, normalize to [-1, 1]
+    let pixelCount = newH * newW
+    var floats = [Float](repeating: 0, count: pixelCount * 3)
+    let ptr = data.bindMemory(to: UInt8.self, capacity: pixelCount * 4)
+
+    for i in 0 ..< pixelCount {
+        let base = i * 4
+        // SigLIP2 normalization: (pixel/255 - 0.5) / 0.5 = pixel/127.5 - 1.0
+        floats[i * 3 + 0] = Float(ptr[base + 0]) / 127.5 - 1.0  // R
+        floats[i * 3 + 1] = Float(ptr[base + 1]) / 127.5 - 1.0  // G
+        floats[i * 3 + 2] = Float(ptr[base + 2]) / 127.5 - 1.0  // B
+    }
+
+    // Shape: [1, H, W, 3] — MLX vision convention (NHWC)
+    let array = MLXArray(floats, [1, newH, newW, 3])
+    return array.asType(.bfloat16)
+
+    #else
     throw MultimodalPreprocessingError.imagePreprocessingUnavailable
+    #endif
 }

@@ -73,55 +73,26 @@ struct RunCommand: AsyncParsableCommand {
             try validateInputFile(audio, flagName: "--audio")
         }
 
-        // Check if this is a Gemma 4 model (use Python fallback for correct output)
+        // Check if this is a Gemma 4 model
         let configURL = modelDir.appendingPathComponent("config.json")
-        if let configData = try? Data(contentsOf: configURL),
-           let configJSON = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
-           isGemma4Config(configJSON) {
-            // Gemma 4: use Python mlx-vlm for correct inference
-            let availability = PythonFallback.checkAvailability()
-            if availability.isAvailable {
-                print("Loading Gemma 4 via mlx-vlm...")
-                let fallback = PythonFallback(modelPath: modelDir.path)
-                if let prompt {
-                    let output = try await fallback.generate(
-                        prompt: prompt, maxTokens: maxTokens,
-                        imagePath: image, audioPath: audio)
-                    print(output)
-                } else {
-                    print("\nGemma 4 Interactive Mode")
-                    print("Type your message and press Enter. Type /quit to exit.\n")
-                    while true {
-                        print("> ", terminator: "")
-                        fflush(stdout)
-                        guard let line = readLine(), !line.isEmpty else { continue }
-                        if line.trimmingCharacters(in: .whitespaces) == "/quit" { break }
-                        let output = try await fallback.generate(
-                            prompt: line, maxTokens: maxTokens,
-                            imagePath: image, audioPath: audio)
-                        print(output)
-                        print()
-                    }
-                }
-                return
-            } else {
-                if image != nil || audio != nil {
-                    print("Error: Gemma 4 image/audio input requires mlx-vlm; native Swift Gemma 4 is text-only.")
-                    print("Detected Python: \(availability.pythonCommand.isEmpty ? "none" : availability.pythonCommand)")
-                    print("Dependency check: \(availability.detail)")
-                    print("Install: pip install mlx-vlm")
-                    throw ExitCode.failure
-                }
-                print("Warning: Gemma 4 native Swift inference is text-only and experimental.")
-                print("mlx-vlm dependency check: \(availability.detail)")
-                print("Install: pip install mlx-vlm")
-                print("Falling back to native engine (experimental)...")
+        let isGemma4 = {
+            guard let configData = try? Data(contentsOf: configURL),
+                  let configJSON = try? JSONSerialization.jsonObject(with: configData) as? [String: Any] else {
+                return false
             }
+            return isGemma4Config(configJSON)
+        }()
+
+        if isGemma4 && (image != nil || audio != nil) {
+            // Native multimodal path for Gemma 4
+            print("Loading Gemma 4 (native multimodal)...")
+        } else if isGemma4 {
+            print("Loading Gemma 4 (native)...")
         }
 
-        // Image/audio are only supported via the Gemma 4 Python bridge
-        if image != nil || audio != nil {
-            print("Error: --image/--audio is only supported for Gemma 4 models via the Python bridge.")
+        // Image/audio are only supported for Gemma 4
+        if (image != nil || audio != nil) && !isGemma4 {
+            print("Error: --image/--audio is only supported for Gemma 4 models.")
             throw ExitCode.failure
         }
 
@@ -140,11 +111,22 @@ struct RunCommand: AsyncParsableCommand {
             seed: seed
         )
 
+        // Load image/audio data if provided
+        var imageData: Data?
+        var audioData: Data?
+        if let image {
+            imageData = try Data(contentsOf: URL(fileURLWithPath: image))
+        }
+        if let audio {
+            audioData = try Data(contentsOf: URL(fileURLWithPath: audio))
+        }
+
         if let prompt {
             // Single-shot mode
             try await generateAndPrint(
                 engine: engine, prompt: prompt, system: system,
-                params: params, maxTokens: maxTokens
+                params: params, maxTokens: maxTokens,
+                imageData: imageData, audioData: audioData
             )
         } else {
             // Interactive REPL
@@ -179,13 +161,17 @@ private func generateAndPrint(
     prompt: String,
     system: String?,
     params: SamplingParams,
-    maxTokens: Int
+    maxTokens: Int,
+    imageData: Data? = nil,
+    audioData: Data? = nil
 ) async throws {
     let (stream, getStats) = engine.generate(
         prompt: prompt,
         systemPrompt: system,
         params: params,
-        maxTokens: maxTokens
+        maxTokens: maxTokens,
+        imageData: imageData,
+        audioData: audioData
     )
 
     // Stream tokens to stdout

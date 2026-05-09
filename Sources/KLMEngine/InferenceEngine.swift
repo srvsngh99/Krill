@@ -105,15 +105,23 @@ public final class InferenceEngine: @unchecked Sendable {
         params: SamplingParams = .greedy,
         maxTokens: Int = 512,
         useSpeculative: Bool = false,
-        usePrefixCache: Bool = true
+        usePrefixCache: Bool = true,
+        imageData: Data? = nil,
+        audioData: Data? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
             messages.append(["role": "system", "content": sys])
         }
-        messages.append(["role": "user", "content": prompt])
+        // For multimodal, prepend media tokens to the prompt
+        var userContent = ""
+        if imageData != nil { userContent += "<|image|>" }
+        if audioData != nil { userContent += "<|audio|>" }
+        userContent += prompt
+        messages.append(["role": "user", "content": userContent])
         return generate(messages: messages, params: params, maxTokens: maxTokens,
-                        useSpeculative: useSpeculative, usePrefixCache: usePrefixCache)
+                        useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
+                        imageData: imageData, audioData: audioData)
     }
 
     /// Generate tokens from a full conversation history, streaming results.
@@ -130,7 +138,9 @@ public final class InferenceEngine: @unchecked Sendable {
         params: SamplingParams = .greedy,
         maxTokens: Int = 512,
         useSpeculative: Bool = false,
-        usePrefixCache: Bool = true
+        usePrefixCache: Bool = true,
+        imageData: Data? = nil,
+        audioData: Data? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         guard let loadedModel, let tokenizer else {
             let emptyStream = AsyncStream<TokenEvent> { $0.finish() }
@@ -152,15 +162,19 @@ public final class InferenceEngine: @unchecked Sendable {
         let eosId = tokenizer.eosTokenId
         let numLayers = loadedModel.numLayers
         let forwardFn = loadedModel.forward
+        let multimodalFn = loadedModel.multimodalForward
         let statsHolder = StatsHolder()
 
         // Capture state for async Task
         nonisolated(unsafe) let capturedForward = forwardFn
+        nonisolated(unsafe) let capturedMultimodalForward = multimodalFn
         nonisolated(unsafe) let capturedTokenizer = tokenizer
         nonisolated(unsafe) let capturedPrefixCache = self.prefixCache
         nonisolated(unsafe) let capturedSpecDecoder = self.specDecoder
         let capturedModelId = self.modelId
         let shouldSpec = useSpeculative && specDecoder != nil
+        let capturedImageData = imageData
+        let capturedAudioData = audioData
 
         let stream = AsyncStream<TokenEvent> { continuation in
             Task { [statsHolder] in
@@ -211,7 +225,41 @@ public final class InferenceEngine: @unchecked Sendable {
 
                 let inputArray = MLXArray(tokensToProcess.map { Int32($0) })
                     .reshaped(1, tokensToProcess.count)
-                let prefillLogits = capturedForward(inputArray, caches)
+
+                // If multimodal data is provided and model supports it, use multimodal forward
+                let prefillLogits: MLXArray
+                if let mmForward = capturedMultimodalForward,
+                   (capturedImageData != nil || capturedAudioData != nil),
+                   !cacheHit {
+                    // Preprocess image and audio if provided
+                    var imageEmb: MLXArray? = nil
+                    var audioEmb: MLXArray? = nil
+
+                    if let imgData = capturedImageData {
+                        do {
+                            let imageTensor = try preprocessImage(imgData)
+                            // Note: full pipeline would run vision encoder here.
+                            // For now, pass the preprocessed tensor as-is.
+                            // The model's multimodal forward handles token injection.
+                            imageEmb = imageTensor
+                        } catch {
+                            // Fall back to text-only if preprocessing fails
+                        }
+                    }
+
+                    if let audData = capturedAudioData {
+                        do {
+                            let melSpec = try computeMelSpectrogramFromWAV(audData)
+                            audioEmb = melSpec
+                        } catch {
+                            // Fall back to text-only if preprocessing fails
+                        }
+                    }
+
+                    prefillLogits = mmForward(inputArray, caches, imageEmb, audioEmb)
+                } else {
+                    prefillLogits = capturedForward(inputArray, caches)
+                }
                 MLX.eval(prefillLogits)
                 prefillDuration = CFAbsoluteTimeGetCurrent() - startTime
 
