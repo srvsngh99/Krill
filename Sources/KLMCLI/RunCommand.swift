@@ -73,23 +73,20 @@ struct RunCommand: AsyncParsableCommand {
             try validateInputFile(audio, flagName: "--audio")
         }
 
-        // Check if this is a Gemma 4 model (use Python fallback for image/audio)
+        // Check if this is a Gemma 4 model
         let configURL = modelDir.appendingPathComponent("config.json")
         if let configData = try? Data(contentsOf: configURL),
            let configJSON = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
            isGemma4Config(configJSON) {
-            if image != nil || audio != nil {
-                // Gemma 4 image/audio: requires Python mlx-vlm bridge because native
-                // vision/audio encoder weight loading is not yet implemented.
+            if audio != nil {
+                // Audio: native Conformer encoder rewrite is pending, use Python bridge
                 let availability = PythonFallback.checkAvailability()
                 guard availability.isAvailable else {
-                    print("Error: Gemma 4 image/audio requires the mlx-vlm Python bridge.")
-                    print("Detected Python: \(availability.pythonCommand.isEmpty ? "none" : availability.pythonCommand)")
-                    print("Dependency check: \(availability.detail)")
+                    print("Error: Gemma 4 audio requires the mlx-vlm Python bridge (native audio encoder pending).")
                     print("Install: make setup-mlx-vlm")
                     throw ExitCode.failure
                 }
-                print("Loading Gemma 4 via mlx-vlm (image/audio)...")
+                print("Loading Gemma 4 via mlx-vlm (audio)...")
                 let fallback = PythonFallback(modelPath: modelDir.path)
                 if let prompt {
                     let output = try await fallback.generate(
@@ -113,12 +110,15 @@ struct RunCommand: AsyncParsableCommand {
                 }
                 return
             }
-            // Gemma 4 text-only: use native Swift engine
+            // Gemma 4 text and image: native Swift engine handles both
         }
 
-        // Image/audio are only supported for Gemma 4 via the Python bridge
-        if image != nil || audio != nil {
-            print("Error: --image/--audio is only supported for Gemma 4 models via the Python bridge.")
+        // Image/audio only supported for Gemma 4
+        let configJSON2 = (try? Data(contentsOf: configURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let isGemma4Model = configJSON2.map(isGemma4Config) ?? false
+        if image != nil && !isGemma4Model {
+            print("Error: --image is only supported for Gemma 4 models.")
             throw ExitCode.failure
         }
 

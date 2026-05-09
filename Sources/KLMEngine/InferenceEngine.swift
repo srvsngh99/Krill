@@ -98,6 +98,10 @@ public final class InferenceEngine: @unchecked Sendable {
         specDecoder != nil
     }
 
+    /// Number of soft tokens the vision encoder produces (for image token expansion).
+    /// Default 280 for Gemma 4 E2B.
+    public var visionSoftTokenCount: Int { 280 }
+
     /// Generate tokens from a single prompt string (convenience wrapper).
     public func generate(
         prompt: String,
@@ -113,9 +117,13 @@ public final class InferenceEngine: @unchecked Sendable {
         if let sys = systemPrompt {
             messages.append(["role": "system", "content": sys])
         }
-        // For multimodal, prepend media tokens to the prompt
+        // For multimodal, prepend media tokens to the prompt.
+        // The vision encoder produces N soft tokens, so we insert N copies of <|image|>
+        // so that injectEmbeddings has exactly N placeholder positions to fill.
         var userContent = ""
-        if imageData != nil { userContent += "<|image|>" }
+        if imageData != nil {
+            userContent += String(repeating: "<|image|>", count: visionSoftTokenCount)
+        }
         if audioData != nil { userContent += "<|audio|>" }
         userContent += prompt
         messages.append(["role": "user", "content": userContent])
@@ -162,15 +170,18 @@ public final class InferenceEngine: @unchecked Sendable {
         let eosId = tokenizer.eosTokenId
         let numLayers = loadedModel.numLayers
         let forwardFn = loadedModel.forward
+        let multimodalFn = loadedModel.multimodalForward
         let statsHolder = StatsHolder()
 
         // Capture state for async Task
         nonisolated(unsafe) let capturedForward = forwardFn
+        nonisolated(unsafe) let capturedMultimodalForward = multimodalFn
         nonisolated(unsafe) let capturedTokenizer = tokenizer
         nonisolated(unsafe) let capturedPrefixCache = self.prefixCache
         let capturedSpecDecoder = self.specDecoder
         let capturedModelId = self.modelId
         let shouldSpec = useSpeculative && specDecoder != nil
+        let capturedImageData = imageData
 
         let stream = AsyncStream<TokenEvent> { continuation in
             Task { [statsHolder] in
@@ -222,13 +233,22 @@ public final class InferenceEngine: @unchecked Sendable {
                 let inputArray = MLXArray(tokensToProcess.map { Int32($0) })
                     .reshaped(1, tokensToProcess.count)
 
-                // Note: multimodal embedding injection requires running the vision/audio
-                // encoders with loaded weights to produce hidden-size embeddings.
-                // Until encoder weight loading is implemented, image/audio data is
-                // handled by the Python bridge in RunCommand, not here.
-                // The multimodalForward closure and preprocessing functions are
-                // available for future use once encoder loading is wired.
-                let prefillLogits = capturedForward(inputArray, caches)
+                // Multimodal prefill: if image data provided and model supports it,
+                // preprocess and pass pixel values through the vision encoder pipeline.
+                let prefillLogits: MLXArray
+                if let mmForward = capturedMultimodalForward,
+                   let imgData = capturedImageData,
+                   !cacheHit {
+                    do {
+                        let pixelValues = try preprocessImage(imgData)
+                        prefillLogits = mmForward(inputArray, caches, pixelValues, nil)
+                    } catch {
+                        // Fall back to text-only if preprocessing fails
+                        prefillLogits = capturedForward(inputArray, caches)
+                    }
+                } else {
+                    prefillLogits = capturedForward(inputArray, caches)
+                }
                 MLX.eval(prefillLogits)
                 prefillDuration = CFAbsoluteTimeGetCurrent() - startTime
 

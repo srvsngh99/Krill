@@ -571,3 +571,99 @@ private func injectEmbeddings(
     // Replace: where mask is true use replacement, else keep original
     return embeddings * (1 - maskExpanded) + paddedB * maskExpanded
 }
+
+// MARK: - MultimodalEmbedder
+
+/// Projects soft tokens from vision/audio encoders into language model space.
+///
+/// Pipeline: RMSNormNoScale -> Linear projection (4-bit quantized)
+///
+/// Weight keys: `embed_vision.embedding_projection.*` or `embed_audio.embedding_projection.*`
+public class MultimodalEmbedder: Module {
+    @ModuleInfo(key: "embedding_projection") var embeddingProjection: Linear
+    let norm: VisionRMSNormNoScale
+
+    public init(embeddingDim: Int, textHiddenSize: Int, eps: Float = 1e-6) {
+        _embeddingProjection = ModuleInfo(
+            wrappedValue: Linear(embeddingDim, textHiddenSize, bias: false),
+            key: "embedding_projection")
+        self.norm = VisionRMSNormNoScale(eps: eps)
+    }
+
+    public func callAsFunction(_ inputsEmbeds: MLXArray) -> MLXArray {
+        let normed = norm(inputsEmbeds)
+        return embeddingProjection(normed)
+    }
+}
+
+// MARK: - Gemma4MultimodalModel
+
+/// Top-level multimodal model wrapper matching the safetensors key structure.
+///
+/// Weight key hierarchy:
+///   `language_model.*` — text model (Gemma4ForCausalLM)
+///   `vision_tower.*` — SigLIP2 vision encoder
+///   `embed_vision.*` — vision → language projection
+///   `audio_tower.*` — Conformer audio encoder (loaded but encoder rewrite pending)
+///   `embed_audio.*` — audio → language projection
+public class Gemma4MultimodalModel: Module {
+    @ModuleInfo(key: "language_model") var languageModel: Gemma4ForCausalLM
+    @ModuleInfo(key: "vision_tower") var visionTower: VisionEncoder
+    @ModuleInfo(key: "embed_vision") var embedVision: MultimodalEmbedder
+
+    public let config: Gemma4Config
+    public let imageTokenId: Int
+    public let audioTokenId: Int
+
+    public init(_ config: Gemma4Config, imageTokenId: Int = 258880, audioTokenId: Int = 258881) {
+        self.config = config
+        self.imageTokenId = imageTokenId
+        self.audioTokenId = audioTokenId
+
+        _languageModel = ModuleInfo(
+            wrappedValue: Gemma4ForCausalLM(config), key: "language_model")
+
+        // Vision tower with config from vision_config
+        _visionTower = ModuleInfo(
+            wrappedValue: VisionEncoder(
+                hiddenSize: 768, intermediateSize: 3072,
+                numLayers: 16, numHeads: 12, numKVHeads: 12,
+                headDim: 64, patchSize: 16, poolingKernelSize: 3,
+                defaultOutputLength: 280, positionEmbeddingSize: 10240,
+                ropeTheta: 100.0, eps: 1e-6),
+            key: "vision_tower")
+
+        _embedVision = ModuleInfo(
+            wrappedValue: MultimodalEmbedder(
+                embeddingDim: 768, textHiddenSize: config.hiddenSize, eps: 1e-6),
+            key: "embed_vision")
+    }
+
+    /// Text-only forward pass.
+    public func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
+        languageModel(tokens, caches: caches)
+    }
+
+    /// Multimodal forward pass with image pixel values.
+    public func callAsFunction(
+        _ tokens: MLXArray, caches: [KVCache]? = nil,
+        pixelValues: MLXArray? = nil
+    ) -> MLXArray {
+        guard let pixels = pixelValues else {
+            return languageModel(tokens, caches: caches)
+        }
+
+        // Vision pipeline: pixels -> encoder -> projector -> embeddings
+        let visionFeatures = visionTower(pixels)
+        let imageEmbeddings = embedVision(visionFeatures)
+
+        // Inject into language model forward
+        return languageModel(
+            tokens, caches: caches,
+            imageEmbeddings: imageEmbeddings,
+            imageTokenId: imageTokenId)
+    }
+
+    /// Number of transformer layers (for KV cache creation).
+    public var numLayers: Int { config.numHiddenLayers }
+}

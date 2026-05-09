@@ -19,26 +19,24 @@ final class Gemma4MultimodalTests: XCTestCase {
         let pngData = createTestPNG(width: 2, height: 2, r: 255, g: 0, b: 0)
         let tensor = try preprocessImage(pngData, targetSize: 48)
 
-        // Shape must be [1, H, W, 3] where H,W are multiples of 48
+        // Shape must be [1, 3, H, W] (channel-first) where H,W are multiples of 48
         XCTAssertEqual(tensor.ndim, 4)
         XCTAssertEqual(tensor.dim(0), 1)
-        XCTAssertTrue(tensor.dim(1) % 48 == 0, "Height must be divisible by 48, got \(tensor.dim(1))")
-        XCTAssertTrue(tensor.dim(2) % 48 == 0, "Width must be divisible by 48, got \(tensor.dim(2))")
-        XCTAssertEqual(tensor.dim(3), 3)
+        XCTAssertEqual(tensor.dim(1), 3, "Channel dim must be 3")
+        XCTAssertTrue(tensor.dim(2) % 48 == 0, "Height must be divisible by 48, got \(tensor.dim(2))")
+        XCTAssertTrue(tensor.dim(3) % 48 == 0, "Width must be divisible by 48, got \(tensor.dim(3))")
     }
 
     func testNativeImagePreprocessingNormalizesToExpectedRange() throws {
-        // White image: all pixels should map to 1.0 (255/127.5 - 1.0)
+        // White image: all pixels should map to ~1.0 (255/255 = 1.0)
         let pngData = createTestPNG(width: 4, height: 4, r: 255, g: 255, b: 255)
         let tensor = try preprocessImage(pngData, targetSize: 48)
 
-        // Check that values are in [-1, 1] range
+        // Check that values are in [0, 1] range (channel-first format, normalized to [0,1])
         let maxVal = MLX.max(tensor).item(Float.self)
         let minVal = MLX.min(tensor).item(Float.self)
-        XCTAssertGreaterThanOrEqual(maxVal, -1.01)
+        XCTAssertGreaterThanOrEqual(minVal, -0.01)
         XCTAssertLessThanOrEqual(maxVal, 1.01)
-        XCTAssertGreaterThanOrEqual(minVal, -1.01)
-        XCTAssertLessThanOrEqual(minVal, 1.01)
     }
 
     // MARK: - Audio Preprocessing Tests

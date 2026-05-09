@@ -154,16 +154,90 @@ private func loadPhi(configData: Data, directory: URL) throws -> LoadedModel {
 
 private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(Gemma4Config.self, from: configData)
-    let model = Gemma4ForCausalLM(config)
 
-    // Gemma 4: quantize with filter to exclude per_layer_model_projection (stays BF16)
+    // Parse image/audio token IDs from config
+    let rawConfig = try JSONSerialization.jsonObject(with: configData) as? [String: Any]
+    let imageTokenId = rawConfig?["image_token_id"] as? Int ?? 258880
+    let audioTokenId = rawConfig?["audio_token_id"] as? Int ?? 258881
+    let hasVisionConfig = rawConfig?["vision_config"] != nil
+
+    // Use multimodal model if vision config is present
+    if hasVisionConfig {
+        let model = Gemma4MultimodalModel(config, imageTokenId: imageTokenId, audioTokenId: audioTokenId)
+
+        // Quantize language model layers (exclude PLE and vision/audio towers)
+        if let q = config.quantization {
+            quantize(model: model, groupSize: q.groupSize, bits: q.bits) { name, _ in
+                let isLangModel = name.contains("language_model.")
+                let isPLE = name.contains("per_layer_model_projection") || name.contains("per_layer_projection_norm")
+                let isEmbedProj = name.contains("embed_vision.embedding_projection") || name.contains("embed_audio.embedding_projection")
+                // Quantize: language model (except PLE) and embedding projections
+                return (isLangModel && !isPLE) || isEmbedProj
+            }
+        }
+
+        // Load ALL weights — key structure matches module hierarchy directly
+        var flatWeights = try loadWeightArrays(from: directory)
+
+        // Strip "model." prefix if present (some checkpoints use it)
+        var cleaned: [String: MLXArray] = [:]
+        for (key, value) in flatWeights {
+            if key.hasPrefix("model.") && !key.hasPrefix("model.embed_tokens") {
+                cleaned[String(key.dropFirst("model.".count))] = value
+            } else {
+                cleaned[key] = value
+            }
+        }
+        flatWeights = cleaned
+
+        // Handle tied embeddings for language_model
+        let hasLmHead = flatWeights.keys.contains { $0.hasPrefix("language_model.lm_head.") }
+        if !hasLmHead {
+            let embedKeys = flatWeights.keys.filter {
+                $0.hasPrefix("language_model.model.embed_tokens.") && !$0.contains("per_layer")
+            }
+            for key in embedKeys {
+                let lmKey = key.replacingOccurrences(of: "language_model.model.embed_tokens.", with: "language_model.lm_head.")
+                flatWeights[lmKey] = flatWeights[key]
+            }
+        }
+
+        // Sanitize conv weights: PyTorch [out, in, kH, kW] -> MLX [out, kH, kW, in]
+        for key in flatWeights.keys {
+            if key.contains("subsample_conv_projection") && key.contains("conv.weight"),
+               let v = flatWeights[key], v.ndim == 4 {
+                flatWeights[key] = v.transposed(0, 2, 3, 1)
+            }
+            if key.contains("depthwise_conv1d.weight"),
+               let v = flatWeights[key], v.ndim == 3 {
+                flatWeights[key] = v.transposed(0, 2, 1)
+            }
+        }
+
+        let tuples = flatWeights.map { ($0.key, $0.value) }
+        let nested = ModuleParameters.unflattened(tuples)
+        try model.update(parameters: nested, verify: [])
+
+        return LoadedModel(
+            module: model,
+            numLayers: config.numHiddenLayers,
+            family: "gemma4",
+            forward: { tokens, caches in model(tokens, caches: caches) },
+            multimodalForward: { tokens, caches, imageEmb, _ in
+                model(tokens, caches: caches, pixelValues: imageEmb)
+            },
+            vocabSize: config.vocabSize
+        )
+    }
+
+    // Fallback: text-only Gemma4 (no vision_config in checkpoint)
+    let model = Gemma4ForCausalLM(config)
     if let q = config.quantization {
         quantize(model: model, groupSize: q.groupSize, bits: q.bits) { name, _ in
             !name.contains("per_layer_model_projection") && !name.contains("per_layer_projection_norm")
         }
     }
 
-    // Load weights with "language_model." prefix stripped
     var flatWeights = try loadWeightArrays(from: directory)
     var stripped: [String: MLXArray] = [:]
     for (key, value) in flatWeights {
@@ -173,7 +247,6 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
     }
     if !stripped.isEmpty { flatWeights = stripped }
 
-    // Handle tied embeddings
     let hasLmHead = flatWeights.keys.contains { $0.hasPrefix("lm_head.") }
     if !hasLmHead {
         let embedKeys = flatWeights.keys.filter { $0.hasPrefix("model.embed_tokens.") && !$0.contains("per_layer") }
@@ -192,10 +265,7 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
         numLayers: config.numHiddenLayers,
         family: "gemma4",
         forward: { tokens, caches in model(tokens, caches: caches) },
-        multimodalForward: { tokens, caches, imageEmb, audioEmb in
-            model(tokens, caches: caches,
-                  imageEmbeddings: imageEmb, audioEmbeddings: audioEmb)
-        },
+        multimodalForward: nil,
         vocabSize: config.vocabSize
     )
 }
