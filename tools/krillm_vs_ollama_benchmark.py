@@ -514,6 +514,26 @@ def main() -> int:
         "krillm": {"runs": krillm_runs, "summary": summarize([run for run in krillm_runs if run])},
         "ollama": {"runs": ollama_runs, "summary": summarize([run for run in ollama_runs if run])},
     }
+
+    # Detect prefix cache influence: if KrillLM prefill speed varies >3x between
+    # runs, later runs likely hit the prefix cache.
+    if use_server:
+        valid_krillm = [r for r in krillm_runs if r and r.get("prefill_tokens_per_second")]
+        if len(valid_krillm) >= 2:
+            prefills = [r["prefill_tokens_per_second"] for r in valid_krillm]
+            if max(prefills) > 3 * min(prefills):
+                report["cache_warning"] = (
+                    "KrillLM prefill speed varies >3x across runs, indicating prefix cache hits "
+                    "on repeated prompts. Later runs may show near-zero prefill cost. "
+                    "Use distinct prompts or --warmup 0 to measure cold prefill."
+                )
+        report["benchmark"]["prefix_cache_active"] = True
+        report["benchmark"]["note"] = (
+            "Server mode with repeated prompts: warmup requests populate the prefix cache, "
+            "so measured runs may reflect cached prefill (near-zero TTFT). This is the "
+            "expected production behavior for repeated system prompts."
+        )
+
     write_report(args.output, report)
     print(f"Benchmark report: {args.output}")
     print(json.dumps(report["results"], indent=2, sort_keys=True))

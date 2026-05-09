@@ -162,19 +162,15 @@ public final class InferenceEngine: @unchecked Sendable {
         let eosId = tokenizer.eosTokenId
         let numLayers = loadedModel.numLayers
         let forwardFn = loadedModel.forward
-        let multimodalFn = loadedModel.multimodalForward
         let statsHolder = StatsHolder()
 
         // Capture state for async Task
         nonisolated(unsafe) let capturedForward = forwardFn
-        nonisolated(unsafe) let capturedMultimodalForward = multimodalFn
         nonisolated(unsafe) let capturedTokenizer = tokenizer
         nonisolated(unsafe) let capturedPrefixCache = self.prefixCache
-        nonisolated(unsafe) let capturedSpecDecoder = self.specDecoder
+        let capturedSpecDecoder = self.specDecoder
         let capturedModelId = self.modelId
         let shouldSpec = useSpeculative && specDecoder != nil
-        let capturedImageData = imageData
-        let capturedAudioData = audioData
 
         let stream = AsyncStream<TokenEvent> { continuation in
             Task { [statsHolder] in
@@ -226,40 +222,13 @@ public final class InferenceEngine: @unchecked Sendable {
                 let inputArray = MLXArray(tokensToProcess.map { Int32($0) })
                     .reshaped(1, tokensToProcess.count)
 
-                // If multimodal data is provided and model supports it, use multimodal forward
-                let prefillLogits: MLXArray
-                if let mmForward = capturedMultimodalForward,
-                   (capturedImageData != nil || capturedAudioData != nil),
-                   !cacheHit {
-                    // Preprocess image and audio if provided
-                    var imageEmb: MLXArray? = nil
-                    var audioEmb: MLXArray? = nil
-
-                    if let imgData = capturedImageData {
-                        do {
-                            let imageTensor = try preprocessImage(imgData)
-                            // Note: full pipeline would run vision encoder here.
-                            // For now, pass the preprocessed tensor as-is.
-                            // The model's multimodal forward handles token injection.
-                            imageEmb = imageTensor
-                        } catch {
-                            // Fall back to text-only if preprocessing fails
-                        }
-                    }
-
-                    if let audData = capturedAudioData {
-                        do {
-                            let melSpec = try computeMelSpectrogramFromWAV(audData)
-                            audioEmb = melSpec
-                        } catch {
-                            // Fall back to text-only if preprocessing fails
-                        }
-                    }
-
-                    prefillLogits = mmForward(inputArray, caches, imageEmb, audioEmb)
-                } else {
-                    prefillLogits = capturedForward(inputArray, caches)
-                }
+                // Note: multimodal embedding injection requires running the vision/audio
+                // encoders with loaded weights to produce hidden-size embeddings.
+                // Until encoder weight loading is implemented, image/audio data is
+                // handled by the Python bridge in RunCommand, not here.
+                // The multimodalForward closure and preprocessing functions are
+                // available for future use once encoder loading is wired.
+                let prefillLogits = capturedForward(inputArray, caches)
                 MLX.eval(prefillLogits)
                 prefillDuration = CFAbsoluteTimeGetCurrent() - startTime
 

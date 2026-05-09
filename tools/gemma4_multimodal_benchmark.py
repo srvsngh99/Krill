@@ -251,17 +251,20 @@ def run_krill_server_task(
     task: dict[str, Any],
     measured: bool,
 ) -> Optional[dict[str, Any]]:
-    """Run a benchmark request against a persistent KrillLM server using /api/generate."""
+    """Run a benchmark request against a persistent KrillLM server using /api/generate.
+
+    Only supports text prompts. Image/audio tasks are skipped because the KrillLM
+    server does not yet accept media payloads, and comparing text-only prompts
+    against Ollama processing real media would produce invalid results.
+    """
+    if task.get("image") or task.get("audio"):
+        return None  # Skip media tasks — see docstring
+
     prompt = task["prompt"]
-    media_prefix = ""
-    if task.get("image"):
-        media_prefix += "<|image|>"
-    if task.get("audio"):
-        media_prefix += "<|audio|>"
 
     payload: dict[str, Any] = {
         "model": "gemma-4-e2b",
-        "prompt": media_prefix + prompt,
+        "prompt": prompt,
         "stream": True,
         "options": {
             "temperature": args.temperature,
@@ -480,8 +483,10 @@ def main() -> int:
 
     results: dict[str, Any] = {}
     for task in tasks:
+        # Skip warmup for server media tasks (server doesn't handle media yet)
+        skip_krill_task = use_server and (task.get("image") or task.get("audio"))
         for _ in range(args.warmup):
-            if include_krillm:
+            if include_krillm and not skip_krill_task:
                 if use_server:
                     run_krill_server_task(args, task, measured=False)
                 else:
@@ -500,12 +505,17 @@ def main() -> int:
                     run_krill_server_task(args, task, measured=True)
                     for _ in range(args.runs)
                 ]
+                valid_runs = [run for run in krill_runs if run]
+                if valid_runs:
+                    task_results["krillm"] = {"runs": valid_runs, "summary": summarize(valid_runs)}
+                else:
+                    task_results["krillm_skipped"] = "Server mode does not support image/audio tasks yet"
             else:
                 krill_runs = [
                     run_krill_task(model, processor, task, args.temperature, args.top_p, measured=True)
                     for _ in range(args.runs)
                 ]
-            task_results["krillm"] = {"runs": krill_runs, "summary": summarize([run for run in krill_runs if run])}
+                task_results["krillm"] = {"runs": krill_runs, "summary": summarize([run for run in krill_runs if run])}
         if include_ollama:
             ollama_runs = [run_ollama_task(args, task, measured=True) for _ in range(args.runs)]
             task_results["ollama"] = {"runs": ollama_runs, "summary": summarize([run for run in ollama_runs if run])}

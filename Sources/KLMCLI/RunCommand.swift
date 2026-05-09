@@ -73,26 +73,52 @@ struct RunCommand: AsyncParsableCommand {
             try validateInputFile(audio, flagName: "--audio")
         }
 
-        // Check if this is a Gemma 4 model
+        // Check if this is a Gemma 4 model (use Python fallback for image/audio)
         let configURL = modelDir.appendingPathComponent("config.json")
-        let isGemma4 = {
-            guard let configData = try? Data(contentsOf: configURL),
-                  let configJSON = try? JSONSerialization.jsonObject(with: configData) as? [String: Any] else {
-                return false
+        if let configData = try? Data(contentsOf: configURL),
+           let configJSON = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
+           isGemma4Config(configJSON) {
+            if image != nil || audio != nil {
+                // Gemma 4 image/audio: requires Python mlx-vlm bridge because native
+                // vision/audio encoder weight loading is not yet implemented.
+                let availability = PythonFallback.checkAvailability()
+                guard availability.isAvailable else {
+                    print("Error: Gemma 4 image/audio requires the mlx-vlm Python bridge.")
+                    print("Detected Python: \(availability.pythonCommand.isEmpty ? "none" : availability.pythonCommand)")
+                    print("Dependency check: \(availability.detail)")
+                    print("Install: make setup-mlx-vlm")
+                    throw ExitCode.failure
+                }
+                print("Loading Gemma 4 via mlx-vlm (image/audio)...")
+                let fallback = PythonFallback(modelPath: modelDir.path)
+                if let prompt {
+                    let output = try await fallback.generate(
+                        prompt: prompt, maxTokens: maxTokens,
+                        imagePath: image, audioPath: audio)
+                    print(output)
+                } else {
+                    print("\nGemma 4 Interactive Mode (mlx-vlm)")
+                    print("Type your message and press Enter. Type /quit to exit.\n")
+                    while true {
+                        print("> ", terminator: "")
+                        fflush(stdout)
+                        guard let line = readLine(), !line.isEmpty else { continue }
+                        if line.trimmingCharacters(in: .whitespaces) == "/quit" { break }
+                        let output = try await fallback.generate(
+                            prompt: line, maxTokens: maxTokens,
+                            imagePath: image, audioPath: audio)
+                        print(output)
+                        print()
+                    }
+                }
+                return
             }
-            return isGemma4Config(configJSON)
-        }()
-
-        if isGemma4 && (image != nil || audio != nil) {
-            // Native multimodal path for Gemma 4
-            print("Loading Gemma 4 (native multimodal)...")
-        } else if isGemma4 {
-            print("Loading Gemma 4 (native)...")
+            // Gemma 4 text-only: use native Swift engine
         }
 
-        // Image/audio are only supported for Gemma 4
-        if (image != nil || audio != nil) && !isGemma4 {
-            print("Error: --image/--audio is only supported for Gemma 4 models.")
+        // Image/audio are only supported for Gemma 4 via the Python bridge
+        if image != nil || audio != nil {
+            print("Error: --image/--audio is only supported for Gemma 4 models via the Python bridge.")
             throw ExitCode.failure
         }
 
