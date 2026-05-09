@@ -439,7 +439,18 @@ class Gemma4TextModel: Module {
         }
 
         // PLE: compute per-layer inputs
-        let pleEmbed = embedPerLayer(tokens) * pleScale
+        // For multimodal: zero out image/audio token IDs so PLE only computes
+        // for text tokens. Image/audio positions get zero PLE contribution.
+        let pleTokens: MLXArray
+        if imageEmbeddings != nil || audioEmbeddings != nil {
+            let imgMask = tokens .== MLXArray(Int32(imageTokenId))
+            let audMask = tokens .== MLXArray(Int32(audioTokenId))
+            let mmMask = (imgMask.asType(.int32) + audMask.asType(.int32)) .> MLXArray(Int32(0))
+            pleTokens = MLX.where(mmMask, MLXArray(Int32(0)), tokens)
+        } else {
+            pleTokens = tokens
+        }
+        let pleEmbed = embedPerLayer(pleTokens) * pleScale
         let projection = perLayerProj(h) * projScale
         let projNormed = perLayerNorm(projection.reshaped(B * L * numLayers, pleDim))
             .reshaped(B, L, numLayers * pleDim)
@@ -525,51 +536,40 @@ public class Gemma4ForCausalLM: Module {
 
 // MARK: - Multimodal Embedding Injection
 
+/// Replace token embeddings at placeholder positions with encoder outputs
+/// using masked_scatter semantics.
+///
+/// The first True mask position gets source[0], the second True gets source[1], etc.
+/// This matches PyTorch's masked_scatter / the Gemma4 reference implementation.
+func maskedScatter(
+    _ inputTensor: MLXArray, mask: MLXArray, source: MLXArray
+) -> MLXArray {
+    // mask: [B, L] or [B, L, D] (expanded), source: [1, N, D]
+    // Flatten mask to [B*L] or [B*L*D]
+    let maskFlat = mask.flattened().asType(.int32)
+    // cumsum gives sequential indices: first True → 0, second True → 1, etc.
+    let indices = MLX.cumsum(maskFlat, axis: 0) - 1
+    // Flatten source and index with modular arithmetic
+    let sourceFlat = source.flattened()
+    let aligned = sourceFlat.take(indices % MLXArray(Int32(sourceFlat.size)), axis: 0)
+    // Where mask is True use aligned value, else keep original
+    let result = MLX.where(maskFlat, aligned, inputTensor.flattened())
+    return result.reshaped(inputTensor.shape)
+}
+
 /// Replace token embeddings at placeholder positions with encoder outputs.
 ///
-/// For each position where tokens == tokenId, the corresponding embedding
-/// is replaced with the next embedding from the encoder output sequence.
+/// Uses masked_scatter: replacement[0] goes to first mask position,
+/// replacement[1] to second, etc.
 private func injectEmbeddings(
     _ embeddings: MLXArray, tokens: MLXArray,
     embeddings replacement: MLXArray, tokenId: Int
 ) -> MLXArray {
     // tokens: [B, L], embeddings: [B, L, D], replacement: [1, N, D]
-    // Find positions where token == tokenId
     let mask = tokens .== MLXArray(Int32(tokenId))  // [B, L]
-
-    // Expand mask to [B, L, 1] for broadcasting
-    let maskExpanded = mask.reshaped(mask.dim(0), mask.dim(1), 1).asType(embeddings.dtype)
-
-    // The replacement embeddings need to be padded/aligned to match sequence length.
-    // Simple approach: create a replacement tensor of same shape, fill placeholder positions.
-    let B = embeddings.dim(0)
-    let L = embeddings.dim(1)
-    let D = embeddings.dim(2)
-    let N = replacement.dim(1)
-
-    // Build replacement row: pad replacement embeddings to length L
-    // Positions without the token ID will be zero (masked out by maskExpanded anyway)
-    let padded: MLXArray
-    if N >= L {
-        padded = replacement[0..., ..<L, 0...]
-    } else {
-        let zeros = MLXArray.zeros([1, L - N, D]).asType(replacement.dtype)
-        padded = concatenated([replacement, zeros], axis: 1)
-    }
-
-    // Tile to batch size if needed
-    let paddedB: MLXArray
-    if B > 1 {
-        // Repeat along batch dimension
-        var tiles = [Int](repeating: 1, count: padded.ndim)
-        tiles[0] = B
-        paddedB = MLX.tiled(padded, repetitions: tiles)
-    } else {
-        paddedB = padded
-    }
-
-    // Replace: where mask is true use replacement, else keep original
-    return embeddings * (1 - maskExpanded) + paddedB * maskExpanded
+    let maskExpanded = expandedDimensions(mask, axis: -1)
+    let mask3D = MLX.broadcast(maskExpanded, to: embeddings.shape)
+    return maskedScatter(embeddings, mask: mask3D, source: replacement)
 }
 
 // MARK: - MultimodalEmbedder

@@ -581,7 +581,15 @@ public func preprocessImage(
     let origW = cgImage.width
     let origH = cgImage.height
 
-    let scale = Float(targetSize) / Float(max(origW, origH))
+    // Resize: scale to targetSize, ensure both dims are at least targetSize
+    // for small images, then round up to nearest blockSize multiple.
+    let minDimTarget = max(targetSize, blockSize * 16)  // minimum 768 for small images
+    let scale: Float
+    if max(origW, origH) <= minDimTarget {
+        scale = Float(minDimTarget) / Float(max(origW, origH))
+    } else {
+        scale = Float(targetSize) / Float(max(origW, origH))
+    }
     var newW = Int(Float(origW) * scale)
     var newH = Int(Float(origH) * scale)
 
@@ -624,7 +632,8 @@ public func preprocessImage(
         floats[2 * pixelCount + i] = Float(ptr[base + 2]) / 255.0 // B
     }
 
-    return MLXArray(floats, [1, 3, newH, newW]).asType(.bfloat16)
+    // Vision encoder expects float32 input (patchify casts to weight dtype internally)
+    return MLXArray(floats, [1, 3, newH, newW])
 
     #else
     throw MultimodalPreprocessingError.imagePreprocessingUnavailable

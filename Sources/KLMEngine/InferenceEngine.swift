@@ -98,9 +98,19 @@ public final class InferenceEngine: @unchecked Sendable {
         specDecoder != nil
     }
 
-    /// Number of soft tokens the vision encoder produces (for image token expansion).
-    /// Default 280 for Gemma 4 E2B.
-    public var visionSoftTokenCount: Int { 280 }
+    /// Compute the number of soft tokens the vision encoder will produce for an image.
+    /// This depends on the preprocessed image size.
+    func computeImageTokenCount(imageData: Data) -> Int {
+        guard let tensor = try? preprocessImage(imageData) else { return 256 }
+        let H = tensor.dim(2)
+        let W = tensor.dim(3)
+        let patchSize = 16
+        let poolingKernel = 3
+        let pH = H / patchSize
+        let pW = W / patchSize
+        let numPatches = pH * pW
+        return numPatches / (poolingKernel * poolingKernel)
+    }
 
     /// Generate tokens from a single prompt string (convenience wrapper).
     public func generate(
@@ -121,8 +131,9 @@ public final class InferenceEngine: @unchecked Sendable {
         // The vision encoder produces N soft tokens, so we insert N copies of <|image|>
         // so that injectEmbeddings has exactly N placeholder positions to fill.
         var userContent = ""
-        if imageData != nil {
-            userContent += String(repeating: "<|image|>", count: visionSoftTokenCount)
+        if let imgData = imageData {
+            let tokenCount = computeImageTokenCount(imageData: imgData)
+            userContent += String(repeating: "<|image|>", count: tokenCount)
         }
         if audioData != nil { userContent += "<|audio|>" }
         userContent += prompt
