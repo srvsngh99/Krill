@@ -620,16 +620,22 @@ public func preprocessImage(
     }
 
     // Extract RGB from RGBA into channel-first [1, 3, H, W] in [0, 1]
+    // CGContext stores pixels bottom-to-top (row 0 = bottom of image).
+    // Vision models expect top-to-bottom, so we flip rows during readout.
     let pixelCount = newH * newW
     var floats = [Float](repeating: 0, count: 3 * pixelCount)
     let ptr = data.bindMemory(to: UInt8.self, capacity: pixelCount * 4)
 
-    // Channel-first: R plane, then G plane, then B plane
-    for i in 0 ..< pixelCount {
-        let base = i * 4
-        floats[i] = Float(ptr[base]) / 255.0                     // R
-        floats[pixelCount + i] = Float(ptr[base + 1]) / 255.0    // G
-        floats[2 * pixelCount + i] = Float(ptr[base + 2]) / 255.0 // B
+    // Channel-first: R plane, then G plane, then B plane (with row flip)
+    for row in 0 ..< newH {
+        let flippedRow = newH - 1 - row  // Flip: CG bottom row → array top row
+        for col in 0 ..< newW {
+            let srcIdx = (flippedRow * newW + col) * 4  // CG pixel (bottom-to-top)
+            let dstIdx = row * newW + col                // Array pixel (top-to-bottom)
+            floats[dstIdx] = Float(ptr[srcIdx]) / 255.0                     // R
+            floats[pixelCount + dstIdx] = Float(ptr[srcIdx + 1]) / 255.0    // G
+            floats[2 * pixelCount + dstIdx] = Float(ptr[srcIdx + 2]) / 255.0 // B
+        }
     }
 
     // Vision encoder expects float32 input (patchify casts to weight dtype internally)
