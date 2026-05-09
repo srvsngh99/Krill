@@ -53,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0, help="Sampling seed passed to both engines.")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature passed to both engines.")
     parser.add_argument("--top-p", type=float, default=1.0, help="Top-p passed to both engines.")
+    parser.add_argument("--krillm-url", help="KrillLM server URL (e.g. http://127.0.0.1:11435). When set, benchmarks against a running KrillLM server instead of CLI subprocess.")
     parser.add_argument("--ollama-host", default="http://127.0.0.1:11434", help="Ollama API host.")
     parser.add_argument("--timeout", type=float, default=600.0, help="Per-run timeout in seconds.")
     parser.add_argument(
@@ -291,6 +292,78 @@ def run_ollama(args: argparse.Namespace, prompt: str, measured: bool) -> Optiona
     }
 
 
+def krillm_server_payload(args: argparse.Namespace, prompt: str, stream: bool) -> dict[str, Any]:
+    return {
+        "model": args.krill_model,
+        "prompt": prompt,
+        "stream": stream,
+        "options": {
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "seed": args.seed,
+            "num_predict": args.max_tokens,
+        },
+    }
+
+
+def run_krillm_server(args: argparse.Namespace, prompt: str, measured: bool) -> Optional[dict[str, Any]]:
+    """Run a benchmark request against a persistent KrillLM server."""
+    payload = krillm_server_payload(args, prompt, stream=measured)
+    data = json.dumps(payload).encode("utf-8")
+    url = args.krillm_url.rstrip("/") + "/api/generate"
+    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    start = time.perf_counter()
+    try:
+        with urllib.request.urlopen(request, timeout=args.timeout) as response:
+            if not measured:
+                response.read()
+                return None
+            first_token_s: Optional[float] = None
+            chunks: list[str] = []
+            final: Optional[dict[str, Any]] = None
+            for raw_line in response:
+                if not raw_line.strip():
+                    continue
+                event = json.loads(raw_line)
+                text = event.get("response") or ""
+                if text and first_token_s is None:
+                    first_token_s = time.perf_counter() - start
+                chunks.append(text)
+                if event.get("done"):
+                    final = event
+            wall_s = time.perf_counter() - start
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"KrillLM server request failed: {exc}") from exc
+
+    if final is None:
+        raise RuntimeError("KrillLM server stream ended without final stats")
+
+    prompt_eval_count = int(final.get("prompt_eval_count") or 0)
+    eval_count = int(final.get("eval_count") or 0)
+    prompt_eval_duration_s = int(final.get("prompt_eval_duration") or 0) / 1_000_000_000
+    eval_duration_s = int(final.get("eval_duration") or 0) / 1_000_000_000
+    generated_text = "".join(chunks)
+    result: dict[str, Any] = {
+        "api": url,
+        "payload": payload,
+        "prompt_tokens": prompt_eval_count,
+        "generated_tokens": eval_count,
+        "prefill_tokens_per_second": prompt_eval_count / prompt_eval_duration_s if prompt_eval_duration_s > 0 else None,
+        "decode_tokens_per_second": eval_count / eval_duration_s if eval_duration_s > 0 else None,
+        "ttft_ms_wall": first_token_s * 1000 if first_token_s is not None else None,
+        "prompt_eval_ms": prompt_eval_duration_s * 1000,
+        "total_s": int(final.get("total_duration") or 0) / 1_000_000_000,
+        "wall_time_s": wall_s,
+        "output_sha256": sha256_text(generated_text),
+        "mode": "server",
+    }
+    # Include server-side TTFT if available
+    ttft_ns = final.get("ttft_ns")
+    if ttft_ns is not None:
+        result["ttft_ms_server"] = int(ttft_ns) / 1_000_000
+    return result
+
+
 def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
     keys = [
         "prompt_tokens",
@@ -333,7 +406,8 @@ def main() -> int:
         return 2
 
     prompt = prompt_text(args)
-    krillm_bin = find_krillm_binary(args.krillm_bin)
+    use_server = bool(args.krillm_url)
+    krillm_bin = None if use_server else find_krillm_binary(args.krillm_bin)
     report: dict[str, Any] = {
         "status": "pending",
         "benchmark": {
@@ -353,16 +427,42 @@ def main() -> int:
         "results": {},
     }
 
+    if use_server:
+        report["benchmark"]["krillm_url"] = args.krillm_url
+        report["benchmark"]["mode"] = "server"
+
     skips: list[str] = []
     failures: list[str] = []
 
-    if krillm_bin is None:
-        skips.append("KrillLM binary not found; run `make release` or pass `--krillm-bin`")
+    if use_server:
+        # Server mode: verify KrillLM server is reachable
+        health_url = args.krillm_url.rstrip("/") + "/healthz"
+        try:
+            req = urllib.request.Request(health_url)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                health = json.loads(resp.read())
+            report["preflight"]["krillm"] = {
+                "ok": True,
+                "mode": "server",
+                "url": args.krillm_url,
+                "health": health,
+            }
+        except Exception as exc:
+            skips.append(f"KrillLM server not reachable at {args.krillm_url}: {exc}")
+            report["preflight"]["krillm"] = {
+                "ok": False,
+                "mode": "server",
+                "url": args.krillm_url,
+                "error": str(exc),
+            }
     else:
-        ok, reason, detail = krillm_model_ok(krillm_bin, args.krill_model)
-        report["preflight"]["krillm"] = {"ok": ok, "binary": krillm_bin, "detail": detail}
-        if not ok and reason:
-            skips.append(reason)
+        if krillm_bin is None:
+            skips.append("KrillLM binary not found; run `make release` or pass `--krillm-bin`")
+        else:
+            ok, reason, detail = krillm_model_ok(krillm_bin, args.krill_model)
+            report["preflight"]["krillm"] = {"ok": ok, "binary": krillm_bin, "detail": detail}
+            if not ok and reason:
+                skips.append(reason)
 
     ok, is_skip, reason, detail = ollama_model_ok(args.ollama_bin, args.ollama_model, args.timeout)
     report["preflight"]["ollama"] = {"ok": ok, "binary": args.ollama_bin, "detail": detail}
@@ -385,12 +485,21 @@ def main() -> int:
         return 1 if failures else SKIP_EXIT_CODE
 
     try:
-        assert krillm_bin is not None
-        for _ in range(args.warmup):
-            run_krillm(args, krillm_bin, prompt, measured=False)
-            run_ollama(args, prompt, measured=False)
+        if use_server:
+            # Server mode: warm server is already running, just do warmup requests
+            for _ in range(args.warmup):
+                run_krillm_server(args, prompt, measured=False)
+                run_ollama(args, prompt, measured=False)
 
-        krillm_runs = [run_krillm(args, krillm_bin, prompt, measured=True) for _ in range(args.runs)]
+            krillm_runs = [run_krillm_server(args, prompt, measured=True) for _ in range(args.runs)]
+        else:
+            assert krillm_bin is not None
+            for _ in range(args.warmup):
+                run_krillm(args, krillm_bin, prompt, measured=False)
+                run_ollama(args, prompt, measured=False)
+
+            krillm_runs = [run_krillm(args, krillm_bin, prompt, measured=True) for _ in range(args.runs)]
+
         ollama_runs = [run_ollama(args, prompt, measured=True) for _ in range(args.runs)]
     except Exception as exc:
         report["status"] = "failed"

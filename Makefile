@@ -22,7 +22,7 @@ GEMMA4_BENCH_WARMUP ?= 1
 KRILLM_PYTHON ?= $(HOME)/.krillm/venv/bin/python3
 KRILLM_VENV_PYTHON ?= python3
 
-.PHONY: build release install uninstall clean test bench bench-compare bench-gemma4-multimodal setup-mlx-vlm metallib dist version
+.PHONY: build release install uninstall clean test bench bench-compare bench-gemma4-multimodal bench-release-gate setup-mlx-vlm metallib dist version
 
 # Debug build (default)
 build:
@@ -110,17 +110,32 @@ bench:
 	fi
 	$(BUILD_DIR)/$(BINARY_NAME) bench $(MODEL) --runs 3
 
+KRILLM_URL ?=
+
 # Reproducible local comparison against Ollama. Exits 77 when prerequisites are missing.
+# Use KRILLM_URL to benchmark against a running KrillLM server (warm-server mode).
 bench-compare:
-	python3 tools/krillm_vs_ollama_benchmark.py \
-		--krillm-bin $(BUILD_DIR)/$(BINARY_NAME) \
-		--krill-model "$(KRILL_MODEL)" \
-		--ollama-model "$(OLLAMA_MODEL)" \
-		--prompt "$(BENCH_PROMPT)" \
-		--max-tokens $(BENCH_MAX_TOKENS) \
-		--runs $(BENCH_RUNS) \
-		--warmup $(BENCH_WARMUP) \
-		--output "$(BENCH_OUTPUT)"
+	@if [ -n "$(KRILLM_URL)" ]; then \
+		python3 tools/krillm_vs_ollama_benchmark.py \
+			--krillm-url "$(KRILLM_URL)" \
+			--krill-model "$(KRILL_MODEL)" \
+			--ollama-model "$(OLLAMA_MODEL)" \
+			--prompt "$(BENCH_PROMPT)" \
+			--max-tokens $(BENCH_MAX_TOKENS) \
+			--runs $(BENCH_RUNS) \
+			--warmup $(BENCH_WARMUP) \
+			--output "$(BENCH_OUTPUT)"; \
+	else \
+		python3 tools/krillm_vs_ollama_benchmark.py \
+			--krillm-bin $(BUILD_DIR)/$(BINARY_NAME) \
+			--krill-model "$(KRILL_MODEL)" \
+			--ollama-model "$(OLLAMA_MODEL)" \
+			--prompt "$(BENCH_PROMPT)" \
+			--max-tokens $(BENCH_MAX_TOKENS) \
+			--runs $(BENCH_RUNS) \
+			--warmup $(BENCH_WARMUP) \
+			--output "$(BENCH_OUTPUT)"; \
+	fi
 
 # Gemma 4 text/image/audio comparison against Ollama. Runs modalities separately.
 bench-gemma4-multimodal:
@@ -130,6 +145,29 @@ bench-gemma4-multimodal:
 		--runs $(GEMMA4_BENCH_RUNS) \
 		--warmup $(GEMMA4_BENCH_WARMUP) \
 		--output "$(GEMMA4_BENCH_OUTPUT)"
+
+GATE_REPORT ?= .build/benchmarks/release-gate.json
+GATE_ALLOW_FLAGS ?=
+
+# Release benchmark gate. Evaluates benchmark reports against performance thresholds.
+# Usage:
+#   make bench-release-gate                                  # uses default multimodal report
+#   make bench-release-gate GATE_INPUT=path/to/report.json   # custom combined report
+#   make bench-release-gate GATE_KRILLM=k.json GATE_OLLAMA=o.json  # sequential comparison
+#   make bench-release-gate GATE_ALLOW_FLAGS="--allow-dtype-mismatch"
+bench-release-gate:
+	@if [ -n "$(GATE_KRILLM)" ] && [ -n "$(GATE_OLLAMA)" ]; then \
+		python3 tools/release_gate.py \
+			--krillm-report "$(GATE_KRILLM)" \
+			--ollama-report "$(GATE_OLLAMA)" \
+			--output "$(GATE_REPORT)" \
+			$(GATE_ALLOW_FLAGS); \
+	else \
+		python3 tools/release_gate.py \
+			"$${GATE_INPUT:-$(GEMMA4_BENCH_OUTPUT)}" \
+			--output "$(GATE_REPORT)" \
+			$(GATE_ALLOW_FLAGS); \
+	fi
 
 # Install the Python bridge used by Gemma 4 image/audio support.
 setup-mlx-vlm:

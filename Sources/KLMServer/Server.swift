@@ -474,22 +474,58 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let eng = engine
         let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
 
+        let requestStart = CFAbsoluteTimeGetCurrent()
+
         if request.stream {
             context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
         }
 
         Task {
-            let (tokenStream, _) = eng.generate(
+            let (tokenStream, getStats) = eng.generate(
                 messages: request.messages,
                 params: request.sampling.samplingParams,
                 maxTokens: request.maxTokens)
 
             if request.stream {
+                var firstTokenTime: Double?
+                var generatedCount = 0
                 for await event in tokenStream {
+                    if !event.isEnd && firstTokenTime == nil {
+                        firstTokenTime = CFAbsoluteTimeGetCurrent()
+                    }
+                    if !event.isEnd { generatedCount += 1 }
+
+                    if event.isEnd {
+                        let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
+                        let stats = getStats()
+                        let prefillNs = Int64((stats?.prefillTime ?? 0) * 1_000_000_000)
+                        let decodeNs = Int64((stats?.decodeTime ?? 0) * 1_000_000_000)
+                        let promptTokens = stats?.promptTokens ?? 0
+                        var finalChunk: [String: Any] = [
+                            "model": modelName,
+                            "message": ["role": "assistant", "content": ""],
+                            "done": true,
+                            "total_duration": totalNs,
+                            "prompt_eval_count": promptTokens,
+                            "prompt_eval_duration": prefillNs,
+                            "eval_count": generatedCount,
+                            "eval_duration": decodeNs,
+                        ]
+                        if let ftt = firstTokenTime {
+                            finalChunk["ttft_ns"] = Int64((ftt - requestStart) * 1_000_000_000)
+                        }
+                        let data = try! JSONSerialization.data(withJSONObject: finalChunk)
+                        var buf = ctx.channel.allocator.buffer(capacity: data.count + 1)
+                        buf.writeBytes(data)
+                        buf.writeString("\n")
+                        self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
+                        break
+                    }
+
                     let chunk: [String: Any] = [
                         "model": modelName,
                         "message": ["role": "assistant", "content": event.text],
-                        "done": event.isEnd
+                        "done": false
                     ]
                     let data = try! JSONSerialization.data(withJSONObject: chunk)
                     var buf = ctx.channel.allocator.buffer(capacity: data.count + 1)
@@ -497,7 +533,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     buf.writeString("\n")
                     // Fix 4: dispatch writes onto the event loop.
                     self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
-                    if event.isEnd { break }
                 }
                 self.writeOnLoop(ctx, .end(nil), flush: true)
             } else {
@@ -506,10 +541,20 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     if event.isEnd { break }
                     fullContent += event.text
                 }
+
+                let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
+                let stats = getStats()
+                let prefillNs = Int64((stats?.prefillTime ?? 0) * 1_000_000_000)
+                let decodeNs = Int64((stats?.decodeTime ?? 0) * 1_000_000_000)
                 let response: [String: Any] = [
                     "model": modelName,
                     "message": ["role": "assistant", "content": fullContent],
-                    "done": true
+                    "done": true,
+                    "total_duration": totalNs,
+                    "prompt_eval_count": stats?.promptTokens ?? 0,
+                    "prompt_eval_duration": prefillNs,
+                    "eval_count": stats?.generatedTokens ?? 0,
+                    "eval_duration": decodeNs,
                 ]
                 self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
             }
@@ -558,26 +603,62 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
         }
 
+        let requestStart = CFAbsoluteTimeGetCurrent()
+
         Task {
-            let (tokenStream, _) = eng.generate(
+            let (tokenStream, getStats) = eng.generate(
                 prompt: request.prompt,
                 systemPrompt: request.system,
                 params: request.sampling.samplingParams,
                 maxTokens: request.maxTokens)
 
             if request.stream {
+                var firstTokenTime: Double?
+                var generatedCount = 0
                 for await event in tokenStream {
+                    if !event.isEnd && firstTokenTime == nil {
+                        firstTokenTime = CFAbsoluteTimeGetCurrent()
+                    }
+                    if !event.isEnd { generatedCount += 1 }
+
+                    if event.isEnd {
+                        // Final chunk with Ollama-compatible timing fields
+                        let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
+                        let stats = getStats()
+                        let prefillNs = Int64((stats?.prefillTime ?? 0) * 1_000_000_000)
+                        let decodeNs = Int64((stats?.decodeTime ?? 0) * 1_000_000_000)
+                        let promptTokens = stats?.promptTokens ?? 0
+                        var finalChunk: [String: Any] = [
+                            "model": modelName,
+                            "response": "",
+                            "done": true,
+                            "total_duration": totalNs,
+                            "prompt_eval_count": promptTokens,
+                            "prompt_eval_duration": prefillNs,
+                            "eval_count": generatedCount,
+                            "eval_duration": decodeNs,
+                        ]
+                        if let ftt = firstTokenTime {
+                            finalChunk["ttft_ns"] = Int64((ftt - requestStart) * 1_000_000_000)
+                        }
+                        let data = try! JSONSerialization.data(withJSONObject: finalChunk)
+                        var buf = ctx.channel.allocator.buffer(capacity: data.count + 1)
+                        buf.writeBytes(data)
+                        buf.writeString("\n")
+                        self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
+                        break
+                    }
+
                     let chunk: [String: Any] = [
                         "model": modelName,
                         "response": event.text,
-                        "done": event.isEnd
+                        "done": false
                     ]
                     let data = try! JSONSerialization.data(withJSONObject: chunk)
                     var buf = ctx.channel.allocator.buffer(capacity: data.count + 1)
                     buf.writeBytes(data)
                     buf.writeString("\n")
                     self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
-                    if event.isEnd { break }
                 }
                 self.writeOnLoop(ctx, .end(nil), flush: true)
             } else {
@@ -587,10 +668,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     fullResponse += event.text
                 }
 
+                let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
+                let stats = getStats()
+                let prefillNs = Int64((stats?.prefillTime ?? 0) * 1_000_000_000)
+                let decodeNs = Int64((stats?.decodeTime ?? 0) * 1_000_000_000)
                 let response: [String: Any] = [
                     "model": modelName,
                     "response": fullResponse,
-                    "done": true
+                    "done": true,
+                    "total_duration": totalNs,
+                    "prompt_eval_count": stats?.promptTokens ?? 0,
+                    "prompt_eval_duration": prefillNs,
+                    "eval_count": stats?.generatedTokens ?? 0,
+                    "eval_duration": decodeNs,
                 ]
                 self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
             }
