@@ -352,11 +352,41 @@ class Gemma4TextModel: Module {
 
     let config: Gemma4Config
 
+    // Pre-computed scalar constants (avoids per-call allocation)
+    let embedScale: MLXArray
+    let pleScale: MLXArray
+    let projScale: MLXArray
+    let combineScale: MLXArray
+
+    // KV sharing: donor layer indices (computed once at init)
+    let lastSlidingDonor: Int
+    let lastFullDonor: Int
+
     init(_ config: Gemma4Config) {
         self.config = config
         let dim = config.hiddenSize
         let pleDim = config.hiddenSizePerLayerInput
         let pleTotal = config.numHiddenLayers * pleDim
+
+        // Pre-compute BF16 scalars
+        self.embedScale = MLXArray(Float(dim).squareRoot()).asType(.bfloat16)
+        self.pleScale = MLXArray(Float(pleDim).squareRoot()).asType(.bfloat16)
+        self.projScale = MLXArray(1.0 / Float(dim).squareRoot()).asType(.bfloat16)
+        self.combineScale = MLXArray(Float(0.7071067811865476)).asType(.bfloat16)
+
+        // Pre-compute KV sharing donor indices
+        let firstShared = config.firstKVSharedLayer
+        var slidingDonor = 0
+        var fullDonor = 0
+        for i in 0 ..< firstShared {
+            if config.isFullAttention(layerIdx: i) {
+                fullDonor = i
+            } else {
+                slidingDonor = i
+            }
+        }
+        self.lastSlidingDonor = slidingDonor
+        self.lastFullDonor = fullDonor
 
         _embedTokens = ModuleInfo(
             wrappedValue: Embedding(embeddingCount: config.vocabSize, dimensions: dim),
@@ -398,8 +428,6 @@ class Gemma4TextModel: Module {
         let pleDim = config.hiddenSizePerLayerInput
 
         // Main embeddings (scaled by sqrt(hidden_size))
-        // CRITICAL: scalars must be BF16 to avoid promoting quantized matmuls to float32
-        let embedScale = MLXArray(Float(config.hiddenSize).squareRoot()).asType(.bfloat16)
         var h = embedTokens(tokens) * embedScale
 
         // Inject multimodal embeddings at placeholder token positions
@@ -411,43 +439,44 @@ class Gemma4TextModel: Module {
         }
 
         // PLE: compute per-layer inputs
-        let pleScale = MLXArray(Float(pleDim).squareRoot()).asType(.bfloat16)
         let pleEmbed = embedPerLayer(tokens) * pleScale
-
-        let projScale = MLXArray(1.0 / Float(config.hiddenSize).squareRoot()).asType(.bfloat16)
         let projection = perLayerProj(h) * projScale
         let projNormed = perLayerNorm(projection.reshaped(B * L * numLayers, pleDim))
             .reshaped(B, L, numLayers * pleDim)
-
-        let combineScale = MLXArray(Float(0.7071067811865476)).asType(.bfloat16)
         let combinedPLE = (projNormed + pleEmbed) * combineScale
+
+        // Evaluate embedding and PLE computation before entering layer loop.
+        // This flushes the graph so each layer starts with materialized inputs,
+        // preventing quadratic graph growth during prefill.
+        if L > 1 {
+            MLX.eval(h, combinedPLE)
+        }
 
         // Causal mask
         let mask: MLXArray? = L > 1 ? createAdditiveCausalMask(L, dtype: .bfloat16) : nil
 
-        // KV sharing: find the donor cache indices for shared layers.
-        // Layers 0..<firstKVSharedLayer have their own caches.
-        // Layers firstKVSharedLayer..< numLayers reuse KV from earlier donor layers.
-        // Donor for sliding: last non-shared sliding layer
-        // Donor for full: last non-shared full layer
+        // KV sharing donor indices (pre-computed at init)
         let firstShared = config.firstKVSharedLayer
-        var lastSlidingDonor = 0
-        var lastFullDonor = 0
-        for i in 0 ..< firstShared {
-            if config.isFullAttention(layerIdx: i) {
-                lastFullDonor = i
-            } else {
-                lastSlidingDonor = i
-            }
-        }
 
-        // Forward through layers
-        // For simplicity in v1: all layers compute their own K/V and use their own cache.
-        // Full KV sharing optimization (sharing caches between layers 15-34 and donors)
-        // deferred to v2 for correctness-first approach.
+        // Forward through layers with KV sharing for layers >= firstShared.
+        // Shared layers pass the donor's cache as sharedCache so attention sees
+        // the same context as the donor layer, reducing redundant KV storage.
         for (i, layer) in layers.enumerated() {
             let pleSlice = combinedPLE[0..., 0..., (i * pleDim) ..< ((i + 1) * pleDim)]
-            h = layer(h, mask: mask, cache: caches?[i], perLayerInput: pleSlice)
+
+            if i >= firstShared, let caches {
+                // KV-shared layer: pass donor cache
+                let donorIdx = config.isFullAttention(layerIdx: i) ? lastFullDonor : lastSlidingDonor
+                h = layer(h, mask: mask, cache: caches[i],
+                         sharedCache: caches[donorIdx], perLayerInput: pleSlice)
+            } else {
+                h = layer(h, mask: mask, cache: caches?[i], perLayerInput: pleSlice)
+            }
+
+            // Evaluate every 5 layers during prefill to bound graph size
+            if L > 1 && (i + 1) % 5 == 0 {
+                MLX.eval(h)
+            }
         }
 
         return norm(h)
