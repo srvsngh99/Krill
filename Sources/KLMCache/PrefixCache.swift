@@ -24,7 +24,7 @@ public final class PrefixCache: @unchecked Sendable {
     public init(
         cacheDir: URL? = nil,
         maxMemoryEntries: Int = 8,
-        minPrefixLength: Int = 32
+        minPrefixLength: Int = 8
     ) {
         let dir = cacheDir ?? PrefixCache.defaultCacheDir()
         self.cacheDir = dir

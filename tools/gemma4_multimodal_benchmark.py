@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audio-max-tokens", type=int, default=24)
     parser.add_argument("--image", help="Optional image asset path.")
     parser.add_argument("--audio", help="Optional audio asset path.")
+    parser.add_argument("--krillm-url", help="KrillLM server URL for native-path benchmarking (e.g. http://127.0.0.1:11435).")
     parser.add_argument("--timeout", type=float, default=600.0)
     return parser.parse_args()
 
@@ -245,6 +246,76 @@ def run_krill_task(
     }
 
 
+def run_krill_server_task(
+    args: argparse.Namespace,
+    task: dict[str, Any],
+    measured: bool,
+) -> Optional[dict[str, Any]]:
+    """Run a benchmark request against a persistent KrillLM server using /api/generate."""
+    prompt = task["prompt"]
+    media_prefix = ""
+    if task.get("image"):
+        media_prefix += "<|image|>"
+    if task.get("audio"):
+        media_prefix += "<|audio|>"
+
+    payload: dict[str, Any] = {
+        "model": "gemma-4-e2b",
+        "prompt": media_prefix + prompt,
+        "stream": True,
+        "options": {
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "seed": args.seed,
+            "num_predict": task["max_tokens"],
+        },
+    }
+    url = args.krillm_url.rstrip("/") + "/api/generate"
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    start = time.perf_counter()
+    first_token_s: Optional[float] = None
+    chunks: list[str] = []
+    final: Optional[dict[str, Any]] = None
+    with urllib.request.urlopen(request, timeout=args.timeout) as response:
+        for raw_line in response:
+            if not raw_line.strip():
+                continue
+            event = json.loads(raw_line)
+            content = event.get("response") or ""
+            if content and first_token_s is None:
+                first_token_s = time.perf_counter() - start
+            chunks.append(content)
+            if event.get("done"):
+                final = event
+    wall_s = time.perf_counter() - start
+    if final is None:
+        raise RuntimeError("KrillLM server stream ended without final stats")
+    if not measured:
+        return None
+
+    prompt_eval_s = int(final.get("prompt_eval_duration") or 0) / 1_000_000_000
+    eval_s = int(final.get("eval_duration") or 0) / 1_000_000_000
+    prompt_tokens = int(final.get("prompt_eval_count") or 0)
+    generated_tokens = int(final.get("eval_count") or 0)
+    text = "".join(chunks)
+    return {
+        "wall_time_s": wall_s,
+        "total_s": int(final.get("total_duration") or 0) / 1_000_000_000,
+        "ttft_ms_wall": first_token_s * 1000 if first_token_s is not None else None,
+        "prompt_tokens": prompt_tokens,
+        "generated_tokens": generated_tokens,
+        "prefill_tokens_per_second": prompt_tokens / prompt_eval_s if prompt_eval_s > 0 else None,
+        "decode_tokens_per_second": generated_tokens / eval_s if eval_s > 0 else None,
+        "output_sha256": sha256_text(text),
+        "output_preview": text[:160],
+        "mode": "server",
+    }
+
+
 def ollama_chat_payload(args: argparse.Namespace, task: dict[str, Any], stream: bool) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "user", "content": task["prompt"]}
     media_path = task.get("image") or task.get("audio")
@@ -386,22 +457,35 @@ def main() -> int:
 
     include_krillm = args.engine in ("both", "krillm")
     include_ollama = args.engine in ("both", "ollama")
+    use_server = bool(getattr(args, "krillm_url", None))
     krill_quant = krill_quantization(args.krill_model) if include_krillm else None
     ollama_quant = ollama_show(args.ollama_bin, args.ollama_model, args.timeout) if include_ollama else None
 
     model = None
     processor = None
     krill_load_s = None
-    if include_krillm:
+    if include_krillm and not use_server:
         load_start = time.perf_counter()
         model, processor = load(args.krill_model)
         krill_load_s = time.perf_counter() - load_start
+    elif include_krillm and use_server:
+        # Verify server is reachable
+        try:
+            health_req = urllib.request.Request(args.krillm_url.rstrip("/") + "/healthz")
+            with urllib.request.urlopen(health_req, timeout=10) as resp:
+                health = json.loads(resp.read())
+            print(f"KrillLM server: {health.get('status')} (model: {health.get('model')})")
+        except Exception as exc:
+            raise SystemExit(f"KrillLM server not reachable at {args.krillm_url}: {exc}")
 
     results: dict[str, Any] = {}
     for task in tasks:
         for _ in range(args.warmup):
             if include_krillm:
-                run_krill_task(model, processor, task, args.temperature, args.top_p, measured=False)
+                if use_server:
+                    run_krill_server_task(args, task, measured=False)
+                else:
+                    run_krill_task(model, processor, task, args.temperature, args.top_p, measured=False)
             if include_ollama:
                 run_ollama_task(args, task, measured=False)
 
@@ -411,10 +495,16 @@ def main() -> int:
             "media": {k: task[k] for k in ("image", "audio") if k in task},
         }
         if include_krillm:
-            krill_runs = [
-                run_krill_task(model, processor, task, args.temperature, args.top_p, measured=True)
-                for _ in range(args.runs)
-            ]
+            if use_server:
+                krill_runs = [
+                    run_krill_server_task(args, task, measured=True)
+                    for _ in range(args.runs)
+                ]
+            else:
+                krill_runs = [
+                    run_krill_task(model, processor, task, args.temperature, args.top_p, measured=True)
+                    for _ in range(args.runs)
+                ]
             task_results["krillm"] = {"runs": krill_runs, "summary": summarize([run for run in krill_runs if run])}
         if include_ollama:
             ollama_runs = [run_ollama_task(args, task, measured=True) for _ in range(args.runs)]
@@ -427,6 +517,8 @@ def main() -> int:
             "krill_model": args.krill_model,
             "ollama_model": args.ollama_model,
             "engine": args.engine,
+            "krillm_mode": "server" if use_server else "mlx-vlm",
+            "krillm_url": args.krillm_url if use_server else None,
             "runs": args.runs,
             "warmup": args.warmup,
             "temperature": args.temperature,

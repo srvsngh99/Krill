@@ -522,15 +522,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         break
                     }
 
-                    let chunk: [String: Any] = [
-                        "model": modelName,
-                        "message": ["role": "assistant", "content": event.text],
-                        "done": false
-                    ]
-                    let data = try! JSONSerialization.data(withJSONObject: chunk)
-                    var buf = ctx.channel.allocator.buffer(capacity: data.count + 1)
-                    buf.writeBytes(data)
-                    buf.writeString("\n")
+                    // Fast path: build JSON string directly instead of JSONSerialization
+                    let escaped = escapeJSON(event.text)
+                    let line = "{\"model\":\"\(modelName)\",\"message\":{\"role\":\"assistant\",\"content\":\"\(escaped)\"},\"done\":false}\n"
+                    var buf = ctx.channel.allocator.buffer(capacity: line.utf8.count)
+                    buf.writeString(line)
                     // Fix 4: dispatch writes onto the event loop.
                     self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
                 }
@@ -649,15 +645,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         break
                     }
 
-                    let chunk: [String: Any] = [
-                        "model": modelName,
-                        "response": event.text,
-                        "done": false
-                    ]
-                    let data = try! JSONSerialization.data(withJSONObject: chunk)
-                    var buf = ctx.channel.allocator.buffer(capacity: data.count + 1)
-                    buf.writeBytes(data)
-                    buf.writeString("\n")
+                    // Fast path: build JSON string directly instead of JSONSerialization
+                    let escaped = escapeJSON(event.text)
+                    let line = "{\"model\":\"\(modelName)\",\"response\":\"\(escaped)\",\"done\":false}\n"
+                    var buf = ctx.channel.allocator.buffer(capacity: line.utf8.count)
+                    buf.writeString(line)
                     self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
                 }
                 self.writeOnLoop(ctx, .end(nil), flush: true)
@@ -887,4 +879,27 @@ private func sseChunk(id: String, content: String?, finishReason: String?) -> St
         return ""
     }
     return "data: \(json)\n\n"
+}
+
+/// Escape a string for safe embedding inside a JSON string value.
+/// Handles backslash, double-quote, and control characters.
+private func escapeJSON(_ s: String) -> String {
+    var result = ""
+    result.reserveCapacity(s.utf8.count)
+    for c in s {
+        switch c {
+        case "\"": result += "\\\""
+        case "\\": result += "\\\\"
+        case "\n": result += "\\n"
+        case "\r": result += "\\r"
+        case "\t": result += "\\t"
+        default:
+            if c.asciiValue != nil && c.asciiValue! < 0x20 {
+                result += String(format: "\\u%04x", c.asciiValue!)
+            } else {
+                result.append(c)
+            }
+        }
+    }
+    return result
 }

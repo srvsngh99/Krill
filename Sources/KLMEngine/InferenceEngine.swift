@@ -268,7 +268,7 @@ public final class InferenceEngine: @unchecked Sendable {
                 // forwarded). On the next request with the same prefix, the
                 // restored KV will cover all prompt tokens, and the "full cache
                 // hit" path above trims the last token and re-forwards it.
-                if usePrefixCache && !cacheHit && promptTokens.count >= 32 {
+                if usePrefixCache && !cacheHit && promptTokens.count >= 8 {
                     var snapshotKeys: [[MLXArray]] = []
                     var snapshotValues: [[MLXArray]] = []
                     for cache in caches {
