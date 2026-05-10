@@ -205,6 +205,10 @@ public let draftPairs: [String: String] = [
     "qwen2.5-14b": "qwen2.5-1.5b",
     "qwen2.5-3b": "qwen2.5-0.5b",
     "gemma-2-9b": "gemma-2-2b",
+    // Gemma 4: use Gemma 2 2B as drafter (compatible vocab, smaller architecture)
+    "gemma-4-e4b": "gemma-2-2b",
+    "gemma-4-12b": "gemma-2-2b",
+    "gemma-4-27b": "gemma-2-2b",
 ]
 
 /// Find the recommended draft model for a given target.

@@ -119,10 +119,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         switch (head.method, path) {
         // OpenAI endpoints
         case (.POST, "/v1/chat/completions"):
-            guard requireModel(context: context) else { return }
             handleChatCompletions(context: context, body: body)
         case (.POST, "/v1/completions"):
-            guard requireModel(context: context) else { return }
             handleCompletions(context: context, body: body)
         case (.GET, "/v1/models"):
             handleModels(context: context)
@@ -139,10 +137,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         // Ollama endpoints
         case (.POST, "/api/chat"):
-            guard requireModel(context: context) else { return }
             handleOllamaChat(context: context, body: body)
         case (.POST, "/api/generate"):
-            guard requireModel(context: context) else { return }
             handleOllamaGenerate(context: context, body: body)
         case (.GET, "/api/tags"):
             handleOllamaTags(context: context)
@@ -187,7 +183,16 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        let request = ServerParsing.openAIChatRequest(from: json)
+        let request: ServerChatRequest
+        do {
+            request = try ServerParsing.openAIChatRequest(from: json)
+        } catch let error as ServerRequestError {
+            sendJSON(context: context, status: .badRequest, body: ["error": error.message])
+            return
+        } catch {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid request"])
+            return
+        }
 
         // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
         if let requestedModel = request.requestedModel,
@@ -198,6 +203,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             ])
             return
         }
+
+        guard requireModel(context: context) else { return }
 
         guard !request.messages.isEmpty else {
             sendJSON(context: context, status: .badRequest, body: ["error": "No valid messages"])
@@ -299,9 +306,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "total_tokens": (stats?.promptTokens ?? 0) + (stats?.generatedTokens ?? 0)
                 ]
             ]
-            eventLoop.execute {
-                self.sendJSON(context: ctx, status: .ok, body: response)
-            }
+            self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
         }
     }
 
@@ -313,10 +318,27 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        let prompt = json["prompt"] as? String ?? ""
-        let maxTokens = json["max_tokens"] as? Int ?? 256
-        let temperature = json["temperature"] as? Double ?? 0.0
-        let params = SamplingParams(temperature: Float(temperature))
+        let request: ServerCompletionRequest
+        do {
+            request = try ServerParsing.openAICompletionRequest(from: json)
+        } catch let error as ServerRequestError {
+            sendJSON(context: context, status: .badRequest, body: ["error": error.message])
+            return
+        } catch {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid request"])
+            return
+        }
+
+        if let requestedModel = request.requestedModel,
+           let loadedModel = engine.modelName,
+           requestedModel != loadedModel {
+            sendJSON(context: context, status: .badRequest, body: [
+                "error": "Requested model '\(requestedModel)' is not loaded. Currently loaded: '\(loadedModel)'."
+            ])
+            return
+        }
+
+        guard requireModel(context: context) else { return }
 
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
@@ -324,7 +346,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             let (tokenStream, getStats) = eng.generate(
-                prompt: prompt, params: params, maxTokens: maxTokens)
+                prompt: request.prompt,
+                params: request.sampling.samplingParams,
+                maxTokens: request.maxTokens)
 
             var fullText = ""
             for await event in tokenStream {
@@ -348,9 +372,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "total_tokens": (stats?.promptTokens ?? 0) + (stats?.generatedTokens ?? 0)
                 ]
             ]
-            eventLoop.execute {
-                self.sendJSON(context: ctx, status: .ok, body: response)
-            }
+            self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
         }
     }
 
@@ -418,7 +440,16 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        let request = ServerParsing.ollamaChatRequest(from: json)
+        let request: ServerChatRequest
+        do {
+            request = try ServerParsing.ollamaChatRequest(from: json)
+        } catch let error as ServerRequestError {
+            sendJSON(context: context, status: .badRequest, body: ["error": error.message])
+            return
+        } catch {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid request"])
+            return
+        }
 
         // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
         if let requestedModel = request.requestedModel,
@@ -431,6 +462,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
+        guard requireModel(context: context) else { return }
+
         guard !request.messages.isEmpty else {
             sendJSON(context: context, status: .badRequest, body: ["error": "No valid messages"])
             return
@@ -441,30 +474,61 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let eng = engine
         let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
 
+        let requestStart = CFAbsoluteTimeGetCurrent()
+
         if request.stream {
             context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
         }
 
         Task {
-            let (tokenStream, _) = eng.generate(
+            let (tokenStream, getStats) = eng.generate(
                 messages: request.messages,
                 params: request.sampling.samplingParams,
                 maxTokens: request.maxTokens)
 
             if request.stream {
+                var firstTokenTime: Double?
+                var generatedCount = 0
                 for await event in tokenStream {
-                    let chunk: [String: Any] = [
-                        "model": modelName,
-                        "message": ["role": "assistant", "content": event.text],
-                        "done": event.isEnd
-                    ]
-                    let data = try! JSONSerialization.data(withJSONObject: chunk)
-                    var buf = ctx.channel.allocator.buffer(capacity: data.count + 1)
-                    buf.writeBytes(data)
-                    buf.writeString("\n")
+                    if !event.isEnd && firstTokenTime == nil {
+                        firstTokenTime = CFAbsoluteTimeGetCurrent()
+                    }
+                    if !event.isEnd { generatedCount += 1 }
+
+                    if event.isEnd {
+                        let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
+                        let stats = getStats()
+                        let prefillNs = Int64((stats?.prefillTime ?? 0) * 1_000_000_000)
+                        let decodeNs = Int64((stats?.decodeTime ?? 0) * 1_000_000_000)
+                        let promptTokens = stats?.promptTokens ?? 0
+                        var finalChunk: [String: Any] = [
+                            "model": modelName,
+                            "message": ["role": "assistant", "content": ""],
+                            "done": true,
+                            "total_duration": totalNs,
+                            "prompt_eval_count": promptTokens,
+                            "prompt_eval_duration": prefillNs,
+                            "eval_count": generatedCount,
+                            "eval_duration": decodeNs,
+                        ]
+                        if let ftt = firstTokenTime {
+                            finalChunk["ttft_ns"] = Int64((ftt - requestStart) * 1_000_000_000)
+                        }
+                        let data = try! JSONSerialization.data(withJSONObject: finalChunk)
+                        var buf = ctx.channel.allocator.buffer(capacity: data.count + 1)
+                        buf.writeBytes(data)
+                        buf.writeString("\n")
+                        self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
+                        break
+                    }
+
+                    // Fast path: build JSON string directly instead of JSONSerialization
+                    let escaped = escapeJSON(event.text)
+                    let line = "{\"model\":\"\(modelName)\",\"message\":{\"role\":\"assistant\",\"content\":\"\(escaped)\"},\"done\":false}\n"
+                    var buf = ctx.channel.allocator.buffer(capacity: line.utf8.count)
+                    buf.writeString(line)
                     // Fix 4: dispatch writes onto the event loop.
                     self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
-                    if event.isEnd { break }
                 }
                 self.writeOnLoop(ctx, .end(nil), flush: true)
             } else {
@@ -473,14 +537,22 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     if event.isEnd { break }
                     fullContent += event.text
                 }
+
+                let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
+                let stats = getStats()
+                let prefillNs = Int64((stats?.prefillTime ?? 0) * 1_000_000_000)
+                let decodeNs = Int64((stats?.decodeTime ?? 0) * 1_000_000_000)
                 let response: [String: Any] = [
                     "model": modelName,
                     "message": ["role": "assistant", "content": fullContent],
-                    "done": true
+                    "done": true,
+                    "total_duration": totalNs,
+                    "prompt_eval_count": stats?.promptTokens ?? 0,
+                    "prompt_eval_duration": prefillNs,
+                    "eval_count": stats?.generatedTokens ?? 0,
+                    "eval_duration": decodeNs,
                 ]
-                eventLoop.execute {
-                    self.sendJSON(context: ctx, status: .ok, body: response)
-                }
+                self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
             }
         }
     }
@@ -493,11 +565,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        let prompt = json["prompt"] as? String ?? ""
-        let system = json["system"] as? String
+        let request: ServerGenerateRequest
+        do {
+            request = try ServerParsing.ollamaGenerateRequest(from: json)
+        } catch let error as ServerRequestError {
+            sendJSON(context: context, status: .badRequest, body: ["error": error.message])
+            return
+        } catch {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid request"])
+            return
+        }
 
         // Fix 7: Model validation.
-        if let requestedModel = json["model"] as? String,
+        if let requestedModel = request.requestedModel,
            requestedModel != "unknown",
            let loadedModel = engine.modelName,
            requestedModel != loadedModel {
@@ -507,32 +587,94 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        let modelName = engine.modelName ?? json["model"] as? String ?? "unknown"
+        guard requireModel(context: context) else { return }
 
-        let params = ServerParsing.ollamaSamplingOptions(from: json).samplingParams
+        let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
 
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let eng = engine
 
+        if request.stream {
+            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
+        }
+
+        let requestStart = CFAbsoluteTimeGetCurrent()
+
         Task {
-            let (tokenStream, _) = eng.generate(
-                prompt: prompt, systemPrompt: system, params: params, maxTokens: 2048)
+            let (tokenStream, getStats) = eng.generate(
+                prompt: request.prompt,
+                systemPrompt: request.system,
+                params: request.sampling.samplingParams,
+                maxTokens: request.maxTokens)
 
-            var fullResponse = ""
-            for await event in tokenStream {
-                if event.isEnd { break }
-                fullResponse += event.text
-            }
+            if request.stream {
+                var firstTokenTime: Double?
+                var generatedCount = 0
+                for await event in tokenStream {
+                    if !event.isEnd && firstTokenTime == nil {
+                        firstTokenTime = CFAbsoluteTimeGetCurrent()
+                    }
+                    if !event.isEnd { generatedCount += 1 }
 
-            let response: [String: Any] = [
-                "model": modelName,
-                "response": fullResponse,
-                "done": true
-            ]
-            // Fix 4: dispatch write back onto the event loop.
-            eventLoop.execute {
-                self.sendJSON(context: ctx, status: .ok, body: response)
+                    if event.isEnd {
+                        // Final chunk with Ollama-compatible timing fields
+                        let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
+                        let stats = getStats()
+                        let prefillNs = Int64((stats?.prefillTime ?? 0) * 1_000_000_000)
+                        let decodeNs = Int64((stats?.decodeTime ?? 0) * 1_000_000_000)
+                        let promptTokens = stats?.promptTokens ?? 0
+                        var finalChunk: [String: Any] = [
+                            "model": modelName,
+                            "response": "",
+                            "done": true,
+                            "total_duration": totalNs,
+                            "prompt_eval_count": promptTokens,
+                            "prompt_eval_duration": prefillNs,
+                            "eval_count": generatedCount,
+                            "eval_duration": decodeNs,
+                        ]
+                        if let ftt = firstTokenTime {
+                            finalChunk["ttft_ns"] = Int64((ftt - requestStart) * 1_000_000_000)
+                        }
+                        let data = try! JSONSerialization.data(withJSONObject: finalChunk)
+                        var buf = ctx.channel.allocator.buffer(capacity: data.count + 1)
+                        buf.writeBytes(data)
+                        buf.writeString("\n")
+                        self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
+                        break
+                    }
+
+                    // Fast path: build JSON string directly instead of JSONSerialization
+                    let escaped = escapeJSON(event.text)
+                    let line = "{\"model\":\"\(modelName)\",\"response\":\"\(escaped)\",\"done\":false}\n"
+                    var buf = ctx.channel.allocator.buffer(capacity: line.utf8.count)
+                    buf.writeString(line)
+                    self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
+                }
+                self.writeOnLoop(ctx, .end(nil), flush: true)
+            } else {
+                var fullResponse = ""
+                for await event in tokenStream {
+                    if event.isEnd { break }
+                    fullResponse += event.text
+                }
+
+                let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
+                let stats = getStats()
+                let prefillNs = Int64((stats?.prefillTime ?? 0) * 1_000_000_000)
+                let decodeNs = Int64((stats?.decodeTime ?? 0) * 1_000_000_000)
+                let response: [String: Any] = [
+                    "model": modelName,
+                    "response": fullResponse,
+                    "done": true,
+                    "total_duration": totalNs,
+                    "prompt_eval_count": stats?.promptTokens ?? 0,
+                    "prompt_eval_duration": prefillNs,
+                    "eval_count": stats?.generatedTokens ?? 0,
+                    "eval_duration": decodeNs,
+                ]
+                self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
             }
         }
     }
@@ -659,11 +801,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 context.write(wrapOutboundOut(part), promise: nil)
             }
         } else {
+            nonisolated(unsafe) let ctx = context
             context.eventLoop.execute {
                 if flush {
-                    context.writeAndFlush(self.wrapOutboundOut(part), promise: nil)
+                    ctx.writeAndFlush(self.wrapOutboundOut(part), promise: nil)
                 } else {
-                    context.write(self.wrapOutboundOut(part), promise: nil)
+                    ctx.write(self.wrapOutboundOut(part), promise: nil)
                 }
             }
         }
@@ -678,7 +821,26 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             context.close(promise: nil)
             return
         }
+        sendJSONData(context: context, status: status, data: data)
+    }
 
+    private func sendJSONOnLoop(
+        context: ChannelHandlerContext,
+        eventLoop: EventLoop,
+        status: HTTPResponseStatus,
+        body: [String: Any]
+    ) {
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else {
+            writeOnLoop(context, .end(nil), flush: true)
+            return
+        }
+        nonisolated(unsafe) let ctx = context
+        eventLoop.execute {
+            self.sendJSONData(context: ctx, status: status, data: data)
+        }
+    }
+
+    private func sendJSONData(context: ChannelHandlerContext, status: HTTPResponseStatus, data: Data) {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
         headers.add(name: "Content-Length", value: "\(data.count)")
@@ -717,4 +879,27 @@ private func sseChunk(id: String, content: String?, finishReason: String?) -> St
         return ""
     }
     return "data: \(json)\n\n"
+}
+
+/// Escape a string for safe embedding inside a JSON string value.
+/// Handles backslash, double-quote, and control characters.
+private func escapeJSON(_ s: String) -> String {
+    var result = ""
+    result.reserveCapacity(s.utf8.count)
+    for c in s {
+        switch c {
+        case "\"": result += "\\\""
+        case "\\": result += "\\\\"
+        case "\n": result += "\\n"
+        case "\r": result += "\\r"
+        case "\t": result += "\\t"
+        default:
+            if c.asciiValue != nil && c.asciiValue! < 0x20 {
+                result += String(format: "\\u%04x", c.asciiValue!)
+            } else {
+                result.append(c)
+            }
+        }
+    }
+    return result
 }

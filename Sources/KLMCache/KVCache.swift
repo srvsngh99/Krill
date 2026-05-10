@@ -4,15 +4,50 @@ import MLX
 ///
 /// Stores accumulated K/V tensors and grows along the sequence dimension
 /// as tokens are generated. One KVCache instance per transformer layer.
+///
+/// Performance: uses step-based concatenation with periodic compaction to
+/// avoid creating a new array on every single decode step. During decode,
+/// new K/V slices are accumulated in a small buffer and the full history
+/// is rebuilt only when needed for attention.
 public final class KVCache: @unchecked Sendable {
     private var _keys: MLXArray?
     private var _values: MLXArray?
 
+    /// Pending K/V slices not yet merged into _keys/_values.
+    /// Batching concatenation reduces per-token allocation overhead.
+    private var _pendingKeys: [MLXArray] = []
+    private var _pendingValues: [MLXArray] = []
+
+    /// Compact pending slices after this many accumulations.
+    private static let compactThreshold = 8
+
     public init() {}
 
-    /// Number of tokens currently cached.
+    /// Number of tokens currently cached (including pending).
     public var sequenceLength: Int {
-        _keys?.dim(2) ?? 0
+        let baseLen = _keys?.dim(2) ?? 0
+        let pendingLen = _pendingKeys.reduce(0) { $0 + $1.dim(2) }
+        return baseLen + pendingLen
+    }
+
+    /// Merge any pending slices into the main K/V arrays.
+    private func compact() {
+        guard !_pendingKeys.isEmpty else { return }
+
+        if let existingK = _keys, let existingV = _values {
+            var allK = [existingK] + _pendingKeys
+            var allV = [existingV] + _pendingValues
+            _keys = concatenated(allK, axis: 2)
+            _values = concatenated(allV, axis: 2)
+        } else if _pendingKeys.count == 1 {
+            _keys = _pendingKeys[0]
+            _values = _pendingValues[0]
+        } else {
+            _keys = concatenated(_pendingKeys, axis: 2)
+            _values = concatenated(_pendingValues, axis: 2)
+        }
+        _pendingKeys.removeAll(keepingCapacity: true)
+        _pendingValues.removeAll(keepingCapacity: true)
     }
 
     /// Append new key/value tensors and return the full accumulated K/V.
@@ -22,20 +57,35 @@ public final class KVCache: @unchecked Sendable {
     ///   - values: New values, shape `[B, numKVHeads, seqLen, headDim]`
     /// - Returns: Tuple of full (keys, values) including the new tokens.
     public func update(keys newK: MLXArray, values newV: MLXArray) -> (MLXArray, MLXArray) {
-        if let existingK = _keys, let existingV = _values {
-            let k = concatenated([existingK, newK], axis: 2)
-            let v = concatenated([existingV, newV], axis: 2)
-            _keys = k
-            _values = v
-            return (k, v)
+        _pendingKeys.append(newK)
+        _pendingValues.append(newV)
+
+        // Compact periodically to bound memory from dangling references
+        if _pendingKeys.count >= Self.compactThreshold {
+            compact()
         }
-        _keys = newK
-        _values = newV
-        return (newK, newV)
+
+        // Return the full K/V (compacted + pending) for attention
+        if let existingK = _keys, let existingV = _values {
+            if _pendingKeys.isEmpty {
+                return (existingK, existingV)
+            }
+            let allK = concatenated([existingK] + _pendingKeys, axis: 2)
+            let allV = concatenated([existingV] + _pendingValues, axis: 2)
+            return (allK, allV)
+        } else {
+            if _pendingKeys.count == 1 {
+                return (_pendingKeys[0], _pendingValues[0])
+            }
+            let allK = concatenated(_pendingKeys, axis: 2)
+            let allV = concatenated(_pendingValues, axis: 2)
+            return (allK, allV)
+        }
     }
 
     /// Return a snapshot of the current KV arrays, or nil if no state has been cached yet.
     public func snapshot() -> (keys: MLXArray, values: MLXArray)? {
+        compact()
         guard let k = _keys, let v = _values else { return nil }
         return (k, v)
     }
@@ -44,6 +94,8 @@ public final class KVCache: @unchecked Sendable {
     public func restore(keys: MLXArray, values: MLXArray) {
         _keys = keys
         _values = values
+        _pendingKeys.removeAll(keepingCapacity: true)
+        _pendingValues.removeAll(keepingCapacity: true)
     }
 
     /// Truncate cached KV state to the given sequence length.
@@ -51,6 +103,7 @@ public final class KVCache: @unchecked Sendable {
     /// Both keys and values use shape `[B, heads, seq, head_dim]` (seq on axis 2),
     /// matching the layout assumed by `update`.
     public func truncate(to sequenceLength: Int) {
+        compact()
         guard let k = _keys, let v = _values else { return }
         let currentLen = k.dim(2)
         guard sequenceLength < currentLen else { return }
@@ -62,6 +115,8 @@ public final class KVCache: @unchecked Sendable {
     public func reset() {
         _keys = nil
         _values = nil
+        _pendingKeys.removeAll(keepingCapacity: true)
+        _pendingValues.removeAll(keepingCapacity: true)
     }
 }
 

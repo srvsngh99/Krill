@@ -32,13 +32,13 @@ struct RunCommand: AsyncParsableCommand {
     @Option(name: .long, help: "System prompt")
     var system: String?
 
-    @Option(name: .long, help: "Image file path for vision models")
+    @Option(name: .long, help: "Image file path for Gemma 4 via mlx-vlm")
     var image: String?
 
-    @Option(name: .long, help: "Audio file path for audio models")
+    @Option(name: .long, help: "Audio file path for Gemma 4 via mlx-vlm")
     var audio: String?
 
-    @Option(name: .long, help: "Tools JSON file for function calling")
+    @Option(name: .long, help: "Tools JSON file for function calling (not yet supported)")
     var tools: String?
 
     func run() async throws {
@@ -62,19 +62,31 @@ struct RunCommand: AsyncParsableCommand {
 
         // Validate unsupported flags early
         if tools != nil {
-            print("Error: --tools is not yet supported for native inference. This feature is under development.")
+            print("Error: --tools is not yet supported. Tool definitions are not loaded, sent to the model, or executed by krillm run yet.")
             throw ExitCode.failure
         }
 
-        // Check if this is a Gemma 4 model (use Python fallback for correct output)
+        if let image {
+            try validateInputFile(image, flagName: "--image")
+        }
+        if let audio {
+            try validateInputFile(audio, flagName: "--audio")
+        }
+
+        // Check if this is a Gemma 4 model
         let configURL = modelDir.appendingPathComponent("config.json")
         if let configData = try? Data(contentsOf: configURL),
            let configJSON = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
-           let modelType = configJSON["model_type"] as? String,
-           modelType == "gemma4" {
-            // Gemma 4: use Python mlx-vlm for correct inference
-            if PythonFallback.isAvailable {
-                print("Loading Gemma 4 via mlx-vlm...")
+           isGemma4Config(configJSON) {
+            if audio != nil {
+                // Audio: native Conformer encoder rewrite is pending, use Python bridge
+                let availability = PythonFallback.checkAvailability()
+                guard availability.isAvailable else {
+                    print("Error: Gemma 4 audio requires the mlx-vlm Python bridge (native audio encoder pending).")
+                    print("Install: make setup-mlx-vlm")
+                    throw ExitCode.failure
+                }
+                print("Loading Gemma 4 via mlx-vlm (audio)...")
                 let fallback = PythonFallback(modelPath: modelDir.path)
                 if let prompt {
                     let output = try await fallback.generate(
@@ -82,7 +94,7 @@ struct RunCommand: AsyncParsableCommand {
                         imagePath: image, audioPath: audio)
                     print(output)
                 } else {
-                    print("\nGemma 4 Interactive Mode")
+                    print("\nGemma 4 Interactive Mode (mlx-vlm)")
                     print("Type your message and press Enter. Type /quit to exit.\n")
                     while true {
                         print("> ", terminator: "")
@@ -97,16 +109,16 @@ struct RunCommand: AsyncParsableCommand {
                     }
                 }
                 return
-            } else {
-                print("Warning: Gemma 4 requires mlx-vlm for best results.")
-                print("Install: pip install mlx-vlm")
-                print("Falling back to native engine (experimental)...")
             }
+            // Gemma 4 text and image: native Swift engine handles both
         }
 
-        // Image/audio are only supported via the Gemma 4 Python bridge
-        if image != nil || audio != nil {
-            print("Error: --image/--audio is only supported for Gemma 4 models via the Python bridge.")
+        // Image/audio only supported for Gemma 4
+        let configJSON2 = (try? Data(contentsOf: configURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let isGemma4Model = configJSON2.map(isGemma4Config) ?? false
+        if image != nil && !isGemma4Model {
+            print("Error: --image is only supported for Gemma 4 models.")
             throw ExitCode.failure
         }
 
@@ -125,11 +137,22 @@ struct RunCommand: AsyncParsableCommand {
             seed: seed
         )
 
+        // Load image/audio data if provided
+        var imageData: Data?
+        var audioData: Data?
+        if let image {
+            imageData = try Data(contentsOf: URL(fileURLWithPath: image))
+        }
+        if let audio {
+            audioData = try Data(contentsOf: URL(fileURLWithPath: audio))
+        }
+
         if let prompt {
             // Single-shot mode
             try await generateAndPrint(
                 engine: engine, prompt: prompt, system: system,
-                params: params, maxTokens: maxTokens
+                params: params, maxTokens: maxTokens,
+                imageData: imageData, audioData: audioData
             )
         } else {
             // Interactive REPL
@@ -141,6 +164,22 @@ struct RunCommand: AsyncParsableCommand {
     }
 }
 
+private func isGemma4Config(_ configJSON: [String: Any]) -> Bool {
+    let modelType = configJSON["model_type"] as? String
+    let architectures = configJSON["architectures"] as? [String] ?? []
+    return modelType == "gemma4"
+        || modelType == "gemma4_text"
+        || architectures.contains { $0.lowercased().contains("gemma4") }
+}
+
+private func validateInputFile(_ path: String, flagName: String) throws {
+    var isDirectory: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+        print("Error: \(flagName) file not found: \(path)")
+        throw ExitCode.failure
+    }
+}
+
 // MARK: - Generation
 
 private func generateAndPrint(
@@ -148,13 +187,17 @@ private func generateAndPrint(
     prompt: String,
     system: String?,
     params: SamplingParams,
-    maxTokens: Int
+    maxTokens: Int,
+    imageData: Data? = nil,
+    audioData: Data? = nil
 ) async throws {
     let (stream, getStats) = engine.generate(
         prompt: prompt,
         systemPrompt: system,
         params: params,
-        maxTokens: maxTokens
+        maxTokens: maxTokens,
+        imageData: imageData,
+        audioData: audioData
     )
 
     // Stream tokens to stdout

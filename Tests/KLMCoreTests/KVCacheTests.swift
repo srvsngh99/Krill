@@ -1,5 +1,6 @@
 import XCTest
 @testable import KLMCache
+import KLMRuntime
 
 #if canImport(MLX)
 import MLX
@@ -237,47 +238,14 @@ final class KVCacheTests: XCTestCase {
 
     #if canImport(MLX) && os(macOS) && arch(arm64)
     private func withMLXCPU(_ body: () throws -> Void) throws {
-        guard Self.mlxMetalLibraryAvailable else {
-            throw XCTSkip("MLX Metal library is unavailable in this test bundle.")
+        guard MLXMetalRuntime.canInitializeMLXForTests else {
+            throw XCTSkip("MLX Metal runtime is unavailable to this test process.")
         }
 
         try Device.withDefaultDevice(.cpu) {
             try body()
         }
     }
-
-    private static let mlxMetalLibraryAvailable: Bool = {
-        let fileManager = FileManager.default
-        let names = Set(["default.metallib", "mlx.metallib"])
-        let directRoots = [
-            Bundle.main.resourceURL,
-            Bundle.main.bundleURL,
-            Bundle.main.executableURL?.deletingLastPathComponent(),
-        ]
-
-        for root in directRoots.compactMap({ $0 }) {
-            for name in names {
-                if fileManager.fileExists(atPath: root.appendingPathComponent(name).path)
-                    || fileManager.fileExists(atPath: root.appendingPathComponent("Resources").appendingPathComponent(name).path) {
-                    return true
-                }
-            }
-        }
-
-        let buildRoot = URL(fileURLWithPath: fileManager.currentDirectoryPath)
-            .appendingPathComponent(".build")
-        guard let enumerator = fileManager.enumerator(
-            at: buildRoot,
-            includingPropertiesForKeys: nil
-        ) else {
-            return false
-        }
-
-        for case let url as URL in enumerator where names.contains(url.lastPathComponent) {
-            return true
-        }
-        return false
-    }()
 
     private func makeKV(
         batch: Int = 1,

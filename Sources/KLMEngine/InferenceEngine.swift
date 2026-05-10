@@ -98,6 +98,20 @@ public final class InferenceEngine: @unchecked Sendable {
         specDecoder != nil
     }
 
+    /// Compute the number of soft tokens the vision encoder will produce for an image.
+    /// This depends on the preprocessed image size.
+    func computeImageTokenCount(imageData: Data) -> Int {
+        guard let tensor = try? preprocessImage(imageData) else { return 256 }
+        let H = tensor.dim(2)
+        let W = tensor.dim(3)
+        let patchSize = 16
+        let poolingKernel = 3
+        let pH = H / patchSize
+        let pW = W / patchSize
+        let numPatches = pH * pW
+        return numPatches / (poolingKernel * poolingKernel)
+    }
+
     /// Generate tokens from a single prompt string (convenience wrapper).
     public func generate(
         prompt: String,
@@ -105,15 +119,28 @@ public final class InferenceEngine: @unchecked Sendable {
         params: SamplingParams = .greedy,
         maxTokens: Int = 512,
         useSpeculative: Bool = false,
-        usePrefixCache: Bool = true
+        usePrefixCache: Bool = true,
+        imageData: Data? = nil,
+        audioData: Data? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
             messages.append(["role": "system", "content": sys])
         }
-        messages.append(["role": "user", "content": prompt])
+        // For multimodal, prepend media tokens to the prompt.
+        // The vision encoder produces N soft tokens, so we insert N copies of <|image|>
+        // so that injectEmbeddings has exactly N placeholder positions to fill.
+        var userContent = ""
+        if let imgData = imageData {
+            let tokenCount = computeImageTokenCount(imageData: imgData)
+            userContent += String(repeating: "<|image|>", count: tokenCount)
+        }
+        if audioData != nil { userContent += "<|audio|>" }
+        userContent += prompt
+        messages.append(["role": "user", "content": userContent])
         return generate(messages: messages, params: params, maxTokens: maxTokens,
-                        useSpeculative: useSpeculative, usePrefixCache: usePrefixCache)
+                        useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
+                        imageData: imageData, audioData: audioData)
     }
 
     /// Generate tokens from a full conversation history, streaming results.
@@ -130,15 +157,24 @@ public final class InferenceEngine: @unchecked Sendable {
         params: SamplingParams = .greedy,
         maxTokens: Int = 512,
         useSpeculative: Bool = false,
-        usePrefixCache: Bool = true
+        usePrefixCache: Bool = true,
+        imageData: Data? = nil,
+        audioData: Data? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         guard let loadedModel, let tokenizer else {
             let emptyStream = AsyncStream<TokenEvent> { $0.finish() }
             return (emptyStream, { nil })
         }
 
-        let formatted = tokenizer.applyChatTemplate(messages: messages)
-        let promptTokens = tokenizer.encodeWithoutExtraBOS(formatted)
+        // Use direct token ID path for Gemma4 to avoid decode→re-encode
+        // round-trip that loses special tokens (105, 106, 107).
+        let promptTokens: [Int]
+        if loadedModel.family == "gemma4" {
+            promptTokens = tokenizer.formatGemma4TokenIds(messages: messages)
+        } else {
+            let formatted = tokenizer.applyChatTemplate(messages: messages)
+            promptTokens = tokenizer.encodeWithoutExtraBOS(formatted)
+        }
 
         guard !promptTokens.isEmpty else {
             let emptyStream = AsyncStream<TokenEvent> { continuation in
@@ -152,15 +188,18 @@ public final class InferenceEngine: @unchecked Sendable {
         let eosId = tokenizer.eosTokenId
         let numLayers = loadedModel.numLayers
         let forwardFn = loadedModel.forward
+        let multimodalFn = loadedModel.multimodalForward
         let statsHolder = StatsHolder()
 
         // Capture state for async Task
         nonisolated(unsafe) let capturedForward = forwardFn
+        nonisolated(unsafe) let capturedMultimodalForward = multimodalFn
         nonisolated(unsafe) let capturedTokenizer = tokenizer
         nonisolated(unsafe) let capturedPrefixCache = self.prefixCache
-        nonisolated(unsafe) let capturedSpecDecoder = self.specDecoder
+        let capturedSpecDecoder = self.specDecoder
         let capturedModelId = self.modelId
         let shouldSpec = useSpeculative && specDecoder != nil
+        let capturedImageData = imageData
 
         let stream = AsyncStream<TokenEvent> { continuation in
             Task { [statsHolder] in
@@ -211,7 +250,23 @@ public final class InferenceEngine: @unchecked Sendable {
 
                 let inputArray = MLXArray(tokensToProcess.map { Int32($0) })
                     .reshaped(1, tokensToProcess.count)
-                let prefillLogits = capturedForward(inputArray, caches)
+
+                // Multimodal prefill: if image data provided and model supports it,
+                // preprocess and pass pixel values through the vision encoder pipeline.
+                let prefillLogits: MLXArray
+                if let mmForward = capturedMultimodalForward,
+                   let imgData = capturedImageData,
+                   !cacheHit {
+                    do {
+                        let pixelValues = try preprocessImage(imgData)
+                        prefillLogits = mmForward(inputArray, caches, pixelValues, nil)
+                    } catch {
+                        // Fall back to text-only if preprocessing fails
+                        prefillLogits = capturedForward(inputArray, caches)
+                    }
+                } else {
+                    prefillLogits = capturedForward(inputArray, caches)
+                }
                 MLX.eval(prefillLogits)
                 prefillDuration = CFAbsoluteTimeGetCurrent() - startTime
 
@@ -220,7 +275,7 @@ public final class InferenceEngine: @unchecked Sendable {
                 // forwarded). On the next request with the same prefix, the
                 // restored KV will cover all prompt tokens, and the "full cache
                 // hit" path above trims the last token and re-forwards it.
-                if usePrefixCache && !cacheHit && promptTokens.count >= 32 {
+                if usePrefixCache && !cacheHit && promptTokens.count >= 8 {
                     var snapshotKeys: [[MLXArray]] = []
                     var snapshotValues: [[MLXArray]] = []
                     for cache in caches {

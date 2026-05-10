@@ -2,227 +2,655 @@ import Foundation
 import MLX
 import MLXNN
 import MLXFast
+#if canImport(CoreGraphics) && canImport(ImageIO)
+import CoreGraphics
+import ImageIO
+#endif
 
-// MARK: - Vision Encoder (SigLIP2-style for Gemma 4)
+// MARK: - Preprocessing Errors
 
-/// SigLIP2-based vision encoder for Gemma 4 multimodal models.
-///
-/// Pipeline: Image -> Patch Embed -> Position Embed -> Transformer -> Pool -> Project
-/// Produces soft tokens that are prepended to the text token stream.
-public class VisionEncoder: Module {
-    @ModuleInfo(key: "patch_embedding") var patchEmbedding: PatchEmbedding
-    @ModuleInfo(key: "encoder") var encoder: VisionTransformer
-    @ModuleInfo(key: "multi_modal_projector") var projector: Linear
+public enum MultimodalPreprocessingError: Error, CustomStringConvertible {
+    case emptyImageData
+    case imagePreprocessingUnavailable
+    case audioPreprocessingUnavailable
 
-    let patchSize: Int
-    let poolingKernel: Int
-    let hiddenSize: Int
-
-    public init(
-        imageSize: Int = 896,
-        patchSize: Int = 16,
-        poolingKernel: Int = 3,
-        visionHiddenSize: Int = 1152,
-        visionLayers: Int = 16,
-        visionHeads: Int = 12,
-        visionIntermediateSize: Int = 4304,
-        projectedSize: Int = 2048
-    ) {
-        self.patchSize = patchSize
-        self.poolingKernel = poolingKernel
-        self.hiddenSize = visionHiddenSize
-
-        _patchEmbedding = ModuleInfo(
-            wrappedValue: PatchEmbedding(
-                patchSize: patchSize, inChannels: 3, hiddenSize: visionHiddenSize),
-            key: "patch_embedding")
-        _encoder = ModuleInfo(
-            wrappedValue: VisionTransformer(
-                hiddenSize: visionHiddenSize, numLayers: visionLayers,
-                numHeads: visionHeads, intermediateSize: visionIntermediateSize),
-            key: "encoder")
-        _projector = ModuleInfo(
-            wrappedValue: Linear(visionHiddenSize, projectedSize, bias: true),
-            key: "multi_modal_projector")
-    }
-
-    /// Encode an image into soft tokens for the LLM.
-    ///
-    /// - Parameter image: Normalized image tensor [1, H, W, 3] in [-1, 1]
-    /// - Returns: Soft tokens [1, numTokens, projectedSize]
-    public func callAsFunction(_ image: MLXArray) -> MLXArray {
-        // Patch embedding
-        var x = patchEmbedding(image)
-
-        // Transformer encoder
-        x = encoder(x)
-
-        // Spatial pooling (average pooling to reduce token count)
-        x = spatialPool(x)
-
-        // Project to LLM hidden size
-        return projector(x)
-    }
-
-    /// Average pool patches spatially to reduce token count.
-    private func spatialPool(_ x: MLXArray) -> MLXArray {
-        // x shape: [B, numPatches, hiddenSize]
-        // For simplicity, use a stride-based approach
-        // Full impl would reshape to 2D grid and pool
-        let B = x.dim(0)
-        let N = x.dim(1)
-        let D = x.dim(2)
-
-        // Simple stride pooling: take every poolingKernel-th patch
-        let pooledN = N / (poolingKernel * poolingKernel)
-        if pooledN <= 0 { return x }
-
-        // Average non-overlapping blocks
-        let blockSize = poolingKernel * poolingKernel
-        let trimmedN = (N / blockSize) * blockSize
-        let trimmed = x[0..., ..<trimmedN, 0...]
-        let reshaped = trimmed.reshaped(B, trimmedN / blockSize, blockSize, D)
-        return MLX.mean(reshaped, axis: 2)
-    }
-}
-
-// MARK: - Patch Embedding
-
-/// Converts image pixels into patch embeddings via convolution.
-class PatchEmbedding: Module {
-    @ModuleInfo(key: "projection") var projection: Conv2d
-
-    init(patchSize: Int, inChannels: Int, hiddenSize: Int) {
-        _projection = ModuleInfo(
-            wrappedValue: Conv2d(
-                inputChannels: inChannels, outputChannels: hiddenSize,
-                kernelSize: IntOrPair(patchSize),
-                stride: IntOrPair(patchSize)),
-            key: "projection")
-    }
-
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
-        // x: [B, H, W, C] -> conv -> [B, H/P, W/P, D] -> flatten -> [B, N, D]
-        let patches = projection(x)
-        let B = patches.dim(0)
-        let D = patches.dim(3)
-        return patches.reshaped(B, -1, D)
-    }
-}
-
-// MARK: - Vision Transformer (encoder blocks)
-
-class VisionTransformer: Module {
-    @ModuleInfo(key: "layers") var layers: [VisionBlock]
-
-    init(hiddenSize: Int, numLayers: Int, numHeads: Int, intermediateSize: Int) {
-        _layers = ModuleInfo(
-            wrappedValue: (0 ..< numLayers).map { _ in
-                VisionBlock(hiddenSize: hiddenSize, numHeads: numHeads,
-                           intermediateSize: intermediateSize)
-            },
-            key: "layers")
-    }
-
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
-        var hidden = x
-        for layer in layers {
-            hidden = layer(hidden)
+    public var description: String {
+        switch self {
+        case .emptyImageData:
+            return "Image preprocessing failed: image data is empty"
+        case .imagePreprocessingUnavailable:
+            return "Native image preprocessing is not available on this platform."
+        case .audioPreprocessingUnavailable:
+            return "Native audio preprocessing is not implemented. Use Gemma 4 through the mlx-vlm Python bridge."
         }
-        return hidden
     }
 }
 
-class VisionBlock: Module {
-    @ModuleInfo(key: "self_attn") var selfAttn: VisionAttention
-    @ModuleInfo(key: "mlp") var mlp: VisionMLP
-    @ModuleInfo(key: "layer_norm1") var norm1: LayerNorm
-    @ModuleInfo(key: "layer_norm2") var norm2: LayerNorm
+// MARK: - ClippableLinear
 
-    init(hiddenSize: Int, numHeads: Int, intermediateSize: Int) {
-        _selfAttn = ModuleInfo(
-            wrappedValue: VisionAttention(hiddenSize: hiddenSize, numHeads: numHeads),
-            key: "self_attn")
-        _mlp = ModuleInfo(
-            wrappedValue: VisionMLP(hiddenSize: hiddenSize, intermediateSize: intermediateSize),
-            key: "mlp")
-        _norm1 = ModuleInfo(
-            wrappedValue: LayerNorm(dimensions: hiddenSize), key: "layer_norm1")
-        _norm2 = ModuleInfo(
-            wrappedValue: LayerNorm(dimensions: hiddenSize), key: "layer_norm2")
+/// Linear layer with optional input/output clamping.
+///
+/// Matches Gemma4ClippableLinear: wraps nn.Linear, clamps input/output.
+/// Clip bounds are stored as buffers (scalar tensors). Initialized to +/-inf
+/// so clamping is a no-op until real values are loaded from the checkpoint.
+///
+/// Weight key structure: `xxx.linear.weight`, `xxx.input_min`, `xxx.input_max`,
+/// `xxx.output_min`, `xxx.output_max`
+class ClippableLinear: Module {
+    @ModuleInfo(key: "linear") var linear: Linear
+    @ModuleInfo(key: "input_min") var inputMin: MLXArray
+    @ModuleInfo(key: "input_max") var inputMax: MLXArray
+    @ModuleInfo(key: "output_min") var outputMin: MLXArray
+    @ModuleInfo(key: "output_max") var outputMax: MLXArray
+
+    init(_ inputDims: Int, _ outputDims: Int, bias: Bool = false) {
+        _linear = ModuleInfo(wrappedValue: Linear(inputDims, outputDims, bias: bias), key: "linear")
+        _inputMin = ModuleInfo(wrappedValue: MLXArray(Float(-1e38)), key: "input_min")
+        _inputMax = ModuleInfo(wrappedValue: MLXArray(Float(1e38)), key: "input_max")
+        _outputMin = ModuleInfo(wrappedValue: MLXArray(Float(-1e38)), key: "output_min")
+        _outputMax = ModuleInfo(wrappedValue: MLXArray(Float(1e38)), key: "output_max")
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let h = x + selfAttn(norm1(x))
-        return h + mlp(norm2(h))
+        var h = MLX.clip(x, min: inputMin, max: inputMax)
+        h = linear(h)
+        return MLX.clip(h, min: outputMin, max: outputMax)
     }
 }
 
+// MARK: - RMSNorm variants for Vision
+
+/// RMSNorm with learned scale — used for q_norm, k_norm in vision attention.
+class VisionRMSNorm: Module {
+    @ModuleInfo var weight: MLXArray
+    let eps: Float
+
+    init(dimensions: Int, eps: Float = 1e-6) {
+        self.eps = eps
+        _weight = ModuleInfo(wrappedValue: MLXArray.ones([dimensions]))
+    }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        let xf = x.asType(.float32)
+        let variance = MLX.mean(xf * xf, axis: -1, keepDims: true)
+        let normed = xf * MLX.rsqrt(variance + MLXArray(eps))
+        return (normed * weight.asType(.float32)).asType(x.dtype)
+    }
+}
+
+/// Parameter-free RMSNorm — used for v_norm in vision attention.
+class VisionRMSNormNoScale: Module {
+    let eps: Float
+
+    init(eps: Float = 1e-6) {
+        self.eps = eps
+    }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        let xf = x.asType(.float32)
+        let variance = MLX.mean(xf * xf, axis: -1, keepDims: true)
+        return (xf * MLX.rsqrt(variance + MLXArray(eps))).asType(x.dtype)
+    }
+}
+
+// MARK: - 2D Multidimensional RoPE
+
+/// Rotate half: [-x2, x1], matching PyTorch's rotate_half.
+/// Input is 4D: [B, L, numHeads, headDim]. Splits on the LAST axis.
+private func rotateHalf(_ x: MLXArray) -> MLXArray {
+    let half = x.dim(-1) / 2
+    let x1 = x[0..., 0..., 0..., ..<half]
+    let x2 = x[0..., 0..., 0..., half...]
+    return concatenated([-x2, x1], axis: -1)
+}
+
+/// Apply 2D multidimensional RoPE to vision attention queries/keys.
+///
+/// Splits the head dimension into per-spatial-dimension parts and applies
+/// rotate_half independently per dimension. For head_dim=64 and ndim=2,
+/// each dimension gets 32 channels (16 rotary pairs).
+///
+/// - Parameters:
+///   - inputs: [B, L, numHeads, headDim]
+///   - positions: [B, L, 2] — (x, y) patch grid coordinates
+///   - baseFrequency: RoPE base frequency (default 100.0)
+/// - Returns: RoPE-applied tensor, same shape as inputs
+func applyMultidimensionalRoPE(
+    _ inputs: MLXArray, positions: MLXArray, baseFrequency: Float = 100.0
+) -> MLXArray {
+    let headDim = inputs.dim(-1)
+    let ndim = positions.dim(-1)
+    let channelsPerDim = 2 * (headDim / (2 * ndim))
+    let halfPerDim = channelsPerDim / 2
+
+    var resultParts: [MLXArray] = []
+    for d in 0 ..< ndim {
+        let xPart = inputs[0..., 0..., 0..., (d * channelsPerDim) ..< ((d + 1) * channelsPerDim)]
+
+        let freqExp = (2.0 / Float(channelsPerDim)) * MLXArray(Array(0 ..< halfPerDim).map { Float($0) })
+        let timescale = MLX.pow(MLXArray(baseFrequency), freqExp)
+        let sinusoidInp = positions[0..., 0..., d ..< (d + 1)].asType(.float32) / timescale
+
+        let cosD = MLX.cos(sinusoidInp)
+        let sinD = MLX.sin(sinusoidInp)
+        let cosFull = concatenated([cosD, cosD], axis: -1).asType(inputs.dtype)
+        let sinFull = concatenated([sinD, sinD], axis: -1).asType(inputs.dtype)
+        // Expand [B, L, channelsPerDim] -> [B, L, 1, channelsPerDim]
+        let cosExp = expandedDimensions(cosFull, axis: 2)
+        let sinExp = expandedDimensions(sinFull, axis: 2)
+
+        let yPart = xPart * cosExp + rotateHalf(xPart) * sinExp
+        resultParts.append(yPart)
+    }
+    return concatenated(resultParts, axis: -1)
+}
+
+// MARK: - Vision Attention
+
+/// SigLIP2 vision attention with ClippableLinear, q/k/v norms, and 2D RoPE.
 class VisionAttention: Module {
     let numHeads: Int
+    let numKVHeads: Int
     let headDim: Int
-    let scale: Float
+    let ropeBaseFrequency: Float
 
-    @ModuleInfo(key: "q_proj") var qProj: Linear
-    @ModuleInfo(key: "k_proj") var kProj: Linear
-    @ModuleInfo(key: "v_proj") var vProj: Linear
-    @ModuleInfo(key: "o_proj") var oProj: Linear
+    @ModuleInfo(key: "q_proj") var qProj: ClippableLinear
+    @ModuleInfo(key: "k_proj") var kProj: ClippableLinear
+    @ModuleInfo(key: "v_proj") var vProj: ClippableLinear
+    @ModuleInfo(key: "o_proj") var oProj: ClippableLinear
+    @ModuleInfo(key: "q_norm") var qNorm: VisionRMSNorm
+    @ModuleInfo(key: "k_norm") var kNorm: VisionRMSNorm
 
-    init(hiddenSize: Int, numHeads: Int) {
+    let vNorm = VisionRMSNormNoScale()
+
+    init(hiddenSize: Int, numHeads: Int, numKVHeads: Int, headDim: Int,
+         ropeTheta: Float = 100.0) {
         self.numHeads = numHeads
-        self.headDim = hiddenSize / numHeads
-        self.scale = 1.0 / Float(headDim).squareRoot()
+        self.numKVHeads = numKVHeads
+        self.headDim = headDim
+        self.ropeBaseFrequency = ropeTheta
 
-        _qProj = ModuleInfo(wrappedValue: Linear(hiddenSize, hiddenSize, bias: true), key: "q_proj")
-        _kProj = ModuleInfo(wrappedValue: Linear(hiddenSize, hiddenSize, bias: true), key: "k_proj")
-        _vProj = ModuleInfo(wrappedValue: Linear(hiddenSize, hiddenSize, bias: true), key: "v_proj")
-        _oProj = ModuleInfo(wrappedValue: Linear(hiddenSize, hiddenSize, bias: true), key: "o_proj")
+        _qProj = ModuleInfo(wrappedValue: ClippableLinear(hiddenSize, numHeads * headDim), key: "q_proj")
+        _kProj = ModuleInfo(wrappedValue: ClippableLinear(hiddenSize, numKVHeads * headDim), key: "k_proj")
+        _vProj = ModuleInfo(wrappedValue: ClippableLinear(hiddenSize, numKVHeads * headDim), key: "v_proj")
+        _oProj = ModuleInfo(wrappedValue: ClippableLinear(numHeads * headDim, hiddenSize), key: "o_proj")
+        _qNorm = ModuleInfo(wrappedValue: VisionRMSNorm(dimensions: headDim), key: "q_norm")
+        _kNorm = ModuleInfo(wrappedValue: VisionRMSNorm(dimensions: headDim), key: "k_norm")
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
+    func callAsFunction(_ x: MLXArray, positions: MLXArray, mask: MLXArray?) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
 
-        let q = qProj(x).reshaped(B, L, numHeads, headDim).transposed(0, 2, 1, 3)
-        let k = kProj(x).reshaped(B, L, numHeads, headDim).transposed(0, 2, 1, 3)
-        let v = vProj(x).reshaped(B, L, numHeads, headDim).transposed(0, 2, 1, 3)
+        var q = qProj(x).reshaped(B, L, numHeads, headDim)
+        var k = kProj(x).reshaped(B, L, numKVHeads, headDim)
+        var v = vProj(x).reshaped(B, L, numKVHeads, headDim)
+
+        q = qNorm(q)
+        k = kNorm(k)
+        v = vNorm(v)
+
+        q = applyMultidimensionalRoPE(q, positions: positions, baseFrequency: ropeBaseFrequency)
+        k = applyMultidimensionalRoPE(k, positions: positions, baseFrequency: ropeBaseFrequency)
+
+        q = q.transposed(0, 2, 1, 3)
+        k = k.transposed(0, 2, 1, 3)
+        v = v.transposed(0, 2, 1, 3)
 
         let out = MLXFast.scaledDotProductAttention(
-            queries: q, keys: k, values: v, scale: scale, mask: nil)
+            queries: q, keys: k, values: v, scale: 1.0, mask: mask)
+
         return oProj(out.transposed(0, 2, 1, 3).reshaped(B, L, -1))
     }
 }
 
+// MARK: - Vision MLP (GeGLU)
+
 class VisionMLP: Module {
-    @ModuleInfo(key: "fc1") var fc1: Linear
-    @ModuleInfo(key: "fc2") var fc2: Linear
+    @ModuleInfo(key: "gate_proj") var gateProj: ClippableLinear
+    @ModuleInfo(key: "up_proj") var upProj: ClippableLinear
+    @ModuleInfo(key: "down_proj") var downProj: ClippableLinear
 
     init(hiddenSize: Int, intermediateSize: Int) {
-        _fc1 = ModuleInfo(wrappedValue: Linear(hiddenSize, intermediateSize, bias: true), key: "fc1")
-        _fc2 = ModuleInfo(wrappedValue: Linear(intermediateSize, hiddenSize, bias: true), key: "fc2")
+        _gateProj = ModuleInfo(wrappedValue: ClippableLinear(hiddenSize, intermediateSize), key: "gate_proj")
+        _upProj = ModuleInfo(wrappedValue: ClippableLinear(hiddenSize, intermediateSize), key: "up_proj")
+        _downProj = ModuleInfo(wrappedValue: ClippableLinear(intermediateSize, hiddenSize), key: "down_proj")
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        fc2(gelu(fc1(x)))
+        downProj(geluApproximate(gateProj(x)) * upProj(x))
+    }
+}
+
+// MARK: - Vision Transformer Block (4 norms)
+
+class VisionTransformerBlock: Module {
+    @ModuleInfo(key: "self_attn") var selfAttn: VisionAttention
+    @ModuleInfo(key: "mlp") var mlp: VisionMLP
+    @ModuleInfo(key: "input_layernorm") var inputLayernorm: RMSNorm
+    @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayernorm: RMSNorm
+    @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforwardLayernorm: RMSNorm
+    @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardLayernorm: RMSNorm
+
+    init(hiddenSize: Int, intermediateSize: Int, numHeads: Int, numKVHeads: Int,
+         headDim: Int, ropeTheta: Float, eps: Float) {
+        _selfAttn = ModuleInfo(wrappedValue: VisionAttention(
+            hiddenSize: hiddenSize, numHeads: numHeads, numKVHeads: numKVHeads,
+            headDim: headDim, ropeTheta: ropeTheta), key: "self_attn")
+        _mlp = ModuleInfo(wrappedValue: VisionMLP(
+            hiddenSize: hiddenSize, intermediateSize: intermediateSize), key: "mlp")
+        _inputLayernorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: hiddenSize, eps: eps), key: "input_layernorm")
+        _postAttentionLayernorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: hiddenSize, eps: eps), key: "post_attention_layernorm")
+        _preFeedforwardLayernorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: hiddenSize, eps: eps), key: "pre_feedforward_layernorm")
+        _postFeedforwardLayernorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: hiddenSize, eps: eps), key: "post_feedforward_layernorm")
+    }
+
+    func callAsFunction(_ x: MLXArray, positions: MLXArray, mask: MLXArray?) -> MLXArray {
+        let normed = inputLayernorm(x)
+        let attnOut = selfAttn(normed, positions: positions, mask: mask)
+        let attnNormed = postAttentionLayernorm(attnOut)
+        let h = x + attnNormed
+
+        let ffnIn = preFeedforwardLayernorm(h)
+        let ffnOut = mlp(ffnIn)
+        let ffnNormed = postFeedforwardLayernorm(ffnOut)
+        return h + ffnNormed
+    }
+}
+
+// MARK: - Vision Transformer (encoder)
+
+/// Holds the transformer layers — maps to `vision_tower.encoder` in weights.
+class VisionTransformerModel: Module {
+    @ModuleInfo(key: "layers") var layers: [VisionTransformerBlock]
+
+    init(hiddenSize: Int, intermediateSize: Int, numLayers: Int, numHeads: Int,
+         numKVHeads: Int, headDim: Int, ropeTheta: Float, eps: Float) {
+        _layers = ModuleInfo(wrappedValue: (0 ..< numLayers).map { _ in
+            VisionTransformerBlock(
+                hiddenSize: hiddenSize, intermediateSize: intermediateSize,
+                numHeads: numHeads, numKVHeads: numKVHeads,
+                headDim: headDim, ropeTheta: ropeTheta, eps: eps)
+        }, key: "layers")
+    }
+
+    func callAsFunction(_ x: MLXArray, positions: MLXArray, mask: MLXArray?) -> MLXArray {
+        var h = x
+        for layer in layers {
+            h = layer(h, positions: positions, mask: mask)
+        }
+        return h
+    }
+}
+
+// MARK: - Patch Embedder
+
+/// Patchify image + Linear projection + factored 2D position embeddings.
+///
+/// Weight key structure:
+///   `patch_embedder.input_proj.weight` — Linear(3*patchSize^2, hiddenSize)
+///   `patch_embedder.position_embedding_table` — [2, posEmbedSize, hiddenSize]
+class VisionPatchEmbedder: Module {
+    let hiddenSize: Int
+    let patchSize: Int
+    let positionEmbeddingSize: Int
+
+    @ModuleInfo(key: "input_proj") var inputProj: Linear
+    @ModuleInfo(key: "position_embedding_table") var positionEmbeddingTable: MLXArray
+
+    init(hiddenSize: Int, patchSize: Int, positionEmbeddingSize: Int) {
+        self.hiddenSize = hiddenSize
+        self.patchSize = patchSize
+        self.positionEmbeddingSize = positionEmbeddingSize
+        _inputProj = ModuleInfo(
+            wrappedValue: Linear(3 * patchSize * patchSize, hiddenSize, bias: false),
+            key: "input_proj")
+        _positionEmbeddingTable = ModuleInfo(
+            wrappedValue: MLXArray.ones([2, positionEmbeddingSize, hiddenSize]),
+            key: "position_embedding_table")
+    }
+
+    /// Patchify: [B, C, H, W] -> [B, numPatches, patchSize^2 * C]
+    func patchify(_ pixelValues: MLXArray) -> MLXArray {
+        let B = pixelValues.dim(0)
+        let C = pixelValues.dim(1)
+        let H = pixelValues.dim(2)
+        let W = pixelValues.dim(3)
+        let p = patchSize
+        let pH = H / p
+        let pW = W / p
+
+        // [B, C, pH, p, pW, p] -> [B, pH, pW, p, p, C] -> [B, pH*pW, p*p*C]
+        let reshaped = pixelValues.reshaped(B, C, pH, p, pW, p)
+        let transposed = reshaped.transposed(0, 2, 4, 3, 5, 1)
+        let patches = transposed.reshaped(B, pH * pW, C * p * p)
+        // Normalize: 2 * (x - 0.5) maps [0, 1] to [-1, 1]
+        return inputProj((2 * (patches - 0.5)).asType(inputProj.weight.dtype))
+    }
+
+    /// Compute position embeddings from patch grid coordinates.
+    func positionEmbeddings(patchPositions: MLXArray, paddingPositions: MLXArray) -> MLXArray {
+        // One-hot encode positions: [B, numPatches, 2] -> [B, numPatches, 2, posEmbedSize]
+        let indices = expandedDimensions(patchPositions, axis: -1)
+        let oneHot = (indices .== MLXArray(Array(0 ..< positionEmbeddingSize).map { Int32($0) }))
+            .asType(.float32)
+        // [B, numPatches, 2, posEmbedSize] -> [B, 2, numPatches, posEmbedSize]
+        let oh = oneHot.transposed(0, 2, 1, 3).asType(positionEmbeddingTable.dtype)
+        // [B, 2, numPatches, posEmbedSize] @ [2, posEmbedSize, hiddenSize] -> [B, 2, numPatches, hiddenSize]
+        let posEmbed = MLX.matmul(oh, positionEmbeddingTable)
+        // Sum over 2 spatial dims -> [B, numPatches, hiddenSize]
+        let summed = posEmbed.sum(axis: 1)
+        // Zero out padding positions
+        let padMask = expandedDimensions(paddingPositions, axis: -1)
+        return MLX.where(padMask, MLXArray(Float(0)), summed)
+    }
+
+    func callAsFunction(_ pixelValues: MLXArray, patchPositions: MLXArray,
+                        paddingPositions: MLXArray) -> MLXArray {
+        let hidden = patchify(pixelValues)
+        let posEmbed = positionEmbeddings(patchPositions: patchPositions, paddingPositions: paddingPositions)
+        return hidden + posEmbed
+    }
+}
+
+// MARK: - Vision Pooler
+
+/// Position-aware average pooling to fixed output length (default 280 tokens).
+class VisionPooler: Module {
+    let hiddenSize: Int
+    let defaultOutputLength: Int
+    let rootHiddenSize: Float
+
+    init(hiddenSize: Int, defaultOutputLength: Int) {
+        self.hiddenSize = hiddenSize
+        self.defaultOutputLength = defaultOutputLength
+        self.rootHiddenSize = Float(hiddenSize).squareRoot()
+    }
+
+    func callAsFunction(
+        _ hiddenStates: MLXArray, patchPositions: MLXArray,
+        paddingPositions: MLXArray
+    ) -> (MLXArray, MLXArray) {
+        // Zero out padding tokens
+        let padMask = expandedDimensions(paddingPositions, axis: -1)
+        var h = MLX.where(padMask, MLXArray(Float(0)), hiddenStates)
+
+        let inputSeqLen = h.dim(1)
+        let length = defaultOutputLength
+
+        if inputSeqLen == length {
+            return (h * MLXArray(rootHiddenSize), paddingPositions)
+        }
+
+        // Position-aware average pooling
+        let k = Int(Float(inputSeqLen / length).squareRoot())
+        let kSquared = Float(k * k)
+
+        let clamped = MLX.maximum(patchPositions, MLXArray(Int32(0)))
+        let maxX = MLX.max(clamped[0..., 0..., ..<1], axis: 1, keepDims: true) + 1
+        let kernelIdxs = MLX.floor(clamped.asType(.float32) / MLXArray(Float(k))).asType(.int32)
+        let binIdx = kernelIdxs[0..., 0..., ..<1] + (maxX / MLXArray(Int32(k))) * kernelIdxs[0..., 0..., 1...]
+        let binIdxFlat = binIdx.squeezed(axis: -1)
+
+        // One-hot encode bins -> weights
+        let binOneHot = (expandedDimensions(binIdxFlat, axis: -1)
+            .== MLXArray(Array(0 ..< length).map { Int32($0) })).asType(.float32)
+        let weights = binOneHot / MLXArray(kSquared)
+
+        // Weighted sum: [B, L, length]^T @ [B, L, D] -> [B, length, D]
+        let pooled = MLX.matmul(weights.transposed(0, 2, 1), h.asType(.float32)).asType(h.dtype)
+
+        // Mask: which output bins have at least one valid patch
+        let mask = 1 - MLX.all(weights .== MLXArray(Float(0)), axis: 1).asType(.int32)
+
+        return (pooled * MLXArray(rootHiddenSize), mask)
+    }
+}
+
+// MARK: - VisionModel (top-level, maps to vision_tower.*)
+
+/// Complete SigLIP2 vision encoder for Gemma 4.
+///
+/// Weight key structure:
+///   `vision_tower.patch_embedder.*`
+///   `vision_tower.encoder.layers.*`
+///
+/// Input: pixel values [B, C, H, W] in [0, 1] (channel-first)
+/// Output: soft tokens [1, numTokens, hiddenSize] — typically [1, 280, 768]
+public class VisionEncoder: Module {
+    let patchSize: Int
+    let poolingKernelSize: Int
+    let defaultOutputLength: Int
+    let maxPatches: Int
+
+    @ModuleInfo(key: "patch_embedder") var patchEmbedder: VisionPatchEmbedder
+    @ModuleInfo(key: "encoder") var encoder: VisionTransformerModel
+
+    let pooler: VisionPooler
+
+    public init(
+        hiddenSize: Int = 768,
+        intermediateSize: Int = 3072,
+        numLayers: Int = 16,
+        numHeads: Int = 12,
+        numKVHeads: Int = 12,
+        headDim: Int = 64,
+        patchSize: Int = 16,
+        poolingKernelSize: Int = 3,
+        defaultOutputLength: Int = 280,
+        positionEmbeddingSize: Int = 10240,
+        ropeTheta: Float = 100.0,
+        eps: Float = 1e-6
+    ) {
+        self.patchSize = patchSize
+        self.poolingKernelSize = poolingKernelSize
+        self.defaultOutputLength = defaultOutputLength
+        self.maxPatches = defaultOutputLength * poolingKernelSize * poolingKernelSize
+
+        _patchEmbedder = ModuleInfo(
+            wrappedValue: VisionPatchEmbedder(
+                hiddenSize: hiddenSize, patchSize: patchSize,
+                positionEmbeddingSize: positionEmbeddingSize),
+            key: "patch_embedder")
+        _encoder = ModuleInfo(
+            wrappedValue: VisionTransformerModel(
+                hiddenSize: hiddenSize, intermediateSize: intermediateSize,
+                numLayers: numLayers, numHeads: numHeads,
+                numKVHeads: numKVHeads, headDim: headDim,
+                ropeTheta: ropeTheta, eps: eps),
+            key: "encoder")
+        self.pooler = VisionPooler(
+            hiddenSize: hiddenSize, defaultOutputLength: defaultOutputLength)
+    }
+
+    /// Compute patch positions and padding mask for a single image.
+    func patchPositions(height: Int, width: Int) -> (positions: MLXArray, padding: MLXArray, numReal: Int) {
+        let pH = height / patchSize
+        let pW = width / patchSize
+        let numPatches = pH * pW
+        let numReal = min(numPatches, maxPatches)
+
+        // Grid coordinates: (x, y)
+        var positions = [Int32](repeating: 0, count: maxPatches * 2)
+        for y in 0 ..< pH {
+            for x in 0 ..< pW {
+                let idx = y * pW + x
+                if idx >= maxPatches { break }
+                positions[idx * 2] = Int32(x)
+                positions[idx * 2 + 1] = Int32(y)
+            }
+        }
+        // Padding positions get -1
+        for i in numReal ..< maxPatches {
+            positions[i * 2] = -1
+            positions[i * 2 + 1] = -1
+        }
+
+        var paddingMask = [Bool](repeating: false, count: maxPatches)
+        for i in numReal ..< maxPatches {
+            paddingMask[i] = true
+        }
+
+        let posArray = MLXArray(positions, [1, maxPatches, 2])
+        let padArray = MLXArray(paddingMask, [1, maxPatches])
+        return (posArray, padArray, numReal)
+    }
+
+    /// Encode pixel values into soft tokens.
+    ///
+    /// - Parameter pixelValues: [B, C, H, W] in [0, 1] range (channel-first)
+    /// - Returns: Soft tokens [1, numTokens, hiddenSize] — typically [1, 280, 768]
+    public func callAsFunction(_ pixelValues: MLXArray) -> MLXArray {
+        let B = pixelValues.dim(0)
+        let H = pixelValues.dim(2)
+        let W = pixelValues.dim(3)
+
+        let (patchPos, paddingPos, numReal) = patchPositions(height: H, width: W)
+
+        // Embed patches (only real, not padding)
+        var inputsEmbeds = patchEmbedder(
+            pixelValues,
+            patchPositions: patchPos[0..., ..<numReal, 0...],
+            paddingPositions: paddingPos[0..., ..<numReal])
+
+        // Pad to maxPatches if needed
+        let numPadding = maxPatches - numReal
+        if numPadding > 0 {
+            let padEmbeds = MLXArray.zeros([B, numPadding, inputsEmbeds.dim(2)]).asType(inputsEmbeds.dtype)
+            inputsEmbeds = concatenated([inputsEmbeds, padEmbeds], axis: 1)
+        }
+
+        // Bidirectional attention mask: [B, 1, L, L]
+        let validMask = paddingPos .== MLXArray(false)
+        let attnMask2D = expandedDimensions(validMask, axis: 1) * expandedDimensions(validMask, axis: 2)
+        let maskFill = MLXArray(Float(-1e4)).asType(inputsEmbeds.dtype)
+        let zeroFill = MLXArray(Float(0)).asType(inputsEmbeds.dtype)
+        let attnMask = expandedDimensions(
+            MLX.where(attnMask2D, zeroFill, maskFill), axis: 1)
+
+        // Transformer encoder
+        let hiddenStates = encoder(inputsEmbeds, positions: patchPos, mask: attnMask)
+
+        // Pool to defaultOutputLength tokens
+        let (pooled, poolMask) = pooler(hiddenStates, patchPositions: patchPos, paddingPositions: paddingPos)
+
+        // Extract valid (non-padding) tokens
+        let validCount = poolMask.asType(.int32).sum()
+        MLX.eval(validCount)
+        let nValid = Int(truncating: validCount.item(Int32.self) as NSNumber) / B
+        let result = pooled[0..., ..<nValid, 0...]
+
+        return result
     }
 }
 
 // MARK: - Image Preprocessing
 
-/// Preprocess an image file for the vision encoder.
+/// Preprocess an image file for the Gemma 4 vision encoder (SigLIP2).
+///
+/// Pipeline:
+///   1. Decode PNG/JPEG via CoreGraphics
+///   2. Resize longest side to targetSize, maintain aspect ratio
+///   3. Pad to make both dimensions divisible by (patchSize * poolingKernel) = 48
+///   4. Output as [1, 3, H, W] in [0, 1] range (channel-first, float32)
 ///
 /// - Parameters:
 ///   - imageData: Raw image data (PNG/JPEG)
-///   - targetSize: Target size (must be divisible by 48)
-/// - Returns: Normalized image tensor [1, H, W, 3]
-public func preprocessImage(_ imageData: Data, targetSize: Int = 672) -> MLXArray? {
-    // TODO: Not yet implemented. Full implementation requires CoreGraphics to
-    // decode the image and resize it to targetSize x targetSize, then normalize
-    // pixel values to [-1, 1].
-    // Production impl: CGImage -> resize to targetSize x targetSize -> normalize to [-1, 1]
-    guard !imageData.isEmpty else { return nil }
+///   - targetSize: Target longest-side size (default 672, must be divisible by 48)
+///   - patchSize: Patch size for the vision encoder (default 16)
+///   - poolingKernel: Spatial pooling kernel size (default 3)
+/// - Returns: Image tensor [1, 3, H, W] in [0, 1], bfloat16
+public func preprocessImage(
+    _ imageData: Data,
+    targetSize: Int = 672,
+    patchSize: Int = 16,
+    poolingKernel: Int = 3
+) throws -> MLXArray {
+    guard !imageData.isEmpty else {
+        throw MultimodalPreprocessingError.emptyImageData
+    }
 
-    // Return nil with a clear indication this is not implemented
-    print("[KrillLM] Warning: Vision preprocessing not yet implemented. Image input will be ignored.")
-    return nil
+    #if canImport(CoreGraphics) && canImport(ImageIO)
+    let blockSize = patchSize * poolingKernel  // 48
+
+    guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+          let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        throw MultimodalPreprocessingError.emptyImageData
+    }
+
+    let origW = cgImage.width
+    let origH = cgImage.height
+
+    // Resize: scale to targetSize, ensure both dims are at least targetSize
+    // for small images, then round up to nearest blockSize multiple.
+    let minDimTarget = max(targetSize, blockSize * 16)  // minimum 768 for small images
+    let scale: Float
+    if max(origW, origH) <= minDimTarget {
+        scale = Float(minDimTarget) / Float(max(origW, origH))
+    } else {
+        scale = Float(targetSize) / Float(max(origW, origH))
+    }
+    var newW = Int(Float(origW) * scale)
+    var newH = Int(Float(origH) * scale)
+
+    newW = ((newW + blockSize - 1) / blockSize) * blockSize
+    newH = ((newH + blockSize - 1) / blockSize) * blockSize
+
+    let bitsPerComponent = 8
+    let bytesPerRow = newW * 4
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    guard let context = CGContext(
+        data: nil, width: newW, height: newH,
+        bitsPerComponent: bitsPerComponent, bytesPerRow: bytesPerRow,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else {
+        throw MultimodalPreprocessingError.emptyImageData
+    }
+
+    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: newW, height: newH))
+
+    let drawW = Int(Float(origW) * scale)
+    let drawH = Int(Float(origH) * scale)
+    context.draw(cgImage, in: CGRect(x: 0, y: newH - drawH, width: drawW, height: drawH))
+
+    guard let data = context.data else {
+        throw MultimodalPreprocessingError.emptyImageData
+    }
+
+    // Extract RGB from RGBA into channel-first [1, 3, H, W] in [0, 1]
+    // CGContext stores pixels bottom-to-top (row 0 = bottom of image).
+    // Vision models expect top-to-bottom, so we flip rows during readout.
+    let pixelCount = newH * newW
+    var floats = [Float](repeating: 0, count: 3 * pixelCount)
+    let ptr = data.bindMemory(to: UInt8.self, capacity: pixelCount * 4)
+
+    // Channel-first: R plane, then G plane, then B plane (with row flip)
+    for row in 0 ..< newH {
+        let flippedRow = newH - 1 - row  // Flip: CG bottom row → array top row
+        for col in 0 ..< newW {
+            let srcIdx = (flippedRow * newW + col) * 4  // CG pixel (bottom-to-top)
+            let dstIdx = row * newW + col                // Array pixel (top-to-bottom)
+            floats[dstIdx] = Float(ptr[srcIdx]) / 255.0                     // R
+            floats[pixelCount + dstIdx] = Float(ptr[srcIdx + 1]) / 255.0    // G
+            floats[2 * pixelCount + dstIdx] = Float(ptr[srcIdx + 2]) / 255.0 // B
+        }
+    }
+
+    // Vision encoder expects float32 input (patchify casts to weight dtype internally)
+    return MLXArray(floats, [1, 3, newH, newW])
+
+    #else
+    throw MultimodalPreprocessingError.imagePreprocessingUnavailable
+    #endif
+}
+
+/// GELU approximate activation matching PyTorch's gelu_pytorch_tanh.
+private func geluApproximate(_ x: MLXArray) -> MLXArray {
+    // gelu_approx(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    let sqrt2pi = MLXArray(Float(0.7978845608028654))
+    let coeff = MLXArray(Float(0.044715))
+    let inner = sqrt2pi * (x + coeff * x * x * x)
+    return MLXArray(Float(0.5)) * x * (MLXArray(Float(1.0)) + MLX.tanh(inner))
 }

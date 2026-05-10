@@ -3,6 +3,7 @@ import MLX
 @testable import KLMEngine
 @testable import KLMCache
 @testable import KLMSampler
+import KLMRuntime
 
 /// Tests for speculative decoding first-token emission and rejection rollback.
 ///
@@ -13,8 +14,8 @@ final class SpeculativeDecodingTests: XCTestCase {
         if ProcessInfo.processInfo.environment["KLM_SKIP_MLX_TESTS"] == "1" {
             throw XCTSkip("MLX tests skipped by KLM_SKIP_MLX_TESTS")
         }
-        guard hasLoadableMLXMetalLibrary() else {
-            throw XCTSkip("MLX Metal library is not available in the test bundle")
+        guard MLXMetalRuntime.canInitializeMLXForTests else {
+            throw XCTSkip("MLX Metal runtime is not available to this test process")
         }
         #else
         throw XCTSkip("MLX-backed tests require macOS arm64 with MLX/Metal")
@@ -230,36 +231,4 @@ final class SpeculativeDecodingTests: XCTestCase {
         MLXArray((start ..< start + count).map { Float($0) }, [1, 1, count, 1])
     }
 
-    private func hasLoadableMLXMetalLibrary() -> Bool {
-        let fm = FileManager.default
-        let names = Set(["default.metallib", "mlx.metallib"])
-        let directRoots = [
-            Bundle.main.resourceURL,
-            Bundle.main.bundleURL,
-            Bundle.main.executableURL?.deletingLastPathComponent(),
-        ]
-
-        for root in directRoots.compactMap({ $0 }) {
-            for name in names {
-                if fm.fileExists(atPath: root.appendingPathComponent(name).path)
-                    || fm.fileExists(atPath: root.appendingPathComponent("Resources").appendingPathComponent(name).path) {
-                    return true
-                }
-            }
-        }
-
-        let buildRoot = URL(fileURLWithPath: fm.currentDirectoryPath)
-            .appendingPathComponent(".build")
-        guard let enumerator = fm.enumerator(
-            at: buildRoot,
-            includingPropertiesForKeys: nil
-        ) else {
-            return false
-        }
-
-        for case let url as URL in enumerator where names.contains(url.lastPathComponent) {
-            return true
-        }
-        return false
-    }
 }
