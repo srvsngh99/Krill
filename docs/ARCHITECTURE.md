@@ -2,7 +2,16 @@
 
 ## Overview
 
-KrillLM is a Mac-native LLM inference engine for Apple Silicon built on MLX. It ships as a single CLI binary (`krillm`) with an HTTP server, supporting 7 model families with prefix caching, speculative decoding, and native Gemma 4 multimodal.
+KrillLM is a Mac-native LLM inference engine for Apple Silicon built on MLX. It ships as a single CLI binary (`krillm`) with an HTTP server, supporting 7 model families with prefix caching and speculative decoding.
+
+### Gemma 4 Multimodal Support Matrix
+
+| Path | Text | Image only | Audio only | Image+Audio |
+|------|------|------------|------------|-------------|
+| CLI (`krillm run`) | Native Swift | Native Swift (SigLIP2) | mlx-vlm bridge | mlx-vlm bridge (both) |
+| Server API | Native Swift | Not supported | Not supported | Not supported |
+
+When `--audio` is present, RunCommand routes the entire request (including any `--image`) through the mlx-vlm Python bridge because native audio is not implemented. Image-only requests use the native Swift vision path. Server does not accept media payloads.
 
 ## Module Dependency Graph
 

@@ -37,7 +37,8 @@ generate(messages:, params:, maxTokens:, imageData:, audioData:)
 #### Step 1: Tokenize
 - Gemma4: `formatGemma4TokenIds()` (direct token IDs, no round-trip)
 - Others: `applyChatTemplate()` then `encodeWithoutExtraBOS()`
-- Multimodal: prepend N copies of `<|image|>` based on `computeImageTokenCount()`
+- Multimodal (CLI image only): prepend N copies of `<|image|>` based on `computeImageTokenCount()`
+- Audio: handled by Python bridge in RunCommand before reaching InferenceEngine
 
 #### Step 2: Create KV Caches
 - `makeKVCaches(numLayers)` — one empty cache per layer

@@ -55,6 +55,8 @@ Returns server status, memory, uptime, loaded model info.
 
 ### POST /api/generate
 
+Text-only generation. **Does not accept `images` or media payloads** — the `images` field from Ollama's API is rejected. Image/audio generation is only available via the CLI (`krillm run --image`), not the server API.
+
 ```bash
 curl http://127.0.0.1:11435/api/generate -d '{
   "model": "llama-3.2-1b",
@@ -74,7 +76,8 @@ curl http://127.0.0.1:11435/api/generate -d '{
 
 ### POST /api/chat
 
-Same as /api/generate but with messages format:
+Text-only chat. Same media limitation as `/api/generate` — no image/audio payloads.
+
 ```json
 {"model": "...", "messages": [{"role": "user", "content": "..."}]}
 ```
@@ -82,6 +85,19 @@ Same as /api/generate but with messages format:
 ### GET /api/tags
 
 Returns installed models in Ollama format.
+
+## Multimodal Limitations
+
+The server currently supports **text-only** generation. Image and audio are not supported through any server endpoint:
+
+- `/api/generate` rejects the top-level `images` field with an unsupported-field error
+- `/api/chat` accepts text messages only (`role` + `content`); per-message `images` fields are not consumed and no media is passed to inference
+- Server-mode benchmarks skip media tasks for this reason
+
+For multimodal inference, use the CLI directly:
+```bash
+krillm run gemma-4-e2b "Describe this image." --image photo.png
+```
 
 ## Health and Monitoring
 
