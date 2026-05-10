@@ -145,6 +145,22 @@ class ReleaseCandidateProfileTests(unittest.TestCase):
         self.assertEqual(kinds.get("text_wall_ratio"), "hard")
         self.assertEqual(kinds.get("image_wall_ratio"), "hard")
 
+    def test_missing_hard_metric_fails_the_gate(self):
+        # Strip text_decode (a hard-gated metric) from the report by handing
+        # the gate a results section with no decode_tokens_per_second_median.
+        # The gate must treat the absence as a failure, not a silent pass.
+        report = self._baseline_report()
+        for engine in ("krillm", "ollama"):
+            report["results"]["text"][engine]["summary"].pop("decode_tokens_per_second_median", None)
+
+        code, gate = run_gate(report, "--profile", "release_candidate", "--allow-dtype-mismatch")
+        self.assertEqual(code, 1, "missing hard metric must fail the gate")
+        decode = next(e for e in gate["evaluations"] if e["name"] == "text_decode_ratio")
+        self.assertIsNone(decode["value"])
+        self.assertEqual(decode["kind"], "hard")
+        self.assertFalse(decode["pass"])
+        self.assertFalse(gate["summary"]["hard_metrics_pass"])
+
 
 if __name__ == "__main__":
     unittest.main()

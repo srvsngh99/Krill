@@ -105,7 +105,12 @@ GATE_PROFILES: dict[str, dict[str, str]] = {
         "image_prefill_ratio":   "advisory",
         "audio_wall_ratio":      "out_of_scope",
         "audio_prefill_ratio":   "out_of_scope",
-        "memory_ratio":          "hard",
+        # memory_ratio is advisory until `gemma4_multimodal_benchmark.py`
+        # reliably records `peak_memory_gb_median` for both engines. Today the
+        # field is absent from generated reports, so hard-gating it would mean
+        # "every release_candidate run passes only because we ignored a hard
+        # miss". Re-promote to hard once the benchmark emits peak memory.
+        "memory_ratio":          "advisory",
     },
 }
 
@@ -616,9 +621,12 @@ def main() -> int:
     bottleneck = classify_bottleneck(evaluations)
 
     # Only hard failures break the gate. Advisory metrics are reported but
-    # never gate-blocking under any profile.
+    # never gate-blocking under any profile. Missing hard metrics count as
+    # failures: we cannot claim the gate passes for a metric we did not
+    # measure. Missing advisory metrics are tolerated (they print N/A and
+    # do not affect the verdict either way).
     hard_evals = [e for e in evaluations if e.get("kind", "hard") == "hard"]
-    hard_pass = all(e["pass"] for e in hard_evals if e["value"] is not None)
+    hard_pass = all(e["pass"] for e in hard_evals)
     all_pass = all(e["pass"] for e in evaluations if e["value"] is not None)
     gate_pass = hard_pass and not compatibility_fail
 
