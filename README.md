@@ -128,7 +128,7 @@ krillm pull llama-3.1-8b      # Llama 3.1 8B
 krillm pull qwen2.5-7b        # Qwen 2.5 7B
 krillm pull mistral-7b        # Mistral 7B v0.3
 krillm pull gemma-2-9b        # Gemma 2 9B
-krillm pull gemma-4-e2b       # Gemma 4 E2B (text via native experimental or mlx-vlm; media via mlx-vlm)
+krillm pull gemma-4-e2b       # Gemma 4 E2B (text+image native, audio via mlx-vlm)
 krillm pull phi-4-mini         # Phi-4 Mini
 ```
 
@@ -152,38 +152,29 @@ krillm pull mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 
 ## Gemma 4 Multimodal Support
 
-Gemma 4 image/audio support is routed through the Python `mlx-vlm` bridge. The native Swift Gemma 4 path is text-only and experimental; native image and audio preprocessing intentionally fails instead of producing placeholder tensors or ignoring media.
+Gemma 4 supports text, image, and audio inputs. Image uses the native Swift vision encoder (SigLIP2); audio requires the Python `mlx-vlm` bridge.
 
-| Path | Text | Image | Audio | Tools |
-|------|------|-------|-------|-------|
-| Gemma 4 via `mlx-vlm` | Supported | Supported with `--image` | Supported with `--audio` | Not supported by `krillm run` |
-| Gemma 4 native Swift | Experimental | Not supported | Not supported | Not supported |
-| Other native models | Supported | Not supported | Not supported | Not supported |
+| Path | Text | Image | Audio |
+|------|------|-------|-------|
+| CLI (`krillm run`) | Native Swift | Native Swift | mlx-vlm Python bridge |
+| Server API | Native Swift | Not supported | Not supported |
+| Other models | Native Swift | Not supported | Not supported |
 
-Install the bridge dependency:
+The server API does not accept image/audio payloads. For multimodal inference, use the CLI.
+
+### Image (native, no Python needed)
 
 ```bash
-make setup-mlx-vlm
-
-# Optional: force a specific interpreter instead of ~/.krillm/venv/bin/python3
-export KRILLM_PYTHON=/path/to/venv/bin/python3
+krillm run gemma-4-e2b "Describe this image" --image ./photo.png --max-tokens 64
 ```
 
-Smoke checks:
+### Audio (requires mlx-vlm)
 
 ```bash
-# Dependency detection used by krillm
-python3 -c "from mlx_vlm import load; print('ok')"
+# Install the bridge dependency
+make setup-mlx-vlm
 
-# Image/audio route through mlx-vlm for Gemma 4
-krillm run gemma-4-e2b "Describe this image" --image ./sample.jpg --max-tokens 64
-krillm run gemma-4-e2b "Transcribe or summarize this audio" --audio ./sample.wav --max-tokens 64
-
-# Test image and audio separately. Gemma 4 E2B is large enough that combined
-# image+audio prompts should be treated as a separate load/performance test.
-
-# Without mlx-vlm, Gemma 4 media fails loudly instead of falling back to native text-only inference.
-KRILLM_PYTHON=/usr/bin/python3 krillm run gemma-4-e2b "Describe this image" --image ./sample.jpg
+krillm run gemma-4-e2b "What sound is this?" --audio ./clip.wav --max-tokens 64
 ```
 
 ## API Compatibility
