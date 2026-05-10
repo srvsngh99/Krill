@@ -181,8 +181,8 @@ Release criteria must state which `cache_mode` is being compared. At least one c
 
 ## Apples-to-Apples Comparison Rules
 
-- Do not compare KrillLM text-only placeholder runs against Ollama real-media runs. The server-mode multimodal harness skips image/audio for KrillLM specifically because the server does not accept media payloads — that skip must be visible in release-gate output, not silently substituted with text-only numbers.
-- KrillLM and Ollama runs in the same report must use the same prompts, media assets, max-token budgets, sampling settings, and `cache_mode`.
+- Do not compare text-only placeholder runs against real-media runs. Server-mode multimodal comparisons must send real media payloads to both engines (image via the native Swift SigLIP2 path, audio via the `mlx-vlm` bridge until Workstream 1 lands). Any metric that the harness skips, or that the active gate profile classifies as `out_of_scope`, must be surfaced explicitly in the gate report (`scope_skipped_metrics` with reason) — never silently substituted with text-only numbers.
+- KrillLM and Ollama runs in the same report must use the same prompts, media assets, max-token budgets, sampling settings, `cache_mode`, and `kv_cache_dtype` (recorded in the report under `benchmark.kv_cache_dtype`).
 
 ## Non-Negotiable Rules
 
