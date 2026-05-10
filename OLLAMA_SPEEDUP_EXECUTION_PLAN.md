@@ -203,10 +203,15 @@ out-of-scope metrics via an explicit profile selected at the command line.
 Done:
 
 - `tools/release_gate.py --profile <name>` (default `strict`). The new
-  `release_candidate` profile hard-gates user-visible latency and memory
-  (text_decode, text_wall, text_ttft, image_wall, memory) and treats prefill
-  TPS metrics as advisory (text_prefill, image_prefill). Audio metrics are
-  out_of_scope until Workstream 1 lands.
+  `release_candidate` profile hard-gates user-visible latency
+  (text_decode, text_wall, text_ttft, image_wall) and treats prefill TPS
+  metrics and memory as advisory (text_prefill, image_prefill, memory).
+  Audio metrics are out_of_scope until Workstream 1 lands.
+- Missing hard metrics fail the gate; we cannot claim a metric passes
+  without measuring it.
+- `memory_ratio` is advisory under `release_candidate` until
+  `gemma4_multimodal_benchmark.py` records `peak_memory_gb_median` for both
+  engines. Re-promote to hard once the benchmark emits it.
 - Out-of-scope skips are recorded in `scope_skipped_metrics[]` with a
   human-readable reason so the omission stays auditable; advisory failures
   print a `WARN` glyph and are tagged `[advisory]` but do not break the gate.
@@ -227,12 +232,13 @@ release_gate.py .build/benchmarks/v4-mm.json
   → exit 0
 ```
 
-The release_candidate run on v4-mm.json passes all five hard gates strongly
-(text_decode 1.50x, text_wall 0.52x, text_ttft 0.12x, image_wall 0.56x,
-memory N/A) with two advisory WARNs (text_prefill 1.45x, image_prefill 1.04x)
-and two documented audio skips. Geometric mean speedup 1.418x. The dtype
-mismatch (KrillLM bf16 vs Ollama Q4_K_M) remains a separate, explicit caveat
-that the operator must opt into via `--allow-dtype-mismatch`.
+The release_candidate run on v4-mm.json passes the four user-latency hard
+gates (text_decode 1.50x, text_wall 0.52x, text_ttft 0.12x, image_wall 0.56x)
+with three advisory readings (text_prefill 1.45x WARN, image_prefill 1.04x
+WARN, memory N/A) and two documented audio skips. Geometric mean speedup
+1.418x. The dtype mismatch (KrillLM bf16 vs Ollama Q4_K_M) remains a
+separate, explicit caveat that the operator must opt into via
+`--allow-dtype-mismatch`.
 
 ### 5. Quantized KV Save/Restore
 

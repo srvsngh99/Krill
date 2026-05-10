@@ -103,7 +103,7 @@ profile is recorded in the gate report so audit trails are unambiguous.
 | text_prefill_ratio  | advisory | Wall time and TTFT already gate user latency; prefill TPS is noisy on short prompts. |
 | image_wall_ratio    | hard | User-visible total latency on image prompts. |
 | image_prefill_ratio | advisory | Vision encoder cache lifts work out of the measured prefill window, so this bucket understates the user win that image_wall already captures. Re-promote once the metric excludes cache mode or is redefined. |
-| memory_ratio        | hard | Peak memory must not regress vs Ollama. |
+| memory_ratio        | advisory | `gemma4_multimodal_benchmark.py` does not yet emit `peak_memory_gb_median` for either engine; hard-gating an unmeasured metric would silently pass on every run. Re-promote to hard once the benchmark records peak memory. |
 | audio_wall_ratio    | out_of_scope | Audio runs through the mlx-vlm sidecar; native Swift audio is Workstream 1. |
 | audio_prefill_ratio | out_of_scope | Same as audio_wall. |
 
@@ -111,6 +111,11 @@ Out-of-scope metrics appear in the gate report under `scope_skipped_metrics`
 with the documented reason — they are **not** silently dropped. Advisory
 metrics are evaluated and printed (with a `WARN` glyph and `[advisory]` tag)
 but never break the gate. Only hard failures set `gate: "fail"`.
+
+**Missing hard metrics fail the gate.** If a hard-gated metric is absent
+from the report (e.g. the benchmark never recorded it), the gate verdict is
+`fail`. A claim of "release candidate" must be backed by an actual
+measurement; an unobserved metric is treated as a failure, not a pass.
 
 Use `--profile release_candidate` when validating that a release candidate
 matches the user-latency claim defined in
