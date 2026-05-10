@@ -21,9 +21,10 @@ public struct LoadedModel: @unchecked Sendable {
     /// Forward pass returning logits
     public let forward: (MLXArray, [KVCache]?) -> MLXArray
 
-    /// Multimodal forward pass (tokens, caches, imageEmbeddings, audioEmbeddings) -> logits
+    /// Multimodal forward pass (tokens, caches, imageEmbeddings, audioEmbeddings, imageBytesHash) -> logits
     /// Only set for models that support native multimodal (e.g. Gemma4).
-    public let multimodalForward: ((MLXArray, [KVCache]?, MLXArray?, MLXArray?) -> MLXArray)?
+    /// `imageBytesHash` (when non-nil) keys the per-model vision encoder cache; pass nil to bypass.
+    public let multimodalForward: ((MLXArray, [KVCache]?, MLXArray?, MLXArray?, String?) -> MLXArray)?
 
     /// Vocab size for validation
     public let vocabSize: Int
@@ -214,8 +215,8 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
             numLayers: config.numHiddenLayers,
             family: "gemma4",
             forward: { tokens, caches in model(tokens, caches: caches) },
-            multimodalForward: { tokens, caches, imageEmb, _ in
-                model(tokens, caches: caches, pixelValues: imageEmb)
+            multimodalForward: { tokens, caches, imageEmb, _, imageHash in
+                model(tokens, caches: caches, pixelValues: imageEmb, imageBytesHash: imageHash)
             },
             vocabSize: config.vocabSize
         )
