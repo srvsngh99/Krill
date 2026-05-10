@@ -61,6 +61,19 @@ def parse_args() -> argparse.Namespace:
         default=".build/benchmarks/krillm-vs-ollama.json",
         help="JSON report path.",
     )
+    parser.add_argument(
+        "--cache-mode",
+        choices=["cold", "warm", "cache_hit", "auto"],
+        default="auto",
+        help=(
+            "Cache labelling mode for results. 'auto' infers per-run labels "
+            "from --warmup and prefix-cache heuristics (cold=first run with "
+            "warmup==0, warm=runs after warmup, cache_hit=server prefix-cache "
+            "active on repeated prompts). When set to an explicit value, "
+            "every result is force-tagged with that label and "
+            "cache_mode_source is recorded as 'explicit'."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -209,6 +222,7 @@ def parse_krillm_result(stdout: str, wall_s: float, command: list[str]) -> dict[
         "total_s": float(match.group("total_s")),
         "wall_time_s": wall_s,
         "output_sha256": sha256_text(generated_text),
+        "output_preview": generated_text[:200],
     }
 
 
@@ -289,6 +303,7 @@ def run_ollama(args: argparse.Namespace, prompt: str, measured: bool) -> Optiona
         "wall_time_s": wall_s,
         "load_ms": int(final.get("load_duration") or 0) / 1_000_000,
         "output_sha256": sha256_text(generated_text),
+        "output_preview": generated_text[:200],
     }
 
 
@@ -355,6 +370,7 @@ def run_krillm_server(args: argparse.Namespace, prompt: str, measured: bool) -> 
         "total_s": int(final.get("total_duration") or 0) / 1_000_000_000,
         "wall_time_s": wall_s,
         "output_sha256": sha256_text(generated_text),
+        "output_preview": generated_text[:200],
         "mode": "server",
     }
     # Include server-side TTFT if available
@@ -385,6 +401,86 @@ def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
             summary[f"{key}_min"] = min(values)
             summary[f"{key}_max"] = max(values)
     return summary
+
+
+def infer_cache_mode(index: int, warmup: int, use_server: bool) -> str:
+    """Infer per-run cache_mode label.
+
+    cold      = first measured run when no warmup was performed
+    warm      = run executed after at least one warmup or after the first run
+    cache_hit = same prompt repeated against a server with prefix cache active
+    """
+    if use_server and (warmup > 0 or index > 0):
+        return "cache_hit"
+    if warmup == 0 and index == 0:
+        return "cold"
+    return "warm"
+
+
+def apply_cache_mode(
+    runs: list[Optional[dict[str, Any]]],
+    cli_mode: str,
+    warmup: int,
+    use_server: bool,
+) -> tuple[str, str]:
+    """Tag each run with cache_mode and return (group_label, source)."""
+    source = "explicit" if cli_mode != "auto" else "auto"
+    labels: list[str] = []
+    for i, run in enumerate(runs):
+        if run is None:
+            continue
+        if cli_mode == "auto":
+            label = infer_cache_mode(i, warmup, use_server)
+        else:
+            label = cli_mode
+        run["cache_mode"] = label
+        labels.append(label)
+    if not labels:
+        group = cli_mode if cli_mode != "auto" else "warm"
+    elif all(l == labels[0] for l in labels):
+        group = labels[0]
+    else:
+        group = "mixed"
+    return group, source
+
+
+def check_input_parity(
+    krillm_runs: list[dict[str, Any]],
+    ollama_runs: list[dict[str, Any]],
+    prompt: str,
+) -> dict[str, Any]:
+    """Compare prompt token (or character) counts between engines."""
+    def median_tokens(runs: list[dict[str, Any]]) -> Optional[float]:
+        values = [r["prompt_tokens"] for r in runs if r and r.get("prompt_tokens")]
+        if not values:
+            return None
+        return statistics.median(values)
+
+    krill_tokens = median_tokens(krillm_runs)
+    ollama_tokens = median_tokens(ollama_runs)
+    if krill_tokens and ollama_tokens:
+        basis = "prompt_tokens"
+        a, b = krill_tokens, ollama_tokens
+    else:
+        basis = "prompt_chars"
+        a = b = float(len(prompt))
+    if max(a, b) == 0:
+        return {"status": "ok", "basis": basis, "krillm": a, "ollama": b, "delta_ratio": 0.0}
+    delta_ratio = abs(a - b) / max(a, b)
+    status = "ok" if delta_ratio <= 0.10 else "mismatch"
+    details = {
+        "status": status,
+        "basis": basis,
+        "krillm": a,
+        "ollama": b,
+        "delta_ratio": round(delta_ratio, 4),
+    }
+    if status == "mismatch":
+        details["details"] = (
+            f"prompt size differs by {delta_ratio*100:.1f}% between engines "
+            f"({basis}: krillm={a}, ollama={b}); results may not be comparable"
+        )
+    return details
 
 
 def write_report(path: str, report: dict[str, Any]) -> None:
@@ -421,6 +517,7 @@ def main() -> int:
             "temperature": args.temperature,
             "top_p": args.top_p,
             "seed": args.seed,
+            "cache_mode_requested": args.cache_mode,
         },
         "environment": environment(krillm_bin, args.ollama_bin),
         "preflight": {},
@@ -510,10 +607,52 @@ def main() -> int:
         return 1
 
     report["status"] = "ok"
+
+    krill_group, krill_source = apply_cache_mode(krillm_runs, args.cache_mode, args.warmup, use_server)
+    ollama_group, ollama_source = apply_cache_mode(ollama_runs, args.cache_mode, args.warmup, False)
+
     report["results"] = {
-        "krillm": {"runs": krillm_runs, "summary": summarize([run for run in krillm_runs if run])},
-        "ollama": {"runs": ollama_runs, "summary": summarize([run for run in ollama_runs if run])},
+        "krillm": {
+            "runs": krillm_runs,
+            "summary": summarize([run for run in krillm_runs if run]),
+            "cache_mode": krill_group,
+            "cache_mode_source": krill_source,
+        },
+        "ollama": {
+            "runs": ollama_runs,
+            "summary": summarize([run for run in ollama_runs if run]),
+            "cache_mode": ollama_group,
+            "cache_mode_source": ollama_source,
+        },
     }
+
+    if args.cache_mode != "auto":
+        top_cache_mode = args.cache_mode
+        top_source = "explicit"
+    elif krill_group == ollama_group:
+        top_cache_mode = krill_group
+        top_source = "auto"
+    else:
+        top_cache_mode = "mixed"
+        top_source = "auto"
+    report["cache_mode"] = top_cache_mode
+    report["cache_mode_source"] = top_source
+
+    parity = check_input_parity(
+        [r for r in krillm_runs if r],
+        [r for r in ollama_runs if r],
+        prompt,
+    )
+    report["input_parity"] = parity
+    if parity.get("status") == "mismatch":
+        print(f"WARN: input parity mismatch: {parity.get('details')}", file=sys.stderr)
+
+    if use_server:
+        report["server_media"] = {
+            "status": "supported",
+            "image": "native",
+            "audio": "bridge",
+        }
 
     # Detect prefix cache influence: if KrillLM prefill speed varies >3x between
     # runs, later runs likely hit the prefix cache.

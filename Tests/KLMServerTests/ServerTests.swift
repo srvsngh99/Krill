@@ -98,13 +98,27 @@ final class ServerTests: XCTestCase {
     }
 
     func testOpenAIChatRequestRejectsInvalidMessageContent() {
+        // OpenAI chat now accepts string OR an array of content blocks.
+        // A bare object (not array) is invalid; verify the new error message.
         XCTAssertThrowsError(try ServerParsing.openAIChatRequest(from: [
             "model": "local-model",
             "messages": [["role": "user", "content": ["type": "text"]]],
         ])) { error in
             XCTAssertEqual(
                 error as? ServerRequestError,
-                .invalidType(field: "messages[0].content", expected: "a string")
+                .invalidType(field: "messages[0].content", expected: "a string or an array of content blocks")
+            )
+        }
+    }
+
+    func testOpenAIChatRequestRejectsNumericMessageContent() {
+        XCTAssertThrowsError(try ServerParsing.openAIChatRequest(from: [
+            "model": "local-model",
+            "messages": [["role": "user", "content": 42]],
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidType(field: "messages[0].content", expected: "a string or an array of content blocks")
             )
         }
     }
@@ -190,14 +204,17 @@ final class ServerTests: XCTestCase {
         }
     }
 
-    func testOllamaGenerateRequestRejectsUnsupportedImages() {
-        XCTAssertThrowsError(try ServerParsing.ollamaGenerateRequest(from: [
+    func testOllamaGenerateRequestAcceptsImagesField() throws {
+        // `images` is no longer rejected at the parsing layer — it is captured
+        // into the media payload and validated by the server handler against
+        // the loaded model. Parsing alone should succeed.
+        let request = try ServerParsing.ollamaGenerateRequest(from: [
             "model": "local-model",
             "prompt": "describe this",
-            "images": ["base64"],
-        ])) { error in
-            XCTAssertEqual(error as? ServerRequestError, .unsupportedField("images"))
-        }
+            "images": ["dGVzdA=="],
+        ])
+        XCTAssertEqual(request.media.images, ["dGVzdA=="])
+        XCTAssertNil(request.media.audio)
     }
 
     func testOversizedBodyReturnsPayloadTooLarge() throws {

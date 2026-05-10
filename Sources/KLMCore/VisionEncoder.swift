@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import MLX
 import MLXNN
 import MLXFast
@@ -6,6 +7,89 @@ import MLXFast
 import CoreGraphics
 import ImageIO
 #endif
+
+// MARK: - VisionEncoderCache
+
+/// LRU cache for SigLIP2 vision encoder outputs, keyed by SHA-256 of input image bytes.
+///
+/// The cached value is the post-encoder, post-projection embedding tensor that the
+/// language model consumes. Cache lifetime is bound to the owning model instance —
+/// reloading the model (different weights) gets a fresh cache.
+public final class VisionEncoderCache: @unchecked Sendable {
+    public static let defaultCapacity: Int = 4
+
+    private let lock = NSLock()
+    private let capacity: Int
+    private var entries: [String: MLXArray] = [:]
+    private var order: [String] = []
+
+    private var _hits: Int = 0
+    private var _misses: Int = 0
+
+    public init(capacity: Int = VisionEncoderCache.defaultCapacity) {
+        self.capacity = max(1, capacity)
+    }
+
+    public static func key(forImageBytes data: Data) -> String {
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    func lookup(_ key: String) -> MLXArray? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let value = entries[key] else {
+            _misses += 1
+            return nil
+        }
+        _hits += 1
+        if let idx = order.firstIndex(of: key) {
+            order.remove(at: idx)
+        }
+        order.append(key)
+        return value
+    }
+
+    func store(_ key: String, value: MLXArray) {
+        lock.lock()
+        defer { lock.unlock() }
+        if entries[key] != nil {
+            if let idx = order.firstIndex(of: key) {
+                order.remove(at: idx)
+            }
+            order.append(key)
+            entries[key] = value
+            return
+        }
+        if order.count >= capacity, let evict = order.first {
+            order.removeFirst()
+            entries.removeValue(forKey: evict)
+        }
+        entries[key] = value
+        order.append(key)
+    }
+
+    var hits: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _hits
+    }
+
+    var misses: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _misses
+    }
+
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return entries.count
+    }
+
+    func resetCounters() {
+        lock.lock(); defer { lock.unlock() }
+        _hits = 0
+        _misses = 0
+    }
+}
 
 // MARK: - Preprocessing Errors
 

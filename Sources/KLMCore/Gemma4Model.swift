@@ -204,7 +204,7 @@ class Gemma4Attention: Module {
     /// - Parameter sharedCache: If non-nil, use this cache's K/V instead of computing new ones (KV sharing)
     func callAsFunction(
         _ x: MLXArray, maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .none,
-        cache: KVCache? = nil, sharedCache: KVCache? = nil
+        cache: KVCacheProtocol? = nil, sharedCache: KVCacheProtocol? = nil
     ) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
@@ -307,7 +307,7 @@ class Gemma4Block: Module {
 
     func callAsFunction(
         _ x: MLXArray, maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .none,
-        cache: KVCache? = nil, sharedCache: KVCache? = nil, perLayerInput: MLXArray? = nil
+        cache: KVCacheProtocol? = nil, sharedCache: KVCacheProtocol? = nil, perLayerInput: MLXArray? = nil
     ) -> MLXArray {
         // Attention with post-norm
         var h = x + postAttnNorm(selfAttn(inputLayernorm(x), maskMode: maskMode, cache: cache, sharedCache: sharedCache))
@@ -406,7 +406,7 @@ class Gemma4TextModel: Module {
     ///   - imageTokenId: Token ID for image placeholder (default 258880)
     ///   - audioTokenId: Token ID for audio placeholder (default 258881)
     func callAsFunction(
-        _ tokens: MLXArray, caches: [KVCache]? = nil,
+        _ tokens: MLXArray, caches: [KVCacheProtocol]? = nil,
         imageEmbeddings: MLXArray? = nil, audioEmbeddings: MLXArray? = nil,
         imageTokenId: Int = 258880, audioTokenId: Int = 258881
     ) -> MLXArray {
@@ -501,7 +501,7 @@ public class Gemma4ForCausalLM: Module {
         model.embedTokens.asLinear(hidden)
     }
 
-    public func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
+    public func callAsFunction(_ tokens: MLXArray, caches: [KVCacheProtocol]? = nil) -> MLXArray {
         let hidden = model(tokens, caches: caches)
         let logits = lmHead(hidden)
         let cap = config.finalLogitSoftcapping
@@ -510,7 +510,7 @@ public class Gemma4ForCausalLM: Module {
 
     /// Forward pass with multimodal embedding injection.
     public func callAsFunction(
-        _ tokens: MLXArray, caches: [KVCache]? = nil,
+        _ tokens: MLXArray, caches: [KVCacheProtocol]? = nil,
         imageEmbeddings: MLXArray? = nil, audioEmbeddings: MLXArray? = nil,
         imageTokenId: Int = 258880, audioTokenId: Int = 258881
     ) -> MLXArray {
@@ -605,6 +605,9 @@ public class Gemma4MultimodalModel: Module {
     public let imageTokenId: Int
     public let audioTokenId: Int
 
+    // Per-instance cache: invalidated automatically when the model is unloaded.
+    public let visionCache: VisionEncoderCache = VisionEncoderCache()
+
     public init(_ config: Gemma4Config, imageTokenId: Int = 258880, audioTokenId: Int = 258881) {
         self.config = config
         self.imageTokenId = imageTokenId
@@ -630,22 +633,38 @@ public class Gemma4MultimodalModel: Module {
     }
 
     /// Text-only forward pass.
-    public func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
+    public func callAsFunction(_ tokens: MLXArray, caches: [KVCacheProtocol]? = nil) -> MLXArray {
         languageModel(tokens, caches: caches)
     }
 
     /// Multimodal forward pass with image pixel values.
+    ///
+    /// If `imageBytesHash` is non-nil it is treated as a stable identifier for the
+    /// raw image bytes the caller derived `pixelValues` from; the encoder output
+    /// for that key is cached and reused on subsequent calls. Pass `nil` to
+    /// bypass the cache (e.g. for multi-image batches or any non-image input).
     public func callAsFunction(
-        _ tokens: MLXArray, caches: [KVCache]? = nil,
-        pixelValues: MLXArray? = nil
+        _ tokens: MLXArray, caches: [KVCacheProtocol]? = nil,
+        pixelValues: MLXArray? = nil,
+        imageBytesHash: String? = nil
     ) -> MLXArray {
         guard let pixels = pixelValues else {
             return languageModel(tokens, caches: caches)
         }
 
-        // Vision pipeline: pixels -> encoder -> projector -> embeddings
-        let visionFeatures = visionTower(pixels)
-        let imageEmbeddings = embedVision(visionFeatures)
+        let imageEmbeddings: MLXArray
+        if let key = imageBytesHash, let cached = visionCache.lookup(key) {
+            imageEmbeddings = cached
+        } else {
+            // Vision pipeline: pixels -> encoder -> projector -> embeddings
+            let visionFeatures = visionTower(pixels)
+            let computed = embedVision(visionFeatures)
+            if let key = imageBytesHash {
+                MLX.eval(computed)
+                visionCache.store(key, value: computed)
+            }
+            imageEmbeddings = computed
+        }
 
         // Inject into language model forward
         return languageModel(

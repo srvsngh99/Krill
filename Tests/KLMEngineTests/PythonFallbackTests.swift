@@ -18,19 +18,10 @@ final class PythonFallbackTests: XCTestCase {
         }
     }
 
-    func testGeneratedPythonScriptEscapesPromptAndMediaPaths() {
-        let script = PythonFallback.buildScript(
-            modelPath: #"/tmp/model "quoted""#,
-            prompt: #"say "hi"\nthen continue"#,
-            maxTokens: 12,
-            imagePath: #"/tmp/image "one".png"#,
-            audioPath: #"/tmp/audio \ sample.wav"#)
-
-        XCTAssertTrue(script.contains(#"model, processor = load("/tmp/model \"quoted\"")"#))
-        XCTAssertTrue(script.contains(#"user_prompt = "say \"hi\"\\nthen continue""#))
-        XCTAssertTrue(script.contains(#"media_prefix = "<|image|><|audio|>""#))
-        XCTAssertTrue(script.contains(#"kwargs["image"] = ["/tmp/image \"one\".png"]"#))
-        XCTAssertTrue(script.contains(#"kwargs["audio"] = "/tmp/audio \\ sample.wav""#))
-        XCTAssertTrue(script.contains("max_tokens=12"))
-    }
+    // The previous `testGeneratedPythonScriptEscapesPromptAndMediaPaths` test
+    // asserted on a Python script string built per-request inside Swift. With
+    // the persistent sidecar, prompt/media handling lives in
+    // `tools/mlx_vlm_sidecar.py` and is exercised through the JSON protocol.
+    // The new sidecar tests in `PythonFallbackSidecarTests.swift` cover that
+    // path end-to-end, so this string-shape test no longer applies.
 }
