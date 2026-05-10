@@ -90,8 +90,8 @@ Returns installed models in Ollama format.
 
 The server currently supports **text-only** generation. Image and audio are not supported through any server endpoint:
 
-- `/api/generate` rejects the `images` field
-- `/api/chat` does not pass image/audio data to the engine
+- `/api/generate` rejects the top-level `images` field with an unsupported-field error
+- `/api/chat` accepts text messages only (`role` + `content`); per-message `images` fields are not consumed and no media is passed to inference
 - Server-mode benchmarks skip media tasks for this reason
 
 For multimodal inference, use the CLI directly:

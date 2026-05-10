@@ -85,7 +85,13 @@ Evaluates benchmark reports against performance thresholds.
 
 ## Release Readiness Status
 
-Release benchmark gates currently **fail**. Text wall time passes (0.588x), but text decode (1.19x, need 1.5x) and prefill ratios do not meet thresholds. Image/audio benchmarks via the multimodal harness still use the mlx-vlm bridge path, not the native CLI path. Server multimodal benchmarks are skipped because the server does not accept media payloads.
+Release benchmark gates currently **fail**. Run `make bench-release-gate` for the latest per-metric results. The gate report at `.build/benchmarks/release-gate.json` contains exact ratios, the worst metric, and bottleneck classification.
+
+Key gaps as of the last reviewed run:
+- Text decode ratio does not meet the 1.5x threshold.
+- Prefill ratios are below target (MLX framework limitation).
+- Image/audio benchmarks via the multimodal harness use the mlx-vlm bridge path, not the native CLI path.
+- Server multimodal benchmarks are skipped because the server does not accept media payloads.
 
 ## Cache-Hit Benchmark Caveats
 

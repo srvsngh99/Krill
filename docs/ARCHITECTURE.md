@@ -6,12 +6,12 @@ KrillLM is a Mac-native LLM inference engine for Apple Silicon built on MLX. It 
 
 ### Gemma 4 Multimodal Support Matrix
 
-| Path | Text | Image | Audio |
-|------|------|-------|-------|
-| CLI (`krillm run`) | Native Swift | Native Swift (SigLIP2 vision encoder) | mlx-vlm Python bridge |
-| Server (`/api/generate`, `/v1/chat/completions`) | Native Swift | Not supported | Not supported |
+| Path | Text | Image only | Audio only | Image+Audio |
+|------|------|------------|------------|-------------|
+| CLI (`krillm run`) | Native Swift | Native Swift (SigLIP2) | mlx-vlm bridge | mlx-vlm bridge (both) |
+| Server API | Native Swift | Not supported | Not supported | Not supported |
 
-Server image/audio is not supported — the server does not accept media payloads. Audio always requires the mlx-vlm Python bridge (`make setup-mlx-vlm`).
+When `--audio` is present, RunCommand routes the entire request (including any `--image`) through the mlx-vlm Python bridge because native audio is not implemented. Image-only requests use the native Swift vision path. Server does not accept media payloads.
 
 ## Module Dependency Graph
 

@@ -152,13 +152,12 @@ krillm pull mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 
 ## Gemma 4 Multimodal Support
 
-Gemma 4 supports text, image, and audio inputs. Image uses the native Swift vision encoder (SigLIP2); audio requires the Python `mlx-vlm` bridge.
+Gemma 4 supports text, image, and audio inputs. Image-only uses the native Swift vision encoder (SigLIP2); audio requires the Python `mlx-vlm` bridge. When both `--image` and `--audio` are used together, the entire request routes through mlx-vlm.
 
-| Path | Text | Image | Audio |
-|------|------|-------|-------|
-| CLI (`krillm run`) | Native Swift | Native Swift | mlx-vlm Python bridge |
-| Server API | Native Swift | Not supported | Not supported |
-| Other models | Native Swift | Not supported | Not supported |
+| Path | Text | Image only | Audio only | Image+Audio |
+|------|------|------------|------------|-------------|
+| CLI (`krillm run`) | Native Swift | Native Swift | mlx-vlm bridge | mlx-vlm bridge (both) |
+| Server API | Native Swift | Not supported | Not supported | Not supported |
 
 The server API does not accept image/audio payloads. For multimodal inference, use the CLI.
 
