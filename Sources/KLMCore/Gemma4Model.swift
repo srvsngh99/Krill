@@ -282,7 +282,7 @@ class Gemma4MLP: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(gelu(gateProj(x)) * upProj(x))
+        downProj(geluApproximate(gateProj(x)) * upProj(x))
     }
 }
 
@@ -329,7 +329,7 @@ class Gemma4Block: Module {
 
         // PLE gating
         if let ple = perLayerInput {
-            let gate = gelu(pleGate(h))  // [B, L, 256]
+            let gate = geluApproximate(pleGate(h))  // [B, L, 256]
             let gated = gate * ple        // element-wise with PLE slice
             let projected = pleProj(gated) // [B, L, 1536]
             h = h + pleNorm(projected)
@@ -498,17 +498,18 @@ class Gemma4TextModel: Module {
 
 public class Gemma4ForCausalLM: Module {
     @ModuleInfo(key: "model") var model: Gemma4TextModel
-    // Separate lm_head for logit projection (loaded from embed_tokens weights)
-    @ModuleInfo(key: "lm_head") var lmHead: Linear
 
     public let config: Gemma4Config
 
     public init(_ config: Gemma4Config) {
         self.config = config
         _model = ModuleInfo(wrappedValue: Gemma4TextModel(config), key: "model")
-        _lmHead = ModuleInfo(
-            wrappedValue: Linear(config.hiddenSize, config.vocabSize, bias: false),
-            key: "lm_head")
+    }
+
+    /// Output projection: reuse embed_tokens as the LM head (tied weights).
+    /// This matches the Python implementation which uses `embed_tokens.as_linear()`.
+    private func lmHead(_ hidden: MLXArray) -> MLXArray {
+        model.embedTokens.asLinear(hidden)
     }
 
     public func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {

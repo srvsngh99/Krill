@@ -190,17 +190,8 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
         }
         flatWeights = cleaned
 
-        // Handle tied embeddings for language_model
-        let hasLmHead = flatWeights.keys.contains { $0.hasPrefix("language_model.lm_head.") }
-        if !hasLmHead {
-            let embedKeys = flatWeights.keys.filter {
-                $0.hasPrefix("language_model.model.embed_tokens.") && !$0.contains("per_layer")
-            }
-            for key in embedKeys {
-                let lmKey = key.replacingOccurrences(of: "language_model.model.embed_tokens.", with: "language_model.lm_head.")
-                flatWeights[lmKey] = flatWeights[key]
-            }
-        }
+        // Tied embeddings: Gemma4 uses embed_tokens.as_linear() as the LM head.
+        // No separate lm_head weights needed — the model reuses embed_tokens directly.
 
         // Sanitize conv weights: PyTorch [out, in, kH, kW] -> MLX [out, kH, kW, in]
         for key in flatWeights.keys {
@@ -247,14 +238,7 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
     }
     if !stripped.isEmpty { flatWeights = stripped }
 
-    let hasLmHead = flatWeights.keys.contains { $0.hasPrefix("lm_head.") }
-    if !hasLmHead {
-        let embedKeys = flatWeights.keys.filter { $0.hasPrefix("model.embed_tokens.") && !$0.contains("per_layer") }
-        for key in embedKeys {
-            let lmKey = key.replacingOccurrences(of: "model.embed_tokens.", with: "lm_head.")
-            flatWeights[lmKey] = flatWeights[key]
-        }
-    }
+    // Tied embeddings: Gemma4 uses embed_tokens.as_linear() as the LM head.
 
     let tuples = flatWeights.map { ($0.key, $0.value) }
     let nested = ModuleParameters.unflattened(tuples)

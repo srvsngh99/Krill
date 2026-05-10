@@ -166,8 +166,15 @@ public final class InferenceEngine: @unchecked Sendable {
             return (emptyStream, { nil })
         }
 
-        let formatted = tokenizer.applyChatTemplate(messages: messages)
-        let promptTokens = tokenizer.encodeWithoutExtraBOS(formatted)
+        // Use direct token ID path for Gemma4 to avoid decode→re-encode
+        // round-trip that loses special tokens (105, 106, 107).
+        let promptTokens: [Int]
+        if loadedModel.family == "gemma4" {
+            promptTokens = tokenizer.formatGemma4TokenIds(messages: messages)
+        } else {
+            let formatted = tokenizer.applyChatTemplate(messages: messages)
+            promptTokens = tokenizer.encodeWithoutExtraBOS(formatted)
+        }
 
         guard !promptTokens.isEmpty else {
             let emptyStream = AsyncStream<TokenEvent> { continuation in
