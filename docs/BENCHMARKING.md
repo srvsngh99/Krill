@@ -91,7 +91,7 @@ profile is recorded in the gate report so audit trails are unambiguous.
 | Profile | Behavior |
 |---------|----------|
 | `strict` (default) | Every threshold is hard-gated. Preserves the original behavior; existing CI invocations do not need to change. |
-| `release_candidate` | Hard-gates user-visible latency and memory metrics. Treats prefill TPS metrics as advisory. Scopes audio metrics out until native Swift audio (Workstream 1) lands. |
+| `release_candidate` | Hard-gates user-visible latency metrics. Treats prefill TPS and memory as advisory. Scopes audio metrics out until native Swift audio (Workstream 1) lands. |
 
 **Per-metric kind under `release_candidate`:**
 
