@@ -957,6 +957,11 @@ def main() -> int:
 
         results[task["name"]] = task_results
 
+    # KV cache dtype is set on the KrillLM side via KRILL_KV_CACHE_DTYPE
+    # (read by InferenceEngine at construction). Record what the harness saw
+    # so the gate can call out int8 vs fp16 runs explicitly.
+    kv_cache_dtype = os.environ.get("KRILL_KV_CACHE_DTYPE", "fp16")
+
     report = {
         "status": "ok",
         "benchmark": {
@@ -973,6 +978,7 @@ def main() -> int:
             "top_p": args.top_p,
             "seed": args.seed,
             "cache_mode_requested": args.cache_mode,
+            "kv_cache_dtype": kv_cache_dtype,
         },
         "environment": environment(),
         "assets": {

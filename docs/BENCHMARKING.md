@@ -83,6 +83,48 @@ Evaluates benchmark reports against performance thresholds.
 
 **Output:** JSON report + colored terminal summary with per-metric pass/fail, geometric mean speedup, worst metric, bottleneck classification.
 
+### Gate profiles
+
+`release_gate.py --profile <name>` selects which metrics are hard-gated. The
+profile is recorded in the gate report so audit trails are unambiguous.
+
+| Profile | Behavior |
+|---------|----------|
+| `strict` (default) | Every threshold is hard-gated. Preserves the original behavior; existing CI invocations do not need to change. |
+| `release_candidate` | Hard-gates user-visible latency and memory metrics. Treats prefill TPS metrics as advisory. Scopes audio metrics out until native Swift audio (Workstream 1) lands. |
+
+**Per-metric kind under `release_candidate`:**
+
+| Metric | Kind | Rationale |
+|--------|------|-----------|
+| text_decode_ratio   | hard | Core decode throughput claim. |
+| text_wall_ratio     | hard | User-visible total latency. |
+| text_ttft_ratio     | hard | User-visible first-token latency. |
+| text_prefill_ratio  | advisory | Wall time and TTFT already gate user latency; prefill TPS is noisy on short prompts. |
+| image_wall_ratio    | hard | User-visible total latency on image prompts. |
+| image_prefill_ratio | advisory | Vision encoder cache lifts work out of the measured prefill window, so this bucket understates the user win that image_wall already captures. Re-promote once the metric excludes cache mode or is redefined. |
+| memory_ratio        | hard | Peak memory must not regress vs Ollama. |
+| audio_wall_ratio    | out_of_scope | Audio runs through the mlx-vlm sidecar; native Swift audio is Workstream 1. |
+| audio_prefill_ratio | out_of_scope | Same as audio_wall. |
+
+Out-of-scope metrics appear in the gate report under `scope_skipped_metrics`
+with the documented reason — they are **not** silently dropped. Advisory
+metrics are evaluated and printed (with a `WARN` glyph and `[advisory]` tag)
+but never break the gate. Only hard failures set `gate: "fail"`.
+
+Use `--profile release_candidate` when validating that a release candidate
+matches the user-latency claim defined in
+[`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](../OLLAMA_SPEEDUP_EXECUTION_PLAN.md) §4.
+Use the default `strict` profile when running CI gates or pre-release sweeps
+where every metric must still meet its original threshold.
+
+### KV cache dtype in reports
+
+The benchmark harness records `benchmark.kv_cache_dtype` (sourced from
+`KRILL_KV_CACHE_DTYPE`, default `fp16`). The gate echoes it in the gate
+report's `kv_cache_dtype` field and on the terminal summary header so int8
+and fp16 runs are never confused for one another.
+
 ## Release Readiness Status
 
 This build is a release-readiness baseline, not a production release. Release benchmark gates currently **fail**. Run `make bench-release-gate` for the latest per-metric results. The gate report at `.build/benchmarks/release-gate.json` contains exact ratios, the worst metric, and bottleneck classification. See [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for the full plan and acceptance criteria.
