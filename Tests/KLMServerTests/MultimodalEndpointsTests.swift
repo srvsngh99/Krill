@@ -2,7 +2,10 @@ import XCTest
 import NIOCore
 import NIOEmbedded
 import NIOHTTP1
-import KLMEngine
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
+@testable import KLMEngine
 import KLMRegistry
 @testable import KLMServer
 
@@ -162,6 +165,48 @@ final class MultimodalEndpointsTests: XCTestCase {
         XCTAssertFalse(mirror.children.contains(where: { $0.label == "media" }))
     }
 
+    /// Regression for PR #9 medium #4: OpenAI streaming bridge requests must
+    /// receive an SSE response head, not application/x-ndjson or JSON.
+    func testOpenAIStreamingHeadIsSSE() {
+        let head = ServerResponseHeads.openAIStreaming()
+        XCTAssertEqual(head.status, .ok)
+        XCTAssertEqual(head.headers.first(name: "Content-Type"), "text/event-stream")
+        XCTAssertEqual(head.headers.first(name: "Cache-Control"), "no-cache")
+    }
+
+    func testOllamaStreamingHeadIsNDJSON() {
+        let head = ServerResponseHeads.ollamaStreaming()
+        XCTAssertEqual(head.status, .ok)
+        XCTAssertEqual(head.headers.first(name: "Content-Type"), "application/x-ndjson")
+        XCTAssertEqual(head.headers.first(name: "Transfer-Encoding"), "chunked")
+    }
+
+    /// Regression for PR #9 medium #5: per-item size validation must fire BEFORE
+    /// the model-loaded check so oversized payloads are rejected with 413
+    /// regardless of server state. Pre-fix this test got 503 (no model loaded).
+    func testOversizedImageReturns413BeforeModelCheck() throws {
+        let raw = Data(repeating: 0x42, count: ServerMultimodal.maxPayloadBytes + 1024)
+        let b64 = raw.base64EncodedString()
+
+        let channel = try makeChannel(maxBodySizeOverride: 64 * 1024 * 1024)
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+
+        try writeJSONRequest(
+            to: channel,
+            method: .POST,
+            uri: "/api/generate",
+            body: [
+                "model": "local-model",
+                "prompt": "describe",
+                "images": [b64]
+            ]
+        )
+
+        let head = try readResponseHead(from: channel)
+        XCTAssertEqual(head.status, .payloadTooLarge,
+                       "oversized image must return 413 even with no model loaded")
+    }
+
     func testOversizedImageReturns413() throws {
         // Create a >25MB base64 string.
         let raw = Data(repeating: 0x42, count: 26 * 1024 * 1024)
@@ -188,6 +233,145 @@ final class MultimodalEndpointsTests: XCTestCase {
         // 413 from the handler. Either path satisfies the contract that
         // oversized media is refused with 413.
         XCTAssertEqual(head.status, .payloadTooLarge)
+    }
+
+    // MARK: - Chat path placeholder injection (PR #9 blocker 1)
+
+    /// Regression for PR #9: the chat path (used by /v1/chat/completions and
+    /// /api/chat) silently dropped image placeholders, so multimodal forward
+    /// had no positions to inject vision embeddings into. Verify that
+    /// injectMediaPlaceholders prepends N copies of `<|image|>` to the first
+    /// user message's content.
+    func testChatPathInjectsImagePlaceholdersIntoFirstUserMessage() {
+        let baseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-mm-placeholder-\(UUID().uuidString)")
+        let engine = InferenceEngine(modelDirectory: baseDir.appendingPathComponent("model"))
+
+        let pngData = makeTinyPNG(width: 4, height: 4, r: 200, g: 50, b: 50)
+        XCTAssertFalse(pngData.isEmpty, "Test PNG generation should succeed")
+
+        let expectedCount = engine.computeImageTokenCount(imageData: pngData)
+        XCTAssertGreaterThan(expectedCount, 0)
+
+        let messages: [[String: String]] = [
+            ["role": "system", "content": "you are helpful"],
+            ["role": "user", "content": "describe this"],
+        ]
+        let prepared = engine.injectMediaPlaceholders(
+            into: messages, imageData: pngData, audioData: nil)
+
+        XCTAssertEqual(prepared.count, messages.count)
+        XCTAssertEqual(prepared[0]["content"], "you are helpful", "system msg untouched")
+
+        let userContent = prepared[1]["content"] ?? ""
+        let placeholder = "<|image|>"
+        let occurrences = userContent.components(separatedBy: placeholder).count - 1
+        XCTAssertEqual(occurrences, expectedCount,
+                       "Expected \(expectedCount) image placeholders, got \(occurrences)")
+        XCTAssertTrue(userContent.hasSuffix("describe this"),
+                      "Original prompt content must be preserved at end")
+    }
+
+    func testChatPathInjectsAudioPlaceholderIntoFirstUserMessage() {
+        let baseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-mm-audio-placeholder-\(UUID().uuidString)")
+        let engine = InferenceEngine(modelDirectory: baseDir.appendingPathComponent("model"))
+
+        let messages: [[String: String]] = [["role": "user", "content": "transcribe"]]
+        let prepared = engine.injectMediaPlaceholders(
+            into: messages, imageData: nil, audioData: Data([0x52, 0x49, 0x46, 0x46]))
+
+        let userContent = prepared[0]["content"] ?? ""
+        XCTAssertTrue(userContent.hasPrefix("<|audio|>"),
+                      "Audio placeholder must precede prompt text")
+        XCTAssertTrue(userContent.hasSuffix("transcribe"))
+    }
+
+    func testChatPathLeavesMessagesUnchangedWithoutMedia() {
+        let baseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-mm-nomedia-\(UUID().uuidString)")
+        let engine = InferenceEngine(modelDirectory: baseDir.appendingPathComponent("model"))
+        let messages: [[String: String]] = [["role": "user", "content": "hello"]]
+        let prepared = engine.injectMediaPlaceholders(
+            into: messages, imageData: nil, audioData: nil)
+        XCTAssertEqual(prepared, messages)
+    }
+
+    // MARK: - Capability gating (PR #9 blocker 2)
+
+    /// supportsNativeImage must be false when no model is loaded. This guards
+    /// the regression where a text-only checkpoint claimed image capability.
+    func testSupportsNativeImageFalseWhenNoModelLoaded() {
+        let baseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-mm-cap-\(UUID().uuidString)")
+        let engine = InferenceEngine(modelDirectory: baseDir.appendingPathComponent("model"))
+        XCTAssertFalse(engine.supportsNativeImage,
+                       "No model loaded -> no image capability")
+        XCTAssertFalse(engine.supportsAudio,
+                       "No model loaded -> no audio capability")
+    }
+
+    /// /api/generate with image payload must be rejected (503 because no model
+    /// is loaded). With the tighter capability check, even a text-only
+    /// gemma4 checkpoint would yield the same rejection at decodeMediaForRequest.
+    /// This test documents the capability gating contract from the server side.
+    func testImageRequestRejectedWithoutMultimodalModel() throws {
+        // Without any model loaded, requireModel returns 503 first; this is
+        // covered by testOllamaGenerateRejectsImageWhenModelNotLoaded above.
+        // Here we additionally verify the engine-level capability is false.
+        let baseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-mm-cap2-\(UUID().uuidString)")
+        let engine = InferenceEngine(modelDirectory: baseDir.appendingPathComponent("model"))
+        XCTAssertFalse(engine.supportsNativeImage)
+    }
+
+    // MARK: - Live: two distinct images must change output
+
+    /// Live regression for PR #9 blocker 1: two visually different images with
+    /// the same prompt must produce different outputs. If placeholder injection
+    /// is missing, the model never sees the image and both outputs match.
+    func testTwoDifferentImagesProduceDifferentOutputs() async throws {
+        try requireGemma4Env()
+        let path = ProcessInfo.processInfo.environment["KLM_GEMMA4_MODEL_PATH"]!
+        let dir = URL(fileURLWithPath: path, isDirectory: true)
+        let engine = InferenceEngine(modelDirectory: dir)
+        try await engine.load()
+        guard engine.supportsNativeImage else {
+            throw XCTSkip("Loaded checkpoint is not multimodal Gemma 4")
+        }
+
+        let redPNG = makeTinyPNG(width: 64, height: 64, r: 230, g: 20, b: 20)
+        let bluePNG = makeTinyPNG(width: 64, height: 64, r: 20, g: 20, b: 230)
+        XCTAssertFalse(redPNG.isEmpty)
+        XCTAssertFalse(bluePNG.isEmpty)
+
+        func runOnce(image: Data) async -> String {
+            let messages: [[String: String]] = [
+                ["role": "user", "content": "What single color do you see?"]
+            ]
+            let (stream, _) = engine.generate(
+                messages: messages,
+                params: .greedy,
+                maxTokens: 24,
+                useSpeculative: false,
+                usePrefixCache: false,
+                imageData: image,
+                audioData: nil)
+            var out = ""
+            for await event in stream {
+                if event.isEnd { break }
+                out += event.text
+            }
+            return out
+        }
+
+        let redOut = await runOnce(image: redPNG)
+        let blueOut = await runOnce(image: bluePNG)
+        XCTAssertFalse(redOut.isEmpty)
+        XCTAssertFalse(blueOut.isEmpty)
+        XCTAssertNotEqual(
+            redOut, blueOut,
+            "Identical outputs across visually-different images suggest the image is not conditioning the model")
     }
 
     // MARK: - Live Gemma 4 path (skipped without env var)
@@ -232,9 +416,11 @@ final class MultimodalEndpointsTests: XCTestCase {
         let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
         let channel = EmbeddedChannel()
         try channel.pipeline.addHandler(
-            KLMServer._makeHTTPHandlerForTesting(engine: engine, registry: registry)
+            KLMServer._makeHTTPHandlerForTesting(
+                engine: engine,
+                registry: registry,
+                maxBodySizeOverride: maxBodySizeOverride)
         ).wait()
-        _ = maxBodySizeOverride // currently unused; ServerLimits.maxBodySize is global.
         return channel
     }
 
@@ -281,5 +467,29 @@ final class MultimodalEndpointsTests: XCTestCase {
 
     private enum TestError: Error {
         case unexpectedResponsePart
+    }
+
+    /// Build a minimal solid-color PNG via CoreGraphics + ImageIO.
+    fileprivate func makeTinyPNG(width: Int, height: Int, r: UInt8, g: UInt8, b: UInt8) -> Data {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return Data() }
+        ctx.setFillColor(CGColor(
+            red: CGFloat(r) / 255.0,
+            green: CGFloat(g) / 255.0,
+            blue: CGFloat(b) / 255.0,
+            alpha: 1.0))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        guard let image = ctx.makeImage() else { return Data() }
+        let mutableData = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(
+            mutableData, "public.png" as CFString, 1, nil) else { return Data() }
+        CGImageDestinationAddImage(dest, image, nil)
+        CGImageDestinationFinalize(dest)
+        return mutableData as Data
     }
 }

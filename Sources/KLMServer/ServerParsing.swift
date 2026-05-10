@@ -639,4 +639,12 @@ internal enum ServerResponseHeads {
         headers.add(name: "Transfer-Encoding", value: "chunked")
         return HTTPResponseHead(version: version, status: .ok, headers: headers)
     }
+
+    static func openAIStreaming(version: HTTPVersion = .http1_1) -> HTTPResponseHead {
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: "text/event-stream")
+        headers.add(name: "Cache-Control", value: "no-cache")
+        headers.add(name: "Connection", value: "keep-alive")
+        return HTTPResponseHead(version: version, status: .ok, headers: headers)
+    }
 }

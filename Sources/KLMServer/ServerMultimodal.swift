@@ -54,8 +54,9 @@ internal enum MediaDecodeError: Error, Equatable {
 }
 
 internal enum ServerMultimodal {
-    /// Maximum decoded size, per item.
-    static let maxPayloadBytes = 25 * 1024 * 1024
+    /// Maximum decoded size, per item. Aligned with ServerLimits.maxBodySize so
+    /// the per-item check and the global HTTP body limit cannot disagree.
+    static let maxPayloadBytes = ServerLimits.maxBodySize
 
     /// Strip a `data:...;base64,` prefix if present, returning the bare base64 body.
     static func stripDataURLPrefix(_ s: String) -> String {
@@ -90,6 +91,32 @@ internal enum ServerMultimodal {
             }
         }
         return "png"
+    }
+
+    /// Estimated decoded byte count for a base64 string. Cheaply rejects
+    /// oversized payloads before allocating a Data buffer to decode them.
+    static func estimateDecodedSize(_ base64: String) -> Int {
+        let stripped = stripDataURLPrefix(base64)
+        let len = stripped.count
+        guard len > 0 else { return 0 }
+        return (len * 3) / 4
+    }
+
+    /// Throw payloadTooLarge if any base64 item's estimated decoded size exceeds
+    /// the per-item limit. Used by request validation BEFORE model-loaded checks
+    /// so 413 fires regardless of server state.
+    static func validatePayloadSizes(_ payload: ServerMediaPayload) throws {
+        for (idx, b64) in payload.images.enumerated() {
+            if estimateDecodedSize(b64) > maxPayloadBytes {
+                throw MediaDecodeError.payloadTooLarge(
+                    field: payload.images.count > 1 ? "images[\(idx)]" : "images",
+                    bytes: estimateDecodedSize(b64), limit: maxPayloadBytes)
+            }
+        }
+        if let audio = payload.audio, estimateDecodedSize(audio) > maxPayloadBytes {
+            throw MediaDecodeError.payloadTooLarge(
+                field: "audio", bytes: estimateDecodedSize(audio), limit: maxPayloadBytes)
+        }
     }
 
     /// Decode a single base64 string, validate size, write to a temp file.

@@ -33,9 +33,10 @@ public final class KLMServer: Sendable {
 
     internal static func _makeHTTPHandlerForTesting(
         engine: InferenceEngine,
-        registry: Registry
+        registry: Registry,
+        maxBodySizeOverride: Int? = nil
     ) -> any ChannelHandler & Sendable {
-        HTTPHandler(engine: engine, registry: registry)
+        HTTPHandler(engine: engine, registry: registry, maxBodySizeOverride: maxBodySizeOverride)
     }
 
     /// Start the HTTP server (blocks until shutdown).
@@ -79,14 +80,15 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let logger = Logger(label: "krillm.http")
     private let startedAt = Date()
 
-    private let maxBodySize = ServerLimits.maxBodySize
+    private let maxBodySize: Int
 
     private var requestHead: HTTPRequestHead?
     private var body: ByteBuffer = ByteBuffer()
 
-    init(engine: InferenceEngine, registry: Registry) {
+    init(engine: InferenceEngine, registry: Registry, maxBodySizeOverride: Int? = nil) {
         self.engine = engine
         self.registry = registry
+        self.maxBodySize = maxBodySizeOverride ?? ServerLimits.maxBodySize
     }
 
     /// Best-effort load of file bytes for a path. Returns nil if the path is
@@ -284,6 +286,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         if payload.images.count > 1 {
             throw MediaDecodeError.tooManyImages
         }
+        try ServerMultimodal.validatePayloadSizes(payload)
     }
 
     /// Validate a parsed media payload against the loaded model and decode it
@@ -385,8 +388,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         // Audio bridge does not stream; if the client asked for streaming we
         // emit a single payload chunk + final done chunk for compatibility.
-        if requestStream && (style == .ollamaChat || style == .ollamaGenerate) {
-            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
+        if requestStream {
+            switch style {
+            case .ollamaChat, .ollamaGenerate:
+                context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
+            case .openAI:
+                context.write(wrapOutboundOut(.head(ServerResponseHeads.openAIStreaming())), promise: nil)
+            }
         }
 
         let requestStart = CFAbsoluteTimeGetCurrent()
@@ -410,23 +418,40 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
                 switch style {
                 case .openAI:
-                    let response: [String: Any] = [
-                        "id": "chatcmpl-\(UUID().uuidString.prefix(8))",
-                        "object": "chat.completion",
-                        "created": Int(Date().timeIntervalSince1970),
-                        "choices": [[
-                            "index": 0,
-                            "message": ["role": "assistant", "content": output],
-                            "finish_reason": "stop"
-                        ]],
-                        "usage": [
-                            "prompt_tokens": 0,
-                            "completion_tokens": 0,
-                            "total_tokens": 0
-                        ],
-                        "krillm_path": "mlx-vlm-bridge"
-                    ]
-                    self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
+                    let chatId = "chatcmpl-\(UUID().uuidString.prefix(8))"
+                    if requestStream {
+                        let contentChunk = sseChunk(id: chatId, content: output, finishReason: nil)
+                        var buf1 = ctx.channel.allocator.buffer(capacity: contentChunk.utf8.count)
+                        buf1.writeString(contentChunk)
+                        self.writeOnLoop(ctx, .body(.byteBuffer(buf1)), flush: true)
+                        let stopChunk = sseChunk(id: chatId, content: nil, finishReason: "stop")
+                        var buf2 = ctx.channel.allocator.buffer(capacity: stopChunk.utf8.count)
+                        buf2.writeString(stopChunk)
+                        self.writeOnLoop(ctx, .body(.byteBuffer(buf2)), flush: true)
+                        let done = "data: [DONE]\n\n"
+                        var buf3 = ctx.channel.allocator.buffer(capacity: done.utf8.count)
+                        buf3.writeString(done)
+                        self.writeOnLoop(ctx, .body(.byteBuffer(buf3)), flush: true)
+                        self.writeOnLoop(ctx, .end(nil), flush: true)
+                    } else {
+                        let response: [String: Any] = [
+                            "id": chatId,
+                            "object": "chat.completion",
+                            "created": Int(Date().timeIntervalSince1970),
+                            "choices": [[
+                                "index": 0,
+                                "message": ["role": "assistant", "content": output],
+                                "finish_reason": "stop"
+                            ]],
+                            "usage": [
+                                "prompt_tokens": 0,
+                                "completion_tokens": 0,
+                                "total_tokens": 0
+                            ],
+                            "krillm_path": "mlx-vlm-bridge"
+                        ]
+                        self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
+                    }
                 case .ollamaChat:
                     if requestStream {
                         // Single content chunk
