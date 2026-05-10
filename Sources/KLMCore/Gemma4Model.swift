@@ -203,7 +203,7 @@ class Gemma4Attention: Module {
 
     /// - Parameter sharedCache: If non-nil, use this cache's K/V instead of computing new ones (KV sharing)
     func callAsFunction(
-        _ x: MLXArray, mask: MLXArray? = nil,
+        _ x: MLXArray, maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .none,
         cache: KVCache? = nil, sharedCache: KVCache? = nil
     ) -> MLXArray {
         let B = x.dim(0)
@@ -218,23 +218,11 @@ class Gemma4Attention: Module {
         let k: MLXArray
         let v: MLXArray
 
-        if sharedCache != nil {
-            // KV-shared layer: compute K/V for this token but DON'T write to donor cache.
-            // The attention uses the donor cache's accumulated K/V for context.
-            var newK = kProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
-            var newV = vProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
-            newK = kNorm(newK)
-            let vVar = MLX.mean(newV * newV, axis: -1, keepDims: true)
-            newV = newV * MLX.rsqrt(vVar + MLXArray(rmsNormEps).asType(newV.dtype))
-            newK = applyRoPE(newK, offset: offset)
-            // For shared layers: just use own K/V directly (no cache append)
-            // The donor's cache provides historical context via the cache passed as 'cache'
-            if let cache {
-                (k, v) = cache.update(keys: newK, values: newV)
-            } else {
-                k = newK
-                v = newV
-            }
+        if let shared = sharedCache, let sharedSnap = shared.snapshot() {
+            // KV-shared layer: reuse K/V from the donor layer directly.
+            // Do NOT compute new K/V — the donor's accumulated K/V IS the context.
+            k = sharedSnap.keys
+            v = sharedSnap.values
         } else {
             // Normal layer: compute K/V and write to own cache
             var newK = kProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
@@ -253,7 +241,7 @@ class Gemma4Attention: Module {
 
         // Attention with scale=1.0 (Gemma 4 uses unit scale)
         let output = MLXFast.scaledDotProductAttention(
-            queries: q, keys: k, values: v, scale: 1.0, mask: mask)
+            queries: q, keys: k, values: v, scale: 1.0, mask: maskMode)
 
         return oProj(output.transposed(0, 2, 1, 3).reshaped(B, L, -1))
     }
@@ -318,11 +306,11 @@ class Gemma4Block: Module {
     }
 
     func callAsFunction(
-        _ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil,
-        sharedCache: KVCache? = nil, perLayerInput: MLXArray? = nil
+        _ x: MLXArray, maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .none,
+        cache: KVCache? = nil, sharedCache: KVCache? = nil, perLayerInput: MLXArray? = nil
     ) -> MLXArray {
         // Attention with post-norm
-        var h = x + postAttnNorm(selfAttn(inputLayernorm(x), mask: mask, cache: cache, sharedCache: sharedCache))
+        var h = x + postAttnNorm(selfAttn(inputLayernorm(x), maskMode: maskMode, cache: cache, sharedCache: sharedCache))
 
         // FFN with pre+post norm
         h = h + postFfnNorm(mlp(preFfnNorm(h)))
@@ -465,6 +453,7 @@ class Gemma4TextModel: Module {
 
         // Causal mask
         let mask: MLXArray? = L > 1 ? createAdditiveCausalMask(L, dtype: .bfloat16) : nil
+        let maskMode: MLXFast.ScaledDotProductAttentionMaskMode = mask != nil ? .array(mask!) : .none
 
         // KV sharing donor indices (pre-computed at init)
         let firstShared = config.firstKVSharedLayer
@@ -478,10 +467,10 @@ class Gemma4TextModel: Module {
             if i >= firstShared, let caches {
                 // KV-shared layer: pass donor cache
                 let donorIdx = config.isFullAttention(layerIdx: i) ? lastFullDonor : lastSlidingDonor
-                h = layer(h, mask: mask, cache: caches[i],
+                h = layer(h, maskMode: maskMode, cache: caches[i],
                          sharedCache: caches[donorIdx], perLayerInput: pleSlice)
             } else {
-                h = layer(h, mask: mask, cache: caches?[i], perLayerInput: pleSlice)
+                h = layer(h, maskMode: maskMode, cache: caches?[i], perLayerInput: pleSlice)
             }
 
             // Evaluate every 5 layers during prefill to bound graph size
