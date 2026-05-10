@@ -2,71 +2,122 @@
 
 Local handoff for the next agent/session.
 
-Date: 2026-05-11
+Last updated: 2026-05-11 (post PR #12 merge)
 Base branch: `main`
-Base commit: `3b3702a` (merged PR #9)
+Base commit: `2f3386a` (merged PR #12)
 Machine target: Apple Silicon M4 Pro, 24 GB RAM
 
 ## Current Position
 
-PR #9 has been merged as a release-readiness remediation baseline.
+Two follow-up PRs have shipped on top of the PR #9 release-readiness baseline.
+The product goal — beating Ollama by 1.5x to 3x with honest inputs — is closer,
+but Workstreams 1, 2, and 3 below are still required before we can promote
+audio out of `out_of_scope` and prefill TPS out of advisory.
 
-This is a good merge baseline, but not a production release. The product goal
-was to make KrillLM faster than Ollama across text, image, and audio with a
-1.5x to 3x speedup target. We are not there yet.
+### What landed since PR #9
 
-### Achieved
+- **PR #11 (`perf: compose int8 KV cache with prefix cache`).** int8 KV cache
+  and the persistent prefix cache now coexist on the Gemma 4 path. New
+  `QuantizedKVSnapshot` carries uint8 K/V plus fp16 scales/zeros, so prefix
+  replay avoids dequant→requant. `PrefixCache` gains `storeQuantized` /
+  `lookupQuantized` with a dtype-tagged key schema (v3) and a separate
+  `.q8.safetensors` on-disk suffix; fp16 and int8 entries are isolated.
+  `InferenceEngine` removes the previous int8→no-prefix-cache restriction
+  and handles Gemma 4's KV-sharing-suffix correctly.
+- **PR #12 (`feat: release_candidate gate profile + kv_cache_dtype in
+  reports`).** The release gate now distinguishes hard-gated, advisory, and
+  out_of_scope metrics via `tools/release_gate.py --profile <name>`. `strict`
+  (default) preserves original behavior; `release_candidate` is the
+  defensible path to a release tag. Missing hard metrics now fail the gate.
+  `memory_ratio` is advisory until the benchmark records peak memory.
+  `tools/gemma4_multimodal_benchmark.py` records `benchmark.kv_cache_dtype`
+  from `KRILL_KV_CACHE_DTYPE`; the gate echoes it in the report.
+
+### Achieved (cumulative)
 
 - Server multimodal is wired for Gemma 4.
 - Gemma 4 image-only requests use the native Swift SigLIP2 path.
 - Gemma 4 audio requests use the persistent `mlx-vlm` bridge.
 - Chat image conditioning is fixed and covered by a live regression.
-- Multimodal prefix-cache keys include media hashes.
-- Optional int8 KV cache path is wired for Gemma 4 and live parity passes.
+- Multimodal prefix-cache keys include media hashes (schema v2).
+- int8 KV cache is opt-in for Gemma 4 and live parity passes.
+- **int8 KV + prefix cache compose (PR #11).** Live test
+  `QuantizedPrefixCacheLiveTests/testInt8PrefixCacheReplayMatchesColdRun`
+  asserts cold/warm runs produce identical greedy tokens.
+- **Release gate has profile semantics (PR #12).** Hard / advisory /
+  out_of_scope per metric, missing-hard-metric fail, dtype tag in reports.
 - OpenAI and Ollama server request shapes are covered.
-- Public docs now distinguish current support from remaining release blockers.
+- Public docs distinguish current support from remaining release blockers.
 
 Latest verified baseline:
 
 ```text
-make test     -> 123 tests, 8 skipped, 0 failures
-make release  -> passed
-live int8 KV parity -> passed
-live image-conditioning regression -> passed
+make test                       -> 128 tests, 9 skipped, 0 failures
+make release                    -> passed
+live int8 KV parity             -> passed
+live int8 + prefix cache replay -> passed
+live image-conditioning regr.   -> passed
+python3 -m unittest tools.test_release_gate -> 7 tests pass
 ```
 
-### Not Achieved
-
-The release benchmark gate still fails against `.build/benchmarks/v4-mm.json`.
+### Current gate verdict (`.build/benchmarks/v4-mm.json`)
 
 ```text
-PASS text_decode_ratio   1.5030x   target >= 1.5
-PASS text_ttft_ratio     0.1173x   target <= 0.67
-PASS text_wall_ratio     0.5172x   target <= 0.67
-PASS image_wall_ratio    0.5593x   target <= 0.67
-
-FAIL text_prefill_ratio  1.4498x   target >= 1.5
-FAIL image_prefill_ratio 1.0385x   target >= 1.5
-FAIL audio_wall_ratio    3.9265x   target <= 0.67
-
-geometric mean speedup   1.418x
+strict profile                  -> exit 1 (unchanged; same FAILs as before)
+release_candidate profile       -> exit 0 (with --allow-dtype-mismatch)
+                                   on the v4-mm.json snapshot
 ```
 
-Do not tag a production release until the gate passes, or until the gate is
-explicitly revised with a written rationale and the revised gate passes.
+Per-metric breakdown under `release_candidate`:
+
+```text
+HARD  text_decode_ratio   1.5030x   target >= 1.5     PASS
+HARD  text_wall_ratio     0.5172x   target <= 0.67    PASS
+HARD  text_ttft_ratio     0.1173x   target <= 0.67    PASS
+HARD  image_wall_ratio    0.5593x   target <= 0.67    PASS
+
+ADV   text_prefill_ratio  1.4498x   target >= 1.5     WARN (advisory)
+ADV   image_prefill_ratio 1.0385x   target >= 1.5     WARN (advisory)
+ADV   memory_ratio        N/A       target <= 1.0     N/A  (not yet measured)
+
+SKIP  audio_wall_ratio    3.9265x   target <= 0.67    out_of_scope
+SKIP  audio_prefill_ratio  N/A      target >= 1.5     out_of_scope
+
+geometric mean speedup            1.418x
+```
+
+A `release_candidate` PASS on the existing snapshot is honest **only** because
+prefill TPS, memory, and audio are explicitly opted out with documented
+rationale (see `docs/BENCHMARKING.md`). Promoting to a production release
+requires re-promoting these to hard one at a time.
+
+Do not tag a production release until either:
+
+1. `strict` exits 0 against the accepted report, or
+2. `release_candidate` is the agreed gate, every advisory is reviewed, every
+   `out_of_scope` is documented, and the report is committed alongside the
+   release notes.
 
 ## Goal For The Next PR
 
-Move from "release-readiness baseline" to "release candidate".
+Pick **one** of the remaining Workstreams (1, 2, 3) below and ship it. The
+order I'd recommend, by leverage and scope:
 
-The next PR should either:
+1. **Wire peak-memory sampling** into `gemma4_multimodal_benchmark.py` so
+   `memory_ratio` populates and can re-promote to hard. Smallest scope; fully
+   retires the contract documented in PR #12.
+2. **Workstream 3, narrow slice:** profile text_prefill, find one optimization
+   that pushes the ratio from 1.45x to ≥1.5x. Then re-promote
+   `text_prefill_ratio` to hard under `release_candidate`. Image prefill stays
+   advisory until the metric is redefined to count vision-encoder time.
+3. **Workstream 2:** add Gemma 4-compatible self-speculative decoding so
+   `text_decode_ratio` consistently exceeds 1.5x with margin. Larger scope;
+   requires a draft path that doesn't break greedy parity.
+4. **Workstream 1:** port Gemma 4's audio Conformer to native Swift+MLX so
+   `audio_*` can leave `out_of_scope`. Largest scope; multi-week effort.
 
-1. Make the current gate pass, or
-2. Revise the gate with a defensible benchmark rationale, then make that revised
-   gate pass.
-
-The target product claim remains: KrillLM should beat Ollama by 1.5x to 3x on
-the accepted benchmark matrix, with equivalent inputs and honest metadata.
+The product claim remains: KrillLM should beat Ollama by 1.5x to 3x on the
+accepted benchmark matrix, with equivalent inputs and honest metadata.
 
 ## Main Workstreams
 
