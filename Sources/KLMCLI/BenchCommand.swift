@@ -63,7 +63,7 @@ struct BenchCommand: AsyncParsableCommand {
         if warmup > 0 {
             print("Warming up (\(warmup) run\(warmup > 1 ? "s" : ""))...")
             for _ in 0 ..< warmup {
-                try await benchmarkRun(
+                _ = try await benchmarkRun(
                     model: loaded, promptTokens: promptTokens, genLen: 16)
             }
         }

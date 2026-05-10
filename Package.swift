@@ -17,8 +17,13 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "KLMRuntime",
+            dependencies: []
+        ),
+        .target(
             name: "KLMCore",
             dependencies: [
+                "KLMRuntime",
                 "KLMCache",
                 "KLMKernels",
                 .product(name: "MLX", package: "mlx-swift"),
@@ -103,6 +108,7 @@ let package = Package(
             dependencies: [
                 "KLMCore",
                 "KLMCache",
+                "KLMRuntime",
                 .product(name: "MLX", package: "mlx-swift"),
             ]
         ),
@@ -112,6 +118,7 @@ let package = Package(
                 "KLMEngine",
                 "KLMCache",
                 "KLMSampler",
+                "KLMRuntime",
                 .product(name: "MLX", package: "mlx-swift"),
             ]
         ),

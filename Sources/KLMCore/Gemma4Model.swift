@@ -203,7 +203,7 @@ class Gemma4Attention: Module {
 
     /// - Parameter sharedCache: If non-nil, use this cache's K/V instead of computing new ones (KV sharing)
     func callAsFunction(
-        _ x: MLXArray, mask: MLXArray? = nil,
+        _ x: MLXArray, maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .none,
         cache: KVCache? = nil, sharedCache: KVCache? = nil
     ) -> MLXArray {
         let B = x.dim(0)
@@ -218,23 +218,11 @@ class Gemma4Attention: Module {
         let k: MLXArray
         let v: MLXArray
 
-        if sharedCache != nil {
-            // KV-shared layer: compute K/V for this token but DON'T write to donor cache.
-            // The attention uses the donor cache's accumulated K/V for context.
-            var newK = kProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
-            var newV = vProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
-            newK = kNorm(newK)
-            let vVar = MLX.mean(newV * newV, axis: -1, keepDims: true)
-            newV = newV * MLX.rsqrt(vVar + MLXArray(rmsNormEps).asType(newV.dtype))
-            newK = applyRoPE(newK, offset: offset)
-            // For shared layers: just use own K/V directly (no cache append)
-            // The donor's cache provides historical context via the cache passed as 'cache'
-            if let cache {
-                (k, v) = cache.update(keys: newK, values: newV)
-            } else {
-                k = newK
-                v = newV
-            }
+        if let shared = sharedCache, let sharedSnap = shared.snapshot() {
+            // KV-shared layer: reuse K/V from the donor layer directly.
+            // Do NOT compute new K/V — the donor's accumulated K/V IS the context.
+            k = sharedSnap.keys
+            v = sharedSnap.values
         } else {
             // Normal layer: compute K/V and write to own cache
             var newK = kProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
@@ -253,7 +241,7 @@ class Gemma4Attention: Module {
 
         // Attention with scale=1.0 (Gemma 4 uses unit scale)
         let output = MLXFast.scaledDotProductAttention(
-            queries: q, keys: k, values: v, scale: 1.0, mask: mask)
+            queries: q, keys: k, values: v, scale: 1.0, mask: maskMode)
 
         return oProj(output.transposed(0, 2, 1, 3).reshaped(B, L, -1))
     }
@@ -282,7 +270,7 @@ class Gemma4MLP: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(gelu(gateProj(x)) * upProj(x))
+        downProj(geluApproximate(gateProj(x)) * upProj(x))
     }
 }
 
@@ -318,18 +306,18 @@ class Gemma4Block: Module {
     }
 
     func callAsFunction(
-        _ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil,
-        sharedCache: KVCache? = nil, perLayerInput: MLXArray? = nil
+        _ x: MLXArray, maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .none,
+        cache: KVCache? = nil, sharedCache: KVCache? = nil, perLayerInput: MLXArray? = nil
     ) -> MLXArray {
         // Attention with post-norm
-        var h = x + postAttnNorm(selfAttn(inputLayernorm(x), mask: mask, cache: cache, sharedCache: sharedCache))
+        var h = x + postAttnNorm(selfAttn(inputLayernorm(x), maskMode: maskMode, cache: cache, sharedCache: sharedCache))
 
         // FFN with pre+post norm
         h = h + postFfnNorm(mlp(preFfnNorm(h)))
 
         // PLE gating
         if let ple = perLayerInput {
-            let gate = gelu(pleGate(h))  // [B, L, 256]
+            let gate = geluApproximate(pleGate(h))  // [B, L, 256]
             let gated = gate * ple        // element-wise with PLE slice
             let projected = pleProj(gated) // [B, L, 1536]
             h = h + pleNorm(projected)
@@ -352,11 +340,41 @@ class Gemma4TextModel: Module {
 
     let config: Gemma4Config
 
+    // Pre-computed scalar constants (avoids per-call allocation)
+    let embedScale: MLXArray
+    let pleScale: MLXArray
+    let projScale: MLXArray
+    let combineScale: MLXArray
+
+    // KV sharing: donor layer indices (computed once at init)
+    let lastSlidingDonor: Int
+    let lastFullDonor: Int
+
     init(_ config: Gemma4Config) {
         self.config = config
         let dim = config.hiddenSize
         let pleDim = config.hiddenSizePerLayerInput
         let pleTotal = config.numHiddenLayers * pleDim
+
+        // Pre-compute BF16 scalars
+        self.embedScale = MLXArray(Float(dim).squareRoot()).asType(.bfloat16)
+        self.pleScale = MLXArray(Float(pleDim).squareRoot()).asType(.bfloat16)
+        self.projScale = MLXArray(1.0 / Float(dim).squareRoot()).asType(.bfloat16)
+        self.combineScale = MLXArray(Float(0.7071067811865476)).asType(.bfloat16)
+
+        // Pre-compute KV sharing donor indices
+        let firstShared = config.firstKVSharedLayer
+        var slidingDonor = 0
+        var fullDonor = 0
+        for i in 0 ..< firstShared {
+            if config.isFullAttention(layerIdx: i) {
+                fullDonor = i
+            } else {
+                slidingDonor = i
+            }
+        }
+        self.lastSlidingDonor = slidingDonor
+        self.lastFullDonor = fullDonor
 
         _embedTokens = ModuleInfo(
             wrappedValue: Embedding(embeddingCount: config.vocabSize, dimensions: dim),
@@ -378,55 +396,87 @@ class Gemma4TextModel: Module {
             key: "norm")
     }
 
-    func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
+    /// Forward pass with optional multimodal embedding injection.
+    ///
+    /// - Parameters:
+    ///   - tokens: Input token IDs [B, L]
+    ///   - caches: Per-layer KV caches
+    ///   - imageEmbeddings: Vision encoder output to replace image_token_id positions [1, numImageTokens, hiddenSize]
+    ///   - audioEmbeddings: Audio encoder output to replace audio_token_id positions [1, numAudioTokens, hiddenSize]
+    ///   - imageTokenId: Token ID for image placeholder (default 258880)
+    ///   - audioTokenId: Token ID for audio placeholder (default 258881)
+    func callAsFunction(
+        _ tokens: MLXArray, caches: [KVCache]? = nil,
+        imageEmbeddings: MLXArray? = nil, audioEmbeddings: MLXArray? = nil,
+        imageTokenId: Int = 258880, audioTokenId: Int = 258881
+    ) -> MLXArray {
         let B = tokens.dim(0)
         let L = tokens.dim(1)
         let numLayers = config.numHiddenLayers
         let pleDim = config.hiddenSizePerLayerInput
 
         // Main embeddings (scaled by sqrt(hidden_size))
-        // CRITICAL: scalars must be BF16 to avoid promoting quantized matmuls to float32
-        let embedScale = MLXArray(Float(config.hiddenSize).squareRoot()).asType(.bfloat16)
         var h = embedTokens(tokens) * embedScale
 
-        // PLE: compute per-layer inputs
-        let pleScale = MLXArray(Float(pleDim).squareRoot()).asType(.bfloat16)
-        let pleEmbed = embedPerLayer(tokens) * pleScale
+        // Inject multimodal embeddings at placeholder token positions
+        if let imgEmb = imageEmbeddings {
+            h = injectEmbeddings(h, tokens: tokens, embeddings: imgEmb, tokenId: imageTokenId)
+        }
+        if let audEmb = audioEmbeddings {
+            h = injectEmbeddings(h, tokens: tokens, embeddings: audEmb, tokenId: audioTokenId)
+        }
 
-        let projScale = MLXArray(1.0 / Float(config.hiddenSize).squareRoot()).asType(.bfloat16)
+        // PLE: compute per-layer inputs
+        // For multimodal: zero out image/audio token IDs so PLE only computes
+        // for text tokens. Image/audio positions get zero PLE contribution.
+        let pleTokens: MLXArray
+        if imageEmbeddings != nil || audioEmbeddings != nil {
+            let imgMask = tokens .== MLXArray(Int32(imageTokenId))
+            let audMask = tokens .== MLXArray(Int32(audioTokenId))
+            let mmMask = (imgMask.asType(.int32) + audMask.asType(.int32)) .> MLXArray(Int32(0))
+            pleTokens = MLX.where(mmMask, MLXArray(Int32(0)), tokens)
+        } else {
+            pleTokens = tokens
+        }
+        let pleEmbed = embedPerLayer(pleTokens) * pleScale
         let projection = perLayerProj(h) * projScale
         let projNormed = perLayerNorm(projection.reshaped(B * L * numLayers, pleDim))
             .reshaped(B, L, numLayers * pleDim)
-
-        let combineScale = MLXArray(Float(0.7071067811865476)).asType(.bfloat16)
         let combinedPLE = (projNormed + pleEmbed) * combineScale
+
+        // Evaluate embedding and PLE computation before entering layer loop.
+        // This flushes the graph so each layer starts with materialized inputs,
+        // preventing quadratic graph growth during prefill.
+        if L > 1 {
+            MLX.eval(h, combinedPLE)
+        }
 
         // Causal mask
         let mask: MLXArray? = L > 1 ? createAdditiveCausalMask(L, dtype: .bfloat16) : nil
+        let maskMode: MLXFast.ScaledDotProductAttentionMaskMode = mask != nil ? .array(mask!) : .none
 
-        // KV sharing: find the donor cache indices for shared layers.
-        // Layers 0..<firstKVSharedLayer have their own caches.
-        // Layers firstKVSharedLayer..< numLayers reuse KV from earlier donor layers.
-        // Donor for sliding: last non-shared sliding layer
-        // Donor for full: last non-shared full layer
+        // KV sharing donor indices (pre-computed at init)
         let firstShared = config.firstKVSharedLayer
-        var lastSlidingDonor = 0
-        var lastFullDonor = 0
-        for i in 0 ..< firstShared {
-            if config.isFullAttention(layerIdx: i) {
-                lastFullDonor = i
-            } else {
-                lastSlidingDonor = i
-            }
-        }
 
-        // Forward through layers
-        // For simplicity in v1: all layers compute their own K/V and use their own cache.
-        // Full KV sharing optimization (sharing caches between layers 15-34 and donors)
-        // deferred to v2 for correctness-first approach.
+        // Forward through layers with KV sharing for layers >= firstShared.
+        // Shared layers pass the donor's cache as sharedCache so attention sees
+        // the same context as the donor layer, reducing redundant KV storage.
         for (i, layer) in layers.enumerated() {
             let pleSlice = combinedPLE[0..., 0..., (i * pleDim) ..< ((i + 1) * pleDim)]
-            h = layer(h, mask: mask, cache: caches?[i], perLayerInput: pleSlice)
+
+            if i >= firstShared, let caches {
+                // KV-shared layer: pass donor cache
+                let donorIdx = config.isFullAttention(layerIdx: i) ? lastFullDonor : lastSlidingDonor
+                h = layer(h, maskMode: maskMode, cache: caches[i],
+                         sharedCache: caches[donorIdx], perLayerInput: pleSlice)
+            } else {
+                h = layer(h, maskMode: maskMode, cache: caches?[i], perLayerInput: pleSlice)
+            }
+
+            // Evaluate every 5 layers during prefill to bound graph size
+            if L > 1 && (i + 1) % 5 == 0 {
+                MLX.eval(h)
+            }
         }
 
         return norm(h)
@@ -437,24 +487,173 @@ class Gemma4TextModel: Module {
 
 public class Gemma4ForCausalLM: Module {
     @ModuleInfo(key: "model") var model: Gemma4TextModel
-    // Separate lm_head for logit projection (loaded from embed_tokens weights)
-    @ModuleInfo(key: "lm_head") var lmHead: Linear
 
     public let config: Gemma4Config
 
     public init(_ config: Gemma4Config) {
         self.config = config
         _model = ModuleInfo(wrappedValue: Gemma4TextModel(config), key: "model")
-        _lmHead = ModuleInfo(
-            wrappedValue: Linear(config.hiddenSize, config.vocabSize, bias: false),
-            key: "lm_head")
+    }
+
+    /// Output projection: reuse embed_tokens as the LM head (tied weights).
+    /// This matches the Python implementation which uses `embed_tokens.as_linear()`.
+    private func lmHead(_ hidden: MLXArray) -> MLXArray {
+        model.embedTokens.asLinear(hidden)
     }
 
     public func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
         let hidden = model(tokens, caches: caches)
         let logits = lmHead(hidden)
-        // Logit soft-capping
         let cap = config.finalLogitSoftcapping
         return MLX.tanh(logits / cap) * cap
     }
+
+    /// Forward pass with multimodal embedding injection.
+    public func callAsFunction(
+        _ tokens: MLXArray, caches: [KVCache]? = nil,
+        imageEmbeddings: MLXArray? = nil, audioEmbeddings: MLXArray? = nil,
+        imageTokenId: Int = 258880, audioTokenId: Int = 258881
+    ) -> MLXArray {
+        let hidden = model(
+            tokens, caches: caches,
+            imageEmbeddings: imageEmbeddings, audioEmbeddings: audioEmbeddings,
+            imageTokenId: imageTokenId, audioTokenId: audioTokenId)
+        let logits = lmHead(hidden)
+        let cap = config.finalLogitSoftcapping
+        return MLX.tanh(logits / cap) * cap
+    }
+}
+
+// MARK: - Multimodal Embedding Injection
+
+/// Replace token embeddings at placeholder positions with encoder outputs
+/// using masked_scatter semantics.
+///
+/// The first True mask position gets source[0], the second True gets source[1], etc.
+/// This matches PyTorch's masked_scatter / the Gemma4 reference implementation.
+func maskedScatter(
+    _ inputTensor: MLXArray, mask: MLXArray, source: MLXArray
+) -> MLXArray {
+    // mask: [B, L] or [B, L, D] (expanded), source: [1, N, D]
+    // Flatten mask to [B*L] or [B*L*D]
+    let maskFlat = mask.flattened().asType(.int32)
+    // cumsum gives sequential indices: first True → 0, second True → 1, etc.
+    let indices = MLX.cumsum(maskFlat, axis: 0) - 1
+    // Flatten source and index with modular arithmetic
+    let sourceFlat = source.flattened()
+    let aligned = sourceFlat.take(indices % MLXArray(Int32(sourceFlat.size)), axis: 0)
+    // Where mask is True use aligned value, else keep original
+    let result = MLX.where(maskFlat, aligned, inputTensor.flattened())
+    return result.reshaped(inputTensor.shape)
+}
+
+/// Replace token embeddings at placeholder positions with encoder outputs.
+///
+/// Uses masked_scatter: replacement[0] goes to first mask position,
+/// replacement[1] to second, etc.
+private func injectEmbeddings(
+    _ embeddings: MLXArray, tokens: MLXArray,
+    embeddings replacement: MLXArray, tokenId: Int
+) -> MLXArray {
+    // tokens: [B, L], embeddings: [B, L, D], replacement: [1, N, D]
+    let mask = tokens .== MLXArray(Int32(tokenId))  // [B, L]
+    let maskExpanded = expandedDimensions(mask, axis: -1)
+    let mask3D = MLX.broadcast(maskExpanded, to: embeddings.shape)
+    return maskedScatter(embeddings, mask: mask3D, source: replacement)
+}
+
+// MARK: - MultimodalEmbedder
+
+/// Projects soft tokens from vision/audio encoders into language model space.
+///
+/// Pipeline: RMSNormNoScale -> Linear projection (4-bit quantized)
+///
+/// Weight keys: `embed_vision.embedding_projection.*` or `embed_audio.embedding_projection.*`
+public class MultimodalEmbedder: Module {
+    @ModuleInfo(key: "embedding_projection") var embeddingProjection: Linear
+    let norm: VisionRMSNormNoScale
+
+    public init(embeddingDim: Int, textHiddenSize: Int, eps: Float = 1e-6) {
+        _embeddingProjection = ModuleInfo(
+            wrappedValue: Linear(embeddingDim, textHiddenSize, bias: false),
+            key: "embedding_projection")
+        self.norm = VisionRMSNormNoScale(eps: eps)
+    }
+
+    public func callAsFunction(_ inputsEmbeds: MLXArray) -> MLXArray {
+        let normed = norm(inputsEmbeds)
+        return embeddingProjection(normed)
+    }
+}
+
+// MARK: - Gemma4MultimodalModel
+
+/// Top-level multimodal model wrapper matching the safetensors key structure.
+///
+/// Weight key hierarchy:
+///   `language_model.*` — text model (Gemma4ForCausalLM)
+///   `vision_tower.*` — SigLIP2 vision encoder
+///   `embed_vision.*` — vision → language projection
+///   `audio_tower.*` — Conformer audio encoder (loaded but encoder rewrite pending)
+///   `embed_audio.*` — audio → language projection
+public class Gemma4MultimodalModel: Module {
+    @ModuleInfo(key: "language_model") var languageModel: Gemma4ForCausalLM
+    @ModuleInfo(key: "vision_tower") var visionTower: VisionEncoder
+    @ModuleInfo(key: "embed_vision") var embedVision: MultimodalEmbedder
+
+    public let config: Gemma4Config
+    public let imageTokenId: Int
+    public let audioTokenId: Int
+
+    public init(_ config: Gemma4Config, imageTokenId: Int = 258880, audioTokenId: Int = 258881) {
+        self.config = config
+        self.imageTokenId = imageTokenId
+        self.audioTokenId = audioTokenId
+
+        _languageModel = ModuleInfo(
+            wrappedValue: Gemma4ForCausalLM(config), key: "language_model")
+
+        // Vision tower with config from vision_config
+        _visionTower = ModuleInfo(
+            wrappedValue: VisionEncoder(
+                hiddenSize: 768, intermediateSize: 3072,
+                numLayers: 16, numHeads: 12, numKVHeads: 12,
+                headDim: 64, patchSize: 16, poolingKernelSize: 3,
+                defaultOutputLength: 280, positionEmbeddingSize: 10240,
+                ropeTheta: 100.0, eps: 1e-6),
+            key: "vision_tower")
+
+        _embedVision = ModuleInfo(
+            wrappedValue: MultimodalEmbedder(
+                embeddingDim: 768, textHiddenSize: config.hiddenSize, eps: 1e-6),
+            key: "embed_vision")
+    }
+
+    /// Text-only forward pass.
+    public func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
+        languageModel(tokens, caches: caches)
+    }
+
+    /// Multimodal forward pass with image pixel values.
+    public func callAsFunction(
+        _ tokens: MLXArray, caches: [KVCache]? = nil,
+        pixelValues: MLXArray? = nil
+    ) -> MLXArray {
+        guard let pixels = pixelValues else {
+            return languageModel(tokens, caches: caches)
+        }
+
+        // Vision pipeline: pixels -> encoder -> projector -> embeddings
+        let visionFeatures = visionTower(pixels)
+        let imageEmbeddings = embedVision(visionFeatures)
+
+        // Inject into language model forward
+        return languageModel(
+            tokens, caches: caches,
+            imageEmbeddings: imageEmbeddings,
+            imageTokenId: imageTokenId)
+    }
+
+    /// Number of transformer layers (for KV cache creation).
+    public var numLayers: Int { config.numHiddenLayers }
 }

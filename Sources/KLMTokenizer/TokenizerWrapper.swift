@@ -76,7 +76,9 @@ public final class KLMTokenizer: @unchecked Sendable {
         // Detect Gemma 4 by checking if token 105 decodes to a turn marker
         let token105 = tokenizer.decode(tokens: [105])
         if token105.contains("turn") || token105.contains("<|") {
-            return formatGemma4(messages: messages)
+            // Use direct token ID path (avoid decode→re-encode round-trip
+            // which loses special tokens)
+            return tokenizer.decode(tokens: formatGemma4TokenIds(messages: messages))
         }
 
         // Fallback: manual Llama 3 instruct format
@@ -90,11 +92,13 @@ public final class KLMTokenizer: @unchecked Sendable {
         return result
     }
 
-    /// Gemma 4 chat template formatting.
+    /// Encode messages as Gemma 4 token IDs directly.
+    ///
+    /// Returns token IDs with correct special token IDs (105, 106, 107)
+    /// that would be lost in a text decode→re-encode round-trip.
+    ///
     /// Format: BOS + <|turn|>user\ncontent<turn|>\n<|turn|>model\n
-    private func formatGemma4(messages: [[String: String]]) -> String {
-        // Gemma 4 uses special token IDs directly, not text markers.
-        // We encode by building the token sequence and decoding back.
+    public func formatGemma4TokenIds(messages: [[String: String]]) -> [Int] {
         // BOS=2, <|turn|>=105, <turn|>=106, \n=107
         var tokens: [Int] = [2]  // BOS
         for msg in messages {
@@ -111,7 +115,7 @@ public final class KLMTokenizer: @unchecked Sendable {
         tokens.append(105)  // <|turn|>
         tokens += tokenizer.encode(text: "model")
         tokens.append(107)  // \n
-        return tokenizer.decode(tokens: tokens)
+        return tokens
     }
 }
 

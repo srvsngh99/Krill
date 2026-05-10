@@ -40,7 +40,8 @@ private func chipInfo() -> String {
     if size > 0 {
         var brand = [CChar](repeating: 0, count: size)
         sysctlbyname("machdep.cpu.brand_string", &brand, &size, nil, 0)
-        return String(cString: brand)
+        let length = brand.firstIndex(of: 0) ?? brand.count
+        return String(decoding: brand.prefix(length).map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
     return "Apple Silicon"
 }

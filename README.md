@@ -1,37 +1,83 @@
 # KrillLM
 
-A faster, Mac-native LLM inference CLI for Apple Silicon.
+A Mac-native LLM inference CLI for Apple Silicon.
 
 Built on Apple's [MLX](https://github.com/ml-explore/mlx-swift) framework. Ships as a single CLI binary.
 
-**1.57x faster than Ollama** on decode, **58% less memory**, zero CoreAudio conflicts.
+## Benchmarks
 
-## Performance (llama3.2:1b, M4 Pro)
+Benchmark results depend on local hardware, OS, model quantization, installed binaries, and daemon state. KrillLM does not publish fixed KrillLM-vs-Ollama numbers in this README without an attached reproducibility report.
 
-| Metric | KrillLM | Ollama | Delta |
-|--------|---------|--------|-------|
-| Decode (32 tok) | 252 tok/s | 161 tok/s | **1.57x** |
-| TTFT | 17ms | 136ms | **8x faster** |
-| Memory | 704 MB | 1,685 MB | **58% less** |
-| mlock usage | None | 1.8 GB wired | No system conflicts |
+Use the local harness to compare an installed KrillLM model with an installed Ollama model:
 
-<details>
-<summary>Benchmark methodology</summary>
-
-- **Hardware**: Apple M4 Pro
-- **Model**: `llama3.2:1b` (Hugging Face canonical weights via `mlx-community/Llama-3.2-1B-Instruct-4bit`)
-- **Prompt**: "Explain quantum computing in simple terms"
-- **Settings**: temperature=0, max_tokens=32
-- **Measurement**: Median of 5 runs after 2 warmup runs
-- **Ollama version**: v0.5.x (specify exact version when reproducing)
-- **KrillLM version**: v0.2.0
-- **macOS**: 15.x, Xcode 16.x, Swift 6.2
-
-To reproduce:
+```bash
+make bench-compare \
+  KRILL_MODEL=llama-3.2-1b \
+  OLLAMA_MODEL=llama3.2:1b \
+  BENCH_MAX_TOKENS=32 \
+  BENCH_RUNS=5 \
+  BENCH_WARMUP=2
 ```
-krillm run llama3.2:1b --prompt "Explain quantum computing in simple terms" --max-tokens 32
+
+The harness writes `.build/benchmarks/krillm-vs-ollama.json` by default and records:
+
+- KrillLM and Ollama model names
+- Prompt text and SHA256
+- requested max tokens, actual prompt/generated token counts, runs, warmups, seed, temperature, and top-p
+- per-run throughput/timing plus median/min/max summaries
+- host environment, Swift version, KrillLM version, Ollama version, git commit, and git status
+
+Prerequisites:
+
+- Build KrillLM first with `make release`, or pass `--krillm-bin` when running the Python harness directly.
+- Install the KrillLM model with `krillm pull <model>`.
+- Install Ollama, start its daemon with `ollama serve`, and install the comparison model with `ollama pull <model>`.
+
+The harness exits `77` and writes an actionable skip report when `ollama`, the Ollama daemon, or either model is missing. `krillm bench <model>` remains available for the native synthetic-token benchmark.
+
+For Gemma 4 text/image/audio comparison, install the Python bridge and run:
+
+```bash
+make setup-mlx-vlm
+make bench-gemma4-multimodal
 ```
-</details>
+
+This writes `.build/benchmarks/gemma4-e2b-multimodal-4bit.json`. The harness benchmarks text, image, and audio separately and records the exact quantization metadata. KrillLM's local Gemma 4 E2B checkpoint uses MLX affine 4-bit; Ollama `gemma4:e2b` reports `Q4_K_M`, so the default report labels this as a 4-bit-class comparison, not bit-identical quantization.
+
+### Server-mode benchmarking
+
+For fair warm-server-vs-warm-server comparison (no CLI process startup overhead):
+
+```bash
+# Start KrillLM server
+krillm serve --model llama-3.2-1b --port 11435
+
+# In another terminal
+make bench-compare KRILLM_URL=http://127.0.0.1:11435
+```
+
+### Release benchmark gate
+
+Evaluate benchmark reports against release thresholds (1.5x decode, 0.67x wall time):
+
+```bash
+# Run against existing benchmark report
+make bench-release-gate
+
+# With custom report
+make bench-release-gate GATE_INPUT=.build/benchmarks/krillm-vs-ollama.json
+
+# Sequential comparison (disk-constrained)
+make bench-release-gate GATE_KRILLM=krillm.json GATE_OLLAMA=ollama.json
+```
+
+The gate writes `.build/benchmarks/release-gate.json` with per-metric pass/fail, geometric mean speedup, worst metric, and bottleneck classification.
+
+### Performance claims
+
+KrillLM is competitive with Ollama on Gemma4 E2B decode throughput on Apple Silicon and can exceed Ollama in some local 4-bit-class decode tests. Ollama is currently stronger on Gemma4 multimodal prefill and some wall-time metrics. KrillLM's next performance milestone is a fully native Gemma4 multimodal path with a release gate targeting 1.5x to 3x speedup over Ollama.
+
+Performance claims in this README are not updated unless `make bench-release-gate` passes and the report is committed or linked.
 
 ## Install
 
@@ -69,7 +115,7 @@ krillm run llama-3.2-3b
 krillm serve --model llama-3.2-3b
 # Then: curl http://localhost:11435/v1/chat/completions ...
 
-# Benchmark
+# Native synthetic-token benchmark
 krillm bench llama-3.2-3b
 ```
 
@@ -82,6 +128,7 @@ krillm pull llama-3.1-8b      # Llama 3.1 8B
 krillm pull qwen2.5-7b        # Qwen 2.5 7B
 krillm pull mistral-7b        # Mistral 7B v0.3
 krillm pull gemma-2-9b        # Gemma 2 9B
+krillm pull gemma-4-e2b       # Gemma 4 E2B (text via native experimental or mlx-vlm; media via mlx-vlm)
 krillm pull phi-4-mini         # Phi-4 Mini
 ```
 
@@ -102,6 +149,42 @@ krillm pull mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 | `krillm rm <model>` | Remove a model |
 | `krillm quantize <hf-path>` | Convert HF model to MLX format |
 | `krillm version` | Print version and system info |
+
+## Gemma 4 Multimodal Support
+
+Gemma 4 image/audio support is routed through the Python `mlx-vlm` bridge. The native Swift Gemma 4 path is text-only and experimental; native image and audio preprocessing intentionally fails instead of producing placeholder tensors or ignoring media.
+
+| Path | Text | Image | Audio | Tools |
+|------|------|-------|-------|-------|
+| Gemma 4 via `mlx-vlm` | Supported | Supported with `--image` | Supported with `--audio` | Not supported by `krillm run` |
+| Gemma 4 native Swift | Experimental | Not supported | Not supported | Not supported |
+| Other native models | Supported | Not supported | Not supported | Not supported |
+
+Install the bridge dependency:
+
+```bash
+make setup-mlx-vlm
+
+# Optional: force a specific interpreter instead of ~/.krillm/venv/bin/python3
+export KRILLM_PYTHON=/path/to/venv/bin/python3
+```
+
+Smoke checks:
+
+```bash
+# Dependency detection used by krillm
+python3 -c "from mlx_vlm import load; print('ok')"
+
+# Image/audio route through mlx-vlm for Gemma 4
+krillm run gemma-4-e2b "Describe this image" --image ./sample.jpg --max-tokens 64
+krillm run gemma-4-e2b "Transcribe or summarize this audio" --audio ./sample.wav --max-tokens 64
+
+# Test image and audio separately. Gemma 4 E2B is large enough that combined
+# image+audio prompts should be treated as a separate load/performance test.
+
+# Without mlx-vlm, Gemma 4 media fails loudly instead of falling back to native text-only inference.
+KRILLM_PYTHON=/usr/bin/python3 krillm run gemma-4-e2b "Describe this image" --image ./sample.jpg
+```
 
 ## API Compatibility
 
@@ -138,14 +221,13 @@ KRILL_PORT=11435
 KRILL_KV_CACHE_DTYPE=fp16
 ```
 
-## Why KrillLM over Ollama?
+## Why KrillLM?
 
-1. **Faster** - MLX on Metal is 1.5x+ faster than Ollama's llama.cpp backend on Apple Silicon
-2. **Less memory** - No mlock. Models use normal VM pages, not wired memory
-3. **No system conflicts** - Ollama's mlock exhausts the system mlock budget, breaking CoreAudio (browser audio). KrillLM doesn't.
-4. **Prefix cache** - Repeated system prompts (agent loops) get sub-20ms TTFT
-5. **Speculative decoding** - Draft model verification for 1.5-3x sustained decode
-6. **Single binary** - No daemon, no client/server split, no background process
+1. **Mac-native backend** - Uses MLX on Apple Silicon.
+2. **Normal VM memory** - Does not wire model pages through `mlock`.
+3. **Prefix cache** - Reuses repeated prompt prefixes.
+4. **Speculative decoding** - Supports draft-model verification.
+5. **Single binary** - No required background daemon for local CLI inference.
 
 ## Author
 
