@@ -6,7 +6,7 @@ Built on Apple's [MLX](https://github.com/ml-explore/mlx-swift) framework. Ships
 
 ## Release Status
 
-This build is a release-readiness baseline, not a production release. It includes Gemma4 native text/image improvements, audio via `mlx-vlm`, server timing fields, and benchmark gates. Server multimodal remains unsupported and current benchmarks do not yet meet the release speedup threshold. See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) for the full status, blockers, and acceptance criteria.
+This is not a production release because the release benchmark gate still fails on three metrics. Server multimodal is implemented for Gemma 4 — native image, bridge-backed audio — and shipped with end-to-end tests. Wall-time ratios beat Ollama by 1.6×–1.7×; remaining gate gaps are `text_prefill_ratio` (3% short), `image_prefill_ratio` (structural — vision cache moves work out of prefill), and `audio_wall_ratio` (gated on native audio). See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) for the full status, blockers, and acceptance criteria.
 
 ### Support Matrix
 
