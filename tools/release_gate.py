@@ -57,6 +57,73 @@ HIGHER_IS_BETTER = {
     "audio_prefill_ratio",
 }
 
+# ---------------------------------------------------------------------------
+# Gate profiles
+# ---------------------------------------------------------------------------
+#
+# Each profile maps every gated metric to one of three kinds:
+#
+#   "hard"          — failure breaks the gate (exit 1).
+#   "advisory"      — evaluated and reported; failure does NOT break the gate.
+#   "out_of_scope"  — skipped entirely. Listed in `scope_skipped_metrics` with
+#                     the profile-level reason so the omission is auditable.
+#
+# `strict` (the default) preserves the original behavior: every threshold is
+# hard-gated. CI and historical reports must not change shape unexpectedly.
+#
+# `release_candidate` is the profile defined in
+# OLLAMA_SPEEDUP_EXECUTION_PLAN.md §4 ("Release Gate Semantics"). It hard-gates
+# the metrics that map directly to user-visible latency or memory and treats
+# the prefill TPS bucket as advisory because:
+#   - text_prefill_ratio: text_wall and text_ttft are the user-visible signals
+#     and are already hard-gated; prefill TPS is noisy on short prompts.
+#   - image_prefill_ratio: the vision encoder cache lifts work out of the
+#     measured prefill window, so this bucket understates the user win that
+#     image_wall already captures. Re-promote to hard-gate once the cache mode
+#     is excluded from prefill TPS or the metric is redefined.
+# Audio metrics are out_of_scope until Workstream 1 (native Swift audio) lands;
+# the audio benchmark currently exercises the mlx-vlm sidecar and the gap to
+# Ollama is a known implementation gap, not a perf tuning target.
+GATE_PROFILES: dict[str, dict[str, str]] = {
+    "strict": {
+        "text_decode_ratio":     "hard",
+        "text_wall_ratio":       "hard",
+        "text_ttft_ratio":       "hard",
+        "text_prefill_ratio":    "hard",
+        "image_wall_ratio":      "hard",
+        "image_prefill_ratio":   "hard",
+        "audio_wall_ratio":      "hard",
+        "audio_prefill_ratio":   "hard",
+        "memory_ratio":          "hard",
+    },
+    "release_candidate": {
+        "text_decode_ratio":     "hard",
+        "text_wall_ratio":       "hard",
+        "text_ttft_ratio":       "hard",
+        "text_prefill_ratio":    "advisory",
+        "image_wall_ratio":      "hard",
+        "image_prefill_ratio":   "advisory",
+        "audio_wall_ratio":      "out_of_scope",
+        "audio_prefill_ratio":   "out_of_scope",
+        # memory_ratio is advisory until `gemma4_multimodal_benchmark.py`
+        # reliably records `peak_memory_gb_median` for both engines. Today the
+        # field is absent from generated reports, so hard-gating it would mean
+        # "every release_candidate run passes only because we ignored a hard
+        # miss". Re-promote to hard once the benchmark emits peak memory.
+        "memory_ratio":          "advisory",
+    },
+}
+
+# Human-readable reason shown next to each out_of_scope skip in reports.
+SCOPE_REASONS: dict[str, dict[str, str]] = {
+    "release_candidate": {
+        "audio_wall_ratio":    "audio runs through mlx-vlm sidecar; gated by Workstream 1 (native Swift audio).",
+        "audio_prefill_ratio": "audio runs through mlx-vlm sidecar; gated by Workstream 1 (native Swift audio).",
+    },
+}
+
+VALID_METRIC_KINDS = {"hard", "advisory", "out_of_scope"}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -105,6 +172,19 @@ def parse_args() -> argparse.Namespace:
             "media out of scope for text-only reports. Existing "
             "thresholds are unchanged in either scope; only their "
             "applicability differs."
+        ),
+    )
+    parser.add_argument(
+        "--profile",
+        choices=sorted(GATE_PROFILES.keys()),
+        default="strict",
+        help=(
+            "Gate profile. 'strict' (default) hard-gates every metric and "
+            "preserves the original behavior. 'release_candidate' applies "
+            "the semantics in OLLAMA_SPEEDUP_EXECUTION_PLAN.md §4: "
+            "prefill TPS metrics become advisory and audio metrics are "
+            "out_of_scope until native Swift audio ships. See "
+            "docs/BENCHMARKING.md for the rationale."
         ),
     )
     return parser.parse_args()
@@ -259,11 +339,21 @@ def evaluate_metric(
     name: str,
     value: Optional[float],
     threshold: float,
+    kind: str = "hard",
 ) -> dict[str, Any]:
-    """Evaluate a single metric against its threshold."""
+    """Evaluate a single metric against its threshold.
+
+    `kind` is one of `hard`, `advisory`, `out_of_scope`. Only `hard` failures
+    propagate to the gate verdict; advisory failures are reported alongside
+    passing ones so reviewers can still see them.
+    """
+    if kind not in VALID_METRIC_KINDS:
+        raise ValueError(f"invalid metric kind {kind!r} for {name}")
+
     if value is None:
         return {
             "name": name,
+            "kind": kind,
             "value": None,
             "threshold": threshold,
             "pass": False,
@@ -279,6 +369,7 @@ def evaluate_metric(
 
     return {
         "name": name,
+        "kind": kind,
         "value": round(value, 4),
         "threshold": threshold,
         "direction": direction,
@@ -368,10 +459,13 @@ def print_gate_summary(
     bottleneck: str,
     caveats: list[str],
     passed: bool,
+    profile: str,
+    scope_skipped: list[dict[str, Any]],
+    kv_cache_dtype: str = "fp16",
 ) -> None:
     print()
     print(f"{BOLD}{'=' * 60}{RESET}")
-    print(f"{BOLD}  KrillLM Release Benchmark Gate{RESET}")
+    print(f"{BOLD}  KrillLM Release Benchmark Gate{RESET}  ({CYAN}profile: {profile}, kv: {kv_cache_dtype}{RESET})")
     print(f"{BOLD}{'=' * 60}{RESET}")
     print()
 
@@ -379,17 +473,29 @@ def print_gate_summary(
         val = e["value"]
         thr = e["threshold"]
         direction = e.get("direction", "")
+        kind = e.get("kind", "hard")
+        kind_tag = "" if kind == "hard" else f" {YELLOW}[advisory]{RESET}"
+
         if val is None:
             icon = f"{YELLOW}--{RESET}"
             val_str = "N/A"
         elif e["pass"]:
             icon = f"{GREEN}OK{RESET}"
             val_str = f"{val:.4f}"
+        elif kind == "advisory":
+            # Advisory misses are warnings, not gate failures.
+            icon = f"{YELLOW}WARN{RESET}"
+            val_str = f"{val:.4f}"
         else:
             icon = f"{RED}FAIL{RESET}"
             val_str = f"{val:.4f}"
 
-        print(f"  [{icon}] {e['name']:<30s}  {val_str:>10s}  (need {direction} {thr})")
+        print(f"  [{icon}] {e['name']:<30s}  {val_str:>10s}  (need {direction} {thr}){kind_tag}")
+
+    if scope_skipped:
+        print()
+        for entry in scope_skipped:
+            print(f"  {CYAN}SKIP{RESET} {entry['metric']:<28s}  {entry['reason']}")
 
     print()
     print(f"  {CYAN}Geometric mean speedup:{RESET}  {speedup:.3f}x")
@@ -470,33 +576,59 @@ def main() -> int:
         args.scope == "release"
         and (server_media_status == "skipped" or fmt == "flat")
     )
-    scope_info: dict[str, Any] = {"scope": args.scope}
+    scope_info: dict[str, Any] = {"scope": args.scope, "profile": args.profile}
     if server_media_out_of_scope:
         scope_info["server_media"] = "out_of_scope"
 
     media_metric_prefixes = ("image_", "audio_")
 
+    profile_kinds = GATE_PROFILES[args.profile]
+    profile_reasons = SCOPE_REASONS.get(args.profile, {})
+
     # Evaluate each metric against thresholds
     evaluations: list[dict[str, Any]] = []
-    skipped_for_scope: list[str] = []
+    skipped_for_scope: list[dict[str, Any]] = []
     for name, threshold in sorted(thresholds.items()):
+        # Default kind is hard for metrics not listed in the profile (forwards-
+        # compatible: a new metric added to DEFAULT_THRESHOLDS is hard-gated
+        # until a profile explicitly downgrades it).
+        kind = profile_kinds.get(name, "hard")
+
         value = metrics.get(name)
         if value is None and name not in metrics:
-            # Metric not applicable to this report format — skip silently
             continue
+
+        if kind == "out_of_scope":
+            skipped_for_scope.append({
+                "metric": name,
+                "reason": profile_reasons.get(name, f"out of scope under profile '{args.profile}'"),
+            })
+            continue
+
         if server_media_out_of_scope and name.startswith(media_metric_prefixes):
             if value is None:
-                skipped_for_scope.append(name)
+                skipped_for_scope.append({
+                    "metric": name,
+                    "reason": "server media payload reported as out_of_scope for this report.",
+                })
                 continue
-        evaluations.append(evaluate_metric(name, value, threshold))
+
+        evaluations.append(evaluate_metric(name, value, threshold, kind=kind))
 
     # Compute aggregate stats
     speedup_factors = compute_speedup_factors(metrics)
     geo_speedup = geometric_mean(speedup_factors) if speedup_factors else 0.0
     bottleneck = classify_bottleneck(evaluations)
 
+    # Only hard failures break the gate. Advisory metrics are reported but
+    # never gate-blocking under any profile. Missing hard metrics count as
+    # failures: we cannot claim the gate passes for a metric we did not
+    # measure. Missing advisory metrics are tolerated (they print N/A and
+    # do not affect the verdict either way).
+    hard_evals = [e for e in evaluations if e.get("kind", "hard") == "hard"]
+    hard_pass = all(e["pass"] for e in hard_evals)
     all_pass = all(e["pass"] for e in evaluations if e["value"] is not None)
-    gate_pass = all_pass and not compatibility_fail
+    gate_pass = hard_pass and not compatibility_fail
 
     # Find worst metric
     worst_metric = None
@@ -514,9 +646,18 @@ def main() -> int:
             worst_gap = gap
             worst_metric = e["name"]
 
+    # Surface KV cache dtype so reviewers can spot int8 vs fp16 runs without
+    # opening the source benchmark report. The benchmark harness writes this
+    # under benchmark.kv_cache_dtype; older reports without the field are
+    # treated as fp16 (the default).
+    bench = report.get("benchmark") or {}
+    kv_cache_dtype = bench.get("kv_cache_dtype") or "fp16"
+
     # Build gate report
     gate_report: dict[str, Any] = {
         "gate": "pass" if gate_pass else "fail",
+        "profile": args.profile,
+        "kv_cache_dtype": kv_cache_dtype,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "source_report": args.report or {
             "krillm": args.krillm_report,
@@ -531,6 +672,7 @@ def main() -> int:
             "worst_metric": worst_metric,
             "worst_gap": round(worst_gap, 4),
             "bottleneck": bottleneck,
+            "hard_metrics_pass": hard_pass,
             "all_metrics_pass": all_pass,
             "compatibility_ok": not compatibility_fail,
         },
@@ -538,7 +680,9 @@ def main() -> int:
         "scope": scope_info,
     }
     if skipped_for_scope:
-        gate_report["scope_skipped_metrics"] = sorted(skipped_for_scope)
+        gate_report["scope_skipped_metrics"] = sorted(
+            skipped_for_scope, key=lambda x: x["metric"]
+        )
 
     # Write report
     output = Path(args.output)
@@ -546,7 +690,12 @@ def main() -> int:
     output.write_text(json.dumps(gate_report, indent=2, sort_keys=False) + "\n", encoding="utf-8")
 
     # Terminal output
-    print_gate_summary(evaluations, geo_speedup, bottleneck, caveats, gate_pass)
+    print_gate_summary(
+        evaluations, geo_speedup, bottleneck, caveats, gate_pass,
+        profile=args.profile,
+        scope_skipped=gate_report.get("scope_skipped_metrics", []),
+        kv_cache_dtype=kv_cache_dtype,
+    )
     print(f"Gate report: {args.output}")
 
     return 0 if gate_pass else 1
