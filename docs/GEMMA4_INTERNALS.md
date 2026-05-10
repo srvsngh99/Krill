@@ -8,8 +8,9 @@ Gemma 4 E2B (2B parameters) is a multimodal model with:
 - 35 transformer layers with mixed attention types
 - Per-Layer Embedding (PLE) gating
 - KV sharing between layers 15-34
-- Native vision encoder (SigLIP2)
-- Audio support via Python bridge (conformer rewrite pending)
+- Native vision encoder (SigLIP2) — CLI image works natively
+- Audio: requires mlx-vlm Python bridge (native conformer rewrite pending)
+- Server API: text only (image/audio not supported via HTTP)
 
 ## Files
 

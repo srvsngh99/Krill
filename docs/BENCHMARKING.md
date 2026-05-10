@@ -68,7 +68,7 @@ Gemma4 text/image/audio comparison.
 ### release_gate.py
 Evaluates benchmark reports against performance thresholds.
 
-**Default thresholds:**
+**All thresholds (must match `tools/release_gate.py`):**
 | Metric | Target | Direction |
 |--------|--------|-----------|
 | text_decode_ratio | >= 1.5x | Higher is better |
@@ -76,9 +76,31 @@ Evaluates benchmark reports against performance thresholds.
 | text_ttft_ratio | <= 0.67x | Lower is better |
 | text_prefill_ratio | >= 1.5x | Higher is better |
 | image_wall_ratio | <= 0.67x | Lower is better |
+| image_prefill_ratio | >= 1.5x | Higher is better |
 | audio_wall_ratio | <= 0.67x | Lower is better |
+| audio_prefill_ratio | >= 1.5x | Higher is better |
+| memory_ratio | <= 1.0x | Lower is better |
 
 **Output:** JSON report + colored terminal summary with per-metric pass/fail, geometric mean speedup, worst metric, bottleneck classification.
+
+## Release Readiness Status
+
+Release benchmark gates currently **fail**. Run `make bench-release-gate` for the latest per-metric results. The gate report at `.build/benchmarks/release-gate.json` contains exact ratios, the worst metric, and bottleneck classification.
+
+Key gaps as of the last reviewed run:
+- Text decode ratio does not meet the 1.5x threshold.
+- Prefill ratios are below target (MLX framework limitation).
+- Image/audio benchmarks via the multimodal harness use the mlx-vlm bridge path, not the native CLI path.
+- Server multimodal benchmarks are skipped because the server does not accept media payloads.
+
+## Cache-Hit Benchmark Caveats
+
+Server-mode benchmarks with repeated prompts benefit from the prefix cache. After warmup, measured runs may show near-zero prefill cost (TTFT ~11ms). Reports include `prefix_cache_active: true` and warn when prefill speed varies >3x across runs.
+
+When reporting benchmark results, distinguish:
+- **Cold**: first request, no cache (measures true prefill)
+- **Warm**: model loaded, no prefix cache hit (measures warm prefill)
+- **Cache-hit**: repeated prompt, prefix cache hit (measures cache restore + decode only)
 
 ## Non-Negotiable Rules
 
