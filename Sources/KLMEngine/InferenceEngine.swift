@@ -41,10 +41,18 @@ public final class InferenceEngine: @unchecked Sendable {
     public var modelDirectoryPath: String? { isLoaded ? modelDirectory.path : nil }
 
     /// Whether the loaded model can natively handle image input via the engine.
-    public var supportsNativeImage: Bool { loadedModel?.family == "gemma4" }
+    /// Requires both family == "gemma4" AND a non-nil multimodal forward (i.e.
+    /// the checkpoint actually has `vision_config`); a text-only Gemma 4
+    /// checkpoint cannot inject vision embeddings and must reject image input.
+    public var supportsNativeImage: Bool {
+        loadedModel?.family == "gemma4" && loadedModel?.multimodalForward != nil
+    }
 
-    /// Whether the loaded model can handle audio input (currently only via Python bridge).
-    public var supportsAudio: Bool { loadedModel?.family == "gemma4" }
+    /// Whether the loaded model can handle audio input (currently only via
+    /// Python bridge). Requires the same multimodal checkpoint as image input.
+    public var supportsAudio: Bool {
+        loadedModel?.family == "gemma4" && loadedModel?.multimodalForward != nil
+    }
 
     /// Model identifier for cache keying.
     private var modelId: String { modelDirectory.lastPathComponent }
@@ -120,6 +128,33 @@ public final class InferenceEngine: @unchecked Sendable {
         specDecoder != nil
     }
 
+    /// Prepend `<|image|>` and/or `<|audio|>` placeholder runs to the first
+    /// user message's content. The vision encoder produces N soft tokens, so
+    /// we insert N copies of `<|image|>` for `injectEmbeddings` to fill.
+    /// Returns messages unchanged when no media is provided.
+    func injectMediaPlaceholders(
+        into messages: [[String: String]],
+        imageData: Data?,
+        audioData: Data?
+    ) -> [[String: String]] {
+        guard imageData != nil || audioData != nil else { return messages }
+        var prefix = ""
+        if let img = imageData {
+            prefix += String(repeating: "<|image|>", count: computeImageTokenCount(imageData: img))
+        }
+        if audioData != nil {
+            prefix += "<|audio|>"
+        }
+        var result = messages
+        if let firstUserIndex = result.firstIndex(where: { $0["role"] == "user" }) {
+            let existing = result[firstUserIndex]["content"] ?? ""
+            result[firstUserIndex]["content"] = prefix + existing
+        } else {
+            result.append(["role": "user", "content": prefix])
+        }
+        return result
+    }
+
     /// Compute the number of soft tokens the vision encoder will produce for an image.
     /// This depends on the preprocessed image size.
     func computeImageTokenCount(imageData: Data) -> Int {
@@ -149,17 +184,9 @@ public final class InferenceEngine: @unchecked Sendable {
         if let sys = systemPrompt {
             messages.append(["role": "system", "content": sys])
         }
-        // For multimodal, prepend media tokens to the prompt.
-        // The vision encoder produces N soft tokens, so we insert N copies of <|image|>
-        // so that injectEmbeddings has exactly N placeholder positions to fill.
-        var userContent = ""
-        if let imgData = imageData {
-            let tokenCount = computeImageTokenCount(imageData: imgData)
-            userContent += String(repeating: "<|image|>", count: tokenCount)
-        }
-        if audioData != nil { userContent += "<|audio|>" }
-        userContent += prompt
-        messages.append(["role": "user", "content": userContent])
+        messages.append(["role": "user", "content": prompt])
+        // Placeholder run is injected by generate(messages:) so the chat path
+        // and the prompt path agree on tokenization.
         return generate(messages: messages, params: params, maxTokens: maxTokens,
                         useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
                         imageData: imageData, audioData: audioData)
@@ -188,13 +215,22 @@ public final class InferenceEngine: @unchecked Sendable {
             return (emptyStream, { nil })
         }
 
+        // Inject media placeholders into the first user message before
+        // tokenization so the chat path matches the prompt path. Gemma 4's
+        // multimodal forward replaces embeddings at placeholder token positions
+        // (image_token_id=258880, audio_token_id=258881); without these tokens
+        // the encoder output has nowhere to land and image/audio requests
+        // become silently text-only.
+        let preparedMessages = injectMediaPlaceholders(
+            into: messages, imageData: imageData, audioData: audioData)
+
         // Use direct token ID path for Gemma4 to avoid decode→re-encode
         // round-trip that loses special tokens (105, 106, 107).
         let promptTokens: [Int]
         if loadedModel.family == "gemma4" {
-            promptTokens = tokenizer.formatGemma4TokenIds(messages: messages)
+            promptTokens = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
         } else {
-            let formatted = tokenizer.applyChatTemplate(messages: messages)
+            let formatted = tokenizer.applyChatTemplate(messages: preparedMessages)
             promptTokens = tokenizer.encodeWithoutExtraBOS(formatted)
         }
 
@@ -222,7 +258,17 @@ public final class InferenceEngine: @unchecked Sendable {
         let capturedModelId = self.modelId
         // int8 KV: disable prefix cache (snapshot/restore/truncate are fp16-specific)
         // and speculative decoding (target/draft caches are typed `[KVCache]`).
-        let useInt8KV = self.usesQuantizedKVCache
+        // Non-Gemma 4 model loaders downcast caches to [KVCache] in their forward closures
+        // (see ModelLoader.swift); int8 KV is gated to Gemma 4 only for this release.
+        let useInt8KV: Bool = {
+            guard self.usesQuantizedKVCache else { return false }
+            if loadedModel.family != "gemma4" {
+                FileHandle.standardError.write(Data(
+                    "[KrillLM] warning: int8 KV cache is supported for Gemma 4 only; falling back to fp16 for family=\(loadedModel.family).\n".utf8))
+                return false
+            }
+            return true
+        }()
         let shouldSpec = useSpeculative && specDecoder != nil && !useInt8KV
         let capturedImageData = imageData
 
