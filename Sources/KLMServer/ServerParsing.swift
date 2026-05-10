@@ -25,12 +25,26 @@ internal struct ServerSamplingOptions: Equatable, Sendable {
     }
 }
 
+/// Media payload extracted from a request, prior to base64 decoding.
+/// Each string is either a raw base64 body or a `data:...;base64,...` URL.
+internal struct ServerMediaPayload: Equatable, Sendable {
+    /// Base64-encoded image strings (Ollama allows multiple, we cap at 1).
+    var images: [String] = []
+    /// Base64-encoded audio (single).
+    var audio: String? = nil
+    /// Audio container format hint (e.g. "wav", "mp3"). Defaults to "wav".
+    var audioFormat: String? = nil
+
+    var isEmpty: Bool { images.isEmpty && audio == nil }
+}
+
 internal struct ServerChatRequest: Equatable, Sendable {
     let messages: [[String: String]]
     let stream: Bool
     let maxTokens: Int
     let sampling: ServerSamplingOptions
     let requestedModel: String?
+    var media: ServerMediaPayload = ServerMediaPayload()
 }
 
 internal struct ServerCompletionRequest: Equatable, Sendable {
@@ -47,6 +61,7 @@ internal struct ServerGenerateRequest: Equatable, Sendable {
     let maxTokens: Int
     let sampling: ServerSamplingOptions
     let requestedModel: String?
+    var media: ServerMediaPayload = ServerMediaPayload()
 }
 
 internal enum ServerRequestError: Error, Equatable, Sendable {
@@ -92,7 +107,7 @@ internal enum ServerParsing {
     ]
 
     private static let unsupportedOllamaGenerateFields: Set<String> = [
-        "images", "format", "suffix", "context", "template"
+        "format", "suffix", "context", "template"
     ]
 
     static func jsonObject(from buffer: ByteBuffer) -> [String: Any]? {
@@ -115,9 +130,9 @@ internal enum ServerParsing {
 
     static func openAIChatRequest(from json: [String: Any]) throws -> ServerChatRequest {
         try rejectUnsupportedFields(in: json, fields: unsupportedOpenAIChatFields)
-        let messages = try requiredMessages(from: json)
+        let extracted = try openAIMessages(from: json)
         return ServerChatRequest(
-            messages: messages,
+            messages: extracted.messages,
             stream: try boolValue(json["stream"], field: "stream") ?? false,
             maxTokens: try requiredTokenLimit(
                 from: json,
@@ -125,7 +140,8 @@ internal enum ServerParsing {
                 defaultValue: defaultOpenAIMaxTokens
             ),
             sampling: try openAISamplingOptions(from: json),
-            requestedModel: try optionalString(json["model"], field: "model")
+            requestedModel: try optionalString(json["model"], field: "model"),
+            media: extracted.media
         )
     }
 
@@ -158,13 +174,14 @@ internal enum ServerParsing {
 
     static func ollamaChatRequest(from json: [String: Any]) throws -> ServerChatRequest {
         try rejectUnsupportedFields(in: json, fields: unsupportedOllamaChatFields)
-        let messages = try requiredMessages(from: json)
+        let extracted = try ollamaMessages(from: json)
         return ServerChatRequest(
-            messages: messages,
+            messages: extracted.messages,
             stream: try boolValue(json["stream"], field: "stream") ?? true,
             maxTokens: try ollamaTokenLimit(from: json),
             sampling: try ollamaSamplingOptions(from: json),
-            requestedModel: try optionalString(json["model"], field: "model")
+            requestedModel: try optionalString(json["model"], field: "model"),
+            media: extracted.media
         )
     }
 
@@ -173,13 +190,38 @@ internal enum ServerParsing {
         if try boolValue(json["raw"], field: "raw") == true {
             throw ServerRequestError.unsupportedField("raw")
         }
+        var media = ServerMediaPayload()
+        if let raw = json["images"] {
+            guard let images = ServerMultimodal.coerceStringArray(raw) else {
+                throw ServerRequestError.invalidType(field: "images", expected: "an array of base64 strings")
+            }
+            media.images = images
+        }
+        if let raw = json["audio"] {
+            if let s = raw as? String {
+                media.audio = s
+            } else if let arr = ServerMultimodal.coerceStringArray(raw), let first = arr.first {
+                if arr.count > 1 {
+                    throw ServerRequestError.invalidValue(
+                        field: "audio", reason: "only one audio clip per request is supported"
+                    )
+                }
+                media.audio = first
+            } else {
+                throw ServerRequestError.invalidType(field: "audio", expected: "a base64 string or single-element array")
+            }
+        }
+        if let fmt = try optionalString(json["audio_format"], field: "audio_format") {
+            media.audioFormat = fmt
+        }
         return ServerGenerateRequest(
             prompt: try stringValue(json["prompt"], field: "prompt"),
             system: try optionalString(json["system"], field: "system"),
             stream: try boolValue(json["stream"], field: "stream") ?? true,
             maxTokens: try ollamaTokenLimit(from: json),
             sampling: try ollamaSamplingOptions(from: json),
-            requestedModel: try optionalString(json["model"], field: "model")
+            requestedModel: try optionalString(json["model"], field: "model"),
+            media: media
         )
     }
 
@@ -200,6 +242,166 @@ internal enum ServerParsing {
             ),
             seed: try optionalUInt64(options["seed"] ?? json["seed"], field: "seed")
         )
+    }
+
+    /// Result of message extraction: structured messages plus any extracted media.
+    internal struct ExtractedMessages {
+        let messages: [[String: String]]
+        let media: ServerMediaPayload
+    }
+
+    /// Parse OpenAI-style chat messages, supporting both string content and the
+    /// content-block array form (`{type: text|image_url|input_audio}`).
+    static func openAIMessages(from json: [String: Any]) throws -> ExtractedMessages {
+        guard let rawMessages = json["messages"] else {
+            throw ServerRequestError.missingField("messages")
+        }
+        guard let messages = rawMessages as? [[String: Any]] else {
+            throw ServerRequestError.invalidType(field: "messages", expected: "an array of message objects")
+        }
+
+        var media = ServerMediaPayload()
+        var structured: [[String: String]] = []
+        for (index, message) in messages.enumerated() {
+            guard let role = message["role"] as? String else {
+                throw ServerRequestError.invalidType(field: "messages[\(index)].role", expected: "a string")
+            }
+
+            let rawContent = message["content"]
+            // Plain string content — copy through unchanged.
+            if let str = rawContent as? String {
+                structured.append(["role": role, "content": str])
+                continue
+            }
+
+            // Content-block array form.
+            guard let blocks = rawContent as? [[String: Any]] else {
+                throw ServerRequestError.invalidType(
+                    field: "messages[\(index)].content",
+                    expected: "a string or an array of content blocks"
+                )
+            }
+
+            var textParts: [String] = []
+            for (blockIdx, block) in blocks.enumerated() {
+                let type = block["type"] as? String ?? ""
+                switch type {
+                case "text":
+                    guard let t = block["text"] as? String else {
+                        throw ServerRequestError.invalidType(
+                            field: "messages[\(index)].content[\(blockIdx)].text",
+                            expected: "a string"
+                        )
+                    }
+                    textParts.append(t)
+                case "image_url":
+                    guard let imageURL = block["image_url"] as? [String: Any] else {
+                        throw ServerRequestError.invalidType(
+                            field: "messages[\(index)].content[\(blockIdx)].image_url",
+                            expected: "an object with a 'url' field"
+                        )
+                    }
+                    guard let url = imageURL["url"] as? String else {
+                        throw ServerRequestError.invalidType(
+                            field: "messages[\(index)].content[\(blockIdx)].image_url.url",
+                            expected: "a string"
+                        )
+                    }
+                    guard url.hasPrefix("data:") else {
+                        throw ServerRequestError.invalidValue(
+                            field: "messages[\(index)].content[\(blockIdx)].image_url.url",
+                            reason: "only data: URLs are supported (base64-encoded images)"
+                        )
+                    }
+                    media.images.append(url)
+                case "input_audio":
+                    guard let audio = block["input_audio"] as? [String: Any] else {
+                        throw ServerRequestError.invalidType(
+                            field: "messages[\(index)].content[\(blockIdx)].input_audio",
+                            expected: "an object with 'data' and 'format' fields"
+                        )
+                    }
+                    guard let data = audio["data"] as? String else {
+                        throw ServerRequestError.invalidType(
+                            field: "messages[\(index)].content[\(blockIdx)].input_audio.data",
+                            expected: "a base64 string"
+                        )
+                    }
+                    if media.audio != nil {
+                        throw ServerRequestError.invalidValue(
+                            field: "messages[\(index)].content[\(blockIdx)].input_audio",
+                            reason: "only one audio clip per request is supported"
+                        )
+                    }
+                    media.audio = data
+                    media.audioFormat = audio["format"] as? String
+                default:
+                    throw ServerRequestError.invalidValue(
+                        field: "messages[\(index)].content[\(blockIdx)].type",
+                        reason: "unsupported content block type '\(type)'"
+                    )
+                }
+            }
+            structured.append(["role": role, "content": textParts.joined(separator: "\n")])
+        }
+
+        guard !structured.isEmpty else {
+            throw ServerRequestError.invalidValue(field: "messages", reason: "must contain at least one message")
+        }
+        return ExtractedMessages(messages: structured, media: media)
+    }
+
+    /// Parse Ollama-style chat messages. Each message may carry `images` and `audio`
+    /// fields; we collect them into the request-level media payload.
+    static func ollamaMessages(from json: [String: Any]) throws -> ExtractedMessages {
+        guard let rawMessages = json["messages"] else {
+            throw ServerRequestError.missingField("messages")
+        }
+        guard let messages = rawMessages as? [[String: Any]] else {
+            throw ServerRequestError.invalidType(field: "messages", expected: "an array of message objects")
+        }
+
+        var media = ServerMediaPayload()
+        var structured: [[String: String]] = []
+        for (index, message) in messages.enumerated() {
+            guard let role = message["role"] as? String else {
+                throw ServerRequestError.invalidType(field: "messages[\(index)].role", expected: "a string")
+            }
+            guard let content = message["content"] as? String else {
+                throw ServerRequestError.invalidType(field: "messages[\(index)].content", expected: "a string")
+            }
+            structured.append(["role": role, "content": content])
+
+            if let raw = message["images"] {
+                guard let imgs = ServerMultimodal.coerceStringArray(raw) else {
+                    throw ServerRequestError.invalidType(
+                        field: "messages[\(index)].images",
+                        expected: "an array of base64 strings"
+                    )
+                }
+                media.images.append(contentsOf: imgs)
+            }
+            if let raw = message["audio"] {
+                if let s = raw as? String {
+                    if media.audio != nil {
+                        throw ServerRequestError.invalidValue(
+                            field: "messages[\(index)].audio",
+                            reason: "only one audio clip per request is supported"
+                        )
+                    }
+                    media.audio = s
+                } else {
+                    throw ServerRequestError.invalidType(
+                        field: "messages[\(index)].audio",
+                        expected: "a base64 string"
+                    )
+                }
+            }
+        }
+        guard !structured.isEmpty else {
+            throw ServerRequestError.invalidValue(field: "messages", reason: "must contain at least one message")
+        }
+        return ExtractedMessages(messages: structured, media: media)
     }
 
     private static func requiredMessages(from json: [String: Any]) throws -> [[String: String]] {

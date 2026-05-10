@@ -94,6 +94,19 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow comparison when prompt or media SHA256 differs.",
     )
+    parser.add_argument(
+        "--scope",
+        choices=["release", "multimodal_release"],
+        default="multimodal_release",
+        help=(
+            "Gate scope. 'multimodal_release' (default) enforces all "
+            "thresholds including image and audio, since the server now "
+            "accepts media payloads end-to-end. 'release' keeps server "
+            "media out of scope for text-only reports. Existing "
+            "thresholds are unchanged in either scope; only their "
+            "applicability differs."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -451,13 +464,30 @@ def main() -> int:
     caveats = check_compatibility(report, args)
     compatibility_fail = any("mismatch" in c and "ALLOWED" not in c for c in caveats)
 
+    # Determine scope effects
+    server_media_status = (report.get("server_media") or {}).get("status")
+    server_media_out_of_scope = (
+        args.scope == "release"
+        and (server_media_status == "skipped" or fmt == "flat")
+    )
+    scope_info: dict[str, Any] = {"scope": args.scope}
+    if server_media_out_of_scope:
+        scope_info["server_media"] = "out_of_scope"
+
+    media_metric_prefixes = ("image_", "audio_")
+
     # Evaluate each metric against thresholds
     evaluations: list[dict[str, Any]] = []
+    skipped_for_scope: list[str] = []
     for name, threshold in sorted(thresholds.items()):
         value = metrics.get(name)
         if value is None and name not in metrics:
             # Metric not applicable to this report format — skip silently
             continue
+        if server_media_out_of_scope and name.startswith(media_metric_prefixes):
+            if value is None:
+                skipped_for_scope.append(name)
+                continue
         evaluations.append(evaluate_metric(name, value, threshold))
 
     # Compute aggregate stats
@@ -505,7 +535,10 @@ def main() -> int:
             "compatibility_ok": not compatibility_fail,
         },
         "caveats": caveats,
+        "scope": scope_info,
     }
+    if skipped_for_scope:
+        gate_report["scope_skipped_metrics"] = sorted(skipped_for_scope)
 
     # Write report
     output = Path(args.output)

@@ -59,11 +59,11 @@ Reproducible KrillLM vs Ollama comparison.
 Gemma4 text/image/audio comparison.
 
 **Key flags:**
-- `--krillm-url URL` — server mode (text only, skips image/audio)
+- `--krillm-url URL` — server mode (text, image, and audio supported on Gemma 4)
 - `--engine both|krillm|ollama` — single-engine or comparison
 - `--runs N` / `--warmup N`
 
-**Server mode limitation:** KrillLM server does not accept image/audio payloads via HTTP yet. Server benchmark skips media tasks.
+**Server mode notes:** image and audio payloads are sent as base64 in the standard Ollama shape. Audio runs through the `mlx-vlm` bridge, so the server needs `mlx-vlm` installed for audio benchmarks (`make setup-mlx-vlm`).
 
 ### release_gate.py
 Evaluates benchmark reports against performance thresholds.
@@ -85,22 +85,30 @@ Evaluates benchmark reports against performance thresholds.
 
 ## Release Readiness Status
 
-Release benchmark gates currently **fail**. Run `make bench-release-gate` for the latest per-metric results. The gate report at `.build/benchmarks/release-gate.json` contains exact ratios, the worst metric, and bottleneck classification.
+This build is a release-readiness baseline, not a production release. Release benchmark gates currently **fail**. Run `make bench-release-gate` for the latest per-metric results. The gate report at `.build/benchmarks/release-gate.json` contains exact ratios, the worst metric, and bottleneck classification. See [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for the full plan and acceptance criteria.
 
 Key gaps as of the last reviewed run:
 - Text decode ratio does not meet the 1.5x threshold.
 - Prefill ratios are below target (MLX framework limitation).
-- Image/audio benchmarks via the multimodal harness use the mlx-vlm bridge path, not the native CLI path.
-- Server multimodal benchmarks are skipped because the server does not accept media payloads.
+- Image benchmarks via the multimodal harness currently exercise the mlx-vlm bridge path; the native Swift image path is what the CLI uses end-to-end and should be benchmarked directly when measuring native performance.
+- Audio benchmarks exercise the mlx-vlm bridge because native audio is not implemented.
+- Server multimodal benchmarks now exercise real media payloads (image native, audio bridge).
 
 ## Cache-Hit Benchmark Caveats
 
-Server-mode benchmarks with repeated prompts benefit from the prefix cache. After warmup, measured runs may show near-zero prefill cost (TTFT ~11ms). Reports include `prefix_cache_active: true` and warn when prefill speed varies >3x across runs.
+Benchmark prompts may hit the prefix cache, especially in server mode with repeated prompts. After warmup, measured runs may show near-zero prefill cost (TTFT ~11ms). Reports include `prefix_cache_active: true` and warn when prefill speed varies >3x across runs.
 
-When reporting benchmark results, distinguish:
-- **Cold**: first request, no cache (measures true prefill)
-- **Warm**: model loaded, no prefix cache hit (measures warm prefill)
-- **Cache-hit**: repeated prompt, prefix cache hit (measures cache restore + decode only)
+When reporting benchmark results, every report must label its `cache_mode` as one of:
+- **cold**: first request, no cache (measures true prefill)
+- **warm**: model loaded, no prefix cache hit (measures warm prefill)
+- **cache_hit**: repeated prompt, prefix cache hit (measures cache restore + decode only)
+
+Release criteria must state which `cache_mode` is being compared. At least one cold-path benchmark must be included whenever prefill performance is part of the claim. Do not mix cache-hit numbers with cold-path numbers in the same comparison.
+
+## Apples-to-Apples Comparison Rules
+
+- Do not compare KrillLM text-only placeholder runs against Ollama real-media runs. The server-mode multimodal harness skips image/audio for KrillLM specifically because the server does not accept media payloads — that skip must be visible in release-gate output, not silently substituted with text-only numbers.
+- KrillLM and Ollama runs in the same report must use the same prompts, media assets, max-token budgets, sampling settings, and `cache_mode`.
 
 ## Non-Negotiable Rules
 

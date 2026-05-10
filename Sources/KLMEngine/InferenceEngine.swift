@@ -36,6 +36,16 @@ public final class InferenceEngine: @unchecked Sendable {
     /// The loaded model's directory name (useful for display/status).
     public var modelName: String? { isLoaded ? modelDirectory.lastPathComponent : nil }
 
+    /// Filesystem path to the loaded model directory (for multimodal Python bridge).
+    /// Returns nil if no model is currently loaded.
+    public var modelDirectoryPath: String? { isLoaded ? modelDirectory.path : nil }
+
+    /// Whether the loaded model can natively handle image input via the engine.
+    public var supportsNativeImage: Bool { loadedModel?.family == "gemma4" }
+
+    /// Whether the loaded model can handle audio input (currently only via Python bridge).
+    public var supportsAudio: Bool { loadedModel?.family == "gemma4" }
+
     /// Model identifier for cache keying.
     private var modelId: String { modelDirectory.lastPathComponent }
 
@@ -348,6 +358,11 @@ public final class InferenceEngine: @unchecked Sendable {
                     }
                 } else {
                     // === Standard Decode Path ===
+                    // Pipelined: kick off the next forward asynchronously, then
+                    // run the (CPU-bound) tokenizer decode and consumer yield in
+                    // parallel with the GPU forward. Sampling at the end of the
+                    // iteration syncs on the GPU result. This overlaps consumer
+                    // backpressure and string decode work with kernel execution.
                     while generatedCount < maxTokens {
                         if nextToken == eosId {
                             continuation.yield(TokenEvent(
@@ -356,15 +371,20 @@ public final class InferenceEngine: @unchecked Sendable {
                             break
                         }
 
-                        let tokenText = capturedTokenizer.decode(token: nextToken)
+                        // Kick off forward for the current token asynchronously.
+                        let tokenInput = MLXArray([Int32(nextToken)]).reshaped(1, 1)
+                        let logits = capturedForward(tokenInput, caches)
+                        asyncEval(logits)
+
+                        // While GPU is busy, decode and yield the current token.
+                        let yieldedToken = nextToken
+                        let tokenText = capturedTokenizer.decode(token: yieldedToken)
                         continuation.yield(TokenEvent(
-                            tokenId: nextToken, text: tokenText,
+                            tokenId: yieldedToken, text: tokenText,
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime))
                         generatedCount += 1
 
-                        let tokenInput = MLXArray([Int32(nextToken)]).reshaped(1, 1)
-                        let logits = capturedForward(tokenInput, caches)
-                        MLX.eval(logits)
+                        // Sync on the GPU result and pick the next token.
                         nextToken = sampler.sample(logits)
                     }
                 }
