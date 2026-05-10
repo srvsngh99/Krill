@@ -6,7 +6,7 @@ KrillLM is a Mac-native LLM inference engine for Apple Silicon built on MLX. It 
 
 ### Release Status
 
-This build is a release-readiness baseline, not a production release. Server multimodal is out of scope for this release. See the [README support matrix](../README.md#support-matrix) and [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for the authoritative status.
+This is not a production release because the release benchmark gate still fails on three metrics. Server multimodal is implemented for Gemma 4 — native image and bridge-backed audio — as shown in the support matrix below. See the [README support matrix](../README.md#support-matrix) and [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for the authoritative status and the remaining gate gaps.
 
 ### Gemma 4 Multimodal Support Matrix
 

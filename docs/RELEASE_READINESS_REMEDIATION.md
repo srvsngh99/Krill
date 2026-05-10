@@ -64,7 +64,9 @@ fixture ambiguous, cache-affected results need explicit labels.
 
 ## 2. Current PR State (HEAD of `feat/release-readiness-remediation`)
 
-What is true after the commits in this PR (latest: `206791d`).
+What is true after the commits in this PR. Code verification was performed
+on `206791d`; the head also includes docs-only commits (`2c6066b`,
+`<this-commit>`) on top.
 
 ### What now works
 
@@ -137,7 +139,8 @@ What is true after the commits in this PR (latest: `206791d`).
 
 ### Verification on the target M4 Pro 24 GB machine
 
-Performed on `206791d`:
+Performed on `206791d` (the head of code changes; docs-only commits since
+do not affect these results):
 
 | Check | Result |
 | --- | --- |
