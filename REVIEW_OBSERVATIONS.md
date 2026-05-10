@@ -2,6 +2,13 @@
 
 Date: 2026-05-06
 
+> **Status (2026-05-11):** historical. Most P0 issues listed below have
+> been addressed by subsequent PRs (e.g., real prefix-cache KV
+> snapshot/restore, schema v2 media-hash keying, int8 KV + prefix-cache
+> compose, release-gate semantics). Do not treat any item below as
+> "current"; cross-reference with `OLLAMA_SPEEDUP_EXECUTION_PLAN.md` and
+> `docs/RELEASE_READINESS_REMEDIATION.md` for what's still open.
+
 This document captures review observations for follow-up implementation. The repo is a promising Swift/MLX local LLM CLI/server with a clean module split, but some advertised performance and compatibility features need correctness hardening before they should be treated as production-ready.
 
 ## Summary

@@ -3,17 +3,21 @@
 Originally drafted: 2026-05-10.
 Baseline commit: `4a2b6e6` (`Release readiness baseline and Gemma4 fixes`).
 PR: #9 (`feat/release-readiness-remediation`).
+Last updated: 2026-05-11 (post PR #12).
 
-This document is structured as three sections:
+This document is structured as four sections:
 
 1. **Historical Baseline** — the pre-PR state that motivated the plan.
    Frozen for reference.
-2. **Current PR State** — what is true at the head of this PR.
+2. **PR #9 State** — what was true at the head of the original remediation
+   PR. Frozen for reference.
 3. **Remaining Release Blockers** — what is still required before this can
-   be tagged a production release.
+   be tagged a production release. Updated incrementally.
+4. **Post-baseline progress** — what has shipped on top of the PR #9 baseline.
+   Append-only.
 
-It is not yet a production release. The release benchmark gate still fails
-on three metrics, all documented in section 3.
+It is not yet a production release. Sections 3 and 4 describe what remains
+and what has retired.
 
 ---
 
@@ -62,7 +66,7 @@ fixture ambiguous, cache-affected results need explicit labels.
 
 ---
 
-## 2. Current PR State (HEAD of `feat/release-readiness-remediation`)
+## 2. PR #9 State (HEAD of `feat/release-readiness-remediation`)
 
 What is true after the commits in this PR. Code verification was performed
 on `206791d`; the head also includes docs-only commits on top
@@ -196,54 +200,69 @@ uses the multimodal benchmark.
 ## 3. Remaining Release Blockers
 
 What is still required before this can be tagged a production release.
+Items that have shipped since PR #9 are crossed out; see Section 4 for the
+landing details.
 
 ### 3.1 Release benchmark gate fails
 
-`tools/release_gate.py` does not exit `0` against the accepted multimodal
-report. Three metrics still fail:
+The `strict` profile of `tools/release_gate.py` still exits `1` against the
+accepted multimodal report. The `release_candidate` profile (added in
+PR #12) exits `0` because prefill TPS, memory, and audio metrics are
+explicitly opted out — see `docs/BENCHMARKING.md` for the per-metric kind
+table. Promoting back toward strict requires:
 
 - **`text_prefill_ratio` 1.4498x** — 3% short of the 1.5x threshold.
-  Likely closeable with a vocab-compatible Gemma 4 drafter or
-  kernel-level work, neither of which fits in this PR.
+  Currently advisory under `release_candidate`. Re-promote to hard once a
+  drafter, fused kernel, or short-prompt eval-cadence change pushes it
+  consistently over 1.5x.
 - **`image_prefill_ratio` 1.0385x** — structurally below the 1.5x
-  threshold. The vision encoder cache deliberately moves SigLIP2
-  forward + projector cost out of the prefill window, so the prefill_tps
-  metric falls even though `image_wall_ratio` (the user-facing wall
-  time) passes at 0.5593x. Either the metric needs to be redefined to
-  count vision-encoder time as prefill, or the multimodal gate should be
-  switched to wall/TTFT-based.
-- **`audio_wall_ratio` 3.9265x** — gated on native audio in Swift. The
-  persistent `mlx-vlm` sidecar removed subprocess startup; the remaining
-  gap is the bridge's actual generate cost relative to Ollama's native
-  path. Closing it requires porting Gemma 4's Conformer audio encoder
-  and audio token expansion into native Swift+MLX. Multi-week effort.
+  threshold because the vision-encoder cache moves SigLIP2 forward and
+  projector cost out of the prefill window. Currently advisory under
+  `release_candidate`. Re-promote either by counting vision-encoder time
+  inside the prefill bucket or by switching the multimodal gate to a
+  wall/TTFT-based metric.
+- **`audio_wall_ratio` 3.9265x** — out_of_scope under
+  `release_candidate` until native Swift audio lands. The persistent
+  `mlx-vlm` sidecar removed subprocess startup; the remaining gap is the
+  bridge's generate cost vs Ollama's native path. Closing it requires
+  porting Gemma 4's Conformer audio encoder and audio token expansion
+  into native Swift+MLX. Multi-week effort.
+- **`memory_ratio` N/A** — advisory under `release_candidate` because
+  `gemma4_multimodal_benchmark.py` does not yet emit
+  `peak_memory_gb_median`. Re-promote to hard once the benchmark records
+  peak memory for both engines.
 
 Required outcome before release tag:
 
-- The gate exits `0` for the accepted multimodal benchmark report, OR
-- The gate is explicitly revised with a documented rationale for which
-  metrics are required versus advisory, and the revised gate exits `0`.
+- The active gate (strict, or release_candidate after every advisory has
+  been reviewed and every out_of_scope has been documented) exits `0`
+  against the accepted multimodal benchmark report.
 - The accepted report is committed or attached to release notes with
-  machine, model, quantization, warmup, run count, and `cache_mode`.
+  machine, model, quantization, warmup, run count, `cache_mode`, and
+  `kv_cache_dtype`.
 
 ### 3.2 Engineering work explicitly deferred to a follow-up PR
 
-These are documented as out-of-scope for this PR:
+These were originally out-of-scope for PR #9. Items 4 and 5 have shipped;
+see Section 4.
 
 1. **Native audio in Swift.** Required to close `audio_wall_ratio`.
+   Status: pending.
 2. **Vocab-compatible Gemma 4 drafter or self-speculative decoding.**
    Required to push `text_decode_ratio` and `text_prefill_ratio`
-   meaningfully past 1.5x.
+   meaningfully past 1.5x. Status: pending.
 3. **Custom Metal attention/MLP kernels.** Fused attention+RMSNorm or
    fused MLP gates would cut launch overhead and help short-prompt
-   prefill.
-4. **Restructure `prefill_tps` measurement for multimodal.** Either count
-   vision-encoder time in the prefill bucket, or replace
-   `image_prefill_ratio` with a wall/TTFT-based gate.
-5. **Quantized KV state save/restore in the prefix cache.** int8 KV is
-   currently incompatible with prefix cache because the snapshot path
-   dequantizes on every call. A serialization format for quantized KV
-   would let users get both wins simultaneously.
+   prefill. Status: pending.
+4. ~~**Restructure `prefill_tps` measurement for multimodal.**~~ Replaced
+   by a softer fix in PR #12: image and text prefill TPS are advisory
+   under `release_candidate` with documented rationale. The harder
+   restructure — counting vision-encoder time in prefill, or switching
+   to a wall/TTFT-based multimodal metric — is still desirable and can
+   re-promote both metrics to hard.
+5. ~~**Quantized KV state save/restore in the prefix cache.**~~ Shipped
+   in PR #11. int8 KV and prefix cache compose end-to-end with no
+   dequant→requant round trip. See Section 4.
 
 ---
 
@@ -270,10 +289,93 @@ release-ready only when all of the following are true:
 
 > This build implements Gemma 4 native text and image, audio via the
 > persistent `mlx-vlm` bridge, server multimodal end-to-end (Ollama and
-> OpenAI shapes), benchmark harness hardening, and a corrected
-> multimodal prefix cache. Five of seven release-gate metrics pass and
-> wall-time ratios beat Ollama by 1.6x–1.7x. The gate still fails on
-> `text_prefill_ratio` (3% short), `image_prefill_ratio` (structural —
-> vision cache moves work out of prefill), and `audio_wall_ratio`
-> (gated on native audio). This is a release-readiness baseline, not a
-> production release.
+> OpenAI shapes), benchmark harness hardening, a corrected multimodal
+> prefix cache, and an opt-in int8 KV cache that composes with the
+> prefix cache. The release gate now has a `release_candidate` profile
+> that hard-gates user-visible latency while marking prefill TPS and
+> memory advisory and audio out_of_scope until native Swift audio
+> lands. Wall-time ratios beat Ollama by 1.6x–1.7x. Under
+> `release_candidate` the gate exits `0` on the accepted multimodal
+> snapshot; under `strict` it still fails on `text_prefill_ratio`,
+> `image_prefill_ratio`, and `audio_wall_ratio`. This is a
+> release-readiness baseline plus a documented release-candidate path,
+> not a production release.
+
+---
+
+## 4. Post-baseline progress
+
+Append-only log of what has shipped on top of PR #9. Each entry references
+the PR for full detail.
+
+### 4.1 PR #11 — `perf: compose int8 KV cache with prefix cache`
+
+Merged onto `main` at commit `d6ed1ea`. Closes Workstream 5 of
+[`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](../OLLAMA_SPEEDUP_EXECUTION_PLAN.md).
+
+What landed:
+
+- `QuantizedKVCache.quantizedSnapshot()`, `restoreQuantized(_:)`, and
+  `truncate(to:)` mirror the fp16 contract while keeping K/V in uint8
+  with their fp16 scales/zeros.
+- `PrefixCache.storeQuantized` / `lookupQuantized` persist int8 entries
+  to a separate `<key>.q8.safetensors` filename; the cache key schema
+  bumps to v3 with a dtype tag so fp16 and int8 entries cannot collide.
+- `InferenceEngine` removes the previous `&& !useInt8KV` guard on
+  prefix cache; int8 lookup/restore/truncate mirrors fp16, including
+  the Gemma 4 KV-sharing case where the shared-layer suffix leaves
+  caches empty (only the non-shared prefix is persisted).
+
+Coverage:
+
+- `Tests/KLMCoreTests/QuantizedPrefixCacheTests.swift` — 4 unit tests
+  (round trip, dtype isolation in both directions, restore+truncate+update
+  length invariants).
+- `Tests/KLMEngineTests/QuantizedPrefixCacheLiveTests.swift` (gated by
+  `KLM_GEMMA4_MODEL_PATH`) — cold and warm runs through `InferenceEngine`
+  with `kvCacheDtype: "int8"` and a shared `PrefixCache` produce
+  identical greedy tokens.
+
+Net effect on the test count: `123 / 8` → `128 / 9`.
+
+### 4.2 PR #12 — `feat: release_candidate gate profile + kv_cache_dtype in reports`
+
+Merged onto `main` at commit `2f3386a`. Closes Workstream 4 of the
+execution plan.
+
+What landed:
+
+- `tools/release_gate.py --profile <name>` (default `strict`). The
+  `release_candidate` profile classifies each metric as hard, advisory,
+  or out_of_scope and only fails the gate on hard misses. **Missing
+  hard metrics also fail the gate** — a release claim cannot rest on
+  unmeasured numbers.
+- Per-metric kind under `release_candidate`:
+  - hard: `text_decode`, `text_wall`, `text_ttft`, `image_wall`
+  - advisory: `text_prefill`, `image_prefill`, `memory`
+  - out_of_scope: `audio_wall`, `audio_prefill`
+- `memory_ratio` is advisory until
+  `gemma4_multimodal_benchmark.py` records `peak_memory_gb_median`. The
+  re-promotion contract is documented in `docs/BENCHMARKING.md`.
+- `tools/gemma4_multimodal_benchmark.py` records
+  `benchmark.kv_cache_dtype` (sourced from `KRILL_KV_CACHE_DTYPE`); the
+  gate echoes it in the gate report and on the terminal header.
+- `docs/BENCHMARKING.md` documents both profiles, the per-metric kind
+  table, and the rationale for each downgrade.
+
+Coverage:
+
+- `tools/test_release_gate.py` — 7 unit tests covering strict vs
+  release_candidate dispatch, audio scope skipping, hard-metric
+  regression detection, missing-hard-metric → fail, and
+  `kv_cache_dtype` surfacing.
+
+Verified gate behavior on `.build/benchmarks/v4-mm.json`:
+
+```text
+strict                                  -> exit 1 (unchanged)
+release_candidate --allow-dtype-mismatch -> exit 0
+   hard pass: text_decode, text_wall, text_ttft, image_wall
+   advisory: text_prefill WARN, image_prefill WARN, memory N/A
+   skip:     audio_wall, audio_prefill
+```
