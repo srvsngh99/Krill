@@ -6,7 +6,7 @@ Built on Apple's [MLX](https://github.com/ml-explore/mlx-swift) framework. Ships
 
 ## Release Status
 
-This is not a production release because the release benchmark gate still fails on three metrics. Server multimodal is implemented for Gemma 4 — native image, bridge-backed audio — and shipped with end-to-end tests. Wall-time ratios beat Ollama by 1.6×–1.7×; remaining gate gaps are `text_prefill_ratio` (3% short), `image_prefill_ratio` (structural — vision cache moves work out of prefill), and `audio_wall_ratio` (gated on native audio). See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) for the full status, blockers, and acceptance criteria.
+This is not yet a production release. Server multimodal is implemented for Gemma 4 — native image, bridge-backed audio — and shipped with end-to-end tests. Wall-time ratios beat Ollama by 1.6×–1.7×, and the int8 KV cache now composes with the prefix cache on Gemma 4 (PR #11). The release gate now distinguishes hard, advisory, and out_of_scope metrics via an opt-in `--profile release_candidate` (PR #12); the `strict` gate still fails on `text_prefill_ratio`, `image_prefill_ratio`, and `audio_wall_ratio`. See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) and [`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](OLLAMA_SPEEDUP_EXECUTION_PLAN.md) for the full status, the per-metric promotion contract, and acceptance criteria.
 
 ### Support Matrix
 
@@ -81,7 +81,7 @@ make bench-compare KRILLM_URL=http://127.0.0.1:11435
 Evaluate benchmark reports against release thresholds (1.5x decode, 0.67x wall time):
 
 ```bash
-# Run against existing benchmark report
+# Run against existing benchmark report (strict profile, default)
 make bench-release-gate
 
 # With custom report
@@ -89,15 +89,20 @@ make bench-release-gate GATE_INPUT=.build/benchmarks/krillm-vs-ollama.json
 
 # Sequential comparison (disk-constrained)
 make bench-release-gate GATE_KRILLM=krillm.json GATE_OLLAMA=ollama.json
+
+# release_candidate profile — hard-gates user-visible latency, marks
+# prefill TPS and memory advisory, scopes audio out until native Swift audio
+python3 tools/release_gate.py .build/benchmarks/v4-mm.json \
+  --profile release_candidate --allow-dtype-mismatch
 ```
 
-The gate writes `.build/benchmarks/release-gate.json` with per-metric pass/fail, geometric mean speedup, worst metric, and bottleneck classification.
+The gate writes `.build/benchmarks/release-gate.json` with per-metric pass/fail, geometric mean speedup, worst metric, bottleneck classification, the active profile, and the KV cache dtype the run used. See [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) for the per-metric kind table and rationale.
 
 ### Performance claims
 
-KrillLM is competitive with Ollama on Gemma4 E2B decode throughput on Apple Silicon and can exceed Ollama in some local 4-bit-class decode tests. Ollama is currently stronger on Gemma4 multimodal prefill and some wall-time metrics. KrillLM's next performance milestone is a fully native Gemma4 multimodal path (audio still routes through `mlx-vlm` today) with a release gate targeting 1.5x to 3x speedup over Ollama.
+KrillLM is competitive with Ollama on Gemma4 E2B decode throughput on Apple Silicon and can exceed Ollama in some local 4-bit-class decode tests. Wall-time ratios beat Ollama by 1.6×–1.7× on text and image. Ollama is currently stronger on multimodal prefill TPS and on audio (where KrillLM still routes through `mlx-vlm`). KrillLM's next performance milestone is a fully native Gemma4 multimodal path with a `strict`-profile release gate exiting `0`.
 
-Release benchmark gates currently fail — this is the release-readiness baseline, not a production release. Performance claims in this README are not updated unless `make bench-release-gate` passes and the report is committed or linked.
+The `strict` benchmark gate currently fails on prefill TPS and audio wall time. The `release_candidate` profile (PR #12) exits `0` on the same report by treating prefill TPS / memory as advisory and audio as out_of_scope until native Swift audio lands. This is a release-readiness baseline plus a documented release-candidate path, not a production release. Performance claims in this README are not updated unless `make bench-release-gate` passes under the agreed profile and the report is committed or linked.
 
 ## Install
 
