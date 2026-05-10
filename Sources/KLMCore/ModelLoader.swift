@@ -18,13 +18,17 @@ public struct LoadedModel: @unchecked Sendable {
     /// The detected model family
     public let family: String
 
-    /// Forward pass returning logits
-    public let forward: (MLXArray, [KVCache]?) -> MLXArray
+    /// Forward pass returning logits.
+    ///
+    /// Takes `[KVCacheProtocol]?` so callers can pass either fp16 `KVCache` or `QuantizedKVCache`.
+    /// Families that only support fp16 internally (Llama/Qwen/Mistral/Gemma/Phi/GLM) downcast at the
+    /// boundary; passing a non-`KVCache` array to those families is a logic error caught by the engine.
+    public let forward: (MLXArray, [KVCacheProtocol]?) -> MLXArray
 
     /// Multimodal forward pass (tokens, caches, imageEmbeddings, audioEmbeddings, imageBytesHash) -> logits
     /// Only set for models that support native multimodal (e.g. Gemma4).
     /// `imageBytesHash` (when non-nil) keys the per-model vision encoder cache; pass nil to bypass.
-    public let multimodalForward: ((MLXArray, [KVCache]?, MLXArray?, MLXArray?, String?) -> MLXArray)?
+    public let multimodalForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, String?) -> MLXArray)?
 
     /// Vocab size for validation
     public let vocabSize: Int
@@ -87,7 +91,7 @@ private func loadLlama(configData: Data, directory: URL) throws -> LoadedModel {
         module: model,
         numLayers: config.numHiddenLayers,
         family: "llama",
-        forward: { tokens, caches in model(tokens, caches: caches) },
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
@@ -102,7 +106,7 @@ private func loadQwen(configData: Data, directory: URL) throws -> LoadedModel {
         module: model,
         numLayers: config.numHiddenLayers,
         family: "qwen",
-        forward: { tokens, caches in model(tokens, caches: caches) },
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
@@ -117,7 +121,7 @@ private func loadMistral(configData: Data, directory: URL) throws -> LoadedModel
         module: model,
         numLayers: config.numHiddenLayers,
         family: "mistral",
-        forward: { tokens, caches in model(tokens, caches: caches) },
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
@@ -132,7 +136,7 @@ private func loadGemma(configData: Data, directory: URL) throws -> LoadedModel {
         module: model,
         numLayers: config.numHiddenLayers,
         family: "gemma",
-        forward: { tokens, caches in model(tokens, caches: caches) },
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
@@ -147,7 +151,7 @@ private func loadPhi(configData: Data, directory: URL) throws -> LoadedModel {
         module: model,
         numLayers: config.numHiddenLayers,
         family: "phi",
-        forward: { tokens, caches in model(tokens, caches: caches) },
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
@@ -264,7 +268,7 @@ private func loadGLM(configData: Data, directory: URL) throws -> LoadedModel {
         module: model,
         numLayers: config.numHiddenLayers,
         family: "glm",
-        forward: { tokens, caches in model(tokens, caches: caches) },
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
