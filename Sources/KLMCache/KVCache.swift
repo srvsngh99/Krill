@@ -1,5 +1,17 @@
 import MLX
 
+/// Common interface implemented by every per-layer KV cache backend.
+///
+/// Lowest common denominator across `KVCache` (fp16) and `QuantizedKVCache` (int8).
+/// Code paths that need fp16-only operations (`snapshot`, `restore`, `truncate`) must
+/// keep the concrete `KVCache` type.
+public protocol KVCacheProtocol: AnyObject {
+    func update(keys newK: MLXArray, values newV: MLXArray) -> (MLXArray, MLXArray)
+    func snapshot() -> (keys: MLXArray, values: MLXArray)?
+    func reset()
+    var sequenceLength: Int { get }
+}
+
 /// Per-layer Key-Value cache for transformer attention.
 ///
 /// Stores accumulated K/V tensors and grows along the sequence dimension
@@ -9,7 +21,7 @@ import MLX
 /// avoid creating a new array on every single decode step. During decode,
 /// new K/V slices are accumulated in a small buffer and the full history
 /// is rebuilt only when needed for attention.
-public final class KVCache: @unchecked Sendable {
+public final class KVCache: KVCacheProtocol, @unchecked Sendable {
     private var _keys: MLXArray?
     private var _values: MLXArray?
 

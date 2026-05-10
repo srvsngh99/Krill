@@ -52,10 +52,22 @@ public final class InferenceEngine: @unchecked Sendable {
     /// Timestamp when the model was loaded (nil if not loaded).
     public private(set) var loadedAt: Date?
 
-    public init(modelDirectory: URL, prefixCache: PrefixCache? = nil) {
+    /// KV cache dtype: "fp16" (default) or "int8" (quantized). Read from arg or
+    /// `KRILL_KV_CACHE_DTYPE` env var.
+    private let kvCacheDtype: String
+
+    public init(modelDirectory: URL, prefixCache: PrefixCache? = nil, kvCacheDtype: String? = nil) {
         self.modelDirectory = modelDirectory
         self.prefixCache = prefixCache ?? PrefixCache()
+        if let dtype = kvCacheDtype {
+            self.kvCacheDtype = dtype
+        } else {
+            self.kvCacheDtype = ProcessInfo.processInfo.environment["KRILL_KV_CACHE_DTYPE"] ?? "fp16"
+        }
     }
+
+    /// Whether this engine is configured to use int8 quantized KV cache.
+    public var usesQuantizedKVCache: Bool { kvCacheDtype == "int8" }
 
     /// Load the model and tokenizer from disk.
     /// Auto-detects model family from config.json.
@@ -208,8 +220,26 @@ public final class InferenceEngine: @unchecked Sendable {
         nonisolated(unsafe) let capturedPrefixCache = self.prefixCache
         let capturedSpecDecoder = self.specDecoder
         let capturedModelId = self.modelId
-        let shouldSpec = useSpeculative && specDecoder != nil
+        // int8 KV: disable prefix cache (snapshot/restore/truncate are fp16-specific)
+        // and speculative decoding (target/draft caches are typed `[KVCache]`).
+        let useInt8KV = self.usesQuantizedKVCache
+        let shouldSpec = useSpeculative && specDecoder != nil && !useInt8KV
         let capturedImageData = imageData
+
+        let effectiveUsePrefixCache = usePrefixCache && !useInt8KV
+        // Bind the prefix-cache key to all non-text conditioning. Without this,
+        // a prompt+image request can mis-hit a prior entry computed under a
+        // different image (or no image at all) and serve stale KV state.
+        let mediaHash: String? = {
+            guard imageData != nil || audioData != nil else { return nil }
+            var parts: [String] = []
+            if let img = imageData { parts.append("img:" + VisionEncoderCache.key(forImageBytes: img)) }
+            if let aud = audioData {
+                let digest = VisionEncoderCache.key(forImageBytes: aud) // SHA-256 of bytes
+                parts.append("aud:" + digest)
+            }
+            return parts.joined(separator: "|")
+        }()
 
         let stream = AsyncStream<TokenEvent> { continuation in
             Task { [statsHolder] in
@@ -218,8 +248,12 @@ public final class InferenceEngine: @unchecked Sendable {
                 var prefillDuration: Double = 0
                 var cacheHit = false
 
-                // Create KV caches
-                let caches = makeKVCaches(numLayers: numLayers)
+                // Create KV caches. fp16 path uses concrete KVCache so the prefix-cache
+                // path (snapshot/restore/truncate) works; int8 uses QuantizedKVCache
+                // and skips prefix cache entirely (see effectiveUsePrefixCache above).
+                let fp16Caches: [KVCache]? = useInt8KV ? nil : makeKVCaches(numLayers: numLayers)
+                let int8Caches: [QuantizedKVCache]? = useInt8KV ? makeQuantizedKVCaches(numLayers: numLayers) : nil
+                let caches: [KVCacheProtocol] = useInt8KV ? int8Caches! : fp16Caches!
 
                 // -- Prefix Cache Lookup --
                 // Only accept FULL prefix hits (cached tokens == prompt tokens).
@@ -227,12 +261,12 @@ public final class InferenceEngine: @unchecked Sendable {
                 // span length only, but attention keys include the restored prefix,
                 // causing shape mismatch or incorrect masking. Until cache-aware
                 // mask construction is implemented, we skip partial hits.
-                if usePrefixCache {
+                if effectiveUsePrefixCache, let fp16Caches {
                     if let hit = capturedPrefixCache.lookup(
-                        tokens: promptTokens, modelId: capturedModelId
+                        tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash
                     ), !hit.keys.isEmpty, hit.prefixLength == promptTokens.count {
                         // Full exact hit — restore KV for all prompt tokens.
-                        for (i, cache) in caches.enumerated() {
+                        for (i, cache) in fp16Caches.enumerated() {
                             if i < hit.keys.count, let k = hit.keys[i].first,
                                i < hit.values.count, let v = hit.values[i].first {
                                 cache.restore(keys: k, values: v)
@@ -248,9 +282,9 @@ public final class InferenceEngine: @unchecked Sendable {
                 // to get logits without duplicating a KV entry.
                 // On a miss we forward the entire prompt normally.
                 let tokensToProcess: [Int]
-                if cacheHit {
+                if cacheHit, let fp16Caches {
                     let trimmedLength = max(0, promptTokens.count - 1)
-                    for cache in caches {
+                    for cache in fp16Caches {
                         cache.truncate(to: trimmedLength)
                     }
                     tokensToProcess = [promptTokens.last!]
@@ -286,10 +320,11 @@ public final class InferenceEngine: @unchecked Sendable {
                 // forwarded). On the next request with the same prefix, the
                 // restored KV will cover all prompt tokens, and the "full cache
                 // hit" path above trims the last token and re-forwards it.
-                if usePrefixCache && !cacheHit && promptTokens.count >= 8 {
+                if effectiveUsePrefixCache && !cacheHit && promptTokens.count >= 8,
+                   let fp16Caches {
                     var snapshotKeys: [[MLXArray]] = []
                     var snapshotValues: [[MLXArray]] = []
-                    for cache in caches {
+                    for cache in fp16Caches {
                         if let snap = cache.snapshot() {
                             snapshotKeys.append([snap.keys])
                             snapshotValues.append([snap.values])
@@ -300,7 +335,8 @@ public final class InferenceEngine: @unchecked Sendable {
                             tokens: promptTokens,
                             modelId: capturedModelId,
                             keys: snapshotKeys,
-                            values: snapshotValues
+                            values: snapshotValues,
+                            mediaHash: mediaHash
                         )
                     }
                 }
@@ -342,10 +378,11 @@ public final class InferenceEngine: @unchecked Sendable {
                     }
 
                     while generatedCount < maxTokens && nextToken != eosId {
-                        // Speculative step: get multiple tokens at once
+                        // Speculative step: get multiple tokens at once.
+                        // Spec path requires fp16 caches; shouldSpec already excludes int8.
                         let accepted = specDec.step(
                             lastToken: nextToken,
-                            targetCaches: caches,
+                            targetCaches: fp16Caches!,
                             draftCaches: draftCaches
                         )
 

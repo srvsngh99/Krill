@@ -43,9 +43,15 @@ public final class PrefixCache: @unchecked Sendable {
     ///
     /// Returns the cached KV arrays and how many tokens they cover,
     /// or nil if no matching prefix is found.
+    ///
+    /// `mediaHash` MUST encode all non-text conditioning (image/audio bytes).
+    /// Two requests with the same tokens but different media MUST pass
+    /// different `mediaHash` strings — otherwise a hit would serve KV state
+    /// conditioned on the wrong media. Pass nil/"" only for pure text.
     public func lookup(
         tokens: [Int],
-        modelId: String
+        modelId: String,
+        mediaHash: String? = nil
     ) -> PrefixCacheHit? {
         // Try progressively shorter prefixes
         let maxLen = tokens.count
@@ -57,7 +63,7 @@ public final class PrefixCache: @unchecked Sendable {
 
         while checkLen >= minPrefixLength {
             let prefix = Array(tokens[0 ..< checkLen])
-            let key = cacheKey(tokens: prefix, modelId: modelId)
+            let key = cacheKey(tokens: prefix, modelId: modelId, mediaHash: mediaHash)
 
             // Check memory first
             if let entry = memoryCache[key] {
@@ -89,15 +95,18 @@ public final class PrefixCache: @unchecked Sendable {
     /// Store a prefix's KV state after prefill completes.
     ///
     /// Called asynchronously (write-behind) so it never blocks generation.
+    /// `mediaHash` MUST match the value used at lookup time and must encode
+    /// any image/audio conditioning the KV state was computed under.
     public func store(
         tokens: [Int],
         modelId: String,
         keys: [[MLXArray]],
-        values: [[MLXArray]]
+        values: [[MLXArray]],
+        mediaHash: String? = nil
     ) {
         guard tokens.count >= minPrefixLength else { return }
 
-        let key = cacheKey(tokens: tokens, modelId: modelId)
+        let key = cacheKey(tokens: tokens, modelId: modelId, mediaHash: mediaHash)
         let entry = MemoryCacheEntry(keys: keys, values: values)
 
         storeInMemory(key: key, entry: entry)
@@ -151,10 +160,21 @@ private struct MemoryCacheEntry {
 }
 
 extension PrefixCache {
-    private func cacheKey(tokens: [Int], modelId: String) -> String {
-        // SHA256 of token bytes + model identifier
+    /// Cache key schema version. Bump on backward-incompatible key changes
+    /// so stale on-disk entries become unreachable instead of mis-served.
+    /// v2: includes mediaHash to prevent multimodal cross-contamination.
+    private static let keySchemaVersion: UInt8 = 2
+
+    private func cacheKey(tokens: [Int], modelId: String, mediaHash: String?) -> String {
+        // FNV-1a hash of: schema version || modelId || mediaHash || token bytes.
         var data = Data()
+        data.append(PrefixCache.keySchemaVersion)
         data.append(modelId.data(using: .utf8) ?? Data())
+        data.append(0xFF) // separator so modelId/mediaHash boundary is unambiguous
+        if let mediaHash, !mediaHash.isEmpty {
+            data.append(mediaHash.data(using: .utf8) ?? Data())
+        }
+        data.append(0xFF)
         data.append(Data(bytes: tokens, count: tokens.count * MemoryLayout<Int>.size))
 
         // Simple hash (not cryptographic - just for cache keying)

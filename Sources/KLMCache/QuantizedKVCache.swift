@@ -9,7 +9,7 @@ import MLX
 ///   quantized = round((value - min) / (max - min) * 255) - 128
 ///   scale = (max - min) / 255
 ///   zero_point = min
-public final class QuantizedKVCache: @unchecked Sendable {
+public final class QuantizedKVCache: KVCacheProtocol, @unchecked Sendable {
     private var _keys: MLXArray?       // int8: [B, numKVHeads, seqLen, headDim]
     private var _values: MLXArray?     // int8: [B, numKVHeads, seqLen, headDim]
     private var _keyScales: MLXArray?  // fp16: [B, numKVHeads, seqLen, 1]
@@ -67,6 +67,20 @@ public final class QuantizedKVCache: @unchecked Sendable {
         let fullK = dequantize(_keys!, scale: _keyScales!, zero: _keyZeros!)
         let fullV = dequantize(_values!, scale: _valScales!, zero: _valZeros!)
         return (fullK, fullV)
+    }
+
+    /// Return dequantized full K/V (fp16) for protocol compatibility.
+    ///
+    /// Used by Gemma4 KV-sharing: a shared layer reads its donor's accumulated
+    /// K/V directly. With int8 storage the donor is quantized, so we dequantize
+    /// here to hand back fp16 tensors at attention time.
+    public func snapshot() -> (keys: MLXArray, values: MLXArray)? {
+        guard let qK = _keys, let qV = _values,
+              let kS = _keyScales, let kZ = _keyZeros,
+              let vS = _valScales, let vZ = _valZeros else { return nil }
+        let k = dequantize(qK, scale: kS, zero: kZ)
+        let v = dequantize(qV, scale: vS, zero: vZ)
+        return (k, v)
     }
 
     /// Discard all cached state.
