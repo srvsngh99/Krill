@@ -2,6 +2,12 @@
 
 This plan replaces the earlier contract-only coverage request with an implementation-grade checklist. The target is to protect correctness-sensitive changes in prefix caching, speculative decoding, server protocol handling, and model pulling.
 
+> **Note (2026-05-11):** this document captures the original PR #4 coverage
+> contract. It is preserved as historical context; subsequent PRs added more
+> tests on top. The current verified suite size is `make test` → 128 tests,
+> 9 skipped, 0 failures. See "Coverage added since PR #4" at the bottom of
+> this file for the current rosters that the original plan does not enumerate.
+
 ## Standard
 
 Tests should exercise production code paths whenever practical. Pure contract tests are acceptable only as a supplement, not as the main coverage for changed behavior.
@@ -123,4 +129,46 @@ Expected outcome:
 - MLX/Metal tests either run or skip cleanly.
 - No network access is required.
 - Newly added source seams are minimal and justified by tests.
+
+---
+
+## Coverage added since PR #4
+
+Append-only roster of test files added by later PRs. Use this as the
+shortlist when scoping a new follow-up.
+
+### PR #5 (merge-blocking coverage for PR #4 fixes)
+
+- `Tests/KLMRegistryTests/PullerTests.swift`
+- `Tests/KLMServerTests/ServerTests.swift`
+- Expanded `Tests/KLMCoreTests/PrefixCacheTests.swift`,
+  `Tests/KLMCoreTests/KVCacheTests.swift`,
+  `Tests/KLMEngineTests/SpeculativeDecodingTests.swift`.
+
+### PR #9 (`feat/release-readiness-remediation`) and follow-ups
+
+- `Tests/KLMServerTests/MultimodalEndpointsTests.swift` — server multimodal
+  request/response shape coverage and `testTwoDifferentImagesProduceDifferentOutputs`.
+- `Tests/KLMEngineTests/QuantizedKVCacheUnitTests.swift` — int8 cache shape
+  and quantize/dequantize unit checks.
+- `Tests/KLMEngineTests/QuantizedKVCacheIntegrationTests.swift`
+  (env-gated) — int8 vs fp16 greedy parity through `InferenceEngine`.
+- `Tests/KLMEngineTests/MultimodalPrefixCacheTests.swift` — verifies the
+  prefix cache key includes media bytes (schema v2).
+
+### PR #11 (`perf: compose int8 KV cache with prefix cache`)
+
+- `Tests/KLMCoreTests/QuantizedPrefixCacheTests.swift` — 4 unit tests:
+  uint8 round-trip, dtype isolation in both directions, restore+truncate+update.
+- `Tests/KLMEngineTests/QuantizedPrefixCacheLiveTests.swift` (env-gated) —
+  `testInt8PrefixCacheReplayMatchesColdRun` asserts cold and warm runs through
+  `InferenceEngine` with `kvCacheDtype: "int8"` and a shared `PrefixCache`
+  produce identical greedy tokens.
+
+### PR #12 (`feat: release_candidate gate profile + kv_cache_dtype in reports`)
+
+- `tools/test_release_gate.py` — 7 Python unit tests covering strict vs
+  release_candidate profile dispatch, audio scope skipping, hard-metric
+  regression detection, missing-hard-metric → fail, and `kv_cache_dtype`
+  surfacing. Run with `python3 -m unittest tools.test_release_gate`.
 
