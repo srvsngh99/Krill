@@ -97,6 +97,79 @@ public final class QuantizedKVCache: KVCacheProtocol, @unchecked Sendable {
         _valScales = nil
         _valZeros = nil
     }
+
+    /// Return the raw quantized state for prefix-cache persistence.
+    ///
+    /// Unlike `snapshot()` (which dequantizes for attention compatibility),
+    /// this preserves the uint8 tensors with their fp16 scales/zeros so the
+    /// cache can be re-served without an extra dequant→requant round trip.
+    public func quantizedSnapshot() -> QuantizedKVSnapshot? {
+        guard let qK = _keys, let qV = _values,
+              let kS = _keyScales, let kZ = _keyZeros,
+              let vS = _valScales, let vZ = _valZeros else { return nil }
+        return QuantizedKVSnapshot(
+            keys: qK, values: qV,
+            keyScales: kS, keyZeros: kZ,
+            valueScales: vS, valueZeros: vZ
+        )
+    }
+
+    /// Restore previously quantized state directly into this cache.
+    ///
+    /// Used by the prefix-cache replay path; the caller is responsible for
+    /// truncating to `prompt.count - 1` and re-forwarding the last token, so
+    /// the dependency graph behaves the same as a fresh prefill.
+    public func restoreQuantized(_ snap: QuantizedKVSnapshot) {
+        _keys = snap.keys
+        _values = snap.values
+        _keyScales = snap.keyScales
+        _keyZeros = snap.keyZeros
+        _valScales = snap.valueScales
+        _valZeros = snap.valueZeros
+    }
+
+    /// Truncate cached state along the sequence axis.
+    ///
+    /// All six tensors share axis 2 as the sequence dimension, matching the
+    /// layout produced by `update`.
+    public func truncate(to sequenceLength: Int) {
+        guard let qK = _keys else { return }
+        let currentLen = qK.dim(2)
+        guard sequenceLength < currentLen, sequenceLength >= 0 else { return }
+        _keys      = qK[0..., 0..., 0 ..< sequenceLength, 0...]
+        _values    = _values?[0..., 0..., 0 ..< sequenceLength, 0...]
+        _keyScales = _keyScales?[0..., 0..., 0 ..< sequenceLength, 0...]
+        _keyZeros  = _keyZeros?[0..., 0..., 0 ..< sequenceLength, 0...]
+        _valScales = _valScales?[0..., 0..., 0 ..< sequenceLength, 0...]
+        _valZeros  = _valZeros?[0..., 0..., 0 ..< sequenceLength, 0...]
+    }
+}
+
+/// Per-layer snapshot of quantized KV state — six tensors that together
+/// describe the int8-encoded sequence and its dequantization parameters.
+public struct QuantizedKVSnapshot {
+    public let keys: MLXArray        // uint8 [B, H, S, D]
+    public let values: MLXArray      // uint8 [B, H, S, D]
+    public let keyScales: MLXArray   // fp16  [B, H, S, 1]
+    public let keyZeros: MLXArray    // fp16  [B, H, S, 1]
+    public let valueScales: MLXArray // fp16  [B, H, S, 1]
+    public let valueZeros: MLXArray  // fp16  [B, H, S, 1]
+
+    public init(
+        keys: MLXArray, values: MLXArray,
+        keyScales: MLXArray, keyZeros: MLXArray,
+        valueScales: MLXArray, valueZeros: MLXArray
+    ) {
+        self.keys = keys
+        self.values = values
+        self.keyScales = keyScales
+        self.keyZeros = keyZeros
+        self.valueScales = valueScales
+        self.valueZeros = valueZeros
+    }
+
+    /// Number of cached tokens (sequence axis).
+    public var sequenceLength: Int { keys.dim(2) }
 }
 
 // MARK: - Quantization Helpers

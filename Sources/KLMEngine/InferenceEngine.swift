@@ -256,10 +256,10 @@ public final class InferenceEngine: @unchecked Sendable {
         nonisolated(unsafe) let capturedPrefixCache = self.prefixCache
         let capturedSpecDecoder = self.specDecoder
         let capturedModelId = self.modelId
-        // int8 KV: disable prefix cache (snapshot/restore/truncate are fp16-specific)
-        // and speculative decoding (target/draft caches are typed `[KVCache]`).
-        // Non-Gemma 4 model loaders downcast caches to [KVCache] in their forward closures
-        // (see ModelLoader.swift); int8 KV is gated to Gemma 4 only for this release.
+        // int8 KV is gated to Gemma 4: other model loaders downcast caches to
+        // [KVCache] in their forward closures (see ModelLoader.swift), so a
+        // [QuantizedKVCache] would crash at first attention. Speculative
+        // decoding also assumes fp16 target/draft caches.
         let useInt8KV: Bool = {
             guard self.usesQuantizedKVCache else { return false }
             if loadedModel.family != "gemma4" {
@@ -272,7 +272,9 @@ public final class InferenceEngine: @unchecked Sendable {
         let shouldSpec = useSpeculative && specDecoder != nil && !useInt8KV
         let capturedImageData = imageData
 
-        let effectiveUsePrefixCache = usePrefixCache && !useInt8KV
+        // int8 KV + prefix cache coexist via the quantized snapshot path
+        // (PrefixCache.lookupQuantized / storeQuantized).
+        let effectiveUsePrefixCache = usePrefixCache
         // Bind the prefix-cache key to all non-text conditioning. Without this,
         // a prompt+image request can mis-hit a prior entry computed under a
         // different image (or no image at all) and serve stale KV state.
@@ -296,7 +298,7 @@ public final class InferenceEngine: @unchecked Sendable {
 
                 // Create KV caches. fp16 path uses concrete KVCache so the prefix-cache
                 // path (snapshot/restore/truncate) works; int8 uses QuantizedKVCache
-                // and skips prefix cache entirely (see effectiveUsePrefixCache above).
+                // and its parallel quantized snapshot/restore path.
                 let fp16Caches: [KVCache]? = useInt8KV ? nil : makeKVCaches(numLayers: numLayers)
                 let int8Caches: [QuantizedKVCache]? = useInt8KV ? makeQuantizedKVCaches(numLayers: numLayers) : nil
                 let caches: [KVCacheProtocol] = useInt8KV ? int8Caches! : fp16Caches!
@@ -307,18 +309,34 @@ public final class InferenceEngine: @unchecked Sendable {
                 // span length only, but attention keys include the restored prefix,
                 // causing shape mismatch or incorrect masking. Until cache-aware
                 // mask construction is implemented, we skip partial hits.
-                if effectiveUsePrefixCache, let fp16Caches {
-                    if let hit = capturedPrefixCache.lookup(
-                        tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash
-                    ), !hit.keys.isEmpty, hit.prefixLength == promptTokens.count {
-                        // Full exact hit — restore KV for all prompt tokens.
-                        for (i, cache) in fp16Caches.enumerated() {
-                            if i < hit.keys.count, let k = hit.keys[i].first,
-                               i < hit.values.count, let v = hit.values[i].first {
-                                cache.restore(keys: k, values: v)
+                if effectiveUsePrefixCache {
+                    if let fp16Caches {
+                        if let hit = capturedPrefixCache.lookup(
+                            tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash
+                        ), !hit.keys.isEmpty, hit.prefixLength == promptTokens.count {
+                            for (i, cache) in fp16Caches.enumerated() {
+                                if i < hit.keys.count, let k = hit.keys[i].first,
+                                   i < hit.values.count, let v = hit.values[i].first {
+                                    cache.restore(keys: k, values: v)
+                                }
                             }
+                            cacheHit = true
                         }
-                        cacheHit = true
+                    } else if let int8Caches {
+                        // Gemma 4 KV sharing leaves a suffix of caches empty
+                        // (shared layers reuse the donor's K/V via sharedCache),
+                        // so a hit may carry fewer snapshots than caches. Match
+                        // the fp16 contract: hit.layers cover caches[0..count].
+                        if let hit = capturedPrefixCache.lookupQuantized(
+                            tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash
+                        ), !hit.layers.isEmpty,
+                           hit.layers.count <= int8Caches.count,
+                           hit.prefixLength == promptTokens.count {
+                            for i in 0 ..< hit.layers.count {
+                                int8Caches[i].restoreQuantized(hit.layers[i])
+                            }
+                            cacheHit = true
+                        }
                     }
                 }
 
@@ -328,10 +346,12 @@ public final class InferenceEngine: @unchecked Sendable {
                 // to get logits without duplicating a KV entry.
                 // On a miss we forward the entire prompt normally.
                 let tokensToProcess: [Int]
-                if cacheHit, let fp16Caches {
+                if cacheHit {
                     let trimmedLength = max(0, promptTokens.count - 1)
-                    for cache in fp16Caches {
-                        cache.truncate(to: trimmedLength)
+                    if let fp16Caches {
+                        for cache in fp16Caches { cache.truncate(to: trimmedLength) }
+                    } else if let int8Caches {
+                        for cache in int8Caches { cache.truncate(to: trimmedLength) }
                     }
                     tokensToProcess = [promptTokens.last!]
                 } else {
@@ -366,24 +386,45 @@ public final class InferenceEngine: @unchecked Sendable {
                 // forwarded). On the next request with the same prefix, the
                 // restored KV will cover all prompt tokens, and the "full cache
                 // hit" path above trims the last token and re-forwards it.
-                if effectiveUsePrefixCache && !cacheHit && promptTokens.count >= 8,
-                   let fp16Caches {
-                    var snapshotKeys: [[MLXArray]] = []
-                    var snapshotValues: [[MLXArray]] = []
-                    for cache in fp16Caches {
-                        if let snap = cache.snapshot() {
-                            snapshotKeys.append([snap.keys])
-                            snapshotValues.append([snap.values])
+                if effectiveUsePrefixCache && !cacheHit && promptTokens.count >= 8 {
+                    if let fp16Caches {
+                        var snapshotKeys: [[MLXArray]] = []
+                        var snapshotValues: [[MLXArray]] = []
+                        for cache in fp16Caches {
+                            if let snap = cache.snapshot() {
+                                snapshotKeys.append([snap.keys])
+                                snapshotValues.append([snap.values])
+                            }
                         }
-                    }
-                    if !snapshotKeys.isEmpty {
-                        capturedPrefixCache.store(
-                            tokens: promptTokens,
-                            modelId: capturedModelId,
-                            keys: snapshotKeys,
-                            values: snapshotValues,
-                            mediaHash: mediaHash
-                        )
+                        if !snapshotKeys.isEmpty {
+                            capturedPrefixCache.store(
+                                tokens: promptTokens,
+                                modelId: capturedModelId,
+                                keys: snapshotKeys,
+                                values: snapshotValues,
+                                mediaHash: mediaHash
+                            )
+                        }
+                    } else if let int8Caches {
+                        // Mirror the fp16 path: append snapshots in cache order,
+                        // skipping layers that have no own state (KV-shared
+                        // suffix in Gemma 4). The first empty cache marks the
+                        // end of the prefix we persist — caches beyond that are
+                        // always empty for this checkpoint family.
+                        var snapshots: [QuantizedKVSnapshot] = []
+                        for cache in int8Caches {
+                            if let snap = cache.quantizedSnapshot() {
+                                snapshots.append(snap)
+                            }
+                        }
+                        if !snapshots.isEmpty {
+                            capturedPrefixCache.storeQuantized(
+                                tokens: promptTokens,
+                                modelId: capturedModelId,
+                                snapshots: snapshots,
+                                mediaHash: mediaHash
+                            )
+                        }
                     }
                 }
 

@@ -17,7 +17,9 @@ public final class PrefixCache: @unchecked Sendable {
     private let maxMemoryEntries: Int
     private let minPrefixLength: Int
 
-    /// In-memory LRU: key -> (kvState, accessTime)
+    /// In-memory LRU: key -> (kvState, accessTime).
+    /// fp16 and int8 entries share the LRU; their key strings are namespaced
+    /// by dtype so a lookup from one path cannot read the other's tensors.
     private var memoryCache: [String: MemoryCacheEntry] = [:]
     private var accessOrder: [String] = []
 
@@ -53,37 +55,54 @@ public final class PrefixCache: @unchecked Sendable {
         modelId: String,
         mediaHash: String? = nil
     ) -> PrefixCacheHit? {
-        // Try progressively shorter prefixes
+        return scan(tokens: tokens, modelId: modelId, mediaHash: mediaHash, dtype: .fp16) { entry, checkLen in
+            guard case let .fp16(keys, values) = entry.storage else { return nil }
+            return PrefixCacheHit(keys: keys, values: values, prefixLength: checkLen)
+        }
+    }
+
+    /// Look up a quantized (int8) prefix cache entry.
+    ///
+    /// Returns the per-layer `QuantizedKVSnapshot`s and the prefix length they
+    /// cover, or nil on miss. Entries written via `storeQuantized` are stored
+    /// in their uint8 form alongside fp16 scales/zeros, so a hit avoids the
+    /// dequant→requant round trip that would otherwise compound error.
+    public func lookupQuantized(
+        tokens: [Int],
+        modelId: String,
+        mediaHash: String? = nil
+    ) -> QuantizedPrefixCacheHit? {
+        return scan(tokens: tokens, modelId: modelId, mediaHash: mediaHash, dtype: .int8) { entry, checkLen in
+            guard case let .int8(snapshots) = entry.storage else { return nil }
+            return QuantizedPrefixCacheHit(layers: snapshots, prefixLength: checkLen)
+        }
+    }
+
+    private func scan<T>(
+        tokens: [Int],
+        modelId: String,
+        mediaHash: String?,
+        dtype: KVDtype,
+        build: (MemoryCacheEntry, Int) -> T?
+    ) -> T? {
         let maxLen = tokens.count
         guard maxLen >= minPrefixLength else { return nil }
 
-        // Step down by chunks to avoid O(n) hash computations
         let step = max(1, minPrefixLength / 2)
         var checkLen = maxLen
 
         while checkLen >= minPrefixLength {
             let prefix = Array(tokens[0 ..< checkLen])
-            let key = cacheKey(tokens: prefix, modelId: modelId, mediaHash: mediaHash)
+            let key = cacheKey(tokens: prefix, modelId: modelId, mediaHash: mediaHash, dtype: dtype)
 
-            // Check memory first
             if let entry = memoryCache[key] {
                 touchEntry(key)
-                return PrefixCacheHit(
-                    keys: entry.keys,
-                    values: entry.values,
-                    prefixLength: checkLen
-                )
+                if let hit = build(entry, checkLen) { return hit }
             }
 
-            // Check disk
-            if let entry = loadFromDisk(key: key) {
-                // Promote to memory
+            if let entry = loadFromDisk(key: key, dtype: dtype) {
                 storeInMemory(key: key, entry: entry)
-                return PrefixCacheHit(
-                    keys: entry.keys,
-                    values: entry.values,
-                    prefixLength: checkLen
-                )
+                if let hit = build(entry, checkLen) { return hit }
             }
 
             checkLen -= step
@@ -106,17 +125,43 @@ public final class PrefixCache: @unchecked Sendable {
     ) {
         guard tokens.count >= minPrefixLength else { return }
 
-        let key = cacheKey(tokens: tokens, modelId: modelId, mediaHash: mediaHash)
-        let entry = MemoryCacheEntry(keys: keys, values: values)
+        let key = cacheKey(tokens: tokens, modelId: modelId, mediaHash: mediaHash, dtype: .fp16)
+        let entry = MemoryCacheEntry(storage: .fp16(keys: keys, values: values))
 
         storeInMemory(key: key, entry: entry)
 
-        // Write to disk in background (write-behind)
         nonisolated(unsafe) let selfRef = self
         nonisolated(unsafe) let capturedEntry = entry
         nonisolated(unsafe) let capturedKey = key
         Task.detached {
-            selfRef.writeToDisk(key: capturedKey, entry: capturedEntry)
+            selfRef.writeToDisk(key: capturedKey, entry: capturedEntry, dtype: .fp16)
+        }
+    }
+
+    /// Store quantized per-layer snapshots for later replay.
+    ///
+    /// `snapshots` is indexed by transformer layer. Empty snapshots (nil
+    /// entries when a layer has no cached state) are not supported — the
+    /// caller should only invoke this after a full prefill that populates
+    /// every layer.
+    public func storeQuantized(
+        tokens: [Int],
+        modelId: String,
+        snapshots: [QuantizedKVSnapshot],
+        mediaHash: String? = nil
+    ) {
+        guard tokens.count >= minPrefixLength, !snapshots.isEmpty else { return }
+
+        let key = cacheKey(tokens: tokens, modelId: modelId, mediaHash: mediaHash, dtype: .int8)
+        let entry = MemoryCacheEntry(storage: .int8(snapshots: snapshots))
+
+        storeInMemory(key: key, entry: entry)
+
+        nonisolated(unsafe) let selfRef = self
+        nonisolated(unsafe) let capturedEntry = entry
+        nonisolated(unsafe) let capturedKey = key
+        Task.detached {
+            selfRef.writeToDisk(key: capturedKey, entry: capturedEntry, dtype: .int8)
         }
     }
 
@@ -152,32 +197,62 @@ public struct PrefixCacheHit {
     public let prefixLength: Int
 }
 
+/// A successful int8 prefix cache hit.
+///
+/// Carries the raw quantized state for each layer; callers feed each
+/// `QuantizedKVSnapshot` into a `QuantizedKVCache.restoreQuantized(_:)`.
+public struct QuantizedPrefixCacheHit {
+    public let layers: [QuantizedKVSnapshot]
+    public let prefixLength: Int
+}
+
 // MARK: - Internal
 
-private struct MemoryCacheEntry {
-    let keys: [[MLXArray]]
-    let values: [[MLXArray]]
+/// Internal storage form for a cached entry. fp16 and int8 are disjoint so
+/// a lookup from one path cannot read tensors written by the other.
+enum CachedStorage {
+    case fp16(keys: [[MLXArray]], values: [[MLXArray]])
+    case int8(snapshots: [QuantizedKVSnapshot])
+}
+
+struct MemoryCacheEntry {
+    let storage: CachedStorage
+}
+
+enum KVDtype: UInt8 {
+    case fp16 = 1
+    case int8 = 2
+
+    var fileSuffix: String {
+        switch self {
+        case .fp16: return "safetensors"
+        case .int8: return "q8.safetensors"
+        }
+    }
+
+    var keyTag: UInt8 { rawValue }
 }
 
 extension PrefixCache {
     /// Cache key schema version. Bump on backward-incompatible key changes
     /// so stale on-disk entries become unreachable instead of mis-served.
     /// v2: includes mediaHash to prevent multimodal cross-contamination.
-    private static let keySchemaVersion: UInt8 = 2
+    /// v3: includes dtype tag so int8 and fp16 entries cannot collide.
+    private static let keySchemaVersion: UInt8 = 3
 
-    private func cacheKey(tokens: [Int], modelId: String, mediaHash: String?) -> String {
-        // FNV-1a hash of: schema version || modelId || mediaHash || token bytes.
+    private func cacheKey(tokens: [Int], modelId: String, mediaHash: String?, dtype: KVDtype) -> String {
+        // FNV-1a hash of: schema version || dtype || modelId || mediaHash || token bytes.
         var data = Data()
         data.append(PrefixCache.keySchemaVersion)
+        data.append(dtype.keyTag)
         data.append(modelId.data(using: .utf8) ?? Data())
-        data.append(0xFF) // separator so modelId/mediaHash boundary is unambiguous
+        data.append(0xFF)
         if let mediaHash, !mediaHash.isEmpty {
             data.append(mediaHash.data(using: .utf8) ?? Data())
         }
         data.append(0xFF)
         data.append(Data(bytes: tokens, count: tokens.count * MemoryLayout<Int>.size))
 
-        // Simple hash (not cryptographic - just for cache keying)
         var hash: UInt64 = 14695981039346656037 // FNV-1a offset basis
         for byte in data {
             hash ^= UInt64(byte)
@@ -202,43 +277,68 @@ extension PrefixCache {
         touchEntry(key)
     }
 
-    private func loadFromDisk(key: String) -> MemoryCacheEntry? {
-        let fileURL = cacheDir.appendingPathComponent("\(key).safetensors")
+    private func loadFromDisk(key: String, dtype: KVDtype) -> MemoryCacheEntry? {
+        let fileURL = cacheDir.appendingPathComponent("\(key).\(dtype.fileSuffix)")
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
-
         guard let arrays = try? loadArrays(url: fileURL) else { return nil }
 
-        // Reconstruct per-layer keys/values from flat naming
-        // Convention: "layer_0_k", "layer_0_v", "layer_1_k", etc.
-        var layerKeys: [[MLXArray]] = []
-        var layerValues: [[MLXArray]] = []
+        switch dtype {
+        case .fp16:
+            // Convention: "layer_0_k", "layer_0_v", "layer_1_k", etc.
+            var layerKeys: [[MLXArray]] = []
+            var layerValues: [[MLXArray]] = []
+            var i = 0
+            while let k = arrays["layer_\(i)_k"], let v = arrays["layer_\(i)_v"] {
+                layerKeys.append([k])
+                layerValues.append([v])
+                i += 1
+            }
+            guard !layerKeys.isEmpty else { return nil }
+            return MemoryCacheEntry(storage: .fp16(keys: layerKeys, values: layerValues))
 
-        var layerIdx = 0
-        while true {
-            guard let k = arrays["layer_\(layerIdx)_k"],
-                  let v = arrays["layer_\(layerIdx)_v"] else { break }
-            layerKeys.append([k])
-            layerValues.append([v])
-            layerIdx += 1
+        case .int8:
+            // Convention per layer: "layer_{i}_qk", "_qv", "_ks", "_kz", "_vs", "_vz".
+            var snapshots: [QuantizedKVSnapshot] = []
+            var i = 0
+            while let qk = arrays["layer_\(i)_qk"],
+                  let qv = arrays["layer_\(i)_qv"],
+                  let ks = arrays["layer_\(i)_ks"],
+                  let kz = arrays["layer_\(i)_kz"],
+                  let vs = arrays["layer_\(i)_vs"],
+                  let vz = arrays["layer_\(i)_vz"]
+            {
+                snapshots.append(QuantizedKVSnapshot(
+                    keys: qk, values: qv,
+                    keyScales: ks, keyZeros: kz,
+                    valueScales: vs, valueZeros: vz
+                ))
+                i += 1
+            }
+            guard !snapshots.isEmpty else { return nil }
+            return MemoryCacheEntry(storage: .int8(snapshots: snapshots))
         }
-
-        guard !layerKeys.isEmpty else { return nil }
-        return MemoryCacheEntry(keys: layerKeys, values: layerValues)
     }
 
-    private func writeToDisk(key: String, entry: MemoryCacheEntry) {
-        let fileURL = cacheDir.appendingPathComponent("\(key).safetensors")
-
-        // Flatten to named arrays
+    private func writeToDisk(key: String, entry: MemoryCacheEntry, dtype: KVDtype) {
+        let fileURL = cacheDir.appendingPathComponent("\(key).\(dtype.fileSuffix)")
         var arrays: [String: MLXArray] = [:]
-        for (i, layerK) in entry.keys.enumerated() {
-            for k in layerK {
-                arrays["layer_\(i)_k"] = k
+
+        switch entry.storage {
+        case let .fp16(keys, values):
+            for (i, layerK) in keys.enumerated() {
+                for k in layerK { arrays["layer_\(i)_k"] = k }
             }
-        }
-        for (i, layerV) in entry.values.enumerated() {
-            for v in layerV {
-                arrays["layer_\(i)_v"] = v
+            for (i, layerV) in values.enumerated() {
+                for v in layerV { arrays["layer_\(i)_v"] = v }
+            }
+        case let .int8(snapshots):
+            for (i, snap) in snapshots.enumerated() {
+                arrays["layer_\(i)_qk"] = snap.keys
+                arrays["layer_\(i)_qv"] = snap.values
+                arrays["layer_\(i)_ks"] = snap.keyScales
+                arrays["layer_\(i)_kz"] = snap.keyZeros
+                arrays["layer_\(i)_vs"] = snap.valueScales
+                arrays["layer_\(i)_vz"] = snap.valueZeros
             }
         }
 
