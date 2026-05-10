@@ -4,14 +4,19 @@
 
 KrillLM is a Mac-native LLM inference engine for Apple Silicon built on MLX. It ships as a single CLI binary (`krillm`) with an HTTP server, supporting 7 model families with prefix caching and speculative decoding.
 
+### Release Status
+
+This build is a release-readiness baseline, not a production release. Server multimodal is out of scope for this release. See the [README support matrix](../README.md#support-matrix) and [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for the authoritative status.
+
 ### Gemma 4 Multimodal Support Matrix
 
-| Path | Text | Image only | Audio only | Image+Audio |
-|------|------|------------|------------|-------------|
-| CLI (`krillm run`) | Native Swift | Native Swift (SigLIP2) | mlx-vlm bridge | mlx-vlm bridge (both) |
-| Server API | Native Swift | Not supported | Not supported | Not supported |
+| Path | Text | Image | Audio |
+|------|------|-------|-------|
+| CLI native | Supported | Supported (SigLIP2) | — |
+| CLI bridge | — | — | Supported (mlx-vlm) |
+| Server | Supported | Supported (Gemma 4 only, native) | Supported (Gemma 4 only, mlx-vlm bridge) |
 
-When `--audio` is present, RunCommand routes the entire request (including any `--image`) through the mlx-vlm Python bridge because native audio is not implemented. Image-only requests use the native Swift vision path. Server does not accept media payloads.
+Native Swift covers Gemma 4 text and image (text model + SigLIP2 vision encoder). When `--audio` is present, RunCommand routes the entire request (including any `--image`) through the mlx-vlm Python bridge because native audio is not implemented. Image-only requests use the native Swift vision path. The HTTP server mirrors this routing: image-only requests run through the native engine; audio (with or without an image) goes through the bridge.
 
 ## Module Dependency Graph
 

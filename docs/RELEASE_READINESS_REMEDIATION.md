@@ -90,6 +90,51 @@ Multimodal gate summary:
 | Image prefill ratio | 0.0237x |
 | Audio prefill ratio | 0.0592x |
 
+## Post-Remediation Measurements (2026-05-10)
+
+After this PR (server multimodal implemented, multimodal benchmark routed
+through `native_server` mode against a long-running KrillLM daemon, decode
+loop pipelined to overlap GPU forward with CPU tokenizer/yield):
+
+Text/server benchmark medians (`postpr-text-server.json`):
+
+| Metric | KrillLM | Ollama | Ratio | vs baseline |
+| --- | ---: | ---: | ---: | ---: |
+| Wall time | 0.312 s | 0.564 s | 0.5805x | 0.6289x |
+| Decode throughput | 109 tok/s | 88 tok/s | 1.2414x | 1.1246x |
+| Prefill throughput | 1626 tok/s | 1877 tok/s | 0.8385x | 0.7170x |
+
+Multimodal `--krillm-image-mode native_server` gate
+(`postpr-mm-server-gate.json`):
+
+| Metric | Ratio | Threshold | Status | vs baseline |
+| --- | ---: | ---: | --- | ---: |
+| text_decode_ratio | 1.2260x | >=1.5 | FAIL | 1.4413x |
+| text_prefill_ratio | 1.6008x | >=1.5 | OK | 0.0237x |
+| text_ttft_ratio | 0.1406x | <=0.67 | OK | n/a |
+| text_wall_ratio | 0.6063x | <=0.67 | OK | 0.6043x |
+| image_prefill_ratio | 1.7539x | >=1.5 | OK | 0.0237x |
+| image_wall_ratio | 0.7735x | <=0.67 | FAIL | 2.2921x |
+| audio_wall_ratio | 12.0280x | <=0.67 | FAIL | 1.2525x |
+
+Big wins: image prefill flipped from 50x slower to 1.75x faster than Ollama
+because the benchmark now exercises the native Swift image path. Text prefill
+flipped from below Ollama to above the 1.5x threshold. Text TTFT and wall
+ratio pass.
+
+Remaining gaps:
+
+1. text_decode at 1.23x is 18% short of the 1.5x target. Requires either a
+   vocab-compatible Gemma 4 draft model so speculative decoding can be
+   safely enabled, or kernel-level tuning. Out of scope for this PR.
+2. image_wall at 0.77x is 15% short of the 0.67x target.
+3. audio_wall is 12x slower because audio still routes through the Python
+   `mlx-vlm` bridge (now via subprocess from the server, paying Python
+   startup cost). Will not be competitive until native audio is implemented.
+
+The release gate still fails. This PR is a measurable step forward, not a
+release tag.
+
 ## Release Blockers
 
 ### 1. Release Gates Fail

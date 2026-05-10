@@ -8,9 +8,12 @@ Gemma 4 E2B (2B parameters) is a multimodal model with:
 - 35 transformer layers with mixed attention types
 - Per-Layer Embedding (PLE) gating
 - KV sharing between layers 15-34
-- Native vision encoder (SigLIP2) — CLI image works natively
-- Audio: requires mlx-vlm Python bridge (native conformer rewrite pending)
-- Server API: text only (image/audio not supported via HTTP)
+- Text: native Swift on both CLI and server
+- Image: native Swift via SigLIP2 vision encoder (supported on both CLI and server)
+- Audio: routed through the `mlx-vlm` Python bridge (CLI and server both supported; native conformer rewrite pending). When audio is combined with an image, the entire request goes through `mlx-vlm`.
+- Server API: text on every endpoint; image (native) and audio (bridge) on `/api/generate`, `/api/chat`, and `/v1/chat/completions`. `/v1/completions` remains text-only to match upstream OpenAI semantics.
+
+This is a release-readiness baseline, not a production release. See [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for status.
 
 ## Files
 
