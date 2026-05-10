@@ -116,6 +116,7 @@ let package = Package(
             name: "KLMEngineTests",
             dependencies: [
                 "KLMEngine",
+                "KLMCore",
                 "KLMCache",
                 "KLMSampler",
                 "KLMRuntime",

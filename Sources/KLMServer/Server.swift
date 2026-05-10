@@ -33,9 +33,10 @@ public final class KLMServer: Sendable {
 
     internal static func _makeHTTPHandlerForTesting(
         engine: InferenceEngine,
-        registry: Registry
+        registry: Registry,
+        maxBodySizeOverride: Int? = nil
     ) -> any ChannelHandler & Sendable {
-        HTTPHandler(engine: engine, registry: registry)
+        HTTPHandler(engine: engine, registry: registry, maxBodySizeOverride: maxBodySizeOverride)
     }
 
     /// Start the HTTP server (blocks until shutdown).
@@ -79,14 +80,22 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let logger = Logger(label: "krillm.http")
     private let startedAt = Date()
 
-    private let maxBodySize = ServerLimits.maxBodySize
+    private let maxBodySize: Int
 
     private var requestHead: HTTPRequestHead?
     private var body: ByteBuffer = ByteBuffer()
 
-    init(engine: InferenceEngine, registry: Registry) {
+    init(engine: InferenceEngine, registry: Registry, maxBodySizeOverride: Int? = nil) {
         self.engine = engine
         self.registry = registry
+        self.maxBodySize = maxBodySizeOverride ?? ServerLimits.maxBodySize
+    }
+
+    /// Best-effort load of file bytes for a path. Returns nil if the path is
+    /// nil or the read fails.
+    static func loadDataIfPath(_ path: String?) -> Data? {
+        guard let path else { return nil }
+        return try? Data(contentsOf: URL(fileURLWithPath: path))
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -204,6 +213,18 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
+        // Multimodal shape validation runs before model gate so it is
+        // observable even when no model is loaded.
+        do { try validateMediaShape(request.media) } catch let e as MediaDecodeError {
+            sendJSON(context: context,
+                     status: HTTPResponseStatus(statusCode: e.httpStatus),
+                     body: ["error": e.message])
+            return
+        } catch {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid media payload"])
+            return
+        }
+
         guard requireModel(context: context) else { return }
 
         guard !request.messages.isEmpty else {
@@ -211,21 +232,337 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
+        // Multimodal: validate against loaded model and decode payloads.
+        let decodedMedia: DecodedMedia?
+        if request.media.isEmpty {
+            decodedMedia = nil
+        } else {
+            do {
+                decodedMedia = try decodeMediaForRequest(request.media)
+            } catch let error as MediaDecodeError {
+                sendJSON(
+                    context: context,
+                    status: HTTPResponseStatus(statusCode: error.httpStatus),
+                    body: ["error": error.message]
+                )
+                return
+            } catch {
+                sendJSON(context: context, status: .internalServerError,
+                         body: ["error": "Failed to decode media payload"])
+                return
+            }
+        }
+
+        if let media = decodedMedia, media.audioPath != nil {
+            // Audio (with or without image) -> Python bridge, non-streaming bridge response.
+            handleBridgeChat(
+                context: context,
+                messages: request.messages,
+                media: media,
+                maxTokens: request.maxTokens,
+                bridgeStyle: .openAI,
+                requestStream: request.stream
+            )
+            return
+        }
+
         if request.stream {
             handleStreamingCompletion(
                 context: context, messages: request.messages,
-                params: request.sampling.samplingParams, maxTokens: request.maxTokens)
+                params: request.sampling.samplingParams, maxTokens: request.maxTokens,
+                media: decodedMedia)
         } else {
             handleNonStreamingCompletion(
                 context: context, messages: request.messages,
-                params: request.sampling.samplingParams, maxTokens: request.maxTokens)
+                params: request.sampling.samplingParams, maxTokens: request.maxTokens,
+                media: decodedMedia)
+        }
+    }
+
+    // MARK: - Media decoding shared helper
+
+    /// Pre-flight checks that don't require a loaded model.
+    private func validateMediaShape(_ payload: ServerMediaPayload) throws {
+        if payload.images.count > 1 {
+            throw MediaDecodeError.tooManyImages
+        }
+        try ServerMultimodal.validatePayloadSizes(payload)
+    }
+
+    /// Validate a parsed media payload against the loaded model and decode it
+    /// to temp files. Caller is responsible for ``DecodedMedia.cleanup()``.
+    private func decodeMediaForRequest(_ payload: ServerMediaPayload) throws -> DecodedMedia {
+        try validateMediaShape(payload)
+        // Capability check.
+        if !payload.images.isEmpty && !engine.supportsNativeImage {
+            throw MediaDecodeError.mediaNotSupported(
+                reason: "Loaded model does not support image input. Image input requires a Gemma 4 model."
+            )
+        }
+        if payload.audio != nil && !engine.supportsAudio {
+            throw MediaDecodeError.mediaNotSupported(
+                reason: "Loaded model does not support audio input. Audio input requires a Gemma 4 model."
+            )
+        }
+
+        var imagePath: String? = nil
+        var audioPath: String? = nil
+
+        if let img = payload.images.first {
+            imagePath = try ServerMultimodal.decodeAndWrite(
+                base64: img, field: "images", sniffImage: true
+            )
+        }
+        if let aud = payload.audio {
+            let ext = (payload.audioFormat?.lowercased()).flatMap {
+                ["wav", "mp3", "flac", "ogg", "m4a"].contains($0) ? $0 : nil
+            } ?? "wav"
+            audioPath = try ServerMultimodal.decodeAndWrite(
+                base64: aud, field: "audio", preferredExtension: ext
+            )
+        }
+
+        return DecodedMedia(imagePath: imagePath, audioPath: audioPath)
+    }
+
+    /// Distill a chat history into a single prompt + system pair for the
+    /// Python bridge, which doesn't take chat structure today.
+    private func bridgePrompt(from messages: [[String: String]]) -> (prompt: String, system: String?) {
+        var system: String? = nil
+        var userTurns: [String] = []
+        for m in messages {
+            let role = m["role"] ?? "user"
+            let content = m["content"] ?? ""
+            if role == "system" {
+                system = (system.map { $0 + "\n" } ?? "") + content
+            } else if role == "user" {
+                userTurns.append(content)
+            }
+        }
+        return (userTurns.joined(separator: "\n"), system)
+    }
+
+    /// Reply style for the bridge (audio) path.
+    private enum BridgeStyle {
+        case openAI
+        case ollamaChat
+        case ollamaGenerate
+    }
+
+    /// Run a multimodal request through the Python bridge (audio path).
+    private func handleBridgeChat(
+        context: ChannelHandlerContext,
+        messages: [[String: String]],
+        media: DecodedMedia,
+        maxTokens: Int,
+        bridgeStyle: BridgeStyle,
+        requestStream: Bool,
+        promptOverride: String? = nil,
+        systemOverride: String? = nil
+    ) {
+        guard let modelDir = engine.modelDirectoryPath else {
+            sendJSON(context: context, status: .serviceUnavailable,
+                     body: ["error": "No model loaded."])
+            media.cleanup()
+            return
+        }
+        let availability = PythonFallback.checkAvailability()
+        guard availability.isAvailable else {
+            sendJSON(context: context, status: .serviceUnavailable, body: [
+                "error": "Audio input requires the mlx-vlm Python bridge: \(availability.detail). Install via `make setup-mlx-vlm`."
+            ])
+            media.cleanup()
+            return
+        }
+
+        let (composedPrompt, composedSystem) = bridgePrompt(from: messages)
+        let prompt = promptOverride ?? composedPrompt
+        let system = systemOverride ?? composedSystem
+        let modelName = engine.modelName ?? "unknown"
+
+        nonisolated(unsafe) let ctx = context
+        let eventLoop = context.eventLoop
+        let imagePath = media.imagePath
+        let audioPath = media.audioPath
+        let style = bridgeStyle
+
+        // Audio bridge does not stream; if the client asked for streaming we
+        // emit a single payload chunk + final done chunk for compatibility.
+        if requestStream {
+            switch style {
+            case .ollamaChat, .ollamaGenerate:
+                context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
+            case .openAI:
+                context.write(wrapOutboundOut(.head(ServerResponseHeads.openAIStreaming())), promise: nil)
+            }
+        }
+
+        let requestStart = CFAbsoluteTimeGetCurrent()
+
+        Task {
+            defer { media.cleanup() }
+            do {
+                let fallback = PythonFallback(modelPath: modelDir)
+                let composed: String
+                if let sys = system, !sys.isEmpty {
+                    composed = sys + "\n\n" + prompt
+                } else {
+                    composed = prompt
+                }
+                let output = try await fallback.generate(
+                    prompt: composed,
+                    maxTokens: maxTokens,
+                    imagePath: imagePath,
+                    audioPath: audioPath
+                )
+                let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
+                switch style {
+                case .openAI:
+                    let chatId = "chatcmpl-\(UUID().uuidString.prefix(8))"
+                    if requestStream {
+                        let contentChunk = sseChunk(id: chatId, content: output, finishReason: nil)
+                        var buf1 = ctx.channel.allocator.buffer(capacity: contentChunk.utf8.count)
+                        buf1.writeString(contentChunk)
+                        self.writeOnLoop(ctx, .body(.byteBuffer(buf1)), flush: true)
+                        let stopChunk = sseChunk(id: chatId, content: nil, finishReason: "stop")
+                        var buf2 = ctx.channel.allocator.buffer(capacity: stopChunk.utf8.count)
+                        buf2.writeString(stopChunk)
+                        self.writeOnLoop(ctx, .body(.byteBuffer(buf2)), flush: true)
+                        let done = "data: [DONE]\n\n"
+                        var buf3 = ctx.channel.allocator.buffer(capacity: done.utf8.count)
+                        buf3.writeString(done)
+                        self.writeOnLoop(ctx, .body(.byteBuffer(buf3)), flush: true)
+                        self.writeOnLoop(ctx, .end(nil), flush: true)
+                    } else {
+                        let response: [String: Any] = [
+                            "id": chatId,
+                            "object": "chat.completion",
+                            "created": Int(Date().timeIntervalSince1970),
+                            "choices": [[
+                                "index": 0,
+                                "message": ["role": "assistant", "content": output],
+                                "finish_reason": "stop"
+                            ]],
+                            "usage": [
+                                "prompt_tokens": 0,
+                                "completion_tokens": 0,
+                                "total_tokens": 0
+                            ],
+                            "krillm_path": "mlx-vlm-bridge"
+                        ]
+                        self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
+                    }
+                case .ollamaChat:
+                    if requestStream {
+                        // Single content chunk
+                        let body: [String: Any] = [
+                            "model": modelName,
+                            "message": ["role": "assistant", "content": output],
+                            "done": false
+                        ]
+                        let data1 = try? JSONSerialization.data(withJSONObject: body)
+                        if let data1 {
+                            var buf = ctx.channel.allocator.buffer(capacity: data1.count + 1)
+                            buf.writeBytes(data1)
+                            buf.writeString("\n")
+                            self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
+                        }
+                        let final: [String: Any] = [
+                            "model": modelName,
+                            "message": ["role": "assistant", "content": ""],
+                            "done": true,
+                            "total_duration": totalNs,
+                            "prompt_eval_count": 0,
+                            "prompt_eval_duration": 0,
+                            "eval_count": 0,
+                            "eval_duration": 0,
+                            "krillm_path": "mlx-vlm-bridge"
+                        ]
+                        let data2 = try? JSONSerialization.data(withJSONObject: final)
+                        if let data2 {
+                            var buf = ctx.channel.allocator.buffer(capacity: data2.count + 1)
+                            buf.writeBytes(data2)
+                            buf.writeString("\n")
+                            self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
+                        }
+                        self.writeOnLoop(ctx, .end(nil), flush: true)
+                    } else {
+                        let response: [String: Any] = [
+                            "model": modelName,
+                            "message": ["role": "assistant", "content": output],
+                            "done": true,
+                            "total_duration": totalNs,
+                            "prompt_eval_count": 0,
+                            "prompt_eval_duration": 0,
+                            "eval_count": 0,
+                            "eval_duration": 0,
+                            "krillm_path": "mlx-vlm-bridge"
+                        ]
+                        self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
+                    }
+                case .ollamaGenerate:
+                    if requestStream {
+                        let body: [String: Any] = [
+                            "model": modelName,
+                            "response": output,
+                            "done": false
+                        ]
+                        let data1 = try? JSONSerialization.data(withJSONObject: body)
+                        if let data1 {
+                            var buf = ctx.channel.allocator.buffer(capacity: data1.count + 1)
+                            buf.writeBytes(data1)
+                            buf.writeString("\n")
+                            self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
+                        }
+                        let final: [String: Any] = [
+                            "model": modelName,
+                            "response": "",
+                            "done": true,
+                            "total_duration": totalNs,
+                            "prompt_eval_count": 0,
+                            "prompt_eval_duration": 0,
+                            "eval_count": 0,
+                            "eval_duration": 0,
+                            "krillm_path": "mlx-vlm-bridge"
+                        ]
+                        let data2 = try? JSONSerialization.data(withJSONObject: final)
+                        if let data2 {
+                            var buf = ctx.channel.allocator.buffer(capacity: data2.count + 1)
+                            buf.writeBytes(data2)
+                            buf.writeString("\n")
+                            self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
+                        }
+                        self.writeOnLoop(ctx, .end(nil), flush: true)
+                    } else {
+                        let response: [String: Any] = [
+                            "model": modelName,
+                            "response": output,
+                            "done": true,
+                            "total_duration": totalNs,
+                            "prompt_eval_count": 0,
+                            "prompt_eval_duration": 0,
+                            "eval_count": 0,
+                            "eval_duration": 0,
+                            "krillm_path": "mlx-vlm-bridge"
+                        ]
+                        self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
+                    }
+                }
+            } catch {
+                let msg = String(describing: error).prefix(500)
+                eventLoop.execute {
+                    self.sendJSON(context: ctx, status: .internalServerError,
+                                  body: ["error": "mlx-vlm bridge failed: \(msg)"])
+                }
+            }
         }
     }
 
     private func handleStreamingCompletion(
         context: ChannelHandlerContext,
         messages: [[String: String]],
-        params: SamplingParams, maxTokens: Int
+        params: SamplingParams, maxTokens: Int,
+        media: DecodedMedia? = nil
     ) {
         // Send SSE headers
         var headers = HTTPHeaders()
@@ -237,11 +574,15 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         nonisolated(unsafe) let ctx = context
         let eng = engine
+        let imageData = Self.loadDataIfPath(media?.imagePath)
+        let mediaCopy = media
 
         Task {
+            defer { mediaCopy?.cleanup() }
             let (tokenStream, _) = eng.generate(
                 messages: messages,
-                params: params, maxTokens: maxTokens)
+                params: params, maxTokens: maxTokens,
+                imageData: imageData)
 
             let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
 
@@ -273,16 +614,21 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private func handleNonStreamingCompletion(
         context: ChannelHandlerContext,
         messages: [[String: String]],
-        params: SamplingParams, maxTokens: Int
+        params: SamplingParams, maxTokens: Int,
+        media: DecodedMedia? = nil
     ) {
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let eng = engine
+        let imageData = Self.loadDataIfPath(media?.imagePath)
+        let mediaCopy = media
 
         Task {
+            defer { mediaCopy?.cleanup() }
             let (tokenStream, getStats) = eng.generate(
                 messages: messages,
-                params: params, maxTokens: maxTokens)
+                params: params, maxTokens: maxTokens,
+                imageData: imageData)
 
             var fullContent = ""
             for await event in tokenStream {
@@ -462,6 +808,16 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
+        do { try validateMediaShape(request.media) } catch let e as MediaDecodeError {
+            sendJSON(context: context,
+                     status: HTTPResponseStatus(statusCode: e.httpStatus),
+                     body: ["error": e.message])
+            return
+        } catch {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid media payload"])
+            return
+        }
+
         guard requireModel(context: context) else { return }
 
         guard !request.messages.isEmpty else {
@@ -469,10 +825,45 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
+        // Multimodal: validate against loaded model and decode payloads.
+        let decodedMedia: DecodedMedia?
+        if request.media.isEmpty {
+            decodedMedia = nil
+        } else {
+            do {
+                decodedMedia = try decodeMediaForRequest(request.media)
+            } catch let error as MediaDecodeError {
+                sendJSON(
+                    context: context,
+                    status: HTTPResponseStatus(statusCode: error.httpStatus),
+                    body: ["error": error.message]
+                )
+                return
+            } catch {
+                sendJSON(context: context, status: .internalServerError,
+                         body: ["error": "Failed to decode media payload"])
+                return
+            }
+        }
+
+        if let media = decodedMedia, media.audioPath != nil {
+            handleBridgeChat(
+                context: context,
+                messages: request.messages,
+                media: media,
+                maxTokens: request.maxTokens,
+                bridgeStyle: .ollamaChat,
+                requestStream: request.stream
+            )
+            return
+        }
+
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let eng = engine
         let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
+        let imageData = Self.loadDataIfPath(decodedMedia?.imagePath)
+        let mediaCopy = decodedMedia
 
         let requestStart = CFAbsoluteTimeGetCurrent()
 
@@ -481,10 +872,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         Task {
+            defer { mediaCopy?.cleanup() }
             let (tokenStream, getStats) = eng.generate(
                 messages: request.messages,
                 params: request.sampling.samplingParams,
-                maxTokens: request.maxTokens)
+                maxTokens: request.maxTokens,
+                imageData: imageData)
 
             if request.stream {
                 var firstTokenTime: Double?
@@ -587,13 +980,65 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
+        do { try validateMediaShape(request.media) } catch let e as MediaDecodeError {
+            sendJSON(context: context,
+                     status: HTTPResponseStatus(statusCode: e.httpStatus),
+                     body: ["error": e.message])
+            return
+        } catch {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid media payload"])
+            return
+        }
+
         guard requireModel(context: context) else { return }
 
         let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
 
+        // Multimodal: validate and decode media.
+        let decodedMedia: DecodedMedia?
+        if request.media.isEmpty {
+            decodedMedia = nil
+        } else {
+            do {
+                decodedMedia = try decodeMediaForRequest(request.media)
+            } catch let error as MediaDecodeError {
+                sendJSON(
+                    context: context,
+                    status: HTTPResponseStatus(statusCode: error.httpStatus),
+                    body: ["error": error.message]
+                )
+                return
+            } catch {
+                sendJSON(context: context, status: .internalServerError,
+                         body: ["error": "Failed to decode media payload"])
+                return
+            }
+        }
+
+        if let media = decodedMedia, media.audioPath != nil {
+            // Audio path: bridge through Python (entire request, even with image).
+            // Synthesize a single-message conversation for the bridge.
+            let messages: [[String: String]] = [
+                ["role": "user", "content": request.prompt]
+            ]
+            handleBridgeChat(
+                context: context,
+                messages: messages,
+                media: media,
+                maxTokens: request.maxTokens,
+                bridgeStyle: .ollamaGenerate,
+                requestStream: request.stream,
+                promptOverride: request.prompt,
+                systemOverride: request.system
+            )
+            return
+        }
+
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let eng = engine
+        let imageData = Self.loadDataIfPath(decodedMedia?.imagePath)
+        let mediaCopy = decodedMedia
 
         if request.stream {
             context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
@@ -602,11 +1047,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let requestStart = CFAbsoluteTimeGetCurrent()
 
         Task {
+            defer { mediaCopy?.cleanup() }
             let (tokenStream, getStats) = eng.generate(
                 prompt: request.prompt,
                 systemPrompt: request.system,
                 params: request.sampling.samplingParams,
-                maxTokens: request.maxTokens)
+                maxTokens: request.maxTokens,
+                imageData: imageData)
 
             if request.stream {
                 var firstTokenTime: Double?

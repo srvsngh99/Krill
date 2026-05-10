@@ -36,16 +36,46 @@ public final class InferenceEngine: @unchecked Sendable {
     /// The loaded model's directory name (useful for display/status).
     public var modelName: String? { isLoaded ? modelDirectory.lastPathComponent : nil }
 
+    /// Filesystem path to the loaded model directory (for multimodal Python bridge).
+    /// Returns nil if no model is currently loaded.
+    public var modelDirectoryPath: String? { isLoaded ? modelDirectory.path : nil }
+
+    /// Whether the loaded model can natively handle image input via the engine.
+    /// Requires both family == "gemma4" AND a non-nil multimodal forward (i.e.
+    /// the checkpoint actually has `vision_config`); a text-only Gemma 4
+    /// checkpoint cannot inject vision embeddings and must reject image input.
+    public var supportsNativeImage: Bool {
+        loadedModel?.family == "gemma4" && loadedModel?.multimodalForward != nil
+    }
+
+    /// Whether the loaded model can handle audio input (currently only via
+    /// Python bridge). Requires the same multimodal checkpoint as image input.
+    public var supportsAudio: Bool {
+        loadedModel?.family == "gemma4" && loadedModel?.multimodalForward != nil
+    }
+
     /// Model identifier for cache keying.
     private var modelId: String { modelDirectory.lastPathComponent }
 
     /// Timestamp when the model was loaded (nil if not loaded).
     public private(set) var loadedAt: Date?
 
-    public init(modelDirectory: URL, prefixCache: PrefixCache? = nil) {
+    /// KV cache dtype: "fp16" (default) or "int8" (quantized). Read from arg or
+    /// `KRILL_KV_CACHE_DTYPE` env var.
+    private let kvCacheDtype: String
+
+    public init(modelDirectory: URL, prefixCache: PrefixCache? = nil, kvCacheDtype: String? = nil) {
         self.modelDirectory = modelDirectory
         self.prefixCache = prefixCache ?? PrefixCache()
+        if let dtype = kvCacheDtype {
+            self.kvCacheDtype = dtype
+        } else {
+            self.kvCacheDtype = ProcessInfo.processInfo.environment["KRILL_KV_CACHE_DTYPE"] ?? "fp16"
+        }
     }
+
+    /// Whether this engine is configured to use int8 quantized KV cache.
+    public var usesQuantizedKVCache: Bool { kvCacheDtype == "int8" }
 
     /// Load the model and tokenizer from disk.
     /// Auto-detects model family from config.json.
@@ -98,6 +128,33 @@ public final class InferenceEngine: @unchecked Sendable {
         specDecoder != nil
     }
 
+    /// Prepend `<|image|>` and/or `<|audio|>` placeholder runs to the first
+    /// user message's content. The vision encoder produces N soft tokens, so
+    /// we insert N copies of `<|image|>` for `injectEmbeddings` to fill.
+    /// Returns messages unchanged when no media is provided.
+    func injectMediaPlaceholders(
+        into messages: [[String: String]],
+        imageData: Data?,
+        audioData: Data?
+    ) -> [[String: String]] {
+        guard imageData != nil || audioData != nil else { return messages }
+        var prefix = ""
+        if let img = imageData {
+            prefix += String(repeating: "<|image|>", count: computeImageTokenCount(imageData: img))
+        }
+        if audioData != nil {
+            prefix += "<|audio|>"
+        }
+        var result = messages
+        if let firstUserIndex = result.firstIndex(where: { $0["role"] == "user" }) {
+            let existing = result[firstUserIndex]["content"] ?? ""
+            result[firstUserIndex]["content"] = prefix + existing
+        } else {
+            result.append(["role": "user", "content": prefix])
+        }
+        return result
+    }
+
     /// Compute the number of soft tokens the vision encoder will produce for an image.
     /// This depends on the preprocessed image size.
     func computeImageTokenCount(imageData: Data) -> Int {
@@ -127,17 +184,9 @@ public final class InferenceEngine: @unchecked Sendable {
         if let sys = systemPrompt {
             messages.append(["role": "system", "content": sys])
         }
-        // For multimodal, prepend media tokens to the prompt.
-        // The vision encoder produces N soft tokens, so we insert N copies of <|image|>
-        // so that injectEmbeddings has exactly N placeholder positions to fill.
-        var userContent = ""
-        if let imgData = imageData {
-            let tokenCount = computeImageTokenCount(imageData: imgData)
-            userContent += String(repeating: "<|image|>", count: tokenCount)
-        }
-        if audioData != nil { userContent += "<|audio|>" }
-        userContent += prompt
-        messages.append(["role": "user", "content": userContent])
+        messages.append(["role": "user", "content": prompt])
+        // Placeholder run is injected by generate(messages:) so the chat path
+        // and the prompt path agree on tokenization.
         return generate(messages: messages, params: params, maxTokens: maxTokens,
                         useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
                         imageData: imageData, audioData: audioData)
@@ -166,13 +215,22 @@ public final class InferenceEngine: @unchecked Sendable {
             return (emptyStream, { nil })
         }
 
+        // Inject media placeholders into the first user message before
+        // tokenization so the chat path matches the prompt path. Gemma 4's
+        // multimodal forward replaces embeddings at placeholder token positions
+        // (image_token_id=258880, audio_token_id=258881); without these tokens
+        // the encoder output has nowhere to land and image/audio requests
+        // become silently text-only.
+        let preparedMessages = injectMediaPlaceholders(
+            into: messages, imageData: imageData, audioData: audioData)
+
         // Use direct token ID path for Gemma4 to avoid decode→re-encode
         // round-trip that loses special tokens (105, 106, 107).
         let promptTokens: [Int]
         if loadedModel.family == "gemma4" {
-            promptTokens = tokenizer.formatGemma4TokenIds(messages: messages)
+            promptTokens = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
         } else {
-            let formatted = tokenizer.applyChatTemplate(messages: messages)
+            let formatted = tokenizer.applyChatTemplate(messages: preparedMessages)
             promptTokens = tokenizer.encodeWithoutExtraBOS(formatted)
         }
 
@@ -198,8 +256,36 @@ public final class InferenceEngine: @unchecked Sendable {
         nonisolated(unsafe) let capturedPrefixCache = self.prefixCache
         let capturedSpecDecoder = self.specDecoder
         let capturedModelId = self.modelId
-        let shouldSpec = useSpeculative && specDecoder != nil
+        // int8 KV: disable prefix cache (snapshot/restore/truncate are fp16-specific)
+        // and speculative decoding (target/draft caches are typed `[KVCache]`).
+        // Non-Gemma 4 model loaders downcast caches to [KVCache] in their forward closures
+        // (see ModelLoader.swift); int8 KV is gated to Gemma 4 only for this release.
+        let useInt8KV: Bool = {
+            guard self.usesQuantizedKVCache else { return false }
+            if loadedModel.family != "gemma4" {
+                FileHandle.standardError.write(Data(
+                    "[KrillLM] warning: int8 KV cache is supported for Gemma 4 only; falling back to fp16 for family=\(loadedModel.family).\n".utf8))
+                return false
+            }
+            return true
+        }()
+        let shouldSpec = useSpeculative && specDecoder != nil && !useInt8KV
         let capturedImageData = imageData
+
+        let effectiveUsePrefixCache = usePrefixCache && !useInt8KV
+        // Bind the prefix-cache key to all non-text conditioning. Without this,
+        // a prompt+image request can mis-hit a prior entry computed under a
+        // different image (or no image at all) and serve stale KV state.
+        let mediaHash: String? = {
+            guard imageData != nil || audioData != nil else { return nil }
+            var parts: [String] = []
+            if let img = imageData { parts.append("img:" + VisionEncoderCache.key(forImageBytes: img)) }
+            if let aud = audioData {
+                let digest = VisionEncoderCache.key(forImageBytes: aud) // SHA-256 of bytes
+                parts.append("aud:" + digest)
+            }
+            return parts.joined(separator: "|")
+        }()
 
         let stream = AsyncStream<TokenEvent> { continuation in
             Task { [statsHolder] in
@@ -208,8 +294,12 @@ public final class InferenceEngine: @unchecked Sendable {
                 var prefillDuration: Double = 0
                 var cacheHit = false
 
-                // Create KV caches
-                let caches = makeKVCaches(numLayers: numLayers)
+                // Create KV caches. fp16 path uses concrete KVCache so the prefix-cache
+                // path (snapshot/restore/truncate) works; int8 uses QuantizedKVCache
+                // and skips prefix cache entirely (see effectiveUsePrefixCache above).
+                let fp16Caches: [KVCache]? = useInt8KV ? nil : makeKVCaches(numLayers: numLayers)
+                let int8Caches: [QuantizedKVCache]? = useInt8KV ? makeQuantizedKVCaches(numLayers: numLayers) : nil
+                let caches: [KVCacheProtocol] = useInt8KV ? int8Caches! : fp16Caches!
 
                 // -- Prefix Cache Lookup --
                 // Only accept FULL prefix hits (cached tokens == prompt tokens).
@@ -217,12 +307,12 @@ public final class InferenceEngine: @unchecked Sendable {
                 // span length only, but attention keys include the restored prefix,
                 // causing shape mismatch or incorrect masking. Until cache-aware
                 // mask construction is implemented, we skip partial hits.
-                if usePrefixCache {
+                if effectiveUsePrefixCache, let fp16Caches {
                     if let hit = capturedPrefixCache.lookup(
-                        tokens: promptTokens, modelId: capturedModelId
+                        tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash
                     ), !hit.keys.isEmpty, hit.prefixLength == promptTokens.count {
                         // Full exact hit — restore KV for all prompt tokens.
-                        for (i, cache) in caches.enumerated() {
+                        for (i, cache) in fp16Caches.enumerated() {
                             if i < hit.keys.count, let k = hit.keys[i].first,
                                i < hit.values.count, let v = hit.values[i].first {
                                 cache.restore(keys: k, values: v)
@@ -238,9 +328,9 @@ public final class InferenceEngine: @unchecked Sendable {
                 // to get logits without duplicating a KV entry.
                 // On a miss we forward the entire prompt normally.
                 let tokensToProcess: [Int]
-                if cacheHit {
+                if cacheHit, let fp16Caches {
                     let trimmedLength = max(0, promptTokens.count - 1)
-                    for cache in caches {
+                    for cache in fp16Caches {
                         cache.truncate(to: trimmedLength)
                     }
                     tokensToProcess = [promptTokens.last!]
@@ -259,7 +349,8 @@ public final class InferenceEngine: @unchecked Sendable {
                    !cacheHit {
                     do {
                         let pixelValues = try preprocessImage(imgData)
-                        prefillLogits = mmForward(inputArray, caches, pixelValues, nil)
+                        let imageHash = VisionEncoderCache.key(forImageBytes: imgData)
+                        prefillLogits = mmForward(inputArray, caches, pixelValues, nil, imageHash)
                     } catch {
                         // Fall back to text-only if preprocessing fails
                         prefillLogits = capturedForward(inputArray, caches)
@@ -275,10 +366,11 @@ public final class InferenceEngine: @unchecked Sendable {
                 // forwarded). On the next request with the same prefix, the
                 // restored KV will cover all prompt tokens, and the "full cache
                 // hit" path above trims the last token and re-forwards it.
-                if usePrefixCache && !cacheHit && promptTokens.count >= 8 {
+                if effectiveUsePrefixCache && !cacheHit && promptTokens.count >= 8,
+                   let fp16Caches {
                     var snapshotKeys: [[MLXArray]] = []
                     var snapshotValues: [[MLXArray]] = []
-                    for cache in caches {
+                    for cache in fp16Caches {
                         if let snap = cache.snapshot() {
                             snapshotKeys.append([snap.keys])
                             snapshotValues.append([snap.values])
@@ -289,13 +381,26 @@ public final class InferenceEngine: @unchecked Sendable {
                             tokens: promptTokens,
                             modelId: capturedModelId,
                             keys: snapshotKeys,
-                            values: snapshotValues
+                            values: snapshotValues,
+                            mediaHash: mediaHash
                         )
                     }
                 }
 
-                // Sample first token
-                var nextToken = sampler.sample(prefillLogits)
+                // Sample first token. For the spec-decoding path we need a host
+                // Int up front; for the standard path we keep the token as a
+                // lazy 1-element MLXArray so we can chain it directly into the
+                // next forward without paying a GPU↔CPU sync per step.
+                var nextToken: Int
+                var nextTokenArr: MLXArray
+                if shouldSpec {
+                    nextToken = sampler.sample(prefillLogits)
+                    nextTokenArr = MLXArray(Int32(nextToken))
+                } else {
+                    nextTokenArr = sampler.sampleArray(prefillLogits)
+                    asyncEval(nextTokenArr)
+                    nextToken = nextTokenArr.item(Int.self)
+                }
 
                 // -- Decode loop --
                 let decodeStart = CFAbsoluteTimeGetCurrent()
@@ -319,10 +424,11 @@ public final class InferenceEngine: @unchecked Sendable {
                     }
 
                     while generatedCount < maxTokens && nextToken != eosId {
-                        // Speculative step: get multiple tokens at once
+                        // Speculative step: get multiple tokens at once.
+                        // Spec path requires fp16 caches; shouldSpec already excludes int8.
                         let accepted = specDec.step(
                             lastToken: nextToken,
-                            targetCaches: caches,
+                            targetCaches: fp16Caches!,
                             draftCaches: draftCaches
                         )
 
@@ -348,6 +454,13 @@ public final class InferenceEngine: @unchecked Sendable {
                     }
                 } else {
                     // === Standard Decode Path ===
+                    // Two-deep on-GPU pipeline: the just-sampled token stays as
+                    // a lazy MLXArray and is fed directly into the next forward.
+                    // We schedule the next forward + sample, then sync only on
+                    // the *current* token's host int for decode/yield/EOS. By
+                    // the time we sync, the GPU has already started executing
+                    // forward N+1, so kernel launch and host string work overlap
+                    // with kernel execution.
                     while generatedCount < maxTokens {
                         if nextToken == eosId {
                             continuation.yield(TokenEvent(
@@ -356,16 +469,28 @@ public final class InferenceEngine: @unchecked Sendable {
                             break
                         }
 
-                        let tokenText = capturedTokenizer.decode(token: nextToken)
+                        // Reuse the on-GPU sampled token as forward input —
+                        // avoids the per-step `MLXArray([Int32(nextToken)])`
+                        // allocation and keeps the dependency graph on-device.
+                        let tokenInput = nextTokenArr.reshaped(1, 1)
+                        let logits = capturedForward(tokenInput, caches)
+                        let nextTokenArr2 = sampler.sampleArray(logits)
+
+                        // Schedule both the forward and the next sample to run
+                        // on the GPU in the background while we decode/yield.
+                        asyncEval(nextTokenArr2)
+
+                        // While GPU is busy with iteration N+1, decode and yield N.
+                        let yieldedToken = nextToken
+                        let tokenText = capturedTokenizer.decode(token: yieldedToken)
                         continuation.yield(TokenEvent(
-                            tokenId: nextToken, text: tokenText,
+                            tokenId: yieldedToken, text: tokenText,
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime))
                         generatedCount += 1
 
-                        let tokenInput = MLXArray([Int32(nextToken)]).reshaped(1, 1)
-                        let logits = capturedForward(tokenInput, caches)
-                        MLX.eval(logits)
-                        nextToken = sampler.sample(logits)
+                        // Sync once per step on a single 1-element int32 array.
+                        nextTokenArr = nextTokenArr2
+                        nextToken = nextTokenArr.item(Int.self)
                     }
                 }
 

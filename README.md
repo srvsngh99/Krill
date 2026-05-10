@@ -4,6 +4,26 @@ A Mac-native LLM inference CLI for Apple Silicon.
 
 Built on Apple's [MLX](https://github.com/ml-explore/mlx-swift) framework. Ships as a single CLI binary.
 
+## Release Status
+
+This is not a production release because the release benchmark gate still fails on three metrics. Server multimodal is implemented for Gemma 4 — native image, bridge-backed audio — and shipped with end-to-end tests. Wall-time ratios beat Ollama by 1.6×–1.7×; remaining gate gaps are `text_prefill_ratio` (3% short), `image_prefill_ratio` (structural — vision cache moves work out of prefill), and `audio_wall_ratio` (gated on native audio). See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) for the full status, blockers, and acceptance criteria.
+
+### Support Matrix
+
+The matrix below separates CLI vs Server, native Swift vs Python bridge, and per-modality support.
+
+Gemma 4 (`gemma-4-e2b`):
+
+| Path | Text | Image | Audio |
+|------|------|-------|-------|
+| CLI native | Supported | Supported | — |
+| CLI bridge | — | — | Supported (mlx-vlm) |
+| Server | Supported | Supported (Gemma 4 only) | Supported (Gemma 4 only) [^audio-bridge] |
+
+[^audio-bridge]: Server-side audio uses the same `mlx-vlm` Python bridge as the CLI; install with `make setup-mlx-vlm`. Image input on the server runs through the native Swift SigLIP2 path.
+
+All other model families (Llama, Qwen, Mistral, Gemma 2, Phi, GLM-4) are text-only on both CLI and server.
+
 ## Benchmarks
 
 Benchmark results depend on local hardware, OS, model quantization, installed binaries, and daemon state. KrillLM does not publish fixed KrillLM-vs-Ollama numbers in this README without an attached reproducibility report.
@@ -75,9 +95,9 @@ The gate writes `.build/benchmarks/release-gate.json` with per-metric pass/fail,
 
 ### Performance claims
 
-KrillLM is competitive with Ollama on Gemma4 E2B decode throughput on Apple Silicon and can exceed Ollama in some local 4-bit-class decode tests. Ollama is currently stronger on Gemma4 multimodal prefill and some wall-time metrics. KrillLM's next performance milestone is a fully native Gemma4 multimodal path with a release gate targeting 1.5x to 3x speedup over Ollama.
+KrillLM is competitive with Ollama on Gemma4 E2B decode throughput on Apple Silicon and can exceed Ollama in some local 4-bit-class decode tests. Ollama is currently stronger on Gemma4 multimodal prefill and some wall-time metrics. KrillLM's next performance milestone is a fully native Gemma4 multimodal path (audio still routes through `mlx-vlm` today) with a release gate targeting 1.5x to 3x speedup over Ollama.
 
-Performance claims in this README are not updated unless `make bench-release-gate` passes and the report is committed or linked.
+Release benchmark gates currently fail — this is the release-readiness baseline, not a production release. Performance claims in this README are not updated unless `make bench-release-gate` passes and the report is committed or linked.
 
 ## Install
 
@@ -152,14 +172,9 @@ krillm pull mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 
 ## Gemma 4 Multimodal Support
 
-Gemma 4 supports text, image, and audio inputs. Image-only uses the native Swift vision encoder (SigLIP2); audio requires the Python `mlx-vlm` bridge. When both `--image` and `--audio` are used together, the entire request routes through mlx-vlm.
+Gemma 4 supports text, image, and audio inputs. Text and image-only use the native Swift path (text model + SigLIP2 vision encoder). Audio requires the Python `mlx-vlm` bridge. When both `--image` and `--audio` are used together, the entire request routes through mlx-vlm because native audio is not implemented.
 
-| Path | Text | Image only | Audio only | Image+Audio |
-|------|------|------------|------------|-------------|
-| CLI (`krillm run`) | Native Swift | Native Swift | mlx-vlm bridge | mlx-vlm bridge (both) |
-| Server API | Native Swift | Not supported | Not supported | Not supported |
-
-The server API does not accept image/audio payloads. For multimodal inference, use the CLI.
+See the [Support Matrix](#support-matrix) above for the full CLI-native / CLI-bridge / Server breakdown. The HTTP server accepts image and audio payloads on Ollama and OpenAI endpoints when a Gemma 4 model is loaded; see [`docs/SERVER_API.md`](docs/SERVER_API.md) for request shapes.
 
 ### Image (native, no Python needed)
 

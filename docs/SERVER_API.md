@@ -1,5 +1,15 @@
 # Server API Reference
 
+## Status and Scope
+
+This build is a release-readiness baseline, not a production release. The HTTP server supports **text generation on every model family** plus **Gemma 4 image and audio input**. Image input runs through the native Swift SigLIP2 vision encoder; audio input is routed to the `mlx-vlm` Python bridge (the same path the CLI uses for `--audio`). When a request supplies both image and audio, the entire request goes through the bridge to match CLI behavior. Non-Gemma 4 models reject image/audio payloads with HTTP 400. See [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for full status.
+
+**Limits:**
+- 1 image per request maximum (Gemma 4 supports a single image per turn).
+- 1 audio clip per request.
+- 25 MB per decoded media item.
+- 10 MB total HTTP body (`ServerLimits.maxBodySize`).
+
 ## Starting the Server
 
 ```bash
@@ -55,14 +65,30 @@ Returns server status, memory, uptime, loaded model info.
 
 ### POST /api/generate
 
-Text-only generation. **Does not accept `images` or media payloads** — the `images` field from Ollama's API is rejected. Image/audio generation is only available via the CLI (`krillm run --image`), not the server API.
+Text generation on any model. With Gemma 4 loaded, you may also include `images` (base64-encoded array, max 1 element) and/or a single `audio` field (base64 string; default format `wav`, override with `audio_format`).
 
 ```bash
+# Text
 curl http://127.0.0.1:11435/api/generate -d '{
   "model": "llama-3.2-1b",
   "prompt": "Hello",
   "stream": true,
   "options": {"temperature": 0, "num_predict": 32}
+}'
+
+# Image (Gemma 4 only — native Swift vision path)
+curl http://127.0.0.1:11435/api/generate -d '{
+  "model": "gemma-4-e2b",
+  "prompt": "What is in this image?",
+  "images": ["'"$(base64 -i photo.png)"'"]
+}'
+
+# Audio (Gemma 4 only — routed through mlx-vlm bridge)
+curl http://127.0.0.1:11435/api/generate -d '{
+  "model": "gemma-4-e2b",
+  "prompt": "Transcribe this clip.",
+  "audio": "'"$(base64 -i clip.wav)"'",
+  "audio_format": "wav"
 }'
 ```
 
@@ -76,27 +102,46 @@ curl http://127.0.0.1:11435/api/generate -d '{
 
 ### POST /api/chat
 
-Text-only chat. Same media limitation as `/api/generate` — no image/audio payloads.
+Chat-style endpoint. Each message accepts an optional `images` array (Gemma 4 only) and/or `audio` field. The server collects per-message media into a request-level payload and applies the same per-request limit (1 image, 1 audio).
 
 ```json
-{"model": "...", "messages": [{"role": "user", "content": "..."}]}
+{
+  "model": "gemma-4-e2b",
+  "messages": [
+    {
+      "role": "user",
+      "content": "What's in this picture?",
+      "images": ["<base64-png>"]
+    }
+  ]
+}
 ```
 
 ### GET /api/tags
 
 Returns installed models in Ollama format.
 
-## Multimodal Limitations
+## Multimodal Notes
 
-The server currently supports **text-only** generation. Image and audio are not supported through any server endpoint:
+- Image input is supported on all four chat/generate endpoints when a Gemma 4 model is loaded; it is rejected with HTTP 400 for any other model family.
+- Audio input is also Gemma 4 only and is routed through the `mlx-vlm` Python bridge; if `mlx-vlm` is not installed the server returns HTTP 503 with an installation hint (`make setup-mlx-vlm`).
+- OpenAI `/v1/chat/completions` accepts both string content and the standard content-block array form: `{"type": "text"}`, `{"type": "image_url", "image_url": {"url": "data:..."}}`, and `{"type": "input_audio", "input_audio": {"data": "...", "format": "wav"}}`. Only `data:` URLs are accepted for images (no remote fetching).
+- OpenAI `/v1/completions` remains text-only (parity with the upstream API).
+- Decoded media is written to `FileManager.default.temporaryDirectory` and removed when the request completes.
 
-- `/api/generate` rejects the top-level `images` field with an unsupported-field error
-- `/api/chat` accepts text messages only (`role` + `content`); per-message `images` fields are not consumed and no media is passed to inference
-- Server-mode benchmarks skip media tasks for this reason
+### OpenAI image example
 
-For multimodal inference, use the CLI directly:
 ```bash
-krillm run gemma-4-e2b "Describe this image." --image photo.png
+curl http://127.0.0.1:11435/v1/chat/completions -d '{
+  "model": "gemma-4-e2b",
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "What is in this image?"},
+      {"type": "image_url", "image_url": {"url": "data:image/png;base64,'"$(base64 -i photo.png)"'"}}
+    ]
+  }]
+}'
 ```
 
 ## Health and Monitoring
