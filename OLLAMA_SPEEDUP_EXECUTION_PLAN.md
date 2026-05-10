@@ -224,23 +224,32 @@ Acceptance:
 
 ### 5. Quantized KV Save/Restore
 
-Current int8 KV is opt-in and live parity passes, but int8 KV disables prefix
-cache. That means users cannot currently combine both wins.
+Status: implemented. int8 KV and prefix cache now compose on the Gemma 4 path.
 
-Required work:
+Done:
 
-- Add a quantized KV snapshot format.
-- Store scales/zeros and quantized tensors without dequantizing on every
-  snapshot path.
-- Restore int8 KV state into `QuantizedKVCache`.
-- Add tests for exact restore length, generated prefix stability, and memory
-  savings.
+- `QuantizedKVSnapshot` carries the raw uint8 K/V plus the fp16 scales/zeros
+  so persistence preserves the quantized form (no dequant→requant round trip).
+- `QuantizedKVCache.quantizedSnapshot()`, `restoreQuantized(_:)`, and
+  `truncate(to:)` mirror the fp16 cache contract.
+- `PrefixCache.storeQuantized` / `lookupQuantized` write to a distinct
+  `<key>.q8.safetensors` filename and the cache key schema gains a dtype tag
+  (v3) so int8 and fp16 entries can never collide.
+- `InferenceEngine` removes the `&& !useInt8KV` block on prefix cache and
+  dispatches to the quantized snapshot/restore path when int8 is active.
+  Truncate-and-re-forward keeps the prompt length stable on a full hit.
+- Unit coverage: `Tests/KLMCoreTests/QuantizedPrefixCacheTests.swift`
+  (round-trip; cross-dtype isolation in both directions; truncate+update).
+- Live coverage:
+  `Tests/KLMEngineTests/QuantizedPrefixCacheLiveTests.swift`
+  runs the same prompt twice with `kvCacheDtype: "int8"` and a shared
+  prefix cache, asserting cold/warm greedy tokens match.
 
-Acceptance:
+Remaining for the gate report:
 
-- int8 KV and prefix cache can be enabled together for Gemma 4.
-- Live test covers greedy prefix similarity with cache hit enabled.
-- Benchmark report records KV dtype and prefix-cache hit/miss state.
+- Benchmark reports should record `kv_cache_dtype` and prefix-cache
+  hit/miss state per run. The current `gemma4_multimodal_benchmark.py`
+  records `cache_mode` but not the KV dtype — wire that through next.
 
 ## Benchmark Rules For Next Agent
 
