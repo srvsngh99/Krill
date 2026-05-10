@@ -269,7 +269,8 @@ public final class InferenceEngine: @unchecked Sendable {
                    !cacheHit {
                     do {
                         let pixelValues = try preprocessImage(imgData)
-                        prefillLogits = mmForward(inputArray, caches, pixelValues, nil)
+                        let imageHash = VisionEncoderCache.key(forImageBytes: imgData)
+                        prefillLogits = mmForward(inputArray, caches, pixelValues, nil, imageHash)
                     } catch {
                         // Fall back to text-only if preprocessing fails
                         prefillLogits = capturedForward(inputArray, caches)
@@ -304,8 +305,20 @@ public final class InferenceEngine: @unchecked Sendable {
                     }
                 }
 
-                // Sample first token
-                var nextToken = sampler.sample(prefillLogits)
+                // Sample first token. For the spec-decoding path we need a host
+                // Int up front; for the standard path we keep the token as a
+                // lazy 1-element MLXArray so we can chain it directly into the
+                // next forward without paying a GPU↔CPU sync per step.
+                var nextToken: Int
+                var nextTokenArr: MLXArray
+                if shouldSpec {
+                    nextToken = sampler.sample(prefillLogits)
+                    nextTokenArr = MLXArray(Int32(nextToken))
+                } else {
+                    nextTokenArr = sampler.sampleArray(prefillLogits)
+                    asyncEval(nextTokenArr)
+                    nextToken = nextTokenArr.item(Int.self)
+                }
 
                 // -- Decode loop --
                 let decodeStart = CFAbsoluteTimeGetCurrent()
@@ -358,11 +371,13 @@ public final class InferenceEngine: @unchecked Sendable {
                     }
                 } else {
                     // === Standard Decode Path ===
-                    // Pipelined: kick off the next forward asynchronously, then
-                    // run the (CPU-bound) tokenizer decode and consumer yield in
-                    // parallel with the GPU forward. Sampling at the end of the
-                    // iteration syncs on the GPU result. This overlaps consumer
-                    // backpressure and string decode work with kernel execution.
+                    // Two-deep on-GPU pipeline: the just-sampled token stays as
+                    // a lazy MLXArray and is fed directly into the next forward.
+                    // We schedule the next forward + sample, then sync only on
+                    // the *current* token's host int for decode/yield/EOS. By
+                    // the time we sync, the GPU has already started executing
+                    // forward N+1, so kernel launch and host string work overlap
+                    // with kernel execution.
                     while generatedCount < maxTokens {
                         if nextToken == eosId {
                             continuation.yield(TokenEvent(
@@ -371,12 +386,18 @@ public final class InferenceEngine: @unchecked Sendable {
                             break
                         }
 
-                        // Kick off forward for the current token asynchronously.
-                        let tokenInput = MLXArray([Int32(nextToken)]).reshaped(1, 1)
+                        // Reuse the on-GPU sampled token as forward input —
+                        // avoids the per-step `MLXArray([Int32(nextToken)])`
+                        // allocation and keeps the dependency graph on-device.
+                        let tokenInput = nextTokenArr.reshaped(1, 1)
                         let logits = capturedForward(tokenInput, caches)
-                        asyncEval(logits)
+                        let nextTokenArr2 = sampler.sampleArray(logits)
 
-                        // While GPU is busy, decode and yield the current token.
+                        // Schedule both the forward and the next sample to run
+                        // on the GPU in the background while we decode/yield.
+                        asyncEval(nextTokenArr2)
+
+                        // While GPU is busy with iteration N+1, decode and yield N.
                         let yieldedToken = nextToken
                         let tokenText = capturedTokenizer.decode(token: yieldedToken)
                         continuation.yield(TokenEvent(
@@ -384,8 +405,9 @@ public final class InferenceEngine: @unchecked Sendable {
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime))
                         generatedCount += 1
 
-                        // Sync on the GPU result and pick the next token.
-                        nextToken = sampler.sample(logits)
+                        // Sync once per step on a single 1-element int32 array.
+                        nextTokenArr = nextTokenArr2
+                        nextToken = nextTokenArr.item(Int.self)
                     }
                 }
 

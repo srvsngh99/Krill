@@ -605,6 +605,9 @@ public class Gemma4MultimodalModel: Module {
     public let imageTokenId: Int
     public let audioTokenId: Int
 
+    // Per-instance cache: invalidated automatically when the model is unloaded.
+    public let visionCache: VisionEncoderCache = VisionEncoderCache()
+
     public init(_ config: Gemma4Config, imageTokenId: Int = 258880, audioTokenId: Int = 258881) {
         self.config = config
         self.imageTokenId = imageTokenId
@@ -635,17 +638,33 @@ public class Gemma4MultimodalModel: Module {
     }
 
     /// Multimodal forward pass with image pixel values.
+    ///
+    /// If `imageBytesHash` is non-nil it is treated as a stable identifier for the
+    /// raw image bytes the caller derived `pixelValues` from; the encoder output
+    /// for that key is cached and reused on subsequent calls. Pass `nil` to
+    /// bypass the cache (e.g. for multi-image batches or any non-image input).
     public func callAsFunction(
         _ tokens: MLXArray, caches: [KVCache]? = nil,
-        pixelValues: MLXArray? = nil
+        pixelValues: MLXArray? = nil,
+        imageBytesHash: String? = nil
     ) -> MLXArray {
         guard let pixels = pixelValues else {
             return languageModel(tokens, caches: caches)
         }
 
-        // Vision pipeline: pixels -> encoder -> projector -> embeddings
-        let visionFeatures = visionTower(pixels)
-        let imageEmbeddings = embedVision(visionFeatures)
+        let imageEmbeddings: MLXArray
+        if let key = imageBytesHash, let cached = visionCache.lookup(key) {
+            imageEmbeddings = cached
+        } else {
+            // Vision pipeline: pixels -> encoder -> projector -> embeddings
+            let visionFeatures = visionTower(pixels)
+            let computed = embedVision(visionFeatures)
+            if let key = imageBytesHash {
+                MLX.eval(computed)
+                visionCache.store(key, value: computed)
+            }
+            imageEmbeddings = computed
+        }
 
         // Inject into language model forward
         return languageModel(

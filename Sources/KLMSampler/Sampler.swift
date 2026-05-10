@@ -54,6 +54,18 @@ public final class Sampler: @unchecked Sendable {
     /// - Parameter logits: Raw logits, shape `[B, vocabSize]` or `[B, 1, vocabSize]`
     /// - Returns: Sampled token ID as Int
     public func sample(_ logits: MLXArray) -> Int {
+        return sampleArray(logits).item(Int.self)
+    }
+
+    /// Sample the next token, returning a 1-element MLXArray of dtype int32.
+    ///
+    /// Returning a lazy MLXArray instead of a host Int lets the caller keep the
+    /// chosen token on-GPU and feed it directly into the next forward pass, so
+    /// two iterations can be in flight before any host sync happens.
+    ///
+    /// - Parameter logits: Raw logits, shape `[B, vocabSize]` or `[B, 1, vocabSize]`
+    /// - Returns: A 1-element int32 MLXArray of shape `[1]` containing the token ID.
+    public func sampleArray(_ logits: MLXArray) -> MLXArray {
         // Take last position if 3D: [B, seqLen, vocab] -> [B, vocab]
         var logits = logits
         if logits.ndim == 3 {
@@ -62,9 +74,9 @@ public final class Sampler: @unchecked Sendable {
         // Take first batch: [B, vocab] -> [vocab]
         logits = logits[0]
 
-        // Greedy: just argmax
+        // Greedy: just argmax (keepDims gives shape [1])
         if params.temperature <= 0 {
-            return argMax(logits).item(Int.self)
+            return argMax(logits, keepDims: true).asType(.int32)
         }
 
         // Temperature scaling
@@ -80,10 +92,10 @@ public final class Sampler: @unchecked Sendable {
             scaled = topPFilter(scaled, p: params.topP)
         }
 
-        // Sample from the distribution
+        // Sample from the distribution. categorical returns shape [1] uint32.
         let probs = softmax(scaled)
         let token = MLXRandom.categorical(expandedDimensions(probs, axis: 0))
-        return token.item(Int.self)
+        return token.asType(.int32)
     }
 }
 
