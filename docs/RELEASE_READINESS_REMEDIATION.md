@@ -65,8 +65,8 @@ fixture ambiguous, cache-affected results need explicit labels.
 ## 2. Current PR State (HEAD of `feat/release-readiness-remediation`)
 
 What is true after the commits in this PR. Code verification was performed
-on `206791d`; the head also includes docs-only commits (`2c6066b`,
-`<this-commit>`) on top.
+on `206791d`; the head also includes docs-only commits on top
+(`2c6066b`, `b4dbda1`, and any subsequent docs-only fixups).
 
 ### What now works
 
