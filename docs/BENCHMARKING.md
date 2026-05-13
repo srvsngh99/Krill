@@ -103,22 +103,28 @@ profile is recorded in the gate report so audit trails are unambiguous.
 | text_prefill_ratio  | advisory | Wall time and TTFT already gate user latency; prefill TPS is noisy on short prompts. |
 | image_wall_ratio    | hard | User-visible total latency on image prompts. |
 | image_prefill_ratio | advisory | Vision encoder cache lifts work out of the measured prefill window, so this bucket understates the user win that image_wall already captures. Re-promote once the metric excludes cache mode or is redefined. |
-| memory_ratio        | hard (auto-downgraded to advisory when quantization classes differ) | The benchmark now samples each engine's process-tree RSS; the gate hard-gates the ratio so KrillLM cannot quietly regress its footprint. When the comparison crosses quantization classes (e.g. KrillLM bf16 vs Ollama Q4_K_M) the metric is dominated by the weight format, not the runtime, so the gate auto-downgrades it to advisory and records the downgrade in `scope.memory_ratio` and the caveats. It re-promotes to hard automatically the moment a quantization-class-equal report is supplied. |
+| memory_ratio        | hard (auto-downgraded to advisory when quantization classes differ) | The benchmark now samples each engine's process-tree memory; the gate hard-gates the ratio so KrillLM cannot quietly regress its footprint. When the comparison crosses quantization classes (e.g. one engine bf16 vs the other Q4_K_M) the metric is dominated by the weight format, not the runtime, so the gate auto-downgrades it to advisory and records the downgrade in `scope.memory_ratio` and the caveats. The canonical Gemma 4 e2b comparison is class-equal (KrillLM affine 4-bit MLX vs Ollama Q4_K_M GGUF, both `4-bit` class), so memory is hard-gated on it. |
 | audio_wall_ratio    | out_of_scope | Audio runs through the mlx-vlm sidecar; native Swift audio is Workstream 1. |
 | audio_prefill_ratio | out_of_scope | Same as audio_wall. |
 
-**Peak memory sampling.** `gemma4_multimodal_benchmark.py` samples the
-resident set size (RSS) of each engine's process tree from a background
-thread (default 50 ms poll) while every measured request runs and records
-the peak. Ollama is sampled via `pgrep ollama` (covers the daemon plus the
-`ollama runner` child); the KrillLM server is sampled via
-`pgrep -f 'krillm.*serve'`; the krillm CLI subprocess is sampled by its own
-PID. Pass `--ollama-pids` / `--krillm-server-pid` to override auto-detection,
-or `--sample-memory off` to skip it. The KrillLM bridge path keeps using
-mlx-vlm's `GenerationResult.peak_memory` (MLX Metal allocator peak); both
-bases are documented under `memory_sampling.basis` in the report. Per-run
-results carry `peak_memory_gb` and `peak_memory_basis`. RSS is reported in
-decimal GB to match mlx-vlm's basis.
+**Peak memory sampling.** `gemma4_multimodal_benchmark.py` samples each
+engine's process-tree memory from a background thread (default 50 ms poll)
+while every measured request runs and records the peak. On macOS the
+per-PID number is `phys_footprint` from
+`proc_pid_rusage(RUSAGE_INFO_V2)` — the same figure Activity Monitor's
+"Memory" column and `vmmap -summary` report, which counts resident
+mmap'd pages (the safetensors weights KrillLM relies on) with proper
+apportionment. Non-Darwin platforms fall back to RSS from `ps`, which
+under-counts mmap'd pages but is the best portable substitute. Ollama
+is sampled via `pgrep ollama` (covers the daemon plus the `ollama runner`
+child); the KrillLM server is sampled via `pgrep -f 'krillm.*serve'`;
+the krillm CLI subprocess is sampled by its own PID. Pass `--ollama-pids`
+/ `--krillm-server-pid` to override auto-detection, or `--sample-memory
+off` to skip it. The KrillLM bridge path keeps using mlx-vlm's
+`GenerationResult.peak_memory` (MLX Metal allocator peak). All three bases
+are documented under `memory_sampling.basis` in the report and the actual
+basis used for each run appears in `peak_memory_basis`. Values are decimal
+GB throughout, matching mlx-vlm's basis.
 
 **`memory_ratio` is excluded from the geometric-mean speedup headline.**
 Footprint is not a speed dimension; folding a quantization-class-driven
@@ -154,12 +160,16 @@ This build is a release-readiness baseline plus a documented
 release-candidate path, not yet a production release.
 
 - **`strict` gate** (default) currently exits `1` against the accepted
-  multimodal report. `text_prefill_ratio`, `image_prefill_ratio`, and
-  `audio_wall_ratio` fail their hard thresholds.
-- **`release_candidate` gate** exits `0` on the same report (with
-  `--allow-dtype-mismatch`) because prefill TPS is advisory, audio is
-  out_of_scope, and `memory_ratio` is auto-downgraded to advisory while the
-  comparison spans quantization classes (KrillLM bf16 vs Ollama Q4_K_M).
+  multimodal report. `text_decode_ratio`, `text_prefill_ratio`,
+  `image_prefill_ratio`, `audio_wall_ratio`, and `memory_ratio` fail
+  their hard thresholds (see `.build/benchmarks/v5-mm.json` for the
+  refresh that includes peak-memory sampling).
+- **`release_candidate` gate** also exits `1` on the refreshed snapshot:
+  `text_decode_ratio` (1.17x, target ≥1.5x) and `memory_ratio` (1.14x,
+  target ≤1.0x) are hard. The auto-downgrade for `memory_ratio` does
+  *not* apply on this snapshot because both engines are 4-bit class
+  (KrillLM affine-MLX, Ollama Q4_K_M). Audio is out_of_scope; prefill
+  metrics warn but do not gate.
 
 Run `make bench-release-gate` for the latest per-metric results. The gate
 report at `.build/benchmarks/release-gate.json` contains exact ratios, the
@@ -170,18 +180,25 @@ the full plan, the per-metric promotion contract, and acceptance criteria.
 
 Key gaps as of the last reviewed run:
 
-- `text_prefill_ratio` (1.45x) is advisory under `release_candidate`;
-  re-promote once a drafter, fused kernel, or eval-cadence change pushes
-  it past 1.5x.
-- `image_prefill_ratio` (1.04x) is advisory because the vision-encoder
+- `text_decode_ratio` (1.17x on v5-mm) is **hard** and currently
+  failing. KrillLM's absolute decode TPS (≈110 tok/s) is unchanged from
+  prior runs; the regression vs the v4-mm number (1.50x) is Ollama
+  variability — Ollama ran ~94 tok/s in v5 vs ~73 tok/s in v4 on the
+  same machine and version. The metric still wants ≥1.5x sustained, so
+  closing it requires either holding KrillLM well above 1.5× a warm
+  Ollama or revisiting the threshold.
+- `text_prefill_ratio` (1.22x) is advisory under `release_candidate`;
+  re-promote once a drafter, fused kernel, or eval-cadence change
+  pushes it past 1.5x.
+- `image_prefill_ratio` (0.89x) is advisory because the vision-encoder
   cache lifts work out of the measured prefill window;
-  `image_wall_ratio` already passes hard at 0.56x.
-- `memory_ratio` is now sampled (process-tree RSS for native paths and
-  Ollama, MLX Metal allocator peak for the bridge) and hard-gated under
-  `release_candidate`. It auto-downgrades to advisory when the engines'
-  quantization classes differ, which is the case on the canonical
-  bf16-vs-Q4_K_M snapshot. It re-promotes to hard once a
-  quantization-class-equal comparison is run.
+  `image_wall_ratio` (0.67x) just barely passes hard.
+- `memory_ratio` (1.14x) is **hard** and currently failing. Both engines
+  are 4-bit class so the auto-downgrade does not apply. KrillLM's
+  phys_footprint sits at ~9.6 GB vs Ollama's ~8.4 GB on Gemma 4 e2b —
+  the gap is plausible (KrillLM holds the MLX KV cache plus working
+  buffers on top of the affine-quantized weights) and a candidate for
+  Workstream 3 follow-up.
 - Audio benchmarks still run through `mlx-vlm`; native Swift audio is
   Workstream 1 of the execution plan and `audio_*` is `out_of_scope`
   under `release_candidate` until that ships.
