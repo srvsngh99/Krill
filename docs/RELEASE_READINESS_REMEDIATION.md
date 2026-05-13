@@ -227,10 +227,15 @@ table. Promoting back toward strict requires:
   bridge's generate cost vs Ollama's native path. Closing it requires
   porting Gemma 4's Conformer audio encoder and audio token expansion
   into native Swift+MLX. Multi-week effort.
-- **`memory_ratio` N/A** — advisory under `release_candidate` because
-  `gemma4_multimodal_benchmark.py` does not yet emit
-  `peak_memory_gb_median`. Re-promote to hard once the benchmark records
-  peak memory for both engines.
+- **`memory_ratio`** — now hard under `release_candidate` (PR #13).
+  `gemma4_multimodal_benchmark.py` samples each engine's process-tree RSS
+  (and the bridge path uses mlx-vlm's MLX Metal allocator peak), so the
+  metric populates. It is auto-downgraded to advisory while the
+  comparison spans quantization classes (KrillLM bf16 vs Ollama Q4_K_M)
+  because cross-class memory comparisons are dominated by the weight
+  format, not the runtime. It re-promotes to hard automatically once a
+  quantization-class-equal comparison is supplied (e.g. KrillLM ships an
+  affine-Q4 Gemma 4 path or runs against an Ollama bf16 model).
 
 Required outcome before release tag:
 
@@ -379,3 +384,62 @@ release_candidate --allow-dtype-mismatch -> exit 0
    advisory: text_prefill WARN, image_prefill WARN, memory N/A
    skip:     audio_wall, audio_prefill
 ```
+
+### 4.3 PR #13 — `feat: peak-memory sampling + release_candidate memory hard-gate`
+
+In progress on `feat/peak-memory-sampling`. Closes the PR #12 contract
+"`memory_ratio` is advisory until the benchmark records peak memory"; see
+the [`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](../OLLAMA_SPEEDUP_EXECUTION_PLAN.md)
+"Goal For The Next PR" item 1.
+
+What landed:
+
+- `gemma4_multimodal_benchmark.py` samples the resident set size of each
+  engine's process tree from a daemon thread (default 50 ms `ps -axo
+  pid,ppid,rss` poll) and records the peak alongside every measured run as
+  `peak_memory_gb` plus `peak_memory_basis`. Ollama PIDs auto-resolve via
+  `pgrep ollama`; the KrillLM server via `pgrep -f 'krillm.*serve'`; the
+  krillm CLI subprocess by its own PID. Operators can override the
+  resolved PIDs with `--ollama-pids` / `--krillm-server-pid`, or skip
+  sampling entirely with `--sample-memory off`. The KrillLM bridge path
+  keeps using mlx-vlm's `GenerationResult.peak_memory` (MLX Metal
+  allocator peak); both bases are recorded under `memory_sampling.basis`.
+- `release_gate.py` promotes `memory_ratio` to `hard` under
+  `release_candidate`. A new `resolve_metric_kinds()` helper auto-downgrades
+  it to advisory whenever the report's `quantization.comparison.class_equal`
+  is false (KrillLM bf16 vs Ollama Q4_K_M today), with the downgrade
+  recorded in `scope.memory_ratio` and added as a caveat. `strict` keeps
+  it hard regardless. `memory_ratio` is excluded from the geometric-mean
+  speedup headline because footprint is not a speed dimension.
+- Docs (`docs/BENCHMARKING.md`, this file, the execution plan) updated.
+
+Coverage:
+
+- `tools/test_memory_sampling.py` — 14 unit tests covering the RSS
+  sampler, process-tree summing, `pgrep` parsing, override handling,
+  thread join on `__exit__`, and the `_MemoryProbe` report block.
+- `tools/test_release_gate.py` — 6 new tests covering memory present →
+  recorded; quant-class-mismatch → advisory + caveat; quant-class-equal
+  + over budget → hard fail; quant-class-equal + under budget → hard
+  pass; strict keeps memory hard regardless of class; memory excluded
+  from the geomean headline.
+
+Net effect on the test count: `tools/` Python suite goes from 7 → 27
+(13 gate + 14 memory). Swift `make test` is untouched.
+
+Verified gate behavior on `.build/benchmarks/v4-mm.json` after the change
+(no peak-memory data in this older snapshot, so memory remains N/A):
+
+```text
+strict                                  -> exit 1 (unchanged)
+release_candidate --allow-dtype-mismatch -> exit 0
+   hard pass: text_decode, text_wall, text_ttft, image_wall
+   advisory: text_prefill WARN, image_prefill WARN, memory N/A (auto-downgraded)
+   skip:     audio_wall, audio_prefill
+   geomean speedup: 1.418x (memory_ratio excluded)
+```
+
+A fresh benchmark on the canonical `--krillm-image-mode native_server`
+configuration is still pending; the next refresh will populate
+`peak_memory_gb_median` for both engines and exercise the auto-downgrade
+on real numbers rather than missing data.
