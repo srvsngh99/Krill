@@ -17,15 +17,23 @@ audio out of `out_of_scope` and prefill TPS out of advisory.
 ### What landed since PR #9
 
 - **PR #13 (`feat: peak-memory sampling + release_candidate memory hard-gate`,
-  in progress).** `gemma4_multimodal_benchmark.py` samples each engine's
-  process-tree RSS from a daemon thread (50 ms `ps` poll) and records the
-  peak as `peak_memory_gb` per run. `release_gate.py` promotes
-  `memory_ratio` to `hard` under `release_candidate`, with an automatic
-  downgrade to advisory whenever quantization classes differ (KrillLM
-  bf16 vs Ollama Q4_K_M today). `memory_ratio` is excluded from the
+  in progress on `feat/peak-memory-sampling`).**
+  `gemma4_multimodal_benchmark.py` samples each engine's process-tree
+  memory from a daemon thread (50 ms poll). On macOS the per-PID number
+  is `phys_footprint` from `proc_pid_rusage(RUSAGE_INFO_V2)` — the same
+  figure Activity Monitor reports, which counts resident mmap'd pages
+  (KrillLM's safetensors weights). Other platforms fall back to RSS.
+  Each measured run records `peak_memory_gb` and `peak_memory_basis`.
+  `release_gate.py` promotes `memory_ratio` to `hard` under
+  `release_candidate`, with an automatic downgrade to advisory whenever
+  quantization classes differ; `memory_ratio` is excluded from the
   geometric-mean speedup headline because footprint is not a speed
-  dimension. New unit tests: `tools/test_memory_sampling.py` (14) and
-  six new gate tests covering the conditional downgrade.
+  dimension. New unit tests: `tools/test_memory_sampling.py` (17) and
+  six new gate tests covering the conditional downgrade. The fresh
+  `.build/benchmarks/v5-mm.json` shows the canonical comparison is
+  actually class-equal (KrillLM affine 4-bit MLX vs Ollama Q4_K_M
+  GGUF) — v4's "bf16-vs-Q4" framing was a metadata bug from invoking
+  the bench with a registry name instead of the local model path.
 - **PR #11 (`perf: compose int8 KV cache with prefix cache`).** int8 KV cache
   and the persistent prefix cache now coexist on the Gemma 4 path. New
   `QuantizedKVSnapshot` carries uint8 K/V plus fp16 scales/zeros, so prefix
@@ -71,45 +79,60 @@ python3 -m unittest tools.test_release_gate    -> 13 tests pass (was 7)
 python3 -m unittest tools.test_memory_sampling -> 14 tests pass (new)
 ```
 
-### Current gate verdict (`.build/benchmarks/v4-mm.json`)
+### Current gate verdict (`.build/benchmarks/v5-mm.json`, refreshed 2026-05-13)
 
 ```text
-strict profile                  -> exit 1 (unchanged; same FAILs as before)
-release_candidate profile       -> exit 0 (with --allow-dtype-mismatch)
-                                   on the v4-mm.json snapshot
+strict profile                            -> exit 1
+release_candidate --allow-dtype-mismatch  -> exit 1
 ```
 
 Per-metric breakdown under `release_candidate`:
 
 ```text
-HARD  text_decode_ratio   1.5030x   target >= 1.5     PASS
-HARD  text_wall_ratio     0.5172x   target <= 0.67    PASS
-HARD  text_ttft_ratio     0.1173x   target <= 0.67    PASS
-HARD  image_wall_ratio    0.5593x   target <= 0.67    PASS
+HARD  text_wall_ratio     0.6351x   target <= 0.67    PASS
+HARD  text_ttft_ratio     0.2126x   target <= 0.67    PASS
+HARD  image_wall_ratio    0.6656x   target <= 0.67    PASS  (margin <1%)
+HARD  text_decode_ratio   1.1738x   target >= 1.5     FAIL
+HARD  memory_ratio        1.1447x   target <= 1.0     FAIL  (4-bit-vs-4-bit;
+                                                          auto-downgrade does
+                                                          not apply)
 
-ADV   text_prefill_ratio  1.4498x   target >= 1.5     WARN (advisory)
-ADV   image_prefill_ratio 1.0385x   target >= 1.5     WARN (advisory)
-ADV   memory_ratio        N/A       target <= 1.0     N/A  (auto-downgraded;
-                                                     bf16-vs-Q4 unfair, will
-                                                     populate on next bench)
+ADV   text_prefill_ratio  1.2231x   target >= 1.5     WARN (advisory)
+ADV   image_prefill_ratio 0.8899x   target >= 1.5     WARN (advisory)
 
-SKIP  audio_wall_ratio    3.9265x   target <= 0.67    out_of_scope
+SKIP  audio_wall_ratio    3.7868x   target <= 0.67    out_of_scope
 SKIP  audio_prefill_ratio  N/A      target >= 1.5     out_of_scope
 
-geometric mean speedup            1.418x
+geometric mean speedup     1.157x   (memory_ratio excluded from headline)
+
+KrillLM phys_footprint:    text 9.611 GB / image 9.611 GB / audio 10.481 GB
+Ollama  phys_footprint:    text 8.396 GB / image 8.495 GB / audio 8.511 GB
 ```
 
-A `release_candidate` PASS on the existing snapshot is honest **only** because
-prefill TPS, memory, and audio are explicitly opted out with documented
-rationale (see `docs/BENCHMARKING.md`). Promoting to a production release
-requires re-promoting these to hard one at a time.
+The release-candidate gate is currently red on `text_decode_ratio` and
+`memory_ratio`. Two notes on interpreting the regression vs the v4-mm
+snapshot:
+
+- **The v4 "bf16-vs-Q4" framing was wrong.** v4 was invoked with
+  `--krill-model gemma-4-e2b` (registry name); `krill_quantization()`
+  could not load the local config (HuggingFace 401) and recorded
+  `quantization_class: "unknown"`, which made the gate's
+  cross-quantization auto-downgrade trigger spuriously. With the local
+  path the model is correctly identified as 4-bit affine MLX, the
+  comparison is class-equal with Ollama Q4_K_M, and `memory_ratio`
+  is genuinely hard-gateable.
+- **KrillLM's text decode is unchanged.** v4 measured 110.30 tok/s; v5
+  measures 110.36 tok/s. The ratio dropped from 1.50x → 1.17x because
+  Ollama happened to run faster (73 → 94 tok/s) on v5's daemon. Both
+  numbers are honest; the gate is sensitive to Ollama variance.
 
 Do not tag a production release until either:
 
 1. `strict` exits 0 against the accepted report, or
 2. `release_candidate` is the agreed gate, every advisory is reviewed, every
-   `out_of_scope` is documented, and the report is committed alongside the
-   release notes.
+   `out_of_scope` is documented, every hard miss is closed (currently
+   `text_decode_ratio` and `memory_ratio`), and the report is committed
+   alongside the release notes.
 
 ## Goal For The Next PR
 
@@ -307,15 +330,10 @@ release_gate.py .build/benchmarks/v4-mm.json
   → exit 0
 ```
 
-The release_candidate run on v4-mm.json passes the four user-latency hard
-gates (text_decode 1.50x, text_wall 0.52x, text_ttft 0.12x, image_wall 0.56x)
-with three advisory readings (text_prefill 1.45x WARN, image_prefill 1.04x
-WARN, memory N/A — hard under the profile but auto-downgraded because the
-dtype classes differ; will populate on the next benchmark refresh) and two
-documented audio skips. Geometric mean speedup 1.418x (memory_ratio is
-excluded from the headline). The dtype mismatch (KrillLM bf16 vs Ollama
-Q4_K_M) remains a separate, explicit caveat that the operator must opt
-into via `--allow-dtype-mismatch`.
+v4-mm.json was the historical snapshot; see the "Current gate verdict"
+section above for the refreshed v5-mm.json results that include
+peak-memory sampling and the corrected (class-equal) quantization
+identification.
 
 ### 5. Quantized KV Save/Restore
 
@@ -367,6 +385,22 @@ Required benchmark metadata:
 
 Use warm-server comparisons for release gating. Do not mix repeated CLI process
 startup against a warm Ollama daemon.
+
+Pass the **full local path** to `--krill-model` (e.g.
+`/Users/.../models/blobs/gemma-4-e2b`), not the registry name. The bench
+reads `quantization_class` from the local `config.json`; with a registry
+name it falls back to a HuggingFace lookup that 401s for private/local
+models and records `quantization_class: "unknown"`, which makes the
+gate's class-equality check (and therefore the `memory_ratio`
+auto-downgrade) misfire. v4-mm.json's `quantization.comparison.class_equal:
+false` was an artifact of this; v5-mm.json shows the actual
+class-equal 4-bit-vs-4-bit comparison.
+
+Pass `--krillm-server-pid <pid>` when sampling memory under
+`--krillm-image-mode native_server` if the auto-detected `pgrep -f
+'krillm.*serve'` would also match a wrapper shell (Claude harness, tmux,
+etc.). The override gives a clean per-process number; the auto-detect
+is a few-MB shell wrapper away from clean.
 
 Useful commands:
 
