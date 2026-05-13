@@ -66,23 +66,87 @@ KRILLM_CLI_STATS_RE = re.compile(
 # The release gate reads `peak_memory_gb_median` from the text task summary for
 # both engines (see tools/release_gate.py:extract_multimodal_metrics). Neither
 # the Ollama HTTP API nor the KrillLM server reports peak memory, so we sample
-# the resident set size (RSS) of each engine's process tree from a background
-# thread while a timed request runs and record the peak. The KrillLM bridge
-# path is the one exception: mlx-vlm runs in-process and already exposes
-# `GenerationResult.peak_memory` (MLX Metal allocator peak, GB), which is a
-# cleaner number than the benchmark process's own RSS — we keep that there.
+# each engine's process-tree memory from a background thread while a timed
+# request runs and record the peak.
 #
-# RSS is reported in decimal GB (bytes / 1e9) to match mlx-vlm's basis.
+# On macOS we sample `phys_footprint` from `proc_pid_rusage(RUSAGE_INFO_V2)`
+# rather than RSS. RSS only counts pages currently resident in the process's
+# private/anonymous memory; mmap'd file-backed pages (the safetensors weights
+# KrillLM relies on) are excluded, which made the first cut of this sampler
+# report KrillLM at ~50 MB while the actual model is several GB resident.
+# `phys_footprint` is the kernel's "physical memory used by this process"
+# figure — the same number `vmmap -summary` and Activity Monitor's "Memory"
+# column report — and includes resident mmap'd pages with proper apportionment.
+# On non-Darwin platforms we fall back to RSS from `ps`.
+#
+# The KrillLM bridge path is the one exception: mlx-vlm runs in-process and
+# already exposes `GenerationResult.peak_memory` (MLX Metal allocator peak,
+# decimal GB), which is a cleaner number than the benchmark process's own
+# footprint — we keep that there.
+#
+# All values are reported in decimal GB (bytes / 1e9) to match mlx-vlm's basis.
 
 
-def _process_tree_rss_kb(root_pids: set[int]) -> int:
-    """Sum RSS (KiB) over the given PIDs and all their descendants.
+def _macos_phys_footprint_bytes(pid: int) -> Optional[int]:
+    """Return `ri_phys_footprint` from `proc_pid_rusage(RUSAGE_INFO_V2)`,
+    or None on failure / non-Darwin / no permission."""
+    fn = _MACOS_PROC_PID_RUSAGE
+    if fn is None:
+        return None
+    info = _RUsageInfoV2()
+    rc = fn(ctypes.c_int(pid), ctypes.c_int(2), ctypes.byref(info))
+    if rc != 0:
+        return None
+    return int(info.ri_phys_footprint)
 
-    Uses a single `ps` snapshot so the figure is internally consistent. Returns
-    0 if `ps` is unavailable or none of the roots are alive.
-    """
-    if not root_pids:
-        return 0
+
+if sys.platform == "darwin":
+    import ctypes
+    import ctypes.util
+
+    class _RUsageInfoV2(ctypes.Structure):
+        # Mirrors `struct rusage_info_v2` from <sys/resource.h>. Only
+        # ri_resident_size and ri_phys_footprint are read; the rest is here
+        # so the layout matches and `proc_pid_rusage` writes the right slot.
+        _fields_ = [
+            ("ri_uuid", ctypes.c_uint8 * 16),
+            ("ri_user_time", ctypes.c_uint64),
+            ("ri_system_time", ctypes.c_uint64),
+            ("ri_pkg_idle_wkups", ctypes.c_uint64),
+            ("ri_interrupt_wkups", ctypes.c_uint64),
+            ("ri_pageins", ctypes.c_uint64),
+            ("ri_wired_size", ctypes.c_uint64),
+            ("ri_resident_size", ctypes.c_uint64),
+            ("ri_phys_footprint", ctypes.c_uint64),
+            ("ri_proc_start_abstime", ctypes.c_uint64),
+            ("ri_proc_exit_abstime", ctypes.c_uint64),
+            ("ri_child_user_time", ctypes.c_uint64),
+            ("ri_child_system_time", ctypes.c_uint64),
+            ("ri_child_pkg_idle_wkups", ctypes.c_uint64),
+            ("ri_child_interrupt_wkups", ctypes.c_uint64),
+            ("ri_child_pageins", ctypes.c_uint64),
+            ("ri_child_elapsed_abstime", ctypes.c_uint64),
+            ("ri_diskio_bytesread", ctypes.c_uint64),
+            ("ri_diskio_byteswritten", ctypes.c_uint64),
+        ]
+
+    try:
+        _libsystem = ctypes.CDLL(ctypes.util.find_library("System") or "libSystem.dylib")
+        _MACOS_PROC_PID_RUSAGE = _libsystem.proc_pid_rusage
+        _MACOS_PROC_PID_RUSAGE.restype = ctypes.c_int
+        _MACOS_PROC_PID_RUSAGE.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+        _SAMPLER_BASIS = "phys_footprint_process_tree"
+    except Exception:  # pragma: no cover — extremely unusual macOS install
+        _MACOS_PROC_PID_RUSAGE = None
+        _SAMPLER_BASIS = "rss_process_tree"
+else:
+    _MACOS_PROC_PID_RUSAGE = None
+    _SAMPLER_BASIS = "rss_process_tree"
+
+
+def _ps_snapshot() -> dict[str, dict[int, Any]]:
+    """Single `ps` snapshot returning {'parent': {pid: ppid}, 'rss': {pid: kb}}."""
+    out = ""
     try:
         out = subprocess.run(
             ["ps", "-axo", "pid=,ppid=,rss="],
@@ -92,8 +156,8 @@ def _process_tree_rss_kb(root_pids: set[int]) -> int:
             timeout=5.0,
         ).stdout
     except Exception:
-        return 0
-    children: dict[int, list[int]] = {}
+        return {"parent": {}, "rss": {}}
+    parent: dict[int, int] = {}
     rss: dict[int, int] = {}
     for line in out.splitlines():
         parts = line.split()
@@ -103,33 +167,71 @@ def _process_tree_rss_kb(root_pids: set[int]) -> int:
             pid, ppid, kb = int(parts[0]), int(parts[1]), int(parts[2])
         except ValueError:
             continue
+        parent[pid] = ppid
         rss[pid] = kb
+    return {"parent": parent, "rss": rss}
+
+
+def _walk_tree(roots: set[int], parent_map: dict[int, int]) -> set[int]:
+    """All PIDs reachable from `roots` via parent links in `parent_map`."""
+    children: dict[int, list[int]] = {}
+    for pid, ppid in parent_map.items():
         children.setdefault(ppid, []).append(pid)
     seen: set[int] = set()
-    stack = list(root_pids)
-    total = 0
+    stack = list(roots)
     while stack:
         pid = stack.pop()
-        if pid in seen or pid not in rss:
+        if pid in seen or pid not in parent_map:
             continue
         seen.add(pid)
-        total += rss[pid]
         stack.extend(children.get(pid, []))
-    return total
+    return seen
 
 
-class RSSSampler:
-    """Polls process-tree RSS in a daemon thread; reports the peak in GB.
+def _process_tree_footprint_kb(root_pids: set[int]) -> int:
+    """Sum per-PID memory (KiB) over `root_pids` and all their descendants.
+
+    Uses macOS `phys_footprint` per PID where available, otherwise RSS from
+    the same `ps` snapshot. Returns 0 if no PIDs are alive.
+    """
+    if not root_pids:
+        return 0
+    snap = _ps_snapshot()
+    pids = _walk_tree(root_pids, snap["parent"])
+    if not pids:
+        return 0
+    total_bytes = 0
+    if _MACOS_PROC_PID_RUSAGE is not None:
+        for pid in pids:
+            fp = _macos_phys_footprint_bytes(pid)
+            if fp is not None:
+                total_bytes += fp
+            else:
+                # Process died between ps snapshot and rusage call, or we
+                # lack permission. Fall back to that pid's RSS for a non-zero
+                # contribution rather than dropping it silently.
+                total_bytes += snap["rss"].get(pid, 0) * 1024
+    else:
+        for pid in pids:
+            total_bytes += snap["rss"].get(pid, 0) * 1024
+    return total_bytes // 1024  # back to KiB to keep the sampler API stable
+
+
+class MemorySampler:
+    """Polls process-tree memory in a daemon thread; reports the peak in GB.
+
+    Uses macOS `phys_footprint` (which counts resident mmap'd weights, the
+    metric Activity Monitor displays) when available, otherwise RSS from `ps`.
 
     Use as a context manager around a timed region:
 
-        sampler = RSSSampler([pid])
+        sampler = MemorySampler([pid])
         with sampler:
             ...do the request...
         peak = sampler.peak_gb  # float GB, or None if sampling produced nothing
     """
 
-    basis = "rss_process_tree"
+    basis = _SAMPLER_BASIS
 
     def __init__(self, root_pids: list[int], interval_s: float = 0.05) -> None:
         self._roots = {p for p in root_pids if p}
@@ -140,16 +242,16 @@ class RSSSampler:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            kb = _process_tree_rss_kb(self._roots)
+            kb = _process_tree_footprint_kb(self._roots)
             if kb > self._peak_kb:
                 self._peak_kb = kb
             self._stop.wait(self._interval)
 
-    def __enter__(self) -> "RSSSampler":
+    def __enter__(self) -> "MemorySampler":
         if self._roots:
             # One immediate sample so even a sub-interval-length task records
             # the already-loaded model footprint.
-            self._peak_kb = _process_tree_rss_kb(self._roots)
+            self._peak_kb = _process_tree_footprint_kb(self._roots)
             self._thread = threading.Thread(target=self._loop, daemon=True)
             self._thread.start()
         return self
@@ -165,6 +267,11 @@ class RSSSampler:
         if not self._roots or self._peak_kb <= 0:
             return None
         return self._peak_kb * 1024 / 1e9
+
+
+# Back-compat alias for any external caller (and for the brief window the
+# class lived under its old name).
+RSSSampler = MemorySampler
 
 
 def _pgrep(pattern: str, full: bool) -> list[int]:
@@ -246,11 +353,11 @@ class _MemoryProbe:
     def _record(self, which: str, pids: list[int]) -> None:
         self.observed.setdefault(which, set()).update(p for p in pids if p)
 
-    def sampler_for(self, which: str) -> RSSSampler:
+    def sampler_for(self, which: str) -> MemorySampler:
         """Sampler over the resolved process tree for engine `which`
         ('krillm' for a `krillm serve` process, or 'ollama')."""
         if not self.enabled:
-            return RSSSampler([], self.interval_s)
+            return MemorySampler([], self.interval_s)
         if which == "ollama":
             pids = resolve_ollama_pids(self.ollama_override)
             if not pids:
@@ -267,23 +374,37 @@ class _MemoryProbe:
                     "memory will be unavailable (pass --krillm-server-pid to override)"
                 )
             self._record("krillm", pids)
-        return RSSSampler(pids, self.interval_s)
+        return MemorySampler(pids, self.interval_s)
 
-    def sampler_for_pids(self, pids: list[int]) -> RSSSampler:
+    def sampler_for_pids(self, pids: list[int]) -> MemorySampler:
         """Sampler over an explicit PID list (used for the krillm CLI
         subprocess, whose PID we already know)."""
         if not self.enabled:
-            return RSSSampler([], self.interval_s)
+            return MemorySampler([], self.interval_s)
         self._record("krillm", pids)
-        return RSSSampler(pids, self.interval_s)
+        return MemorySampler(pids, self.interval_s)
 
     def report_block(self) -> dict[str, Any]:
+        if _MACOS_PROC_PID_RUSAGE is not None:
+            tree_basis_doc = (
+                "phys_footprint of the engine process tree from "
+                "proc_pid_rusage(RUSAGE_INFO_V2), decimal GB; matches "
+                "Activity Monitor's Memory column and includes resident "
+                "mmap'd weights"
+            )
+            tree_basis_key = "phys_footprint_process_tree"
+        else:
+            tree_basis_doc = (
+                "resident set size of the engine process tree from `ps`, "
+                "decimal GB"
+            )
+            tree_basis_key = "rss_process_tree"
         return {
             "requested": "auto" if self.enabled else "off",
             "enabled": self.enabled,
             "interval_ms": round(self.interval_s * 1000),
             "basis": {
-                "rss": "resident set size of the engine process tree, decimal GB",
+                tree_basis_key: tree_basis_doc,
                 "mlx_metal": "mlx-vlm GenerationResult.peak_memory (MLX Metal allocator peak, decimal GB)",
             },
             "krillm_pids_sampled": sorted(self.observed.get("krillm", set())),
