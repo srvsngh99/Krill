@@ -172,3 +172,16 @@ shortlist when scoping a new follow-up.
   regression detection, missing-hard-metric → fail, and `kv_cache_dtype`
   surfacing. Run with `python3 -m unittest tools.test_release_gate`.
 
+### PR #13 (`feat: peak-memory sampling + release_candidate memory hard-gate`)
+
+- `tools/test_memory_sampling.py` — 14 Python unit tests covering the RSS
+  sampler against a live subprocess, process-tree summing, `pgrep` parsing
+  and self-exclusion, override handling, daemon-thread join on `__exit__`,
+  and the `_MemoryProbe` report-block shape. Run with
+  `python3 -m unittest tools.test_memory_sampling`.
+- `tools/test_release_gate.py` — extended with 6 new tests (now 13 total)
+  for `memory_ratio` semantics: recorded-when-present, advisory under
+  quant-class mismatch, hard pass/fail under quant-class equality, strict
+  keeps memory hard regardless, and exclusion from the geometric-mean
+  speedup headline.
+

@@ -21,6 +21,7 @@ import statistics
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -29,7 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from PIL import Image, ImageDraw
+# Pillow is only needed when generating/inspecting image fixtures; import it
+# lazily so the rest of the module (e.g. the memory sampler) works without it.
 
 try:
     from mlx_vlm import generate, load  # type: ignore
@@ -55,6 +57,242 @@ KRILLM_CLI_STATS_RE = re.compile(
     r"TTFT:\s+(?P<ttft_ms>[0-9.]+)ms,\s+"
     r"total:\s+(?P<total_s>[0-9.]+)s"
 )
+
+
+# ---------------------------------------------------------------------------
+# Peak-memory sampling
+# ---------------------------------------------------------------------------
+#
+# The release gate reads `peak_memory_gb_median` from the text task summary for
+# both engines (see tools/release_gate.py:extract_multimodal_metrics). Neither
+# the Ollama HTTP API nor the KrillLM server reports peak memory, so we sample
+# the resident set size (RSS) of each engine's process tree from a background
+# thread while a timed request runs and record the peak. The KrillLM bridge
+# path is the one exception: mlx-vlm runs in-process and already exposes
+# `GenerationResult.peak_memory` (MLX Metal allocator peak, GB), which is a
+# cleaner number than the benchmark process's own RSS — we keep that there.
+#
+# RSS is reported in decimal GB (bytes / 1e9) to match mlx-vlm's basis.
+
+
+def _process_tree_rss_kb(root_pids: set[int]) -> int:
+    """Sum RSS (KiB) over the given PIDs and all their descendants.
+
+    Uses a single `ps` snapshot so the figure is internally consistent. Returns
+    0 if `ps` is unavailable or none of the roots are alive.
+    """
+    if not root_pids:
+        return 0
+    try:
+        out = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,rss="],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5.0,
+        ).stdout
+    except Exception:
+        return 0
+    children: dict[int, list[int]] = {}
+    rss: dict[int, int] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        try:
+            pid, ppid, kb = int(parts[0]), int(parts[1]), int(parts[2])
+        except ValueError:
+            continue
+        rss[pid] = kb
+        children.setdefault(ppid, []).append(pid)
+    seen: set[int] = set()
+    stack = list(root_pids)
+    total = 0
+    while stack:
+        pid = stack.pop()
+        if pid in seen or pid not in rss:
+            continue
+        seen.add(pid)
+        total += rss[pid]
+        stack.extend(children.get(pid, []))
+    return total
+
+
+class RSSSampler:
+    """Polls process-tree RSS in a daemon thread; reports the peak in GB.
+
+    Use as a context manager around a timed region:
+
+        sampler = RSSSampler([pid])
+        with sampler:
+            ...do the request...
+        peak = sampler.peak_gb  # float GB, or None if sampling produced nothing
+    """
+
+    basis = "rss_process_tree"
+
+    def __init__(self, root_pids: list[int], interval_s: float = 0.05) -> None:
+        self._roots = {p for p in root_pids if p}
+        self._interval = max(0.01, interval_s)
+        self._peak_kb = 0
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            kb = _process_tree_rss_kb(self._roots)
+            if kb > self._peak_kb:
+                self._peak_kb = kb
+            self._stop.wait(self._interval)
+
+    def __enter__(self) -> "RSSSampler":
+        if self._roots:
+            # One immediate sample so even a sub-interval-length task records
+            # the already-loaded model footprint.
+            self._peak_kb = _process_tree_rss_kb(self._roots)
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    @property
+    def peak_gb(self) -> Optional[float]:
+        if not self._roots or self._peak_kb <= 0:
+            return None
+        return self._peak_kb * 1024 / 1e9
+
+
+def _pgrep(pattern: str, full: bool) -> list[int]:
+    """Return PIDs matching `pattern` (a process name, or full command line if
+    `full`), excluding this process. Empty on no match or error."""
+    cmd = ["pgrep"]
+    if full:
+        cmd.append("-f")
+    cmd.append(pattern)
+    try:
+        completed = subprocess.run(
+            cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5.0
+        )
+    except Exception:
+        return []
+    if completed.returncode > 1:  # 0 = matched, 1 = no match, >1 = error
+        return []
+    pids: list[int] = []
+    for tok in completed.stdout.split():
+        try:
+            pid = int(tok)
+        except ValueError:
+            continue
+        if pid != os.getpid():
+            pids.append(pid)
+    return pids
+
+
+def _parse_pid_list(value: Optional[str]) -> list[int]:
+    if not value:
+        return []
+    out: list[int] = []
+    for tok in value.replace(",", " ").split():
+        try:
+            out.append(int(tok))
+        except ValueError:
+            continue
+    return out
+
+
+def resolve_ollama_pids(override: Optional[str]) -> list[int]:
+    """PIDs of the Ollama process family (the `ollama serve` daemon plus the
+    `ollama runner` model subprocess, which shares the binary's name)."""
+    if override:
+        return sorted(set(_parse_pid_list(override)))
+    return sorted(set(_pgrep("ollama", full=False)))
+
+
+def resolve_krillm_server_pids(override: Optional[str]) -> list[int]:
+    """PID(s) of a running `krillm serve` process."""
+    if override:
+        return sorted(set(_parse_pid_list(override)))
+    return sorted(set(_pgrep("krillm.*serve", full=True)))
+
+
+class _MemoryProbe:
+    """Process-RSS sampling configuration plus a record of which PIDs were
+    actually sampled, so the report can describe the measurement."""
+
+    def __init__(self) -> None:
+        self.enabled = False
+        self.interval_s = 0.05
+        self.ollama_override: Optional[str] = None
+        self.krillm_server_override: Optional[str] = None
+        self.observed: dict[str, set[int]] = {"krillm": set(), "ollama": set()}
+        self.notes: list[str] = []
+
+    def configure(self, args: argparse.Namespace) -> None:
+        self.enabled = args.sample_memory == "auto"
+        self.interval_s = max(0.01, args.memory_sample_interval_ms / 1000.0)
+        self.ollama_override = args.ollama_pids
+        self.krillm_server_override = args.krillm_server_pid
+
+    def _note_once(self, msg: str) -> None:
+        if msg not in self.notes:
+            self.notes.append(msg)
+            print(f"WARN: {msg}", file=sys.stderr)
+
+    def _record(self, which: str, pids: list[int]) -> None:
+        self.observed.setdefault(which, set()).update(p for p in pids if p)
+
+    def sampler_for(self, which: str) -> RSSSampler:
+        """Sampler over the resolved process tree for engine `which`
+        ('krillm' for a `krillm serve` process, or 'ollama')."""
+        if not self.enabled:
+            return RSSSampler([], self.interval_s)
+        if which == "ollama":
+            pids = resolve_ollama_pids(self.ollama_override)
+            if not pids:
+                self._note_once(
+                    "could not resolve any Ollama process PIDs; ollama peak "
+                    "memory will be unavailable (pass --ollama-pids to override)"
+                )
+            self._record("ollama", pids)
+        else:
+            pids = resolve_krillm_server_pids(self.krillm_server_override)
+            if not pids:
+                self._note_once(
+                    "could not resolve a `krillm serve` PID; krillm server peak "
+                    "memory will be unavailable (pass --krillm-server-pid to override)"
+                )
+            self._record("krillm", pids)
+        return RSSSampler(pids, self.interval_s)
+
+    def sampler_for_pids(self, pids: list[int]) -> RSSSampler:
+        """Sampler over an explicit PID list (used for the krillm CLI
+        subprocess, whose PID we already know)."""
+        if not self.enabled:
+            return RSSSampler([], self.interval_s)
+        self._record("krillm", pids)
+        return RSSSampler(pids, self.interval_s)
+
+    def report_block(self) -> dict[str, Any]:
+        return {
+            "requested": "auto" if self.enabled else "off",
+            "enabled": self.enabled,
+            "interval_ms": round(self.interval_s * 1000),
+            "basis": {
+                "rss": "resident set size of the engine process tree, decimal GB",
+                "mlx_metal": "mlx-vlm GenerationResult.peak_memory (MLX Metal allocator peak, decimal GB)",
+            },
+            "krillm_pids_sampled": sorted(self.observed.get("krillm", set())),
+            "ollama_pids_sampled": sorted(self.observed.get("ollama", set())),
+            "notes": list(self.notes),
+        }
+
+
+_MEMORY = _MemoryProbe()
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,6 +342,39 @@ def parse_args() -> argparse.Namespace:
             "and cache_mode_source is recorded as 'explicit'."
         ),
     )
+    parser.add_argument(
+        "--sample-memory",
+        choices=["auto", "off"],
+        default="auto",
+        help=(
+            "Sample peak resident-set memory of each engine's process tree "
+            "during timed requests (so the release gate's memory_ratio "
+            "populates). 'auto' (default) samples when PIDs can be resolved; "
+            "'off' disables it. The KrillLM bridge path uses mlx-vlm's "
+            "GenerationResult.peak_memory instead of RSS."
+        ),
+    )
+    parser.add_argument(
+        "--memory-sample-interval-ms",
+        type=float,
+        default=50.0,
+        help="Polling interval for the RSS sampler thread (default 50 ms).",
+    )
+    parser.add_argument(
+        "--ollama-pids",
+        help=(
+            "Comma/space-separated PIDs of the Ollama process family to sample "
+            "for peak memory. Default: auto-detect via `pgrep ollama`."
+        ),
+    )
+    parser.add_argument(
+        "--krillm-server-pid",
+        help=(
+            "PID(s) of the `krillm serve` process to sample for peak memory "
+            "(only used with --krillm-url / native_server). Default: auto-detect "
+            "via `pgrep -f 'krillm.*serve'`."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -131,6 +402,8 @@ def ensure_assets(output_path: str, image: Optional[str], audio: Optional[str]) 
 
     image_path = Path(image) if image else asset_dir / "gemma4-red-box.png"
     if not image:
+        from PIL import Image, ImageDraw
+
         img = Image.new("RGB", (256, 256), "white")
         draw = ImageDraw.Draw(img)
         draw.rectangle((45, 70, 211, 190), fill=(220, 40, 40))
@@ -281,13 +554,17 @@ def run_krill_task(
         return None
 
     text = result.text if hasattr(result, "text") else str(result)
+    # mlx-vlm runs in-process here, so its own MLX Metal allocator peak is a
+    # cleaner figure than the benchmark process's RSS. 0.0 means "not reported".
+    peak_memory_gb = getattr(result, "peak_memory", None) or None
     return {
         "wall_time_s": wall_s,
         "prompt_tokens": getattr(result, "prompt_tokens", None),
         "generated_tokens": getattr(result, "generation_tokens", None),
         "prefill_tokens_per_second": getattr(result, "prompt_tps", None),
         "decode_tokens_per_second": getattr(result, "generation_tps", None),
-        "peak_memory_gb": getattr(result, "peak_memory", None),
+        "peak_memory_gb": peak_memory_gb,
+        "peak_memory_basis": "mlx_metal" if peak_memory_gb is not None else None,
         "output_sha256": sha256_text(text),
         "output_preview": text[:200],
     }
@@ -335,21 +612,23 @@ def run_krill_server_task(
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
+    sampler = _MEMORY.sampler_for("krillm")
     start = time.perf_counter()
     first_token_s: Optional[float] = None
     chunks: list[str] = []
     final: Optional[dict[str, Any]] = None
-    with urllib.request.urlopen(request, timeout=args.timeout) as response:
-        for raw_line in response:
-            if not raw_line.strip():
-                continue
-            event = json.loads(raw_line)
-            content = event.get("response") or ""
-            if content and first_token_s is None:
-                first_token_s = time.perf_counter() - start
-            chunks.append(content)
-            if event.get("done"):
-                final = event
+    with sampler:
+        with urllib.request.urlopen(request, timeout=args.timeout) as response:
+            for raw_line in response:
+                if not raw_line.strip():
+                    continue
+                event = json.loads(raw_line)
+                content = event.get("response") or ""
+                if content and first_token_s is None:
+                    first_token_s = time.perf_counter() - start
+                chunks.append(content)
+                if event.get("done"):
+                    final = event
     wall_s = time.perf_counter() - start
     if final is None:
         raise RuntimeError("KrillLM server stream ended without final stats")
@@ -361,6 +640,7 @@ def run_krill_server_task(
     prompt_tokens = int(final.get("prompt_eval_count") or 0)
     generated_tokens = int(final.get("eval_count") or 0)
     text = "".join(chunks)
+    peak_memory_gb = sampler.peak_gb
     return {
         "wall_time_s": wall_s,
         "total_s": int(final.get("total_duration") or 0) / 1_000_000_000,
@@ -369,6 +649,8 @@ def run_krill_server_task(
         "generated_tokens": generated_tokens,
         "prefill_tokens_per_second": prompt_tokens / prompt_eval_s if prompt_eval_s > 0 else None,
         "decode_tokens_per_second": generated_tokens / eval_s if eval_s > 0 else None,
+        "peak_memory_gb": peak_memory_gb,
+        "peak_memory_basis": sampler.basis if peak_memory_gb is not None else None,
         "output_sha256": sha256_text(text),
         "output_preview": text[:200],
         "mode": "server",
@@ -405,17 +687,26 @@ def run_krill_native_cli_task(
         command += ["--image", task["image"]]
 
     start = time.perf_counter()
-    completed = run_cmd(command, timeout=args.timeout)
+    proc = subprocess.Popen(
+        command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    sampler = _MEMORY.sampler_for_pids([proc.pid])
+    try:
+        with sampler:
+            stdout, stderr = proc.communicate(timeout=args.timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
     wall_s = time.perf_counter() - start
-    if completed.returncode != 0:
+    if proc.returncode != 0:
         raise RuntimeError(
-            f"krillm CLI failed with exit {completed.returncode}: "
-            f"{completed.stderr or completed.stdout}"
+            f"krillm CLI failed with exit {proc.returncode}: "
+            f"{stderr or stdout}"
         )
     if not measured:
         return None
 
-    stdout = completed.stdout
     match = KRILLM_CLI_STATS_RE.search(stdout)
     if not match:
         raise RuntimeError("krillm CLI output did not contain a parseable stats line")
@@ -425,6 +716,7 @@ def run_krill_native_cli_task(
         if line and not line.startswith("Loading model") and not line.startswith("Ready (")
     ]
     generated_text = "\n".join(generated_lines)
+    peak_memory_gb = sampler.peak_gb
     return {
         "wall_time_s": wall_s,
         "total_s": float(match.group("total_s")),
@@ -433,6 +725,8 @@ def run_krill_native_cli_task(
         "generated_tokens": int(match.group("generated_tokens")),
         "prefill_tokens_per_second": float(match.group("prefill_tps")),
         "decode_tokens_per_second": float(match.group("decode_tps")),
+        "peak_memory_gb": peak_memory_gb,
+        "peak_memory_basis": sampler.basis if peak_memory_gb is not None else None,
         "output_sha256": sha256_text(generated_text),
         "output_preview": generated_text[:200],
         "mode": "native_cli",
@@ -473,31 +767,33 @@ def run_krill_native_server_task(
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
+    sampler = _MEMORY.sampler_for("krillm")
     start = time.perf_counter()
     first_token_s: Optional[float] = None
     chunks: list[str] = []
     final: Optional[dict[str, Any]] = None
-    try:
-        response_ctx = urllib.request.urlopen(request, timeout=args.timeout)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 400:
-            raise RuntimeError(
-                "KrillLM server returned 400 for multimodal request — "
-                "server multimodal support has likely not landed yet "
-                f"(url={url}): {exc.read().decode('utf-8', errors='replace')}"
-            ) from exc
-        raise
-    with response_ctx as response:
-        for raw_line in response:
-            if not raw_line.strip():
-                continue
-            event = json.loads(raw_line)
-            content = event.get("response") or ""
-            if content and first_token_s is None:
-                first_token_s = time.perf_counter() - start
-            chunks.append(content)
-            if event.get("done"):
-                final = event
+    with sampler:
+        try:
+            response_ctx = urllib.request.urlopen(request, timeout=args.timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 400:
+                raise RuntimeError(
+                    "KrillLM server returned 400 for multimodal request — "
+                    "server multimodal support has likely not landed yet "
+                    f"(url={url}): {exc.read().decode('utf-8', errors='replace')}"
+                ) from exc
+            raise
+        with response_ctx as response:
+            for raw_line in response:
+                if not raw_line.strip():
+                    continue
+                event = json.loads(raw_line)
+                content = event.get("response") or ""
+                if content and first_token_s is None:
+                    first_token_s = time.perf_counter() - start
+                chunks.append(content)
+                if event.get("done"):
+                    final = event
     wall_s = time.perf_counter() - start
     if final is None:
         raise RuntimeError("KrillLM server stream ended without final stats")
@@ -509,6 +805,7 @@ def run_krill_native_server_task(
     prompt_tokens = int(final.get("prompt_eval_count") or 0)
     generated_tokens = int(final.get("eval_count") or 0)
     text = "".join(chunks)
+    peak_memory_gb = sampler.peak_gb
     return {
         "wall_time_s": wall_s,
         "total_s": int(final.get("total_duration") or 0) / 1_000_000_000,
@@ -517,6 +814,8 @@ def run_krill_native_server_task(
         "generated_tokens": generated_tokens,
         "prefill_tokens_per_second": prompt_tokens / prompt_eval_s if prompt_eval_s > 0 else None,
         "decode_tokens_per_second": generated_tokens / eval_s if eval_s > 0 else None,
+        "peak_memory_gb": peak_memory_gb,
+        "peak_memory_basis": sampler.basis if peak_memory_gb is not None else None,
         "output_sha256": sha256_text(text),
         "output_preview": text[:200],
         "mode": "native_server",
@@ -549,21 +848,23 @@ def run_ollama_task(args: argparse.Namespace, task: dict[str, Any], measured: bo
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
+    sampler = _MEMORY.sampler_for("ollama")
     start = time.perf_counter()
     first_token_s: Optional[float] = None
     chunks: list[str] = []
     final: Optional[dict[str, Any]] = None
-    with urllib.request.urlopen(request, timeout=args.timeout) as response:
-        for raw_line in response:
-            if not raw_line.strip():
-                continue
-            event = json.loads(raw_line)
-            content = ((event.get("message") or {}).get("content")) or ""
-            if content and first_token_s is None:
-                first_token_s = time.perf_counter() - start
-            chunks.append(content)
-            if event.get("done"):
-                final = event
+    with sampler:
+        with urllib.request.urlopen(request, timeout=args.timeout) as response:
+            for raw_line in response:
+                if not raw_line.strip():
+                    continue
+                event = json.loads(raw_line)
+                content = ((event.get("message") or {}).get("content")) or ""
+                if content and first_token_s is None:
+                    first_token_s = time.perf_counter() - start
+                chunks.append(content)
+                if event.get("done"):
+                    final = event
     wall_s = time.perf_counter() - start
     if final is None:
         raise RuntimeError("Ollama stream ended without final stats")
@@ -575,6 +876,7 @@ def run_ollama_task(args: argparse.Namespace, task: dict[str, Any], measured: bo
     prompt_tokens = int(final.get("prompt_eval_count") or 0)
     generated_tokens = int(final.get("eval_count") or 0)
     text = "".join(chunks)
+    peak_memory_gb = sampler.peak_gb
     return {
         "wall_time_s": wall_s,
         "total_s": int(final.get("total_duration") or 0) / 1_000_000_000,
@@ -585,6 +887,8 @@ def run_ollama_task(args: argparse.Namespace, task: dict[str, Any], measured: bo
         "prompt_eval_ms": prompt_eval_s * 1000,
         "prefill_tokens_per_second": prompt_tokens / prompt_eval_s if prompt_eval_s > 0 else None,
         "decode_tokens_per_second": generated_tokens / eval_s if eval_s > 0 else None,
+        "peak_memory_gb": peak_memory_gb,
+        "peak_memory_basis": sampler.basis if peak_memory_gb is not None else None,
         "output_sha256": sha256_text(text),
         "output_preview": text[:200],
     }
@@ -677,6 +981,8 @@ def media_signature(path: Optional[str]) -> Optional[dict[str, Any]]:
     info: dict[str, Any] = {"path": str(p), "size_bytes": p.stat().st_size}
     if suffix in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"):
         try:
+            from PIL import Image
+
             with Image.open(p) as img:
                 info["kind"] = "image"
                 info["width"] = img.width
@@ -804,6 +1110,13 @@ def main() -> int:
     args = parse_args()
     if args.runs < 1 or args.warmup < 0:
         raise SystemExit("--runs must be >= 1 and --warmup must be >= 0")
+
+    _MEMORY.configure(args)
+    if _MEMORY.enabled:
+        print(
+            f"Peak-memory sampling: on ({_MEMORY.interval_s * 1000:.0f} ms RSS poll); "
+            "pass --sample-memory off to disable."
+        )
 
     # Validate the krillm CLI binary up-front when any task may need it.
     if args.engine in ("both", "krillm") and args.krillm_image_mode == "native_cli":
@@ -992,6 +1305,7 @@ def main() -> int:
         },
         "krillm_model_load_s": krill_load_s,
         "krillm_image_mode": args.krillm_image_mode,
+        "memory_sampling": _MEMORY.report_block(),
         "results": results,
     }
     if args.krillm_image_mode == "native_cli":
