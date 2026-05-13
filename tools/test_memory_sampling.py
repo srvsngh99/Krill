@@ -51,37 +51,44 @@ class PidParsingTests(unittest.TestCase):
         self.assertEqual(bm.resolve_krillm_server_pids("7"), [7])
 
 
-class ProcessTreeRssTests(unittest.TestCase):
+class ProcessTreeFootprintTests(unittest.TestCase):
     def test_empty_roots_returns_zero(self):
-        self.assertEqual(bm._process_tree_rss_kb(set()), 0)
+        self.assertEqual(bm._process_tree_footprint_kb(set()), 0)
 
     def test_dead_pid_returns_zero(self):
         # Pick a PID extremely unlikely to be live. 0 (kernel) is not in `ps`
         # output for normal users; a nonexistent high pid likewise.
-        self.assertEqual(bm._process_tree_rss_kb({999999}), 0)
+        self.assertEqual(bm._process_tree_footprint_kb({999999}), 0)
 
-    def test_self_pid_has_nonzero_rss(self):
-        # Our own process is alive and using memory; the RSS must be > 0.
-        kb = bm._process_tree_rss_kb({os.getpid()})
+    def test_self_pid_has_nonzero_footprint(self):
+        # Our own process is alive and using memory; the footprint must be > 0.
+        kb = bm._process_tree_footprint_kb({os.getpid()})
         self.assertGreater(kb, 0)
 
+    def test_walk_tree_includes_descendants(self):
+        # A child process must be included in the tree walk from its parent.
+        parent = {1: 0, 2: 1, 3: 2, 4: 1, 99: 0}
+        self.assertEqual(bm._walk_tree({1}, parent), {1, 2, 3, 4})
+        self.assertEqual(bm._walk_tree({2}, parent), {2, 3})
+        self.assertEqual(bm._walk_tree({99}, parent), {99})
 
-class RSSSamplerTests(unittest.TestCase):
+
+class MemorySamplerTests(unittest.TestCase):
     def test_sampler_with_no_pids_returns_none(self):
-        sampler = bm.RSSSampler([], interval_s=0.02)
+        sampler = bm.MemorySampler([], interval_s=0.02)
         with sampler:
             time.sleep(0.05)
         self.assertIsNone(sampler.peak_gb)
 
     def test_sampler_captures_subprocess_peak(self):
         # Allocate ~80 MB in a child process and hold it briefly. The sampler
-        # must observe a peak RSS comfortably above zero.
+        # must observe a peak comfortably above zero.
         proc = subprocess.Popen([
             sys.executable, "-c",
             "x = bytearray(80 * 1024 * 1024); import time; time.sleep(0.5)",
         ])
         try:
-            sampler = bm.RSSSampler([proc.pid], interval_s=0.02)
+            sampler = bm.MemorySampler([proc.pid], interval_s=0.02)
             with sampler:
                 proc.wait(timeout=5.0)
         finally:
@@ -92,19 +99,36 @@ class RSSSamplerTests(unittest.TestCase):
         # 80 MB in decimal GB ≈ 0.080; allow generous slack for interpreter
         # overhead and rounding.
         self.assertGreater(sampler.peak_gb, 0.04)
-        self.assertEqual(sampler.basis, "rss_process_tree")
+        # On macOS we sample phys_footprint; elsewhere we fall back to RSS.
+        # The class exposes whichever it actually used so reports are honest.
+        self.assertIn(
+            sampler.basis,
+            ("phys_footprint_process_tree", "rss_process_tree"),
+        )
+
+    def test_sampler_basis_tracks_platform(self):
+        # The class-level constant is what the report's memory_sampling.basis
+        # block keys on, so it must reflect the platform we're actually on.
+        if sys.platform == "darwin" and bm._MACOS_PROC_PID_RUSAGE is not None:
+            self.assertEqual(bm.MemorySampler.basis, "phys_footprint_process_tree")
+        else:
+            self.assertEqual(bm.MemorySampler.basis, "rss_process_tree")
 
     def test_sampler_thread_stops_on_exit(self):
         # The daemon thread must be joined when the context manager exits.
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.2)"])
         try:
-            sampler = bm.RSSSampler([proc.pid], interval_s=0.02)
+            sampler = bm.MemorySampler([proc.pid], interval_s=0.02)
             with sampler:
                 proc.wait(timeout=2.0)
             self.assertIsNone(sampler._thread, "sampler thread must be cleared on __exit__")
         finally:
             if proc.poll() is None:
                 proc.kill()
+
+    def test_rsssampler_back_compat_alias(self):
+        # The old name (used by external callers if any) must still resolve.
+        self.assertIs(bm.RSSSampler, bm.MemorySampler)
 
 
 class MemoryProbeTests(unittest.TestCase):
@@ -154,7 +178,9 @@ class MemoryProbeTests(unittest.TestCase):
         self.assertEqual(block["requested"], "auto")
         self.assertTrue(block["enabled"])
         self.assertEqual(block["interval_ms"], 80)
-        self.assertIn("rss", block["basis"])
+        # The basis dict documents which per-tree metric was actually used
+        # (phys_footprint on macOS, RSS elsewhere) plus the bridge-path basis.
+        self.assertIn(bm.MemorySampler.basis, block["basis"])
         self.assertIn("mlx_metal", block["basis"])
         self.assertEqual(block["ollama_pids_sampled"], [42])
         self.assertEqual(block["krillm_pids_sampled"], [])
