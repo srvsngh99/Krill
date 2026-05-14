@@ -2,9 +2,9 @@
 
 Local handoff for the next agent/session.
 
-Last updated: 2026-05-13 (PR #13 in progress on `feat/peak-memory-sampling`)
+Last updated: 2026-05-13 (PR #14 in progress on `feat/peak-memory-sampling`)
 Base branch: `main`
-Base commit: `2f3386a` (merged PR #12); PR #13 sits on top
+Base commit: `2f3386a` (merged PR #12); PR #14 sits on top
 Machine target: Apple Silicon M4 Pro, 24 GB RAM
 
 ## Current Position
@@ -16,7 +16,7 @@ audio out of `out_of_scope` and prefill TPS out of advisory.
 
 ### What landed since PR #9
 
-- **PR #13 (`feat: peak-memory sampling + release_candidate memory hard-gate`,
+- **PR #14 (`feat: peak-memory sampling + release_candidate memory hard-gate`,
   in progress on `feat/peak-memory-sampling`).**
   `gemma4_multimodal_benchmark.py` samples each engine's process-tree
   memory from a daemon thread (50 ms poll). On macOS the per-PID number
@@ -76,7 +76,7 @@ live int8 KV parity             -> passed
 live int8 + prefix cache replay -> passed
 live image-conditioning regr.   -> passed
 python3 -m unittest tools.test_release_gate    -> 13 tests pass (was 7)
-python3 -m unittest tools.test_memory_sampling -> 14 tests pass (new)
+python3 -m unittest tools.test_memory_sampling -> 17 tests pass (new)
 ```
 
 ### Current gate verdict (`.build/benchmarks/v5-mm.json`, refreshed 2026-05-13)
@@ -136,10 +136,10 @@ Do not tag a production release until either:
 
 ## Goal For The Next PR
 
-Item 1 ("wire peak-memory sampling") is in flight on PR #13 — the harness
+Item 1 ("wire peak-memory sampling") is in flight on PR #14 — the harness
 records peak RSS/MLX-Metal peak per run and the gate hard-gates
 `memory_ratio` under `release_candidate` (with the documented
-quant-class-mismatch auto-downgrade). Once PR #13 merges, pick **one** of
+quant-class-mismatch auto-downgrade). Once PR #14 merges, pick **one** of
 the remaining Workstreams (1, 2, 3) below and ship it. Recommended order
 by leverage and scope:
 
@@ -297,7 +297,7 @@ Done:
   Audio metrics are out_of_scope until Workstream 1 lands.
 - Missing hard metrics fail the gate; we cannot claim a metric passes
   without measuring it.
-- `memory_ratio` is **hard** under `release_candidate` (PR #13). It
+- `memory_ratio` is **hard** under `release_candidate` (PR #14). It
   auto-downgrades to advisory whenever quantization classes differ
   (KrillLM bf16 vs Ollama Q4_K_M today), via
   `release_gate.py:resolve_metric_kinds`; the downgrade is recorded in

@@ -172,16 +172,24 @@ shortlist when scoping a new follow-up.
   regression detection, missing-hard-metric → fail, and `kv_cache_dtype`
   surfacing. Run with `python3 -m unittest tools.test_release_gate`.
 
-### PR #13 (`feat: peak-memory sampling + release_candidate memory hard-gate`)
+### PR #14 (`feat: peak-memory sampling + release_candidate memory hard-gate`)
 
-- `tools/test_memory_sampling.py` — 14 Python unit tests covering the RSS
-  sampler against a live subprocess, process-tree summing, `pgrep` parsing
-  and self-exclusion, override handling, daemon-thread join on `__exit__`,
-  and the `_MemoryProbe` report-block shape. Run with
-  `python3 -m unittest tools.test_memory_sampling`.
+- `tools/test_memory_sampling.py` — 17 Python unit tests covering the
+  cross-platform memory sampler against a live subprocess
+  (`phys_footprint` from `proc_pid_rusage` on macOS, RSS from `ps`
+  elsewhere), process-tree topology walking, per-PID footprint summing,
+  `pgrep` parsing and self-exclusion, override handling, daemon-thread
+  join on `__exit__`, the `_MemoryProbe` report-block shape, the
+  platform-conditional basis, and the `RSSSampler → MemorySampler`
+  back-compat alias. Run with `python3 -m unittest tools.test_memory_sampling`.
 - `tools/test_release_gate.py` — extended with 6 new tests (now 13 total)
   for `memory_ratio` semantics: recorded-when-present, advisory under
   quant-class mismatch, hard pass/fail under quant-class equality, strict
   keeps memory hard regardless, and exclusion from the geometric-mean
   speedup headline.
+- `.github/workflows/tools-tests.yml` — minimal CI matrix (ubuntu-latest +
+  macos-latest, Python 3.13) that runs the two suites above on every PR
+  that touches `tools/**`. The macOS leg exercises the `phys_footprint`
+  sampler path; the Linux leg exercises the `ps rss` fallback. Swift
+  `make test` stays local-only (Apple Silicon required for mlx-swift).
 
