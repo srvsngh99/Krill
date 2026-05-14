@@ -228,7 +228,7 @@ table. Promoting back toward strict requires:
   porting Gemma 4's Conformer audio encoder and audio token expansion
   into native Swift+MLX. Multi-week effort.
 - **`memory_ratio` 1.1447x** — now hard under `release_candidate` and
-  failing by ~14% (PR #13). The benchmark samples each engine's
+  failing by ~14% (PR #14). The benchmark samples each engine's
   `phys_footprint` (macOS) or RSS (other platforms) over the full
   process tree, and the bridge path uses mlx-vlm's MLX Metal allocator
   peak. The canonical Gemma 4 e2b comparison is class-equal (KrillLM
@@ -387,7 +387,7 @@ release_candidate --allow-dtype-mismatch -> exit 0
    skip:     audio_wall, audio_prefill
 ```
 
-### 4.3 PR #13 — `feat: peak-memory sampling + release_candidate memory hard-gate`
+### 4.3 PR #14 — `feat: peak-memory sampling + release_candidate memory hard-gate`
 
 Branch `feat/peak-memory-sampling`. Closes the PR #12 contract
 "`memory_ratio` is advisory until the benchmark records peak memory"; see

@@ -1,0 +1,47 @@
+name: tools-tests
+
+# Light-weight CI for the Python helpers under tools/. Runs the release-gate
+# and peak-memory-sampling unit tests on Linux and macOS so PRs that touch
+# tools/ get a check signal without depending on Apple Silicon runners or the
+# full mlx-swift build.
+
+on:
+  pull_request:
+    paths:
+      - 'tools/**'
+      - '.github/workflows/tools-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/**'
+      - '.github/workflows/tools-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  python-tools:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Show Python and platform info
+        run: |
+          python3 --version
+          python3 -c "import sys; print('platform:', sys.platform)"
+
+      - name: Compile-check tools/ Python
+        run: |
+          python3 -m compileall -q tools/release_gate.py tools/test_release_gate.py
+          python3 -m compileall -q tools/gemma4_multimodal_benchmark.py tools/test_memory_sampling.py
+
+      - name: Run release-gate + peak-memory-sampling unit tests
+        run: |
+          python3 -m unittest tools.test_release_gate tools.test_memory_sampling -v
