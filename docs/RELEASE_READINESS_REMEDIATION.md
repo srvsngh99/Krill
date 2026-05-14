@@ -227,10 +227,17 @@ table. Promoting back toward strict requires:
   bridge's generate cost vs Ollama's native path. Closing it requires
   porting Gemma 4's Conformer audio encoder and audio token expansion
   into native Swift+MLX. Multi-week effort.
-- **`memory_ratio` N/A** — advisory under `release_candidate` because
-  `gemma4_multimodal_benchmark.py` does not yet emit
-  `peak_memory_gb_median`. Re-promote to hard once the benchmark records
-  peak memory for both engines.
+- **`memory_ratio` 1.1447x** — now hard under `release_candidate` and
+  failing by ~14% (PR #14). The benchmark samples each engine's
+  `phys_footprint` (macOS) or RSS (other platforms) over the full
+  process tree, and the bridge path uses mlx-vlm's MLX Metal allocator
+  peak. The canonical Gemma 4 e2b comparison is class-equal (KrillLM
+  affine 4-bit MLX vs Ollama Q4_K_M GGUF, both `4-bit`), so the
+  cross-quantization auto-downgrade does *not* apply. KrillLM sits at
+  ~9.6 GB phys_footprint vs Ollama's ~8.4 GB on the text task. Closing
+  the gap is a Workstream 3 follow-up: investigate KV cache sizing,
+  buffer reuse, and whether mlx-swift is materialising any working
+  tensors more eagerly than necessary.
 
 Required outcome before release tag:
 
@@ -379,3 +386,100 @@ release_candidate --allow-dtype-mismatch -> exit 0
    advisory: text_prefill WARN, image_prefill WARN, memory N/A
    skip:     audio_wall, audio_prefill
 ```
+
+### 4.3 PR #14 — `feat: peak-memory sampling + release_candidate memory hard-gate`
+
+Branch `feat/peak-memory-sampling`. Closes the PR #12 contract
+"`memory_ratio` is advisory until the benchmark records peak memory"; see
+the [`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](../OLLAMA_SPEEDUP_EXECUTION_PLAN.md)
+"Goal For The Next PR" item 1.
+
+What landed:
+
+- `gemma4_multimodal_benchmark.py` samples each engine's process-tree
+  memory from a daemon thread (default 50 ms poll) and records the peak
+  alongside every measured run as `peak_memory_gb` plus
+  `peak_memory_basis`. On macOS the per-PID number is `phys_footprint`
+  from `proc_pid_rusage(RUSAGE_INFO_V2)` — the same figure Activity
+  Monitor's "Memory" column reports, which counts resident mmap'd pages
+  (KrillLM's safetensors weights). Non-Darwin platforms fall back to
+  RSS from `ps`. Ollama PIDs auto-resolve via `pgrep ollama`; the
+  KrillLM server via `pgrep -f 'krillm.*serve'`; the krillm CLI
+  subprocess by its own PID. Operators can override with `--ollama-pids`
+  / `--krillm-server-pid`, or skip sampling entirely with
+  `--sample-memory off`. The KrillLM bridge path keeps using mlx-vlm's
+  `GenerationResult.peak_memory` (MLX Metal allocator peak); all three
+  bases are documented under `memory_sampling.basis`.
+- `release_gate.py` promotes `memory_ratio` to `hard` under
+  `release_candidate`. A new `resolve_metric_kinds()` helper
+  auto-downgrades it to advisory whenever the report's
+  `quantization.comparison.class_equal` is false (e.g. one engine bf16
+  and the other Q4_K_M), with the downgrade recorded in
+  `scope.memory_ratio` and added as a caveat. `strict` keeps it hard
+  regardless. `memory_ratio` is excluded from the geometric-mean
+  speedup headline because footprint is not a speed dimension.
+- Docs (`docs/BENCHMARKING.md`, this file, the execution plan) updated.
+
+Coverage:
+
+- `tools/test_memory_sampling.py` — 17 unit tests covering the
+  cross-platform sampler, the `phys_footprint` / RSS basis switch,
+  process-tree topology walking, `pgrep` parsing, override handling,
+  thread join on `__exit__`, the `_MemoryProbe` report block, and the
+  `RSSSampler → MemorySampler` back-compat alias.
+- `tools/test_release_gate.py` — 6 new tests covering memory present →
+  recorded; quant-class-mismatch → advisory + caveat; quant-class-equal
+  + over budget → hard fail; quant-class-equal + under budget → hard
+  pass; strict keeps memory hard regardless of class; memory excluded
+  from the geomean headline.
+
+Net effect on the test count: `tools/` Python suite goes from 7 → 30
+(13 gate + 17 memory). Swift `make test` is untouched.
+
+Two findings the fresh benchmark surfaced:
+
+1. **The canonical comparison is 4-bit-vs-4-bit, not bf16-vs-Q4.** The
+   v4-mm.json snapshot recorded `quantization_class: "unknown"` for
+   KrillLM because the bench was invoked with `--krill-model gemma-4-e2b`
+   (registry name), and `krill_quantization()` couldn't find a local
+   config and got a HuggingFace 401 falling back to "unknown". With the
+   full path (`/Users/sourav/.krillm/models/blobs/gemma-4-e2b`), the
+   on-disk config correctly identifies as 4-bit affine MLX and the
+   comparison is class-equal with Ollama's Q4_K_M GGUF. The auto-downgrade
+   for `memory_ratio` therefore does *not* apply on the canonical
+   snapshot — memory is genuinely hard-gated, and currently failing.
+2. **Ollama's text decode varies meaningfully run-to-run.** On the same
+   machine and same Ollama version (0.21.0), the daemon ran ~73 tok/s in
+   v4-mm and ~94 tok/s in v5-mm. KrillLM's absolute text decode is
+   essentially unchanged (110.30 → 110.36 tok/s). The drop in
+   `text_decode_ratio` from 1.50x → 1.17x is entirely Ollama variance.
+
+Verified gate behavior on the refreshed `.build/benchmarks/v5-mm.json`
+(produced fresh on the M4 Pro 24 GB target with `--krillm-image-mode
+native_server`, `KRILL_KV_CACHE_DTYPE=fp16`, peak-memory sampling on,
+class-equal 4-bit-vs-4-bit comparison):
+
+```text
+strict                                    -> exit 1
+release_candidate --allow-dtype-mismatch  -> exit 1
+
+  HARD pass:  text_wall_ratio   0.6351x   (target <= 0.67)
+              text_ttft_ratio   0.2126x   (target <= 0.67)
+              image_wall_ratio  0.6656x   (target <= 0.67)
+  HARD fail:  text_decode_ratio 1.1738x   (target >= 1.5)
+              memory_ratio      1.1447x   (target <= 1.0)
+  ADV  warn:  text_prefill_ratio  1.2231x  (target >= 1.5)
+              image_prefill_ratio 0.8899x  (target >= 1.5)
+  SKIP:       audio_wall_ratio  3.7868x   out_of_scope
+              audio_prefill_ratio  N/A    out_of_scope
+
+  geomean speedup: 1.157x   (memory_ratio excluded from headline)
+
+  KrillLM phys_footprint:  text 9.611 GB / image 9.611 GB / audio 10.481 GB
+  Ollama  phys_footprint:  text 8.396 GB / image 8.495 GB / audio 8.511 GB
+```
+
+The release-candidate gate is now red on a hard-gated `text_decode_ratio`
+and `memory_ratio`. That is the honest current state, surfaced for the
+first time by the corrected quant identification + the new memory
+sampling. Closing either one is follow-up work outside this PR.

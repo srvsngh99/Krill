@@ -21,6 +21,7 @@ import statistics
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -29,7 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from PIL import Image, ImageDraw
+# Pillow is only needed when generating/inspecting image fixtures; import it
+# lazily so the rest of the module (e.g. the memory sampler) works without it.
 
 try:
     from mlx_vlm import generate, load  # type: ignore
@@ -55,6 +57,363 @@ KRILLM_CLI_STATS_RE = re.compile(
     r"TTFT:\s+(?P<ttft_ms>[0-9.]+)ms,\s+"
     r"total:\s+(?P<total_s>[0-9.]+)s"
 )
+
+
+# ---------------------------------------------------------------------------
+# Peak-memory sampling
+# ---------------------------------------------------------------------------
+#
+# The release gate reads `peak_memory_gb_median` from the text task summary for
+# both engines (see tools/release_gate.py:extract_multimodal_metrics). Neither
+# the Ollama HTTP API nor the KrillLM server reports peak memory, so we sample
+# each engine's process-tree memory from a background thread while a timed
+# request runs and record the peak.
+#
+# On macOS we sample `phys_footprint` from `proc_pid_rusage(RUSAGE_INFO_V2)`
+# rather than RSS. RSS only counts pages currently resident in the process's
+# private/anonymous memory; mmap'd file-backed pages (the safetensors weights
+# KrillLM relies on) are excluded, which made the first cut of this sampler
+# report KrillLM at ~50 MB while the actual model is several GB resident.
+# `phys_footprint` is the kernel's "physical memory used by this process"
+# figure — the same number `vmmap -summary` and Activity Monitor's "Memory"
+# column report — and includes resident mmap'd pages with proper apportionment.
+# On non-Darwin platforms we fall back to RSS from `ps`.
+#
+# The KrillLM bridge path is the one exception: mlx-vlm runs in-process and
+# already exposes `GenerationResult.peak_memory` (MLX Metal allocator peak,
+# decimal GB), which is a cleaner number than the benchmark process's own
+# footprint — we keep that there.
+#
+# All values are reported in decimal GB (bytes / 1e9) to match mlx-vlm's basis.
+
+
+def _macos_phys_footprint_bytes(pid: int) -> Optional[int]:
+    """Return `ri_phys_footprint` from `proc_pid_rusage(RUSAGE_INFO_V2)`,
+    or None on failure / non-Darwin / no permission."""
+    fn = _MACOS_PROC_PID_RUSAGE
+    if fn is None:
+        return None
+    info = _RUsageInfoV2()
+    rc = fn(ctypes.c_int(pid), ctypes.c_int(2), ctypes.byref(info))
+    if rc != 0:
+        return None
+    return int(info.ri_phys_footprint)
+
+
+if sys.platform == "darwin":
+    import ctypes
+    import ctypes.util
+
+    class _RUsageInfoV2(ctypes.Structure):
+        # Mirrors `struct rusage_info_v2` from <sys/resource.h>. Only
+        # ri_resident_size and ri_phys_footprint are read; the rest is here
+        # so the layout matches and `proc_pid_rusage` writes the right slot.
+        _fields_ = [
+            ("ri_uuid", ctypes.c_uint8 * 16),
+            ("ri_user_time", ctypes.c_uint64),
+            ("ri_system_time", ctypes.c_uint64),
+            ("ri_pkg_idle_wkups", ctypes.c_uint64),
+            ("ri_interrupt_wkups", ctypes.c_uint64),
+            ("ri_pageins", ctypes.c_uint64),
+            ("ri_wired_size", ctypes.c_uint64),
+            ("ri_resident_size", ctypes.c_uint64),
+            ("ri_phys_footprint", ctypes.c_uint64),
+            ("ri_proc_start_abstime", ctypes.c_uint64),
+            ("ri_proc_exit_abstime", ctypes.c_uint64),
+            ("ri_child_user_time", ctypes.c_uint64),
+            ("ri_child_system_time", ctypes.c_uint64),
+            ("ri_child_pkg_idle_wkups", ctypes.c_uint64),
+            ("ri_child_interrupt_wkups", ctypes.c_uint64),
+            ("ri_child_pageins", ctypes.c_uint64),
+            ("ri_child_elapsed_abstime", ctypes.c_uint64),
+            ("ri_diskio_bytesread", ctypes.c_uint64),
+            ("ri_diskio_byteswritten", ctypes.c_uint64),
+        ]
+
+    try:
+        _libsystem = ctypes.CDLL(ctypes.util.find_library("System") or "libSystem.dylib")
+        _MACOS_PROC_PID_RUSAGE = _libsystem.proc_pid_rusage
+        _MACOS_PROC_PID_RUSAGE.restype = ctypes.c_int
+        _MACOS_PROC_PID_RUSAGE.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+        _SAMPLER_BASIS = "phys_footprint_process_tree"
+    except Exception:  # pragma: no cover — extremely unusual macOS install
+        _MACOS_PROC_PID_RUSAGE = None
+        _SAMPLER_BASIS = "rss_process_tree"
+else:
+    _MACOS_PROC_PID_RUSAGE = None
+    _SAMPLER_BASIS = "rss_process_tree"
+
+
+def _ps_snapshot() -> dict[str, dict[int, Any]]:
+    """Single `ps` snapshot returning {'parent': {pid: ppid}, 'rss': {pid: kb}}."""
+    out = ""
+    try:
+        out = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,rss="],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5.0,
+        ).stdout
+    except Exception:
+        return {"parent": {}, "rss": {}}
+    parent: dict[int, int] = {}
+    rss: dict[int, int] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 3:
+            continue
+        try:
+            pid, ppid, kb = int(parts[0]), int(parts[1]), int(parts[2])
+        except ValueError:
+            continue
+        parent[pid] = ppid
+        rss[pid] = kb
+    return {"parent": parent, "rss": rss}
+
+
+def _walk_tree(roots: set[int], parent_map: dict[int, int]) -> set[int]:
+    """All PIDs reachable from `roots` via parent links in `parent_map`."""
+    children: dict[int, list[int]] = {}
+    for pid, ppid in parent_map.items():
+        children.setdefault(ppid, []).append(pid)
+    seen: set[int] = set()
+    stack = list(roots)
+    while stack:
+        pid = stack.pop()
+        if pid in seen or pid not in parent_map:
+            continue
+        seen.add(pid)
+        stack.extend(children.get(pid, []))
+    return seen
+
+
+def _process_tree_footprint_kb(root_pids: set[int]) -> int:
+    """Sum per-PID memory (KiB) over `root_pids` and all their descendants.
+
+    Uses macOS `phys_footprint` per PID where available, otherwise RSS from
+    the same `ps` snapshot. Returns 0 if no PIDs are alive.
+    """
+    if not root_pids:
+        return 0
+    snap = _ps_snapshot()
+    pids = _walk_tree(root_pids, snap["parent"])
+    if not pids:
+        return 0
+    total_bytes = 0
+    if _MACOS_PROC_PID_RUSAGE is not None:
+        for pid in pids:
+            fp = _macos_phys_footprint_bytes(pid)
+            if fp is not None:
+                total_bytes += fp
+            else:
+                # Process died between ps snapshot and rusage call, or we
+                # lack permission. Fall back to that pid's RSS for a non-zero
+                # contribution rather than dropping it silently.
+                total_bytes += snap["rss"].get(pid, 0) * 1024
+    else:
+        for pid in pids:
+            total_bytes += snap["rss"].get(pid, 0) * 1024
+    return total_bytes // 1024  # back to KiB to keep the sampler API stable
+
+
+class MemorySampler:
+    """Polls process-tree memory in a daemon thread; reports the peak in GB.
+
+    Uses macOS `phys_footprint` (which counts resident mmap'd weights, the
+    metric Activity Monitor displays) when available, otherwise RSS from `ps`.
+
+    Use as a context manager around a timed region:
+
+        sampler = MemorySampler([pid])
+        with sampler:
+            ...do the request...
+        peak = sampler.peak_gb  # float GB, or None if sampling produced nothing
+    """
+
+    basis = _SAMPLER_BASIS
+
+    def __init__(self, root_pids: list[int], interval_s: float = 0.05) -> None:
+        self._roots = {p for p in root_pids if p}
+        self._interval = max(0.01, interval_s)
+        self._peak_kb = 0
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            kb = _process_tree_footprint_kb(self._roots)
+            if kb > self._peak_kb:
+                self._peak_kb = kb
+            self._stop.wait(self._interval)
+
+    def __enter__(self) -> "MemorySampler":
+        if self._roots:
+            # One immediate sample so even a sub-interval-length task records
+            # the already-loaded model footprint.
+            self._peak_kb = _process_tree_footprint_kb(self._roots)
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    @property
+    def peak_gb(self) -> Optional[float]:
+        if not self._roots or self._peak_kb <= 0:
+            return None
+        return self._peak_kb * 1024 / 1e9
+
+
+# Back-compat alias for any external caller (and for the brief window the
+# class lived under its old name).
+RSSSampler = MemorySampler
+
+
+def _pgrep(pattern: str, full: bool) -> list[int]:
+    """Return PIDs matching `pattern` (a process name, or full command line if
+    `full`), excluding this process. Empty on no match or error."""
+    cmd = ["pgrep"]
+    if full:
+        cmd.append("-f")
+    cmd.append(pattern)
+    try:
+        completed = subprocess.run(
+            cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5.0
+        )
+    except Exception:
+        return []
+    if completed.returncode > 1:  # 0 = matched, 1 = no match, >1 = error
+        return []
+    pids: list[int] = []
+    for tok in completed.stdout.split():
+        try:
+            pid = int(tok)
+        except ValueError:
+            continue
+        if pid != os.getpid():
+            pids.append(pid)
+    return pids
+
+
+def _parse_pid_list(value: Optional[str]) -> list[int]:
+    if not value:
+        return []
+    out: list[int] = []
+    for tok in value.replace(",", " ").split():
+        try:
+            out.append(int(tok))
+        except ValueError:
+            continue
+    return out
+
+
+def resolve_ollama_pids(override: Optional[str]) -> list[int]:
+    """PIDs of the Ollama process family (the `ollama serve` daemon plus the
+    `ollama runner` model subprocess, which shares the binary's name)."""
+    if override:
+        return sorted(set(_parse_pid_list(override)))
+    return sorted(set(_pgrep("ollama", full=False)))
+
+
+def resolve_krillm_server_pids(override: Optional[str]) -> list[int]:
+    """PID(s) of a running `krillm serve` process."""
+    if override:
+        return sorted(set(_parse_pid_list(override)))
+    return sorted(set(_pgrep("krillm.*serve", full=True)))
+
+
+class _MemoryProbe:
+    """Process-RSS sampling configuration plus a record of which PIDs were
+    actually sampled, so the report can describe the measurement."""
+
+    def __init__(self) -> None:
+        self.enabled = False
+        self.interval_s = 0.05
+        self.ollama_override: Optional[str] = None
+        self.krillm_server_override: Optional[str] = None
+        self.observed: dict[str, set[int]] = {"krillm": set(), "ollama": set()}
+        self.notes: list[str] = []
+
+    def configure(self, args: argparse.Namespace) -> None:
+        self.enabled = args.sample_memory == "auto"
+        self.interval_s = max(0.01, args.memory_sample_interval_ms / 1000.0)
+        self.ollama_override = args.ollama_pids
+        self.krillm_server_override = args.krillm_server_pid
+
+    def _note_once(self, msg: str) -> None:
+        if msg not in self.notes:
+            self.notes.append(msg)
+            print(f"WARN: {msg}", file=sys.stderr)
+
+    def _record(self, which: str, pids: list[int]) -> None:
+        self.observed.setdefault(which, set()).update(p for p in pids if p)
+
+    def sampler_for(self, which: str) -> MemorySampler:
+        """Sampler over the resolved process tree for engine `which`
+        ('krillm' for a `krillm serve` process, or 'ollama')."""
+        if not self.enabled:
+            return MemorySampler([], self.interval_s)
+        if which == "ollama":
+            pids = resolve_ollama_pids(self.ollama_override)
+            if not pids:
+                self._note_once(
+                    "could not resolve any Ollama process PIDs; ollama peak "
+                    "memory will be unavailable (pass --ollama-pids to override)"
+                )
+            self._record("ollama", pids)
+        else:
+            pids = resolve_krillm_server_pids(self.krillm_server_override)
+            if not pids:
+                self._note_once(
+                    "could not resolve a `krillm serve` PID; krillm server peak "
+                    "memory will be unavailable (pass --krillm-server-pid to override)"
+                )
+            self._record("krillm", pids)
+        return MemorySampler(pids, self.interval_s)
+
+    def sampler_for_pids(self, pids: list[int]) -> MemorySampler:
+        """Sampler over an explicit PID list (used for the krillm CLI
+        subprocess, whose PID we already know)."""
+        if not self.enabled:
+            return MemorySampler([], self.interval_s)
+        self._record("krillm", pids)
+        return MemorySampler(pids, self.interval_s)
+
+    def report_block(self) -> dict[str, Any]:
+        if _MACOS_PROC_PID_RUSAGE is not None:
+            tree_basis_doc = (
+                "phys_footprint of the engine process tree from "
+                "proc_pid_rusage(RUSAGE_INFO_V2), decimal GB; matches "
+                "Activity Monitor's Memory column and includes resident "
+                "mmap'd weights"
+            )
+            tree_basis_key = "phys_footprint_process_tree"
+        else:
+            tree_basis_doc = (
+                "resident set size of the engine process tree from `ps`, "
+                "decimal GB"
+            )
+            tree_basis_key = "rss_process_tree"
+        return {
+            "requested": "auto" if self.enabled else "off",
+            "enabled": self.enabled,
+            "interval_ms": round(self.interval_s * 1000),
+            "basis": {
+                tree_basis_key: tree_basis_doc,
+                "mlx_metal": "mlx-vlm GenerationResult.peak_memory (MLX Metal allocator peak, decimal GB)",
+            },
+            "krillm_pids_sampled": sorted(self.observed.get("krillm", set())),
+            "ollama_pids_sampled": sorted(self.observed.get("ollama", set())),
+            "notes": list(self.notes),
+        }
+
+
+_MEMORY = _MemoryProbe()
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,6 +463,39 @@ def parse_args() -> argparse.Namespace:
             "and cache_mode_source is recorded as 'explicit'."
         ),
     )
+    parser.add_argument(
+        "--sample-memory",
+        choices=["auto", "off"],
+        default="auto",
+        help=(
+            "Sample peak resident-set memory of each engine's process tree "
+            "during timed requests (so the release gate's memory_ratio "
+            "populates). 'auto' (default) samples when PIDs can be resolved; "
+            "'off' disables it. The KrillLM bridge path uses mlx-vlm's "
+            "GenerationResult.peak_memory instead of RSS."
+        ),
+    )
+    parser.add_argument(
+        "--memory-sample-interval-ms",
+        type=float,
+        default=50.0,
+        help="Polling interval for the RSS sampler thread (default 50 ms).",
+    )
+    parser.add_argument(
+        "--ollama-pids",
+        help=(
+            "Comma/space-separated PIDs of the Ollama process family to sample "
+            "for peak memory. Default: auto-detect via `pgrep ollama`."
+        ),
+    )
+    parser.add_argument(
+        "--krillm-server-pid",
+        help=(
+            "PID(s) of the `krillm serve` process to sample for peak memory "
+            "(only used with --krillm-url / native_server). Default: auto-detect "
+            "via `pgrep -f 'krillm.*serve'`."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -131,6 +523,8 @@ def ensure_assets(output_path: str, image: Optional[str], audio: Optional[str]) 
 
     image_path = Path(image) if image else asset_dir / "gemma4-red-box.png"
     if not image:
+        from PIL import Image, ImageDraw
+
         img = Image.new("RGB", (256, 256), "white")
         draw = ImageDraw.Draw(img)
         draw.rectangle((45, 70, 211, 190), fill=(220, 40, 40))
@@ -281,13 +675,17 @@ def run_krill_task(
         return None
 
     text = result.text if hasattr(result, "text") else str(result)
+    # mlx-vlm runs in-process here, so its own MLX Metal allocator peak is a
+    # cleaner figure than the benchmark process's RSS. 0.0 means "not reported".
+    peak_memory_gb = getattr(result, "peak_memory", None) or None
     return {
         "wall_time_s": wall_s,
         "prompt_tokens": getattr(result, "prompt_tokens", None),
         "generated_tokens": getattr(result, "generation_tokens", None),
         "prefill_tokens_per_second": getattr(result, "prompt_tps", None),
         "decode_tokens_per_second": getattr(result, "generation_tps", None),
-        "peak_memory_gb": getattr(result, "peak_memory", None),
+        "peak_memory_gb": peak_memory_gb,
+        "peak_memory_basis": "mlx_metal" if peak_memory_gb is not None else None,
         "output_sha256": sha256_text(text),
         "output_preview": text[:200],
     }
@@ -335,21 +733,23 @@ def run_krill_server_task(
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
+    sampler = _MEMORY.sampler_for("krillm")
     start = time.perf_counter()
     first_token_s: Optional[float] = None
     chunks: list[str] = []
     final: Optional[dict[str, Any]] = None
-    with urllib.request.urlopen(request, timeout=args.timeout) as response:
-        for raw_line in response:
-            if not raw_line.strip():
-                continue
-            event = json.loads(raw_line)
-            content = event.get("response") or ""
-            if content and first_token_s is None:
-                first_token_s = time.perf_counter() - start
-            chunks.append(content)
-            if event.get("done"):
-                final = event
+    with sampler:
+        with urllib.request.urlopen(request, timeout=args.timeout) as response:
+            for raw_line in response:
+                if not raw_line.strip():
+                    continue
+                event = json.loads(raw_line)
+                content = event.get("response") or ""
+                if content and first_token_s is None:
+                    first_token_s = time.perf_counter() - start
+                chunks.append(content)
+                if event.get("done"):
+                    final = event
     wall_s = time.perf_counter() - start
     if final is None:
         raise RuntimeError("KrillLM server stream ended without final stats")
@@ -361,6 +761,7 @@ def run_krill_server_task(
     prompt_tokens = int(final.get("prompt_eval_count") or 0)
     generated_tokens = int(final.get("eval_count") or 0)
     text = "".join(chunks)
+    peak_memory_gb = sampler.peak_gb
     return {
         "wall_time_s": wall_s,
         "total_s": int(final.get("total_duration") or 0) / 1_000_000_000,
@@ -369,6 +770,8 @@ def run_krill_server_task(
         "generated_tokens": generated_tokens,
         "prefill_tokens_per_second": prompt_tokens / prompt_eval_s if prompt_eval_s > 0 else None,
         "decode_tokens_per_second": generated_tokens / eval_s if eval_s > 0 else None,
+        "peak_memory_gb": peak_memory_gb,
+        "peak_memory_basis": sampler.basis if peak_memory_gb is not None else None,
         "output_sha256": sha256_text(text),
         "output_preview": text[:200],
         "mode": "server",
@@ -405,17 +808,26 @@ def run_krill_native_cli_task(
         command += ["--image", task["image"]]
 
     start = time.perf_counter()
-    completed = run_cmd(command, timeout=args.timeout)
+    proc = subprocess.Popen(
+        command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    sampler = _MEMORY.sampler_for_pids([proc.pid])
+    try:
+        with sampler:
+            stdout, stderr = proc.communicate(timeout=args.timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
     wall_s = time.perf_counter() - start
-    if completed.returncode != 0:
+    if proc.returncode != 0:
         raise RuntimeError(
-            f"krillm CLI failed with exit {completed.returncode}: "
-            f"{completed.stderr or completed.stdout}"
+            f"krillm CLI failed with exit {proc.returncode}: "
+            f"{stderr or stdout}"
         )
     if not measured:
         return None
 
-    stdout = completed.stdout
     match = KRILLM_CLI_STATS_RE.search(stdout)
     if not match:
         raise RuntimeError("krillm CLI output did not contain a parseable stats line")
@@ -425,6 +837,7 @@ def run_krill_native_cli_task(
         if line and not line.startswith("Loading model") and not line.startswith("Ready (")
     ]
     generated_text = "\n".join(generated_lines)
+    peak_memory_gb = sampler.peak_gb
     return {
         "wall_time_s": wall_s,
         "total_s": float(match.group("total_s")),
@@ -433,6 +846,8 @@ def run_krill_native_cli_task(
         "generated_tokens": int(match.group("generated_tokens")),
         "prefill_tokens_per_second": float(match.group("prefill_tps")),
         "decode_tokens_per_second": float(match.group("decode_tps")),
+        "peak_memory_gb": peak_memory_gb,
+        "peak_memory_basis": sampler.basis if peak_memory_gb is not None else None,
         "output_sha256": sha256_text(generated_text),
         "output_preview": generated_text[:200],
         "mode": "native_cli",
@@ -473,31 +888,33 @@ def run_krill_native_server_task(
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
+    sampler = _MEMORY.sampler_for("krillm")
     start = time.perf_counter()
     first_token_s: Optional[float] = None
     chunks: list[str] = []
     final: Optional[dict[str, Any]] = None
-    try:
-        response_ctx = urllib.request.urlopen(request, timeout=args.timeout)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 400:
-            raise RuntimeError(
-                "KrillLM server returned 400 for multimodal request — "
-                "server multimodal support has likely not landed yet "
-                f"(url={url}): {exc.read().decode('utf-8', errors='replace')}"
-            ) from exc
-        raise
-    with response_ctx as response:
-        for raw_line in response:
-            if not raw_line.strip():
-                continue
-            event = json.loads(raw_line)
-            content = event.get("response") or ""
-            if content and first_token_s is None:
-                first_token_s = time.perf_counter() - start
-            chunks.append(content)
-            if event.get("done"):
-                final = event
+    with sampler:
+        try:
+            response_ctx = urllib.request.urlopen(request, timeout=args.timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 400:
+                raise RuntimeError(
+                    "KrillLM server returned 400 for multimodal request — "
+                    "server multimodal support has likely not landed yet "
+                    f"(url={url}): {exc.read().decode('utf-8', errors='replace')}"
+                ) from exc
+            raise
+        with response_ctx as response:
+            for raw_line in response:
+                if not raw_line.strip():
+                    continue
+                event = json.loads(raw_line)
+                content = event.get("response") or ""
+                if content and first_token_s is None:
+                    first_token_s = time.perf_counter() - start
+                chunks.append(content)
+                if event.get("done"):
+                    final = event
     wall_s = time.perf_counter() - start
     if final is None:
         raise RuntimeError("KrillLM server stream ended without final stats")
@@ -509,6 +926,7 @@ def run_krill_native_server_task(
     prompt_tokens = int(final.get("prompt_eval_count") or 0)
     generated_tokens = int(final.get("eval_count") or 0)
     text = "".join(chunks)
+    peak_memory_gb = sampler.peak_gb
     return {
         "wall_time_s": wall_s,
         "total_s": int(final.get("total_duration") or 0) / 1_000_000_000,
@@ -517,6 +935,8 @@ def run_krill_native_server_task(
         "generated_tokens": generated_tokens,
         "prefill_tokens_per_second": prompt_tokens / prompt_eval_s if prompt_eval_s > 0 else None,
         "decode_tokens_per_second": generated_tokens / eval_s if eval_s > 0 else None,
+        "peak_memory_gb": peak_memory_gb,
+        "peak_memory_basis": sampler.basis if peak_memory_gb is not None else None,
         "output_sha256": sha256_text(text),
         "output_preview": text[:200],
         "mode": "native_server",
@@ -549,21 +969,23 @@ def run_ollama_task(args: argparse.Namespace, task: dict[str, Any], measured: bo
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
+    sampler = _MEMORY.sampler_for("ollama")
     start = time.perf_counter()
     first_token_s: Optional[float] = None
     chunks: list[str] = []
     final: Optional[dict[str, Any]] = None
-    with urllib.request.urlopen(request, timeout=args.timeout) as response:
-        for raw_line in response:
-            if not raw_line.strip():
-                continue
-            event = json.loads(raw_line)
-            content = ((event.get("message") or {}).get("content")) or ""
-            if content and first_token_s is None:
-                first_token_s = time.perf_counter() - start
-            chunks.append(content)
-            if event.get("done"):
-                final = event
+    with sampler:
+        with urllib.request.urlopen(request, timeout=args.timeout) as response:
+            for raw_line in response:
+                if not raw_line.strip():
+                    continue
+                event = json.loads(raw_line)
+                content = ((event.get("message") or {}).get("content")) or ""
+                if content and first_token_s is None:
+                    first_token_s = time.perf_counter() - start
+                chunks.append(content)
+                if event.get("done"):
+                    final = event
     wall_s = time.perf_counter() - start
     if final is None:
         raise RuntimeError("Ollama stream ended without final stats")
@@ -575,6 +997,7 @@ def run_ollama_task(args: argparse.Namespace, task: dict[str, Any], measured: bo
     prompt_tokens = int(final.get("prompt_eval_count") or 0)
     generated_tokens = int(final.get("eval_count") or 0)
     text = "".join(chunks)
+    peak_memory_gb = sampler.peak_gb
     return {
         "wall_time_s": wall_s,
         "total_s": int(final.get("total_duration") or 0) / 1_000_000_000,
@@ -585,6 +1008,8 @@ def run_ollama_task(args: argparse.Namespace, task: dict[str, Any], measured: bo
         "prompt_eval_ms": prompt_eval_s * 1000,
         "prefill_tokens_per_second": prompt_tokens / prompt_eval_s if prompt_eval_s > 0 else None,
         "decode_tokens_per_second": generated_tokens / eval_s if eval_s > 0 else None,
+        "peak_memory_gb": peak_memory_gb,
+        "peak_memory_basis": sampler.basis if peak_memory_gb is not None else None,
         "output_sha256": sha256_text(text),
         "output_preview": text[:200],
     }
@@ -677,6 +1102,8 @@ def media_signature(path: Optional[str]) -> Optional[dict[str, Any]]:
     info: dict[str, Any] = {"path": str(p), "size_bytes": p.stat().st_size}
     if suffix in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"):
         try:
+            from PIL import Image
+
             with Image.open(p) as img:
                 info["kind"] = "image"
                 info["width"] = img.width
@@ -804,6 +1231,13 @@ def main() -> int:
     args = parse_args()
     if args.runs < 1 or args.warmup < 0:
         raise SystemExit("--runs must be >= 1 and --warmup must be >= 0")
+
+    _MEMORY.configure(args)
+    if _MEMORY.enabled:
+        print(
+            f"Peak-memory sampling: on ({_MEMORY.interval_s * 1000:.0f} ms RSS poll); "
+            "pass --sample-memory off to disable."
+        )
 
     # Validate the krillm CLI binary up-front when any task may need it.
     if args.engine in ("both", "krillm") and args.krillm_image_mode == "native_cli":
@@ -992,6 +1426,7 @@ def main() -> int:
         },
         "krillm_model_load_s": krill_load_s,
         "krillm_image_mode": args.krillm_image_mode,
+        "memory_sampling": _MEMORY.report_block(),
         "results": results,
     }
     if args.krillm_image_mode == "native_cli":

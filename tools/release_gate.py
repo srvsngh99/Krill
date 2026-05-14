@@ -105,12 +105,12 @@ GATE_PROFILES: dict[str, dict[str, str]] = {
         "image_prefill_ratio":   "advisory",
         "audio_wall_ratio":      "out_of_scope",
         "audio_prefill_ratio":   "out_of_scope",
-        # memory_ratio is advisory until `gemma4_multimodal_benchmark.py`
-        # reliably records `peak_memory_gb_median` for both engines. Today the
-        # field is absent from generated reports, so hard-gating it would mean
-        # "every release_candidate run passes only because we ignored a hard
-        # miss". Re-promote to hard once the benchmark emits peak memory.
-        "memory_ratio":          "advisory",
+        # memory_ratio is hard now that `gemma4_multimodal_benchmark.py` samples
+        # peak RSS for both engines. It is still automatically downgraded to
+        # advisory for any comparison whose quantization classes differ (e.g.
+        # KrillLM bf16 vs Ollama Q4_K_M) — a cross-quantization memory
+        # comparison cannot fairly gate a release. See `resolve_metric_kinds`.
+        "memory_ratio":          "hard",
     },
 }
 
@@ -123,6 +123,33 @@ SCOPE_REASONS: dict[str, dict[str, str]] = {
 }
 
 VALID_METRIC_KINDS = {"hard", "advisory", "out_of_scope"}
+
+
+def resolve_metric_kinds(profile: str, report: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+    """Return (metric -> kind) for `profile`, applying report-dependent
+    adjustments, plus a list of human-readable notes describing them.
+
+    Currently the only adjustment: `memory_ratio` is downgraded from hard to
+    advisory under non-strict profiles when the two engines report different
+    quantization classes (KrillLM bf16 vs Ollama Q4_K_M, say). A peak-memory
+    comparison across quantization classes is dominated by the weight-format
+    difference, not the runtime, so it cannot fairly hard-gate a release. It
+    re-promotes to hard automatically once a quantization-class-equal report is
+    supplied. `strict` keeps every metric hard regardless.
+    """
+    kinds = dict(GATE_PROFILES[profile])
+    notes: list[str] = []
+    if profile != "strict" and kinds.get("memory_ratio") == "hard":
+        comparison = (report.get("quantization") or {}).get("comparison") or {}
+        if not comparison.get("class_equal", False):
+            kinds["memory_ratio"] = "advisory"
+            notes.append(
+                "memory_ratio downgraded to advisory: KrillLM and Ollama report "
+                "different quantization classes, so the peak-memory comparison is "
+                "not apples-to-apples. It re-promotes to hard automatically once a "
+                "quantization-class-equal benchmark is run."
+            )
+    return kinds, notes
 
 
 def parse_args() -> argparse.Namespace:
@@ -426,11 +453,18 @@ def geometric_mean(values: list[float]) -> float:
     return product ** (1.0 / len(values))
 
 
+# Metrics excluded from the geometric-mean "speedup" headline. memory_ratio is
+# a footprint ratio, not a speed ratio, and it is dominated by the weight format
+# (KrillLM bf16 vs Ollama Q4_K_M) rather than the runtime — folding it into a
+# perf headline would understate the speed result for reasons unrelated to speed.
+SPEEDUP_EXCLUDED_METRICS = {"memory_ratio"}
+
+
 def compute_speedup_factors(metrics: dict[str, Optional[float]]) -> list[float]:
-    """Convert all metrics to speedup factors (>1 = KrillLM is better)."""
+    """Convert speed metrics to speedup factors (>1 = KrillLM is better)."""
     factors: list[float] = []
     for name, value in metrics.items():
-        if value is None:
+        if value is None or name in SPEEDUP_EXCLUDED_METRICS:
             continue
         if name in LOWER_IS_BETTER:
             # Lower ratio is better, so speedup = 1/ratio
@@ -582,8 +616,15 @@ def main() -> int:
 
     media_metric_prefixes = ("image_", "audio_")
 
-    profile_kinds = GATE_PROFILES[args.profile]
+    profile_kinds, profile_kind_notes = resolve_metric_kinds(args.profile, report)
     profile_reasons = SCOPE_REASONS.get(args.profile, {})
+    for note in profile_kind_notes:
+        caveats.append(note)
+    if profile_kinds.get("memory_ratio") != GATE_PROFILES[args.profile].get("memory_ratio"):
+        scope_info["memory_ratio"] = (
+            f"{GATE_PROFILES[args.profile].get('memory_ratio')} -> "
+            f"{profile_kinds.get('memory_ratio')}"
+        )
 
     # Evaluate each metric against thresholds
     evaluations: list[dict[str, Any]] = []
