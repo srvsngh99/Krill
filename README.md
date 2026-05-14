@@ -6,7 +6,7 @@ Built on Apple's [MLX](https://github.com/ml-explore/mlx-swift) framework. Ships
 
 ## Release Status
 
-This is not yet a production release. Server multimodal is implemented for Gemma 4 — native image, bridge-backed audio — and shipped with end-to-end tests. Wall-time ratios beat Ollama by 1.6×–1.7×, and the int8 KV cache now composes with the prefix cache on Gemma 4 (PR #11). The release gate now distinguishes hard, advisory, and out_of_scope metrics via an opt-in `--profile release_candidate` (PR #12); the `strict` gate still fails on `text_prefill_ratio`, `image_prefill_ratio`, and `audio_wall_ratio`. See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) and [`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](OLLAMA_SPEEDUP_EXECUTION_PLAN.md) for the full status, the per-metric promotion contract, and acceptance criteria.
+This is not yet a production release. Server multimodal is implemented for Gemma 4 — native image, bridge-backed audio — and shipped with end-to-end tests. The int8 KV cache composes with the prefix cache on Gemma 4 (PR #11), and the release gate now distinguishes hard, advisory, and out_of_scope metrics via `--profile release_candidate` (PR #12). Peak-memory sampling is wired into the benchmark and `memory_ratio` is hard-gated for class-equal comparisons (PR #14). The current refreshed gate is still red: `release_candidate` fails hard on `text_decode_ratio` and `memory_ratio`, while `strict` also fails prefill and audio metrics. See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) and [`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](OLLAMA_SPEEDUP_EXECUTION_PLAN.md) for the full status, the per-metric promotion contract, and acceptance criteria.
 
 ### Support Matrix
 
@@ -90,9 +90,9 @@ make bench-release-gate GATE_INPUT=.build/benchmarks/krillm-vs-ollama.json
 # Sequential comparison (disk-constrained)
 make bench-release-gate GATE_KRILLM=krillm.json GATE_OLLAMA=ollama.json
 
-# release_candidate profile — hard-gates user-visible latency, marks
-# prefill TPS and memory advisory, scopes audio out until native Swift audio
-python3 tools/release_gate.py .build/benchmarks/v4-mm.json \
+# release_candidate profile — hard-gates user-visible latency and class-equal
+# memory, marks prefill TPS advisory, scopes audio out until native Swift audio
+python3 tools/release_gate.py .build/benchmarks/v5-mm.json \
   --profile release_candidate --allow-dtype-mismatch
 ```
 
@@ -100,9 +100,9 @@ The gate writes `.build/benchmarks/release-gate.json` with per-metric pass/fail,
 
 ### Performance claims
 
-KrillLM is competitive with Ollama on Gemma4 E2B decode throughput on Apple Silicon and can exceed Ollama in some local 4-bit-class decode tests. Wall-time ratios beat Ollama by 1.6×–1.7× on text and image. Ollama is currently stronger on multimodal prefill TPS and on audio (where KrillLM still routes through `mlx-vlm`). KrillLM's next performance milestone is a fully native Gemma4 multimodal path with a `strict`-profile release gate exiting `0`.
+KrillLM is competitive with Ollama on Gemma4 E2B decode throughput on Apple Silicon and can exceed Ollama in some local 4-bit-class decode tests. On the refreshed v5 multimodal snapshot, text and image wall-time ratios still pass the release-candidate gate, but the release-candidate gate fails hard on text decode throughput and peak memory. Ollama is currently stronger on multimodal prefill TPS and on audio (where KrillLM still routes through `mlx-vlm`). KrillLM's next performance milestones are sustained `text_decode_ratio >= 1.5x`, `memory_ratio <= 1.0x`, and eventually a fully native Gemma4 multimodal path with a `strict`-profile release gate exiting `0`.
 
-The `strict` benchmark gate currently fails on prefill TPS and audio wall time. The `release_candidate` profile (PR #12) exits `0` on the same report by treating prefill TPS / memory as advisory and audio as out_of_scope until native Swift audio lands. This is a release-readiness baseline plus a documented release-candidate path, not a production release. Performance claims in this README are not updated unless `make bench-release-gate` passes under the agreed profile and the report is committed or linked.
+The `strict` benchmark gate currently fails on text decode, prefill TPS, audio wall time, and memory. The `release_candidate` profile keeps prefill TPS advisory and audio out_of_scope, but now hard-gates class-equal memory; on `.build/benchmarks/v5-mm.json` it exits `1` because `text_decode_ratio` and `memory_ratio` miss their hard thresholds. This is a release-readiness baseline plus a documented follow-up roadmap, not a production release. Performance claims in this README are not updated unless `make bench-release-gate` passes under the agreed profile and the report is committed or linked.
 
 ## Install
 
