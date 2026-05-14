@@ -2,22 +2,24 @@
 
 Local handoff for the next agent/session.
 
-Last updated: 2026-05-13 (PR #14 in progress on `feat/peak-memory-sampling`)
+Last updated: 2026-05-15 (post PR #14 merge)
 Base branch: `main`
-Base commit: `2f3386a` (merged PR #12); PR #14 sits on top
+Base commit: `cf05085` (merged PR #14)
 Machine target: Apple Silicon M4 Pro, 24 GB RAM
 
 ## Current Position
 
-Two follow-up PRs have shipped on top of the PR #9 release-readiness baseline.
+Three follow-up PRs have shipped on top of the PR #9 release-readiness baseline.
 The product goal — beating Ollama by 1.5x to 3x with honest inputs — is closer,
-but Workstreams 1, 2, and 3 below are still required before we can promote
-audio out of `out_of_scope` and prefill TPS out of advisory.
+but the refreshed `release_candidate` gate is still red on hard
+`text_decode_ratio` and `memory_ratio` misses. Workstreams 1, 2, and 3 below
+also remain before we can promote audio out of `out_of_scope` and prefill TPS
+out of advisory.
 
 ### What landed since PR #9
 
 - **PR #14 (`feat: peak-memory sampling + release_candidate memory hard-gate`,
-  in progress on `feat/peak-memory-sampling`).**
+  merged at `cf05085`).**
   `gemma4_multimodal_benchmark.py` samples each engine's process-tree
   memory from a daemon thread (50 ms poll). On macOS the per-PID number
   is `phys_footprint` from `proc_pid_rusage(RUSAGE_INFO_V2)` — the same
@@ -47,7 +49,9 @@ audio out of `out_of_scope` and prefill TPS out of advisory.
   out_of_scope metrics via `tools/release_gate.py --profile <name>`. `strict`
   (default) preserves original behavior; `release_candidate` is the
   defensible path to a release tag. Missing hard metrics now fail the gate.
-  `memory_ratio` is advisory until the benchmark records peak memory.
+  At the time, `memory_ratio` stayed advisory until the benchmark could record
+  peak memory; PR #14 closed that contract and re-promoted class-equal memory
+  to hard.
   `tools/gemma4_multimodal_benchmark.py` records `benchmark.kv_cache_dtype`
   from `KRILL_KV_CACHE_DTYPE`; the gate echoes it in the report.
 
@@ -136,21 +140,22 @@ Do not tag a production release until either:
 
 ## Goal For The Next PR
 
-Item 1 ("wire peak-memory sampling") is in flight on PR #14 — the harness
-records peak RSS/MLX-Metal peak per run and the gate hard-gates
-`memory_ratio` under `release_candidate` (with the documented
-quant-class-mismatch auto-downgrade). Once PR #14 merges, pick **one** of
-the remaining Workstreams (1, 2, 3) below and ship it. Recommended order
-by leverage and scope:
+PR #14 closed the peak-memory sampling gap. The next implementation PR should
+pick **one** current hard release-candidate miss and close it with benchmark
+evidence. Recommended order:
 
-1. **Workstream 3, narrow slice:** profile text_prefill, find one optimization
-   that pushes the ratio from 1.45x to ≥1.5x. Then re-promote
-   `text_prefill_ratio` to hard under `release_candidate`. Image prefill stays
-   advisory until the metric is redefined to count vision-encoder time.
+1. **Memory footprint narrow slice:** reduce `memory_ratio` from 1.1447x to
+   `<= 1.0x` on the class-equal 4-bit snapshot, or prove and document that the
+   threshold needs a different basis. Start with KV-cache sizing, reusable MLX
+   buffers, and any eagerly materialized working tensors.
 2. **Workstream 2:** add Gemma 4-compatible self-speculative decoding so
    `text_decode_ratio` consistently exceeds 1.5x with margin. Larger scope;
-   requires a draft path that doesn't break greedy parity.
-3. **Workstream 1:** port Gemma 4's audio Conformer to native Swift+MLX so
+   requires a draft path that does not break greedy parity.
+3. **Workstream 3, prefill slice:** profile text_prefill and find an
+   optimization that pushes the advisory ratio past 1.5x, or redefine the
+   prefill gate around TTFT/wall time for short prompts. This does not unblock
+   release by itself while hard `text_decode_ratio` and `memory_ratio` fail.
+4. **Workstream 1:** port Gemma 4's audio Conformer to native Swift+MLX so
    `audio_*` can leave `out_of_scope`. Largest scope; multi-week effort.
 
 The product claim remains: KrillLM should beat Ollama by 1.5x to 3x on the
@@ -169,7 +174,7 @@ HTTP/CLI request -> PythonFallback actor -> persistent mlx-vlm sidecar -> MLX Py
 This is much better than per-call subprocess startup, but it still loses badly:
 
 ```text
-audio_wall_ratio = 3.9265x
+audio_wall_ratio = 3.7868x
 target           <= 0.67x
 ```
 
@@ -204,9 +209,12 @@ tools/gemma4_multimodal_benchmark.py
 
 ### 2. Gemma 4 Speculative Decoding
 
-Text decode barely passes in the multimodal gate and is weaker in the standalone
-text benchmark. To consistently reach 1.5x to 3x, we need a Gemma 4-compatible
-drafting strategy.
+Text decode currently fails the refreshed release-candidate gate
+(`text_decode_ratio = 1.1738x`, target `>= 1.5x`). KrillLM's absolute decode
+rate was stable across v4/v5; the ratio dropped because the warm Ollama daemon
+ran faster in v5. To consistently reach 1.5x to 3x, we need a Gemma
+4-compatible drafting strategy or another decode-throughput improvement with
+margin against warm Ollama variance.
 
 Options:
 
@@ -244,20 +252,26 @@ tools/gemma4_multimodal_benchmark.py
 
 ### 3. Prefill And Kernel Optimization
 
-Remaining failures:
+Current prefill and memory gaps:
 
 ```text
-text_prefill_ratio  = 1.4498x, target >= 1.5
-image_prefill_ratio = 1.0385x, target >= 1.5
+memory_ratio        = 1.1447x, target <= 1.0  (hard under release_candidate)
+text_prefill_ratio  = 1.2231x, target >= 1.5  (advisory)
+image_prefill_ratio = 0.8899x, target >= 1.5  (advisory)
 ```
 
-For text prefill, we are close. For image prefill, the metric is ambiguous
-because the vision cache moves work out of the measured prefill window while
-improving user-visible wall time.
+Memory is the release-blocking item in this workstream. For prefill, text and
+image remain advisory under `release_candidate`; image prefill is especially
+ambiguous because the vision cache moves work out of the measured prefill
+window while improving user-visible wall time.
 
 Required work:
 
 - Profile prompt prefill by layer and kernel.
+- Profile peak memory by model weights, KV cache, prefix cache, temporary
+  buffers, and MLX graph/workspace allocations.
+- Reduce avoidable allocation pressure through KV sizing, buffer reuse, and
+  delayed materialization where correctness allows it.
 - Measure MLX graph materialization and kernel dispatch overhead.
 - Investigate fused RMSNorm, attention, and MLP kernels where practical.
 - Keep correctness tests around logits, generated prefix, and cache behavior.
@@ -265,6 +279,8 @@ Required work:
 
 Acceptance:
 
+- `memory_ratio <= 1.0x` on the canonical class-equal 4-bit multimodal report,
+  or a revised memory threshold/basis is documented and accepted before release.
 - `text_prefill_ratio >= 1.5x`, or a documented reason that the gate should use
   TTFT/wall time for short prompts instead.
 - `image_prefill_ratio` is either improved to target or replaced by a better
@@ -277,6 +293,8 @@ Sources/KLMCore/Gemma4Model.swift
 Sources/KLMCore/VisionEncoder.swift
 Sources/KLMEngine/InferenceEngine.swift
 Sources/KLMSampler/Sampler.swift
+Sources/KLMCache/KVCache.swift
+Sources/KLMCache/QuantizedKVCache.swift
 tools/release_gate.py
 tools/gemma4_multimodal_benchmark.py
 docs/BENCHMARKING.md
@@ -416,8 +434,9 @@ KLM_GEMMA4_MODEL_PATH=/Users/sourav/.krillm/models/blobs/gemma-4-e2b \
 CLANG_MODULE_CACHE_PATH=.build/clang-module-cache \
 swift test --filter MultimodalEndpointsTests/testTwoDifferentImagesProduceDifferentOutputs --skip-build
 
-/Users/sourav/.krillm/venv/bin/python3 tools/release_gate.py \
-  .build/benchmarks/v4-mm.json \
+python3 tools/release_gate.py \
+  .build/benchmarks/v5-mm.json \
+  --profile release_candidate --allow-dtype-mismatch \
   --output .build/benchmarks/next-pr-release-gate.json
 ```
 
@@ -432,8 +451,9 @@ If multiple agents work in parallel, split ownership as follows:
 2. Decode/speculation agent:
    - Owns speculative decoding, drafter compatibility, and decode benchmarks.
 
-3. Prefill/kernel agent:
-   - Owns profiling, prefill optimizations, and any MLX/Metal kernel changes.
+3. Memory/prefill/kernel agent:
+   - Owns footprint profiling, KV/buffer allocation reductions, prefill
+     optimizations, and any MLX/Metal kernel changes.
 
 4. Gate/docs agent:
    - Owns `release_gate.py`, benchmark semantics, docs, and report validation.
