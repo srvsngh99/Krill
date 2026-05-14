@@ -173,27 +173,25 @@ vs Ollama `gemma4:e2b`):
 | Decode throughput | 108 tok/s | 89 tok/s | 1.2119x | 1.1246x |
 | Prefill throughput | 1701 tok/s | 1932 tok/s | 0.8807x | 0.7170x |
 
-Multimodal `--krillm-image-mode native_server` gate (`v4-mm-gate.json`,
-4 runs / 2 warmup):
+Multimodal `--krillm-image-mode native_server` gate (`v5-mm-gate.json`,
+4 runs / 2 warmup, peak-memory sampling on):
 
 | Metric | Ratio | Threshold | Status | Baseline |
 | --- | ---: | ---: | --- | ---: |
-| text_decode_ratio | 1.5030x | >=1.5 | OK | 1.4413x |
-| text_prefill_ratio | 1.4498x | >=1.5 | FAIL (3% short) | 0.0237x |
-| text_ttft_ratio | 0.1173x | <=0.67 | OK | n/a |
-| text_wall_ratio | 0.5172x | <=0.67 | OK | 0.6043x |
-| image_prefill_ratio | 1.0385x | >=1.5 | FAIL (structural) | 0.0237x |
-| image_wall_ratio | 0.5593x | <=0.67 | OK | 2.2921x |
-| audio_wall_ratio | 3.9265x | <=0.67 | FAIL (deferred) | 1.2525x |
+| text_decode_ratio | 1.1738x | >=1.5 | FAIL (hard) | 1.4413x |
+| text_prefill_ratio | 1.2231x | >=1.5 | WARN (advisory) | 0.0237x |
+| text_ttft_ratio | 0.2126x | <=0.67 | OK | n/a |
+| text_wall_ratio | 0.6351x | <=0.67 | OK | 0.6043x |
+| image_prefill_ratio | 0.8899x | >=1.5 | WARN (advisory) | 0.0237x |
+| image_wall_ratio | 0.6656x | <=0.67 | OK (margin <1%) | 2.2921x |
+| memory_ratio | 1.1447x | <=1.0 | FAIL (hard) | n/a |
+| audio_wall_ratio | 3.7868x | <=0.67 | SKIP (out_of_scope) | 1.2525x |
 
-Geometric mean speedup: **1.418x** (was 0.429x baseline).
-Wall-time metrics across text and image now beat Ollama by 1.6x–1.7x.
-Five of seven gate metrics pass.
-
-The standalone text benchmark sits at `text_decode 1.21x` because of a
-different prompt; on the multimodal text task `text_decode` reaches
-1.50x. Both numbers are honest readings on the same machine; the gate
-uses the multimodal benchmark.
+Geometric mean speedup: **1.157x** (memory excluded from the headline).
+Text and image wall-time metrics still pass under `release_candidate`, but
+the gate exits `1` because `text_decode_ratio` and `memory_ratio` are hard
+misses. The text decode miss is driven by Ollama daemon variance between
+the v4 and v5 runs; KrillLM's absolute decode rate is essentially unchanged.
 
 ---
 
@@ -205,39 +203,43 @@ landing details.
 
 ### 3.1 Release benchmark gate fails
 
-The `strict` profile of `tools/release_gate.py` still exits `1` against the
-accepted multimodal report. The `release_candidate` profile (added in
-PR #12) exits `0` because prefill TPS, memory, and audio metrics are
-explicitly opted out — see `docs/BENCHMARKING.md` for the per-metric kind
-table. Promoting back toward strict requires:
+Both gate profiles currently exit `1` against the accepted multimodal report.
+Under `release_candidate`, prefill TPS is advisory and audio is out_of_scope,
+but `text_decode_ratio` and class-equal `memory_ratio` are hard misses. See
+`docs/BENCHMARKING.md` for the per-metric kind table. Release work should
+close the hard misses first:
 
-- **`text_prefill_ratio` 1.4498x** — 3% short of the 1.5x threshold.
+- **`text_decode_ratio` 1.1738x** — hard under `release_candidate`, target
+  `>= 1.5x`. KrillLM's absolute decode rate is stable vs v4, but the warm
+  Ollama daemon measured faster in v5. Closing this requires sustained margin
+  against warm Ollama variance, likely via Gemma 4-compatible speculative
+  decoding or another decode-throughput improvement.
+- **`memory_ratio` 1.1447x** — hard under `release_candidate` and failing by
+  ~14% (PR #14). The benchmark samples each engine's `phys_footprint` (macOS)
+  or RSS (other platforms) over the full process tree, and the bridge path
+  uses mlx-vlm's MLX Metal allocator peak. The canonical Gemma 4 e2b comparison
+  is class-equal (KrillLM affine 4-bit MLX vs Ollama Q4_K_M GGUF, both
+  `4-bit`), so the cross-quantization auto-downgrade does *not* apply. KrillLM
+  sits at ~9.6 GB phys_footprint vs Ollama's ~8.4 GB on the text task. Closing
+  the gap is a Workstream 3 follow-up: investigate KV cache sizing, buffer
+  reuse, and whether mlx-swift is materialising any working tensors more
+  eagerly than necessary.
+- **`text_prefill_ratio` 1.2231x** — below the 1.5x threshold.
   Currently advisory under `release_candidate`. Re-promote to hard once a
   drafter, fused kernel, or short-prompt eval-cadence change pushes it
   consistently over 1.5x.
-- **`image_prefill_ratio` 1.0385x** — structurally below the 1.5x
+- **`image_prefill_ratio` 0.8899x** — structurally below the 1.5x
   threshold because the vision-encoder cache moves SigLIP2 forward and
   projector cost out of the prefill window. Currently advisory under
   `release_candidate`. Re-promote either by counting vision-encoder time
   inside the prefill bucket or by switching the multimodal gate to a
   wall/TTFT-based metric.
-- **`audio_wall_ratio` 3.9265x** — out_of_scope under
+- **`audio_wall_ratio` 3.7868x** — out_of_scope under
   `release_candidate` until native Swift audio lands. The persistent
   `mlx-vlm` sidecar removed subprocess startup; the remaining gap is the
   bridge's generate cost vs Ollama's native path. Closing it requires
   porting Gemma 4's Conformer audio encoder and audio token expansion
   into native Swift+MLX. Multi-week effort.
-- **`memory_ratio` 1.1447x** — now hard under `release_candidate` and
-  failing by ~14% (PR #14). The benchmark samples each engine's
-  `phys_footprint` (macOS) or RSS (other platforms) over the full
-  process tree, and the bridge path uses mlx-vlm's MLX Metal allocator
-  peak. The canonical Gemma 4 e2b comparison is class-equal (KrillLM
-  affine 4-bit MLX vs Ollama Q4_K_M GGUF, both `4-bit`), so the
-  cross-quantization auto-downgrade does *not* apply. KrillLM sits at
-  ~9.6 GB phys_footprint vs Ollama's ~8.4 GB on the text task. Closing
-  the gap is a Workstream 3 follow-up: investigate KV cache sizing,
-  buffer reuse, and whether mlx-swift is materialising any working
-  tensors more eagerly than necessary.
 
 Required outcome before release tag:
 
@@ -299,14 +301,14 @@ release-ready only when all of the following are true:
 > OpenAI shapes), benchmark harness hardening, a corrected multimodal
 > prefix cache, and an opt-in int8 KV cache that composes with the
 > prefix cache. The release gate now has a `release_candidate` profile
-> that hard-gates user-visible latency while marking prefill TPS and
-> memory advisory and audio out_of_scope until native Swift audio
-> lands. Wall-time ratios beat Ollama by 1.6x–1.7x. Under
-> `release_candidate` the gate exits `0` on the accepted multimodal
-> snapshot; under `strict` it still fails on `text_prefill_ratio`,
-> `image_prefill_ratio`, and `audio_wall_ratio`. This is a
-> release-readiness baseline plus a documented release-candidate path,
-> not a production release.
+> that hard-gates user-visible latency and class-equal peak memory while
+> marking prefill TPS advisory and audio out_of_scope until native Swift
+> audio lands. On the refreshed v5 multimodal snapshot, text and image
+> wall-time ratios pass, but `release_candidate` exits `1` because
+> `text_decode_ratio` and `memory_ratio` miss hard thresholds. Under
+> `strict`, prefill and audio metrics also fail. This is a
+> release-readiness baseline plus a documented follow-up roadmap, not a
+> production release.
 
 ---
 
