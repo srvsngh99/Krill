@@ -345,6 +345,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                                  _ eventLoop: EventLoop) async -> Bool {
         do {
             try await genQueue.enter()
+            await keepAlive.beginRequest()
             return true
         } catch {
             sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
@@ -356,14 +357,22 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func leaveQueue() {
         let q = genQueue
-        Task { await q.leave() }
+        let ka = keepAlive
+        // endRequest() before leave(): the model's hold is released only
+        // after this request fully drains, so keep_alive:0 / an elapsed
+        // deadline can never evict mid-generation (PR #18 rereview).
+        Task { await ka.endRequest(); await q.leave() }
     }
 
     /// Slot acquire that just returns success/failure (for streaming paths
     /// whose 200 head is already on the wire, so a JSON 503 is impossible -
     /// the caller closes the stream with a terminal error instead).
     private func tryEnterQueue() async -> Bool {
-        do { try await genQueue.enter(); return true } catch { return false }
+        do {
+            try await genQueue.enter()
+            await keepAlive.beginRequest()
+            return true
+        } catch { return false }
     }
 
     /// Apply a created model's Modelfile `PARAMETER` overrides (WS-C) as
@@ -610,7 +619,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             }
 
             // Minimal but valid Anthropic SSE event sequence.
-            self.writeOnLoop(ctx, .head(ServerResponseHeads.openAIStreaming()))
+            self.writeOnLoop(ctx, .head(ServerResponseHeads.openAIStreaming(cors: self.corsHeaders())))
             func sse(_ event: String, _ obj: [String: Any]) {
                 if let d = try? JSONSerialization.data(withJSONObject: obj),
                    let s = String(data: d, encoding: .utf8) {
@@ -766,12 +775,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         "finish_reason": choice["finish_reason"] ?? "stop",
                     ]],
                 ]
-                self.writeOnLoop(ctx, .head(ServerResponseHeads.openAIStreaming()))
+                self.writeOnLoop(ctx, .head(ServerResponseHeads.openAIStreaming(cors: self.corsHeaders())))
                 self.writeSSEJSON(ctx, chunk)
                 self.writeRaw(ctx, "data: [DONE]\n\n")
                 self.writeOnLoop(ctx, .end(nil), flush: true)
             case .ollama:
-                self.writeOnLoop(ctx, .head(ServerResponseHeads.ollamaStreaming()))
+                self.writeOnLoop(ctx, .head(ServerResponseHeads.ollamaStreaming(cors: self.corsHeaders())))
                 self.writeNDJSON(ctx, response)
                 self.writeOnLoop(ctx, .end(nil), flush: true)
             }
@@ -909,9 +918,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         if requestStream {
             switch style {
             case .ollamaChat, .ollamaGenerate:
-                context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
+                context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming(cors: self.corsHeaders()))), promise: nil)
             case .openAI:
-                context.write(wrapOutboundOut(.head(ServerResponseHeads.openAIStreaming())), promise: nil)
+                context.write(wrapOutboundOut(.head(ServerResponseHeads.openAIStreaming(cors: self.corsHeaders()))), promise: nil)
             }
         }
 
@@ -1429,7 +1438,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             contextLimit: request.contextLimit ?? defaultContextLimit)
         if wantStream {
             // NDJSON head must begin in the channelRead call chain (NIO).
-            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
+            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming(cors: self.corsHeaders()))), promise: nil)
         }
         Task {
             defer { mediaCopy?.cleanup() }
@@ -1628,7 +1637,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             maxTokens: request.maxTokens,
             contextLimit: request.contextLimit ?? defaultContextLimit)
         if wantStream {
-            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
+            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming(cors: self.corsHeaders()))), promise: nil)
         }
         Task {
             defer { mediaCopy?.cleanup() }
@@ -1974,7 +1983,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 source: srcManifest.source, context: srcManifest.context,
                 files: srcManifest.files, draftPair: srcManifest.draftPair,
                 chatTemplate: srcManifest.chatTemplate,
-                sizeBytes: srcManifest.sizeBytes, pulledAt: Date())
+                sizeBytes: srcManifest.sizeBytes, pulledAt: Date(),
+                // Preserve the source's Modelfile PARAMETER/TEMPLATE/SYSTEM
+                // overrides — `/api/copy` must match `krillm cp` (PR #18
+                // rereview); dropping them silently de-customized the copy.
+                overrides: srcManifest.overrides)
             try registry.saveManifest(copied)
             sendJSON(context: context, status: .ok, body: ["status": "success"])
         } catch {
@@ -2058,7 +2071,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         if stream {
-            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
+            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming(cors: self.corsHeaders()))), promise: nil)
         }
 
         Task {
@@ -2141,7 +2154,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         do {
             let mf = try ModelfileParser.parse(mfText)
             if stream {
-                context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
+                context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming(cors: self.corsHeaders()))), promise: nil)
                 ndjson(["status": "reading modelfile"])
                 ndjson(["status": "creating model layer"])
             }
