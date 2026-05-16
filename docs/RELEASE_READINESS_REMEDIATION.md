@@ -164,6 +164,24 @@ pass against the local Gemma 4 e2b checkpoint at
 
 ### Latest benchmark measurements
 
+Post-merge PR #18 text sanity run (`post-merge-llama32-1b-server.json`,
+5 runs / 2 warmup, KrillLM server vs Ollama daemon, `llama-3.2-1b` vs
+`llama3.2:1b`):
+
+| Metric | KrillLM | Ollama | Ratio | Gate |
+| --- | ---: | ---: | ---: | --- |
+| Decode throughput | 250 tok/s | 164 tok/s | 1.52x | OK |
+| Prefill throughput | 8106 tok/s | 4838 tok/s | 1.68x | OK |
+| TTFT | 90 ms | 73 ms | 1.23x | FAIL |
+| Wall time | 0.215 s | 0.276 s | 0.78x | FAIL |
+
+This post-merge text-only report is a **sanity check, not a release
+artifact**: the harness warned that prompt tokens differ by 23.3%
+(KrillLM 43 vs Ollama 33), and the generated report fails
+`release_candidate` because TTFT and wall-time do not hit the hard
+thresholds. It confirms the merged code is present and fast on decode,
+but it does not replace the accepted multimodal release report.
+
 Text/server benchmark (`v3-text.json`, 5 runs / 2 warmup, `native_server`
 vs Ollama `gemma4:e2b`):
 
@@ -193,6 +211,26 @@ the gate exits `1` because `text_decode_ratio` and `memory_ratio` are hard
 misses. The text decode miss is driven by Ollama daemon variance between
 the v4 and v5 runs; KrillLM's absolute decode rate is essentially unchanged.
 
+Accepted multimodal report (`v6-mm.json`, 4 runs / 2 warmup,
+KrillLM server vs Ollama daemon, Gemma 4 E2B):
+
+| Task | Metric | KrillLM | Ollama | Ratio / speedup | Release status |
+| --- | --- | ---: | ---: | ---: | --- |
+| Text | TTFT | 29.8 ms | 141.7 ms | 0.21x / 4.8x faster | hard-pass |
+| Text | Wall time | 0.338 s | 0.530 s | 0.64x / 1.57x faster | hard-pass |
+| Text | Decode | 102 tok/s | 85.7 tok/s | 1.19x | floor hard-pass, 1.5x advisory miss |
+| Vision | Wall time | 0.204 s | 0.361 s | 0.56x / 1.77x faster | hard-pass |
+| Vision | Prefill | 21,966 tok/s | 19,701 tok/s | 1.12x | advisory miss |
+| Voice | Wall time | 1.530 s | 0.384 s | 3.98x slower | out_of_scope |
+| Voice | TTFT | 1530 ms | 236 ms | 6.48x slower | out_of_scope |
+| Memory | Text/image peak | 2.84-3.07 GB | 8.83-8.84 GB | 0.32-0.35x | hard-pass |
+
+Vision is therefore part of the current release-candidate performance
+story: native image requests beat Ollama on user-visible wall time with
+class-equal memory. Voice is explicitly **not** production-ready: it still
+runs through the `mlx-vlm` bridge, is slower than Ollama, and remains
+out_of_scope until the native Swift audio path lands.
+
 ---
 
 ## 3. Remaining Release Blockers
@@ -201,19 +239,18 @@ What is still required before this can be tagged a production release.
 Items that have shipped since PR #9 are crossed out; see Section 4 for the
 landing details.
 
-> **macOS Ollama parity gate (new track, 2026-05-17).** A production tag now
-> requires *both* the speedup `release_candidate` gate **and** the
-> `mac_parity` gate (`make parity-gate`) green, per
-> [`OLLAMA_MAC_PARITY_PLAN.md`](OLLAMA_MAC_PARITY_PLAN.md) §6. Phase 1 +
-> Phase 2 tool calling are complete (`--compat`,
-> `/api/version|ps|show|pull|delete|copy`, `/api/blobs`,
-> `/v1/models/{id}`, **WS-B embeddings — dedicated BERT encoder**,
-> **WS-D D1 tools/function calling on `/v1/chat/completions` + `/api/chat`,
-> verified live**). `make parity-gate` is **GREEN — 10/10** on both
-> `mac_parity` and `strict_parity`. Remaining plan workstreams (WS-C
-> Modelfile, WS-D D2/D3/D4, WS-E keep-alive/concurrency, WS-F Anthropic,
-> WS-G CORS/env) are Phase 2–4, not yet in the gated check-set, and must
-> be added before the DoD `11435→11434` port flip.
+> **macOS Ollama parity gate (PR #18, merged 2026-05-16).** A production
+> tag now requires *both* the performance gate and the macOS Ollama parity
+> gate (`make parity-gate`) to be green. PR #18 merged the broad parity
+> surface (`--compat`, discovery/lifecycle endpoints, embeddings, tools,
+> structured output, Modelfile create/show/cp, keep_alive, Anthropic
+> messages, context overrides, stateful sampler penalties, and a serialized
+> generation queue). The parity gate was reported green on the PR, but the
+> follow-up release PR must close the rereview issues before a production
+> tag: `keep_alive:0` must evict only after the active request, `serve` must
+> actually honor `OLLAMA_HOST`/`OLLAMA_MODELS`, `/api/copy` must preserve
+> Modelfile overrides, and streaming responses must include CORS headers.
+> The `11435→11434` default-port flip remains deferred until that PR lands.
 
 ### 3.1 Release benchmark gate
 
@@ -286,6 +323,14 @@ Required outcome before release tag:
 - The active gate (strict, or release_candidate after every advisory has
   been reviewed and every out_of_scope has been documented) exits `0`
   against the accepted multimodal benchmark report.
+- A fresh post-merge multimodal report is generated after restoring the
+  local Gemma 4 E2B checkpoint and is attached to the release PR. It must
+  include text, vision, and voice; voice may remain out_of_scope only if
+  the release language explicitly says audio is bridge-backed and not
+  production parity with Ollama.
+- The PR #18 rereview fixes are merged and covered by tests:
+  `keep_alive:0` post-request eviction, env/config wiring in `serve`,
+  `/api/copy` override preservation, and CORS on streaming responses.
 - The accepted report is committed or attached to release notes with
   machine, model, quantization, warmup, run count, `cache_mode`, and
   `kv_cache_dtype`.
@@ -293,7 +338,8 @@ Required outcome before release tag:
 ### 3.2 Engineering work explicitly deferred to a follow-up PR
 
 These were originally out-of-scope for PR #9. Items 4 and 5 have shipped;
-see Section 4.
+see Section 4. A new follow-up PR is required after PR #18 before any
+production release tag.
 
 1. **Native audio in Swift.** Required to close `audio_wall_ratio`.
    Status: pending.
@@ -312,6 +358,14 @@ see Section 4.
 5. ~~**Quantized KV state save/restore in the prefix cache.**~~ Shipped
    in PR #11. int8 KV and prefix cache compose end-to-end with no
    dequant→requant round trip. See Section 4.
+6. **PR #18 release-readiness fixes.** Close the four rereview issues:
+   `keep_alive:0` post-request eviction, `serve` env/config wiring,
+   `/api/copy` override preservation, and streaming CORS. Status:
+   required follow-up PR.
+7. **Fresh multimodal release artifact.** Restore/pull the local Gemma 4
+   E2B checkpoint, rerun `make bench-gemma4-multimodal`, run
+   `tools/release_gate.py --profile release_candidate`, and attach both
+   reports. Status: required follow-up PR.
 
 ---
 
@@ -347,13 +401,18 @@ release-ready only when all of the following are true:
 > user-visible latency wins decisively (text TTFT ~5x, text wall ~1.57x,
 > image wall ~1.77x faster than Ollama) and class-equal peak memory passes
 > hard, with a hard floor guaranteeing KrillLM never decodes slower than
-> Ollama. KrillLM is competitive but **not** 1.5x ahead on raw
-> decode-token/s against llama.cpp's Metal kernels on this tiny 4-bit
-> model; that `>= 1.5x` decode target is a tracked advisory pending
-> speculative decoding, and no release language should claim faster raw
-> decode. The `strict` gate still exits `1` (decode, prefill, audio). This
-> is a release-readiness baseline plus a documented follow-up roadmap; a
-> production tag still requires the `strict` gate and native audio.
+> Ollama on that accepted run. Vision is native and part of the release
+> candidate claim; voice/audio is bridge-backed, slower than Ollama, and
+> out_of_scope until native Swift audio lands. KrillLM is competitive but
+> **not** 1.5x ahead on raw decode-token/s against llama.cpp's Metal
+> kernels on this tiny 4-bit model; that `>= 1.5x` decode target is a
+> tracked advisory pending speculative decoding, and no release language
+> should claim faster raw decode. The `strict` gate still exits `1`
+> (decode, prefill, audio). This is a release-readiness baseline plus a
+> documented follow-up roadmap; a production tag still requires a follow-up
+> PR that closes the PR #18 rereview issues, reruns the multimodal
+> benchmark, and either keeps audio explicitly scoped out or ships native
+> audio.
 
 ---
 
