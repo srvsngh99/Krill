@@ -24,8 +24,13 @@ struct CpCommand: ParsableCommand {
         let dst = registry.modelPath(destination)
         if fm.fileExists(atPath: dst.path) { try? fm.removeItem(at: dst) }
         do {
-            try fm.createSymbolicLink(at: dst,
-                                      withDestinationURL: registry.modelPath(source))
+            let srcDir = registry.modelPath(source).resolvingSymlinksInPath()
+            try fm.createDirectory(at: dst, withIntermediateDirectories: true)
+            for entry in (try? fm.contentsOfDirectory(atPath: srcDir.path)) ?? [] {
+                try? fm.createSymbolicLink(
+                    at: dst.appendingPathComponent(entry),
+                    withDestinationURL: srcDir.appendingPathComponent(entry))
+            }
             let copied = ModelManifest(
                 name: destination, family: src.family, params: src.params,
                 quant: src.quant, source: src.source, context: src.context,

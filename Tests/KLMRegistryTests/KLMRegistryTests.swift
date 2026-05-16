@@ -53,9 +53,16 @@ final class KLMRegistryTests: XCTestCase {
         XCTAssertEqual(created.overrides?.parameters["temperature"], "0.2")
         XCTAssertEqual(created.family, .llama)
         XCTAssertTrue(reg.hasModel("my-krill"))
-        // Blob dir is a symlink to the base (no weight copy).
-        let attrs = try FileManager.default.attributesOfItem(
-            atPath: reg.modelPath("my-krill").path)
+        // Blob dir is a real directory whose entries symlink into the base
+        // (no weight copy). Seed a base file to verify the link.
+        try "w".write(to: reg.modelPath("base-llama")
+            .appendingPathComponent("model.safetensors"),
+            atomically: true, encoding: .utf8)
+        _ = try reg.createModel(name: "my-krill2", from: mf)
+        let linked = reg.modelPath("my-krill2")
+            .appendingPathComponent("model.safetensors")
+        let attrs = try FileManager.default
+            .attributesOfItem(atPath: linked.path)
         XCTAssertEqual(attrs[.type] as? FileAttributeType, .typeSymbolicLink)
     }
 

@@ -274,8 +274,10 @@ overrides are stored on the manifest. `krillm show <name>`
 (`--modelfile/--parameters/--template/--system`) and `POST /api/show`
 surface them; `krillm cp <src> <dst>` clones by reference. The `SYSTEM`
 override is injected at serve time when the request has no system
-message. (Runtime `PARAMETER`/`TEMPLATE` application round-trips through
-`show` today; applying them in the decode path is a tracked follow-up.)
+message; Modelfile `PARAMETER`s are applied at serve time as defaults
+(an explicit client value still wins). Base weights are referenced via
+per-file symlinks (no copy). (`TEMPLATE` round-trips through `show`;
+re-rendering it at decode is a tracked follow-up.)
 
 ## Structured Output
 

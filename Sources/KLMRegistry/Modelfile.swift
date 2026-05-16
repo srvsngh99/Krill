@@ -152,8 +152,17 @@ extension Registry {
         if fm.fileExists(atPath: dst.path) || isSymlink(dst) {
             try? fm.removeItem(at: dst)
         }
-        // Reference base weights via symlink (no copy).
-        try fm.createSymbolicLink(at: dst, withDestinationURL: modelPath(baseName))
+        // Reference base weights without copying: a real directory whose
+        // entries are per-file symlinks into the base. (A directory-level
+        // symlink is not traversed by the weight loader's directory
+        // enumeration, so we link the files individually.)
+        let baseDir = modelPath(baseName).resolvingSymlinksInPath()
+        try fm.createDirectory(at: dst, withIntermediateDirectories: true)
+        for entry in (try? fm.contentsOfDirectory(atPath: baseDir.path)) ?? [] {
+            try? fm.createSymbolicLink(
+                at: dst.appendingPathComponent(entry),
+                withDestinationURL: baseDir.appendingPathComponent(entry))
+        }
 
         if let w = modelfile.adapterWarning { logger.warning("\(w)") }
 

@@ -90,18 +90,27 @@ advisory `T2-9` row under `strict_parity`).
   when penalties are active. Live-verified: frequency+presence penalty
   cuts repetition ratio 0.889 → 0.093 on llama-3.2-1b.
 
+- WS-C runtime `PARAMETER` application (**applied**): a created model's
+  Modelfile `PARAMETER`s (temperature, top_p, top_k, repeat_penalty,
+  min_p, presence/frequency_penalty, mirostat, repeat_last_n, num_ctx,
+  num_predict, seed) are applied at serve time as *defaults* — an
+  explicit client value still wins. Base weights are referenced via
+  per-file symlinks (no copy) and load identically to the base.
+  Live-verified: a created model with `PARAMETER seed`/`temperature`
+  decodes deterministically and identically to its base.
+
 **Scope honesty — remaining engine-internal follow-ups (the plan's own
 "highest-uncertainty / delicate" items, §8):** WS-D D2
 grammar-constrained decoding (guided-prompt + extraction today, not a
-token-level logit-mask grammar); WS-C runtime `PARAMETER`/`TEMPLATE`
-override application (round-trips via `show`/`/api/show` but not yet
-re-applied at decode); WS-E `NUM_PARALLEL`/`MAX_LOADED_MODELS`/
-`MAX_QUEUE` true concurrency-queue + batching (knobs accepted via env;
-engine is single-flight — the plan's WS-E acceptance explicitly allows
-serialized execution first, batching as follow-up). These remain a
-tracked pass before the DoD `11435→11434` port flip; each is a depth
-refinement of an already-working, gated feature, not a missing
-endpoint.
+token-level logit-mask grammar — §8 explicitly flags this as the
+highest-uncertainty item); WS-C `TEMPLATE` override at decode (Go-style
+template; round-trips via `show`/`/api/show`, not yet re-rendered at
+generation); WS-E `NUM_PARALLEL`/`MAX_LOADED_MODELS`/`MAX_QUEUE` true
+concurrency-queue + batching (knobs accepted via env; engine is
+single-flight — the plan's WS-E acceptance explicitly permits
+serialized execution first with batching as a follow-up). Each is a
+depth refinement of an already-working, gated feature, tracked for a
+pass before the DoD `11435→11434` port flip — not a missing endpoint.
 `mac_parity` GREEN means the gated drop-in essentials pass — not that
 every plan row is done.
 

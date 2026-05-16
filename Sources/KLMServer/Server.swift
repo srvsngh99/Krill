@@ -328,10 +328,43 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
+    /// Apply a created model's Modelfile `PARAMETER` overrides (WS-C) as
+    /// *defaults*: a value is taken from the Modelfile only when the request
+    /// left that knob at its parse default, so an explicit client value
+    /// still wins (matches Ollama's Modelfile-as-defaults semantics).
+    private func applyModelParams(
+        sampling: SamplingParams, maxTokens: Int, contextLimit: Int?
+    ) -> (SamplingParams, Int, Int?) {
+        guard let name = engine.modelName,
+              let p = registry.getModel(name)?.overrides?.parameters,
+              !p.isEmpty
+        else { return (sampling, maxTokens, contextLimit) }
+
+        var s = sampling
+        var mt = maxTokens
+        var ctx = contextLimit
+        func f(_ k: String) -> Float? { p[k].flatMap { Float($0) } }
+        func i(_ k: String) -> Int? { p[k].flatMap { Int($0) } }
+
+        if s.temperature == 0.0, let v = f("temperature") { s.temperature = v }
+        if s.topP == 1.0, let v = f("top_p") { s.topP = v }
+        if s.topK == 0, let v = i("top_k") { s.topK = v }
+        if s.repetitionPenalty == 1.0, let v = f("repeat_penalty") { s.repetitionPenalty = v }
+        if s.minP == 0.0, let v = f("min_p") { s.minP = v }
+        if s.presencePenalty == 0.0, let v = f("presence_penalty") { s.presencePenalty = v }
+        if s.frequencyPenalty == 0.0, let v = f("frequency_penalty") { s.frequencyPenalty = v }
+        if s.mirostat == 0, let v = i("mirostat") { s.mirostat = v }
+        if let v = i("repeat_last_n") { s.repeatLastN = v }
+        if ctx == nil, let v = i("num_ctx") { ctx = v }
+        if (mt == 512 || mt == 2048), let v = i("num_predict"), v > 0 { mt = v }
+        if s.seed == nil, let seed = i("seed") { s.seed = UInt64(max(0, seed)) }
+        return (s, mt, ctx)
+    }
+
     /// Apply a created model's Modelfile `SYSTEM` override (WS-C): if the
     /// loaded model has a system override and the request carries no system
-    /// message, prepend it. PARAMETER/TEMPLATE overrides round-trip via
-    /// `show` today; runtime application of those is a tracked follow-up.
+    /// message, prepend it. `TEMPLATE` round-trips via `show`/`/api/show`;
+    /// runtime template application is a tracked follow-up.
     private func applyModelSystemOverride(
         _ messages: [[String: String]]
     ) -> [[String: String]] {
@@ -461,16 +494,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             into: applyModelSystemOverride(request.messages),
             format: request.responseFormat)
 
-        let effCtx = request.contextLimit ?? defaultContextLimit
+        let (effParams, effMax, effCtx) = applyModelParams(
+            sampling: request.sampling.samplingParams,
+            maxTokens: request.maxTokens,
+            contextLimit: request.contextLimit ?? defaultContextLimit)
         if request.stream {
             handleStreamingCompletion(
                 context: context, messages: genMessages,
-                params: request.sampling.samplingParams, maxTokens: request.maxTokens,
+                params: effParams, maxTokens: effMax,
                 media: decodedMedia, contextLimit: effCtx)
         } else {
             handleNonStreamingCompletion(
                 context: context, messages: genMessages,
-                params: request.sampling.samplingParams, maxTokens: request.maxTokens,
+                params: effParams, maxTokens: effMax,
                 media: decodedMedia, responseFormat: request.responseFormat,
                 contextLimit: effCtx)
         }
@@ -499,13 +535,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         nonisolated(unsafe) let ctx = context
         let eng = engine
         let wantStream = p.stream
-        let params = p.sampling.samplingParams
-        let maxTokens = p.maxTokens
+        let (params, maxTokens, ctxLimit) = applyModelParams(
+            sampling: p.sampling.samplingParams, maxTokens: p.maxTokens,
+            contextLimit: defaultContextLimit)
 
         Task {
             let (tokenStream, getStats) = eng.generate(
                 messages: msgs, params: params, maxTokens: maxTokens,
-                contextLimit: self.defaultContextLimit)
+                contextLimit: ctxLimit)
             var full = ""
             for await ev in tokenStream { if ev.isEnd { break }; full += ev.text }
 
@@ -597,8 +634,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let imageData = Self.loadDataIfPath(media?.imagePath)
         let mediaCopy = media
         let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
-        let params = request.sampling.samplingParams
-        let maxTokens = request.maxTokens
+        let (params, maxTokens, toolCtx) = applyModelParams(
+            sampling: request.sampling.samplingParams,
+            maxTokens: request.maxTokens,
+            contextLimit: request.contextLimit ?? defaultContextLimit)
         let wantStream = request.stream
         let started = CFAbsoluteTimeGetCurrent()
 
@@ -607,7 +646,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             let (tokenStream, getStats) = eng.generate(
                 messages: messages, params: params,
                 maxTokens: maxTokens, imageData: imageData,
-                contextLimit: request.contextLimit ?? self.defaultContextLimit)
+                contextLimit: toolCtx)
 
             var full = ""
             for await event in tokenStream {
@@ -1324,14 +1363,18 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             into: applyModelSystemOverride(request.messages),
             format: request.responseFormat)
         let respFormat = request.responseFormat
+        let (ocParams, ocMax, ocCtx) = applyModelParams(
+            sampling: request.sampling.samplingParams,
+            maxTokens: request.maxTokens,
+            contextLimit: request.contextLimit ?? defaultContextLimit)
         Task {
             defer { mediaCopy?.cleanup() }
             let (tokenStream, getStats) = eng.generate(
                 messages: genMessages,
-                params: request.sampling.samplingParams,
-                maxTokens: request.maxTokens,
+                params: ocParams,
+                maxTokens: ocMax,
                 imageData: imageData,
-                contextLimit: request.contextLimit ?? self.defaultContextLimit)
+                contextLimit: ocCtx)
 
             if request.stream {
                 var firstTokenTime: Double?
@@ -1507,15 +1550,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             (request.system.map { $0 + "\n\n" } ?? "")
                 + StructuredOutput.systemPrompt(for: fmt)
         } ?? request.system
+        let (ogParams, ogMax, ogCtx) = applyModelParams(
+            sampling: request.sampling.samplingParams,
+            maxTokens: request.maxTokens,
+            contextLimit: request.contextLimit ?? defaultContextLimit)
         Task {
             defer { mediaCopy?.cleanup() }
             let (tokenStream, getStats) = eng.generate(
                 prompt: request.prompt,
                 systemPrompt: genSystem,
-                params: request.sampling.samplingParams,
-                maxTokens: request.maxTokens,
+                params: ogParams,
+                maxTokens: ogMax,
                 imageData: imageData,
-                contextLimit: request.contextLimit ?? self.defaultContextLimit)
+                contextLimit: ogCtx)
 
             if request.stream {
                 var firstTokenTime: Double?
