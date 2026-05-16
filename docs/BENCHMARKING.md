@@ -154,6 +154,28 @@ The benchmark harness records `benchmark.kv_cache_dtype` (sourced from
 report's `kv_cache_dtype` field and on the terminal summary header so int8
 and fp16 runs are never confused for one another.
 
+### MLX Metal buffer cache cap (`KRILL_MLX_CACHE_LIMIT_MB`)
+
+mlx-swift recycles freed intermediate buffers in a pool sized from Metal's
+`recommendedMaxWorkingSetSize` (≈16 GB on a 24 GB M4 Pro). Those pages are
+resident and counted by `phys_footprint` / `RSIZE` — the figure the
+benchmark samples for `memory_ratio` — even though MLX treats them as
+"free", so an uncapped pool can grow into the multi-GB range under
+sustained load. KrillLM caps it on every native model load via
+`MLXMemoryConfig` (`Sources/KLMCore/MLXMemoryConfig.swift`):
+
+- Default: **256 MB** — covers Gemma 4 e2b's fixed-size decode-step buffers
+  so the hot loop still recycles (no decode regression).
+- `KRILL_MLX_CACHE_LIMIT_MB=<N>` overrides the cap in MB.
+- `KRILL_MLX_CACHE_LIMIT_MB=0` disables the cap (legacy unbounded
+  behavior).
+
+When benchmarking memory, always pass the clean `--krillm-server-pid`
+override (see the memory-sampling section). The historical v5 ~9.6 GB
+KrillLM reading was the combination of an *uncapped* pool and a
+*contaminated* (non-`--krillm-server-pid`) process-tree sample; with the
+cap and clean sampling, KrillLM text/image phys_footprint is ~2.85–3.0 GB.
+
 ## Release Readiness Status
 
 This build is a release-readiness baseline plus a documented
@@ -161,15 +183,14 @@ release-candidate path, not yet a production release.
 
 - **`strict` gate** (default) currently exits `1` against the accepted
   multimodal report. `text_decode_ratio`, `text_prefill_ratio`,
-  `image_prefill_ratio`, `audio_wall_ratio`, and `memory_ratio` fail
-  their hard thresholds (see `.build/benchmarks/v5-mm.json` for the
-  refresh that includes peak-memory sampling).
-- **`release_candidate` gate** also exits `1` on the refreshed snapshot:
-  `text_decode_ratio` (1.17x, target ≥1.5x) and `memory_ratio` (1.14x,
-  target ≤1.0x) are hard. The auto-downgrade for `memory_ratio` does
-  *not* apply on this snapshot because both engines are 4-bit class
-  (KrillLM affine-MLX, Ollama Q4_K_M). Audio is out_of_scope; prefill
-  metrics warn but do not gate.
+  `image_prefill_ratio`, and `audio_wall_ratio` fail their hard
+  thresholds (see `.build/benchmarks/v6-mm.json`, PR #16).
+- **`release_candidate` gate** exits `1` **solely** on
+  `text_decode_ratio` (~1.15x canonical 1.19x, target ≥1.5x).
+  `memory_ratio` now **passes** at 0.32–0.84 (target ≤1.0x) after PR #16
+  capped the MLX buffer pool and fixed contaminated sampling; class-equal
+  4-bit comparison is unchanged. Audio is out_of_scope; prefill metrics
+  warn but do not gate.
 
 Run `make bench-release-gate` for the latest per-metric results. The gate
 report at `.build/benchmarks/release-gate.json` contains exact ratios, the
@@ -180,25 +201,28 @@ the full plan, the per-metric promotion contract, and acceptance criteria.
 
 Key gaps as of the last reviewed run:
 
-- `text_decode_ratio` (1.17x on v5-mm) is **hard** and currently
-  failing. KrillLM's absolute decode TPS (≈110 tok/s) is unchanged from
-  prior runs; the regression vs the v4-mm number (1.50x) is Ollama
-  variability — Ollama ran ~94 tok/s in v5 vs ~73 tok/s in v4 on the
-  same machine and version. The metric still wants ≥1.5x sustained, so
-  closing it requires either holding KrillLM well above 1.5× a warm
-  Ollama or revisiting the threshold.
+- `text_decode_ratio` (~1.15x on v6-mm, 1.13–1.19 across 5 runs) is
+  **hard** and currently failing — the **sole** remaining hard
+  release-candidate miss. KrillLM decodes ~103–106 tok/s vs Ollama's
+  ~88–95 tok/s on the tiny 5B 4-bit Gemma 4 e2b, where llama.cpp's
+  hand-tuned Metal decode kernels are genuinely competitive. This is a
+  structural kernel gap, not variance; closing it to ≥1.5x is owned by
+  Workstream 2 (Gemma 4-compatible speculative decoding) and is a
+  documented multi-week follow-up. User-visible latency still wins
+  decisively (text TTFT ~5x, text wall ~1.57x, image wall ~1.77x).
 - `text_prefill_ratio` (1.22x) is advisory under `release_candidate`;
   re-promote once a drafter, fused kernel, or eval-cadence change
   pushes it past 1.5x.
 - `image_prefill_ratio` (0.89x) is advisory because the vision-encoder
   cache lifts work out of the measured prefill window;
   `image_wall_ratio` (0.67x) just barely passes hard.
-- `memory_ratio` (1.14x) is **hard** and currently failing. Both engines
-  are 4-bit class so the auto-downgrade does not apply. KrillLM's
-  phys_footprint sits at ~9.6 GB vs Ollama's ~8.4 GB on Gemma 4 e2b —
-  the gap is plausible (KrillLM holds the MLX KV cache plus working
-  buffers on top of the affine-quantized weights) and a candidate for
-  Workstream 3 follow-up.
+- `memory_ratio` is **hard** and now **passing** (0.32–0.84 across 5
+  runs; canonical 0.322). PR #16 root-caused the historical 1.14x / ~9.6
+  GB reading to an uncapped MLX buffer pool plus contaminated sampling;
+  with `KRILL_MLX_CACHE_LIMIT_MB` (default 256 MB) and clean
+  `--krillm-server-pid` sampling, KrillLM text/image phys_footprint is
+  ~2.85–3.0 GB vs Ollama's ~8.2–8.4 GB. Both engines remain 4-bit class
+  so the comparison is genuinely hard-gated.
 - Audio benchmarks still run through `mlx-vlm`; native Swift audio is
   Workstream 1 of the execution plan and `audio_*` is `out_of_scope`
   under `release_candidate` until that ships.
