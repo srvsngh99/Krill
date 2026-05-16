@@ -31,6 +31,28 @@ public struct KrillConfig: Sendable {
     /// Idle timeout for models in serve mode (seconds).
     public var idleTimeout: Int
 
+    /// Context-length override (tokens). nil = use the model's own max.
+    /// `KRILL_CONTEXT_LENGTH` / `OLLAMA_CONTEXT_LENGTH`. (WS-D D4 / T1-3)
+    public var contextLength: Int?
+
+    /// Default keep-alive (duration string, e.g. "5m", "0", "-1").
+    /// `KRILL_KEEP_ALIVE` / `OLLAMA_KEEP_ALIVE`. (WS-E / T1-4)
+    public var keepAlive: String
+
+    /// Max in-flight requests per loaded model. (WS-E / T1-5)
+    public var numParallel: Int
+    /// Max simultaneously-loaded models. (WS-E / T1-5)
+    public var maxLoadedModels: Int
+    /// Max queued requests before 503. (WS-E / T1-5)
+    public var maxQueue: Int
+
+    /// CORS allowlist. `KRILL_ORIGINS` / `OLLAMA_ORIGINS`. `*` = any.
+    /// (WS-G / T3-1)
+    public var origins: [String]
+
+    /// Flash-attention toggle (advisory, WS-G / T3-2).
+    public var flashAttention: Bool
+
     public init() {
         self.defaultModel = nil
         self.defaultQuant = 4
@@ -41,6 +63,13 @@ public struct KrillConfig: Sendable {
         self.serverPort = 11435
         self.serverHost = "127.0.0.1"
         self.idleTimeout = 300
+        self.contextLength = nil
+        self.keepAlive = "5m"
+        self.numParallel = 1
+        self.maxLoadedModels = 1
+        self.maxQueue = 512
+        self.origins = ["http://localhost", "http://127.0.0.1", "https://localhost"]
+        self.flashAttention = false
     }
 
     /// Load configuration with full precedence chain.
@@ -100,8 +129,53 @@ public struct KrillConfig: Sendable {
         }
     }
 
-    /// Override from KRILL_* environment variables.
+    private static func parseOrigins(_ raw: String) -> [String] {
+        raw.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Override from environment. `OLLAMA_*` aliases are applied first so a
+    /// native `KRILL_*` of the same setting always wins (KRILL_* is the
+    /// canonical surface; OLLAMA_* exists only for drop-in compatibility).
     mutating func mergeFromEnvironment() {
+        let env = ProcessInfo.processInfo.environment
+
+        // --- OLLAMA_* drop-in aliases (WS-G / T3-3) ---
+        if let v = env["OLLAMA_HOST"] {
+            // Accept "host", "host:port", or "http://host:port".
+            var s = v
+            if let r = s.range(of: "://") { s = String(s[r.upperBound...]) }
+            if let colon = s.lastIndex(of: ":"),
+               let p = Int(s[s.index(after: colon)...]) {
+                serverPort = p
+                s = String(s[..<colon])
+            }
+            if !s.isEmpty { serverHost = s }
+        }
+        if let v = env["OLLAMA_MODELS"] { modelsDir = v }
+        if let v = env["OLLAMA_CONTEXT_LENGTH"], let i = Int(v) { contextLength = i }
+        if let v = env["OLLAMA_KEEP_ALIVE"] { keepAlive = v }
+        if let v = env["OLLAMA_NUM_PARALLEL"], let i = Int(v) { numParallel = i }
+        if let v = env["OLLAMA_MAX_LOADED_MODELS"], let i = Int(v) { maxLoadedModels = i }
+        if let v = env["OLLAMA_MAX_QUEUE"], let i = Int(v) { maxQueue = i }
+        if let v = env["OLLAMA_KV_CACHE_TYPE"] { kvCacheDtype = v }
+        if let v = env["OLLAMA_ORIGINS"] { origins = Self.parseOrigins(v) }
+        if let v = env["OLLAMA_FLASH_ATTENTION"] {
+            flashAttention = v == "1" || v.lowercased() == "true"
+        }
+
+        // --- KRILL_* native (wins over OLLAMA_*) ---
+        if let v = env["KRILL_CONTEXT_LENGTH"], let i = Int(v) { contextLength = i }
+        if let v = env["KRILL_KEEP_ALIVE"] { keepAlive = v }
+        if let v = env["KRILL_NUM_PARALLEL"], let i = Int(v) { numParallel = i }
+        if let v = env["KRILL_MAX_LOADED_MODELS"], let i = Int(v) { maxLoadedModels = i }
+        if let v = env["KRILL_MAX_QUEUE"], let i = Int(v) { maxQueue = i }
+        if let v = env["KRILL_ORIGINS"] { origins = Self.parseOrigins(v) }
+        if let v = env["KRILL_FLASH_ATTENTION"] {
+            flashAttention = v == "1" || v.lowercased() == "true"
+        }
+
         if let v = ProcessInfo.processInfo.environment["KRILL_DEFAULT_MODEL"] {
             defaultModel = v
         }

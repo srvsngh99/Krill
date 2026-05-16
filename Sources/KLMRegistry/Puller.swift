@@ -55,6 +55,11 @@ public final class Puller: @unchecked Sendable {
         force: Bool = false,
         progress: ProgressHandler? = nil
     ) async throws -> ModelManifest {
+        // Guard the resolved name BEFORE any filesystem op: a crafted ref
+        // (e.g. "x/..") can reduce to ".." and make modelPath() resolve to
+        // the registry root, which the removeItem below would then wipe.
+        try Registry.requireValidName(resolved.name)
+
         // Check if already installed
         if !force && registry.hasModel(resolved.name) {
             logger.info("\(resolved.name) already installed, use --force to re-download")

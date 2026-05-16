@@ -178,7 +178,8 @@ public final class InferenceEngine: @unchecked Sendable {
         useSpeculative: Bool = false,
         usePrefixCache: Bool = true,
         imageData: Data? = nil,
-        audioData: Data? = nil
+        audioData: Data? = nil,
+        contextLimit: Int? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
@@ -189,7 +190,8 @@ public final class InferenceEngine: @unchecked Sendable {
         // and the prompt path agree on tokenization.
         return generate(messages: messages, params: params, maxTokens: maxTokens,
                         useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
-                        imageData: imageData, audioData: audioData)
+                        imageData: imageData, audioData: audioData,
+                        contextLimit: contextLimit)
     }
 
     /// Generate tokens from a full conversation history, streaming results.
@@ -208,7 +210,8 @@ public final class InferenceEngine: @unchecked Sendable {
         useSpeculative: Bool = false,
         usePrefixCache: Bool = true,
         imageData: Data? = nil,
-        audioData: Data? = nil
+        audioData: Data? = nil,
+        contextLimit: Int? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         guard let loadedModel, let tokenizer else {
             let emptyStream = AsyncStream<TokenEvent> { $0.finish() }
@@ -226,13 +229,24 @@ public final class InferenceEngine: @unchecked Sendable {
 
         // Use direct token ID path for Gemma4 to avoid decode→re-encode
         // round-trip that loses special tokens (105, 106, 107).
-        let promptTokens: [Int]
+        var promptTokensBuilt: [Int]
         if loadedModel.family == "gemma4" {
-            promptTokens = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
+            promptTokensBuilt = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
         } else {
             let formatted = tokenizer.applyChatTemplate(messages: preparedMessages)
-            promptTokens = tokenizer.encodeWithoutExtraBOS(formatted)
+            promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(formatted)
         }
+
+        // WS-D D4: honor a context-length cap (num_ctx / KRILL_CONTEXT_LENGTH).
+        // Keep the most recent `contextLimit` tokens so the latest turn and
+        // any tool results survive; warn rather than silently overflow.
+        if let limit = contextLimit, limit > 0, promptTokensBuilt.count > limit {
+            let dropped = promptTokensBuilt.count - limit
+            promptTokensBuilt = Array(promptTokensBuilt.suffix(limit))
+            FileHandle.standardError.write(Data(
+                "[KrillLM] num_ctx=\(limit): prompt truncated, dropped \(dropped) leading token(s).\n".utf8))
+        }
+        let promptTokens = promptTokensBuilt
 
         guard !promptTokens.isEmpty else {
             let emptyStream = AsyncStream<TokenEvent> { continuation in
@@ -269,7 +283,11 @@ public final class InferenceEngine: @unchecked Sendable {
             }
             return true
         }()
+        // Penalty/mirostat sampling needs a sequential per-step recent-token
+        // window, which the multi-token speculative path cannot honor; fall
+        // back to the standard decode loop when penalties are active.
         let shouldSpec = useSpeculative && specDecoder != nil && !useInt8KV
+            && !params.penaltiesActive
         let capturedImageData = imageData
 
         // int8 KV + prefix cache coexist via the quantized snapshot path
@@ -495,6 +513,13 @@ public final class InferenceEngine: @unchecked Sendable {
                     }
                 } else {
                     // === Standard Decode Path ===
+                    // WS-D D3: only when the request opts into penalties /
+                    // mirostat do we maintain a recent-token window; the
+                    // default path below is byte-for-byte unchanged.
+                    let trackHistory = sampler.needsHistory
+                    var recent: [Int] = trackHistory
+                        ? Array(promptTokens.suffix(512)) : []
+
                     // Two-deep on-GPU pipeline: the just-sampled token stays as
                     // a lazy MLXArray and is fed directly into the next forward.
                     // We schedule the next forward + sample, then sync only on
@@ -515,7 +540,13 @@ public final class InferenceEngine: @unchecked Sendable {
                         // allocation and keeps the dependency graph on-device.
                         let tokenInput = nextTokenArr.reshaped(1, 1)
                         let logits = capturedForward(tokenInput, caches)
-                        let nextTokenArr2 = sampler.sampleArray(logits)
+                        let nextTokenArr2: MLXArray
+                        if trackHistory {
+                            recent.append(nextToken)
+                            nextTokenArr2 = sampler.sampleArray(logits, recent: recent)
+                        } else {
+                            nextTokenArr2 = sampler.sampleArray(logits)
+                        }
 
                         // Schedule both the forward and the next sample to run
                         // on the GPU in the background while we decode/yield.

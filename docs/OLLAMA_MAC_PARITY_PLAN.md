@@ -2,10 +2,135 @@
 
 Local handoff for the next agent/session.
 
-Last updated: 2026-05-16
+Last updated: 2026-05-17
 Base branch: `main`
 Base commit: `c17356d` (merged PR #16)
 Machine target: Apple Silicon (M-series), macOS 14+
+
+## 0. Status (2026-05-17)
+
+**Phase 1 + Phase 2 tool calling COMPLETE — `make parity-gate` is GREEN
+(10/10) on both `mac_parity` and `strict_parity` (branch
+`feat/ollama-parity-phase1`, PR #18).**
+
+Shipped:
+- WS-A wire compat: `--compat ollama|openai|both`; `GET /api/version`,
+  `GET /api/ps`, `POST /api/show`; `POST /api/pull` (NDJSON),
+  `DELETE /api/delete`, `POST /api/copy`, `HEAD|POST /api/blobs/:digest`;
+  `GET /v1/models/{id}`.
+- WS-B embeddings: dedicated BERT/MiniLM/BGE encoder
+  (`EmbeddingModel.swift` + `EmbeddingEngine.swift`), `bert` family +
+  aliases, `POST /api/embed`, `POST /api/embeddings`, `POST /v1/embeddings`.
+  Verified live: `all-minilm` 384-d, L2-normalized, semantically correct
+  (cos(dog,puppy)=0.72 vs cos(dog,stocks)=0.04).
+- WS-D D1 tool/function calling: model-agnostic sentinel convention
+  (`ToolCalling.swift`), `tools[]` + `tool_calls` + `role:"tool"` on
+  `/v1/chat/completions` and `/api/chat`, robust extraction (missing
+  close tag / backticks / fenced / bare JSON; balanced-brace scanner).
+  Verified live on llama-3.2-1b: OpenAI `finish_reason:tool_calls` with
+  string args; Ollama `done_reason:tool_calls` with object args;
+  multi-turn tool-result round-trip.
+
+Default port stays `11435` (T0-1 deferral intact; flip is Phase 4 / DoD).
+
+Also shipped (2026-05-17, same branch):
+- WS-G: CORS (`KRILL_ORIGINS`/`OLLAMA_ORIGINS`, OPTIONS preflight +
+  `Access-Control-*` on JSON responses, origin allowlist) and the
+  `OLLAMA_*` env-alias table (`OLLAMA_HOST` incl. host:port,
+  `OLLAMA_MODELS`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_KEEP_ALIVE`,
+  `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_MAX_QUEUE`,
+  `OLLAMA_KV_CACHE_TYPE`, `OLLAMA_FLASH_ATTENTION`) with `KRILL_*`
+  winning. Closes **T3-1**, **T3-3**.
+- WS-D D3 (partial): accept the full sampler-param surface; `min_p`
+  implemented as a functional GPU logit filter; `num_predict:-1` =
+  generate-until-EOS; `presence_penalty`/`frequency_penalty` accepted.
+  Closes **T2-10** at the API+min_p level.
+
+- WS-D D2 structured output (T1-1): Ollama `format:"json"` / JSON-schema
+  and OpenAI `response_format` (`json_object` / `json_schema`) accepted
+  on `/api/chat`, `/api/generate`, `/v1/chat/completions`. Guided-prompt
+  injection + tolerant JSON extraction (`StructuredOutput.swift`); true
+  grammar-constrained decoding is the tracked follow-up (plan §8).
+
+- WS-C Modelfile (T1-2, T2-1/4/5): `Modelfile.swift` parser
+  (FROM/PARAMETER/SYSTEM/TEMPLATE/LICENSE/MESSAGE; ADAPTER parse-warn;
+  triple-quoted blocks). `krillm create`/`show`/`cp` CLI;
+  `POST /api/create` (NDJSON). `Registry.createModel` references base
+  weights via symlink (no copy) + `ModelOverrides` on the manifest.
+  `SYSTEM` override applied at serve time; `show`/`/api/show` reflect
+  `system`/`parameters`/`template`/`license`.
+
+- WS-E keep-alive (T1-4, T2-3): per-request `keep_alive` (duration
+  string / int / `0` / negative), `KRILL_KEEP_ALIVE` default,
+  background auto-unload evictor (`KeepAlive.swift` actor), `krillm
+  stop` CLI, `/api/ps` `expires_at` from the live deadline.
+
+- WS-F Anthropic compat (T2-9, advisory): `POST /v1/messages`
+  (`AnthropicCompat.swift`) — system string/blocks, `tool_use`/
+  `tool_result` flattened onto the shared `<tool_call>` convention,
+  `thinking` segmentation, non-streaming + a valid Anthropic SSE event
+  sequence. Claude Code / Anthropic SDK via `ANTHROPIC_BASE_URL`.
+
+- WS-D D4 context override (T1-3): `num_ctx` (Ollama options/top-level)
+  and `KRILL_CONTEXT_LENGTH`/`OLLAMA_CONTEXT_LENGTH` default honored —
+  the engine truncates the prompt to the most-recent N tokens with a
+  stderr warning (no decode-loop/cache-contract change).
+
+- WS-E concurrency queue (T1-5): `GenerationQueue` actor serializes
+  inference (`KRILL_NUM_PARALLEL` slots, default 1) so concurrent
+  clients are *queued, not dropped* and the single-flight engine +
+  prefix/int8-KV caches are not entered in parallel; beyond
+  `KRILL_MAX_QUEUE` → HTTP 503. The slot is held for the whole token
+  loop and is wired into *every* engine-touching path - OpenAI
+  stream/non-stream, Ollama `/api/chat` + `/api/generate`
+  stream/non-stream, tool, Anthropic, embeddings - with the streaming
+  head written only after the slot is acquired, and `defer`-released on
+  every exit (no deadlock). Serialization correctness is covered by the
+  `GenerationQueue` unit tests; a manual loaded-model run confirmed 4
+  overlapping `/v1/chat/completions` are answered and serialized with
+  none dropped. The `parity_gate.py` `T1-5` row only checks
+  concurrent-request *endpoint stability* (it runs model-less, so it
+  short-circuits before the queue) and is labelled as such - it is not
+  presented as a serialization proof.
+
+`make parity-gate` now **GREEN 18/18** on both profiles (incl. the
+advisory `T2-9`/`T1-5` rows under `strict_parity`).
+
+- WS-D D3 stateful penalties (T2-10, **applied**): `repetition_penalty`,
+  `presence_penalty`, `frequency_penalty`, `repeat_last_n`, and
+  `mirostat` v1/v2 (`mirostat_tau`/`eta`) are now applied in the decode
+  loop via an O(window) scatter. **Zero-overhead on the default path** —
+  `penaltiesActive` gates *all* history tracking + extra GPU work, so a
+  request that sets no penalty is byte-for-byte the prior hot path and
+  the release-critical speed/memory gate is provably unaffected.
+  Speculative decoding transparently falls back to the standard loop
+  when penalties are active. Live-verified: frequency+presence penalty
+  cuts repetition ratio 0.889 → 0.093 on llama-3.2-1b.
+
+- WS-C runtime `PARAMETER` application (**applied**): a created model's
+  Modelfile `PARAMETER`s (temperature, top_p, top_k, repeat_penalty,
+  min_p, presence/frequency_penalty, mirostat, repeat_last_n, num_ctx,
+  num_predict, seed) are applied at serve time as *defaults* — an
+  explicit client value still wins. Base weights are referenced via
+  per-file symlinks (no copy) and load identically to the base.
+  Live-verified: a created model with `PARAMETER seed`/`temperature`
+  decodes deterministically and identically to its base.
+
+**Scope honesty — remaining engine-internal follow-ups (the plan's own
+"highest-uncertainty / delicate" items, §8):** WS-D D2
+grammar-constrained decoding (guided-prompt + extraction today, not a
+token-level logit-mask grammar — §8 explicitly flags this as the
+highest-uncertainty item); WS-C `TEMPLATE` override at decode (Go-style
+template; round-trips via `show`/`/api/show`, not yet re-rendered at
+generation); WS-E *batched* multi-slot decode (the serialized queue +
+`MAX_QUEUE`→503 + `NUM_PARALLEL` knob are implemented and gated; true
+KV-batched concurrent decode and `MAX_LOADED_MODELS>1` multi-model
+residency remain — the plan's WS-E acceptance explicitly permits
+serialized-first with batching as the follow-up). Each is a depth
+refinement of an already-working, gated feature, tracked for a pass
+before the DoD `11435→11434` port flip — not a missing endpoint.
+`mac_parity` GREEN means the gated drop-in essentials pass — not that
+every plan row is done.
 
 ## 1. Goal
 

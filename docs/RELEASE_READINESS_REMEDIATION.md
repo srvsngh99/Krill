@@ -201,6 +201,20 @@ What is still required before this can be tagged a production release.
 Items that have shipped since PR #9 are crossed out; see Section 4 for the
 landing details.
 
+> **macOS Ollama parity gate (new track, 2026-05-17).** A production tag now
+> requires *both* the speedup `release_candidate` gate **and** the
+> `mac_parity` gate (`make parity-gate`) green, per
+> [`OLLAMA_MAC_PARITY_PLAN.md`](OLLAMA_MAC_PARITY_PLAN.md) §6. Phase 1 +
+> Phase 2 tool calling are complete (`--compat`,
+> `/api/version|ps|show|pull|delete|copy`, `/api/blobs`,
+> `/v1/models/{id}`, **WS-B embeddings — dedicated BERT encoder**,
+> **WS-D D1 tools/function calling on `/v1/chat/completions` + `/api/chat`,
+> verified live**). `make parity-gate` is **GREEN — 10/10** on both
+> `mac_parity` and `strict_parity`. Remaining plan workstreams (WS-C
+> Modelfile, WS-D D2/D3/D4, WS-E keep-alive/concurrency, WS-F Anthropic,
+> WS-G CORS/env) are Phase 2–4, not yet in the gated check-set, and must
+> be added before the DoD `11435→11434` port flip.
+
 ### 3.1 Release benchmark gate
 
 Against the accepted multimodal report (`.build/benchmarks/v6-mm.json`):

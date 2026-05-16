@@ -140,6 +140,11 @@ krillm run llama-3.2-3b
 krillm serve --model llama-3.2-3b
 # Then: curl http://localhost:11435/v1/chat/completions ...
 
+# Ollama drop-in (opt-in): match Ollama's port + full /api surface
+krillm serve --model llama-3.2-3b --port 11434 --compat both
+# Default port stays 11435 until the mac_parity gate is green
+# (deferred per docs/OLLAMA_MAC_PARITY_PLAN.md). Track with: make parity-gate
+
 # Native synthetic-token benchmark
 krillm bench llama-3.2-3b
 ```

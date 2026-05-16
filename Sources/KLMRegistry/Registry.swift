@@ -66,8 +66,41 @@ public final class Registry: Sendable {
             .sorted { $0.name < $1.name }
     }
 
+    /// Reject model names that could escape the registry directory or
+    /// otherwise resolve to an unintended path. A model name is an opaque
+    /// identifier, never a path: no separators, no `..`, no leading `.`,
+    /// not absolute, length-bounded.
+    public static func isValidModelName(_ name: String) -> Bool {
+        guard !name.isEmpty, name.count <= 200 else { return false }
+        if name.hasPrefix(".") || name.hasPrefix("/") || name.hasPrefix("~") {
+            return false
+        }
+        if name.contains("/") || name.contains("\\") || name.contains("..") {
+            return false
+        }
+        // Disallow control characters and path-significant whitespace.
+        return !name.unicodeScalars.contains { $0.value < 0x20 || $0 == "\u{7f}" }
+    }
+
+    public enum RegistryError: Error, CustomStringConvertible {
+        case invalidModelName(String)
+        public var description: String {
+            switch self {
+            case .invalidModelName(let n):
+                return "Invalid model name '\(n)': must not contain path separators, '..', or leading '.'"
+            }
+        }
+    }
+
+    static func requireValidName(_ name: String) throws {
+        guard isValidModelName(name) else {
+            throw RegistryError.invalidModelName(name)
+        }
+    }
+
     /// Get a specific model by name.
     public func getModel(_ name: String) -> ModelManifest? {
+        guard Self.isValidModelName(name) else { return nil }
         let manifestURL = manifestsDir.appendingPathComponent("\(name).json")
         guard let data = try? Data(contentsOf: manifestURL) else { return nil }
         let decoder = JSONDecoder()
@@ -82,12 +115,14 @@ public final class Registry: Sendable {
 
     /// Check if a model is installed.
     public func hasModel(_ name: String) -> Bool {
+        guard Self.isValidModelName(name) else { return false }
         let manifestURL = manifestsDir.appendingPathComponent("\(name).json")
         return FileManager.default.fileExists(atPath: manifestURL.path)
     }
 
     /// Save a model manifest after pulling.
     public func saveManifest(_ manifest: ModelManifest) throws {
+        try Self.requireValidName(manifest.name)
         try ensureDirectories()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -100,6 +135,7 @@ public final class Registry: Sendable {
 
     /// Remove a model (manifest + blob directory).
     public func removeModel(_ name: String) throws {
+        try Self.requireValidName(name)
         let fm = FileManager.default
         let manifestURL = manifestsDir.appendingPathComponent("\(name).json")
         let blobDir = blobsDir.appendingPathComponent(name)
