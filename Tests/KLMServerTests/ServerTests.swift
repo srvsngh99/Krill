@@ -64,6 +64,57 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(request.sampling.topK, 41)
     }
 
+    func testOllamaFormatJsonParsed() throws {
+        let req = try ServerParsing.ollamaChatRequest(from: [
+            "model": "m",
+            "messages": [["role": "user", "content": "hi"]],
+            "format": "json",
+        ])
+        XCTAssertEqual(req.responseFormat, .json)
+    }
+
+    func testOllamaFormatSchemaParsed() throws {
+        let req = try ServerParsing.ollamaGenerateRequest(from: [
+            "model": "m", "prompt": "hi", "stream": false,
+            "format": ["type": "object", "properties": ["x": ["type": "number"]]],
+        ])
+        guard case .schema(let s)? = req.responseFormat else {
+            return XCTFail("expected schema")
+        }
+        XCTAssertTrue(s.contains("properties"))
+    }
+
+    func testOpenAIResponseFormatJsonObject() throws {
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m",
+            "messages": [["role": "user", "content": "hi"]],
+            "response_format": ["type": "json_object"],
+        ])
+        XCTAssertEqual(req.responseFormat, .json)
+    }
+
+    func testStructuredOutputExtractsJSONFromProse() {
+        let text = "Sure! Here you go:\n```json\n{\"a\": 1, \"b\": [2,3]}\n```\nHope that helps."
+        let out = StructuredOutput.coerce(text, format: .json)
+        let obj = try? JSONSerialization.jsonObject(with: Data(out.utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["a"] as? Int, 1)
+    }
+
+    func testStructuredOutputArrayAndPassthrough() {
+        XCTAssertEqual(StructuredOutput.extractJSON(from: "x [1, 2, 3] y"), "[1,2,3]")
+        // No JSON + format set -> original text preserved (visible refusal).
+        XCTAssertEqual(StructuredOutput.coerce("I cannot.", format: .json), "I cannot.")
+        // No format -> untouched.
+        XCTAssertEqual(StructuredOutput.coerce("plain", format: nil), "plain")
+    }
+
+    func testStructuredOutputInjectsSystemTurn() {
+        let out = StructuredOutput.injectFormatSystem(
+            into: [["role": "user", "content": "hi"]], format: .json)
+        XCTAssertEqual(out.first?["role"], "system")
+        XCTAssertTrue(out.first?["content"]?.contains("valid JSON") ?? false)
+    }
+
     func testOpenAIChatParsesMinPAndAcceptsPenalties() throws {
         let req = try ServerParsing.openAIChatRequest(from: [
             "model": "m",

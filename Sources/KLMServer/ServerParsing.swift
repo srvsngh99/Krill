@@ -49,6 +49,13 @@ internal struct ServerToolSpec: Equatable, Sendable {
     let parametersJSON: String
 }
 
+/// Structured-output request (WS-D D2 / T1-1). `.json` = free-form JSON;
+/// `.schema` carries a JSON-schema string the output must conform to.
+internal enum ResponseFormat: Equatable, Sendable {
+    case json
+    case schema(String)
+}
+
 internal struct ServerChatRequest: Equatable, Sendable {
     let messages: [[String: String]]
     let stream: Bool
@@ -57,6 +64,7 @@ internal struct ServerChatRequest: Equatable, Sendable {
     let requestedModel: String?
     var media: ServerMediaPayload = ServerMediaPayload()
     var tools: [ServerToolSpec] = []
+    var responseFormat: ResponseFormat? = nil
 }
 
 internal struct ServerCompletionRequest: Equatable, Sendable {
@@ -74,6 +82,7 @@ internal struct ServerGenerateRequest: Equatable, Sendable {
     let sampling: ServerSamplingOptions
     let requestedModel: String?
     var media: ServerMediaPayload = ServerMediaPayload()
+    var responseFormat: ResponseFormat? = nil
 }
 
 internal enum ServerRequestError: Error, Equatable, Sendable {
@@ -104,7 +113,7 @@ internal enum ServerParsing {
     private static let unsupportedOpenAIChatFields: Set<String> = [
         "parallel_tool_calls",
         "functions", "function_call",
-        "response_format", "logprobs", "top_logprobs",
+        "logprobs", "top_logprobs",
         "stop", "logit_bias",
         "stream_options"
     ]
@@ -114,12 +123,10 @@ internal enum ServerParsing {
         "stop", "frequency_penalty", "presence_penalty", "logit_bias"
     ]
 
-    private static let unsupportedOllamaChatFields: Set<String> = [
-        "format"
-    ]
+    private static let unsupportedOllamaChatFields: Set<String> = []
 
     private static let unsupportedOllamaGenerateFields: Set<String> = [
-        "format", "suffix", "context", "template"
+        "suffix", "context", "template"
     ]
 
     static func jsonObject(from buffer: ByteBuffer) -> [String: Any]? {
@@ -210,6 +217,42 @@ internal enum ServerParsing {
         return copy
     }
 
+    /// Ollama `format`: the string `"json"` or a JSON-schema object.
+    static func parseOllamaFormat(_ raw: Any?) -> ResponseFormat? {
+        guard let raw else { return nil }
+        if let s = raw as? String {
+            return s.lowercased() == "json" ? .json : nil
+        }
+        if let obj = raw as? [String: Any],
+           let d = try? JSONSerialization.data(withJSONObject: obj),
+           let s = String(data: d, encoding: .utf8) {
+            return .schema(s)
+        }
+        return nil
+    }
+
+    /// OpenAI `response_format`: `{type:"json_object"}`,
+    /// `{type:"json_schema", json_schema:{schema:{…}}}`, or `{type:"text"}`.
+    static func parseOpenAIResponseFormat(_ raw: Any?) -> ResponseFormat? {
+        guard let obj = raw as? [String: Any],
+              let type = obj["type"] as? String else { return nil }
+        switch type {
+        case "json_object":
+            return .json
+        case "json_schema":
+            if let js = obj["json_schema"] as? [String: Any] {
+                let schema = (js["schema"] as? [String: Any]) ?? js
+                if let d = try? JSONSerialization.data(withJSONObject: schema),
+                   let s = String(data: d, encoding: .utf8) {
+                    return .schema(s)
+                }
+            }
+            return .json
+        default:
+            return nil
+        }
+    }
+
     static func openAIChatRequest(from json: [String: Any]) throws -> ServerChatRequest {
         try rejectUnsupportedFields(in: json, fields: unsupportedOpenAIChatFields)
         let tools = try parseTools(from: json)
@@ -225,7 +268,8 @@ internal enum ServerParsing {
             sampling: try openAISamplingOptions(from: json),
             requestedModel: try optionalString(json["model"], field: "model"),
             media: extracted.media,
-            tools: tools
+            tools: tools,
+            responseFormat: parseOpenAIResponseFormat(json["response_format"])
         )
     }
 
@@ -269,7 +313,8 @@ internal enum ServerParsing {
             sampling: try ollamaSamplingOptions(from: json),
             requestedModel: try optionalString(json["model"], field: "model"),
             media: extracted.media,
-            tools: tools
+            tools: tools,
+            responseFormat: parseOllamaFormat(json["format"])
         )
     }
 
@@ -309,7 +354,8 @@ internal enum ServerParsing {
             maxTokens: try ollamaTokenLimit(from: json),
             sampling: try ollamaSamplingOptions(from: json),
             requestedModel: try optionalString(json["model"], field: "model"),
-            media: media
+            media: media,
+            responseFormat: parseOllamaFormat(json["format"])
         )
     }
 

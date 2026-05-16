@@ -46,16 +46,23 @@ Also shipped (2026-05-17, same branch):
   generate-until-EOS; `presence_penalty`/`frequency_penalty` accepted.
   Closes **T2-10** at the API+min_p level.
 
-`make parity-gate` now **GREEN 12/12** on both profiles.
+- WS-D D2 structured output (T1-1): Ollama `format:"json"` / JSON-schema
+  and OpenAI `response_format` (`json_object` / `json_schema`) accepted
+  on `/api/chat`, `/api/generate`, `/v1/chat/completions`. Guided-prompt
+  injection + tolerant JSON extraction (`StructuredOutput.swift`); true
+  grammar-constrained decoding is the tracked follow-up (plan §8).
+
+`make parity-gate` now **GREEN 13/13** on both profiles.
 
 **Scope honesty — still open / NOT gated (Phase 2–4):** WS-C
-Modelfile/`create`/`show`/`cp`; WS-D D2 structured output (`format`);
-WS-D D3 *stateful* penalties (presence/frequency/mirostat/repeat_last_n
-are accepted but not yet applied in the decode loop); WS-D D4 real
-`num_ctx` clamp/override; WS-E keep-alive/auto-unload/concurrency/queue;
-WS-F Anthropic `/v1/messages` + thinking. These must be built and added
-to the gate before the DoD `11435→11434` port flip. `mac_parity` GREEN
-means the gated drop-in essentials pass — not that every plan row is done.
+Modelfile/`create`/`show`/`cp`; WS-D D3 *stateful* penalties
+(presence/frequency/mirostat/repeat_last_n are accepted but not yet
+applied in the decode loop); WS-D D2 grammar-constrained decoding (only
+guided+extract today); WS-D D4 real `num_ctx` clamp/override; WS-E
+keep-alive/auto-unload/concurrency/queue; WS-F Anthropic `/v1/messages`
++ thinking. These must be built and added to the gate before the DoD
+`11435→11434` port flip. `mac_parity` GREEN means the gated drop-in
+essentials pass — not that every plan row is done.
 
 ## 1. Goal
 

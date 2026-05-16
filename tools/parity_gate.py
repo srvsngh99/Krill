@@ -267,6 +267,30 @@ class Gate:
 
         self.check("T2-10", "H", "extended sampler params", sampler_params)
 
+        def structured_output() -> tuple[str, str]:
+            # Ollama format:"json" and OpenAI response_format must be
+            # accepted (no parse-time 400). 503/200 are both fine.
+            c1, r1 = self._req(
+                "POST", "/api/chat",
+                {"model": "x", "stream": False,
+                 "messages": [{"role": "user", "content": "give json"}],
+                 "format": "json"})
+            c2, r2 = self._req(
+                "POST", "/v1/chat/completions",
+                {"model": "x",
+                 "messages": [{"role": "user", "content": "give json"}],
+                 "response_format": {"type": "json_object"}})
+            for c, r, who in ((c1, r1, "ollama format"),
+                              (c2, r2, "openai response_format")):
+                if c == 400:
+                    return "FAIL", f"{who} rejected: {r[:100]!r}"
+                if c not in (200, 503):
+                    return "FAIL", f"{who} unexpected {c}"
+            return "PASS", "format + response_format accepted"
+
+        self.check("T1-1", "H", "structured output (JSON/schema)",
+                   structured_output)
+
     # -- verdict ----------------------------------------------------------
     def verdict(self, profile: str) -> bool:
         print(f"\nProfile: {profile}")

@@ -397,16 +397,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
+        let genMessages = StructuredOutput.injectFormatSystem(
+            into: request.messages, format: request.responseFormat)
+
         if request.stream {
             handleStreamingCompletion(
-                context: context, messages: request.messages,
+                context: context, messages: genMessages,
                 params: request.sampling.samplingParams, maxTokens: request.maxTokens,
                 media: decodedMedia)
         } else {
             handleNonStreamingCompletion(
-                context: context, messages: request.messages,
+                context: context, messages: genMessages,
                 params: request.sampling.samplingParams, maxTokens: request.maxTokens,
-                media: decodedMedia)
+                media: decodedMedia, responseFormat: request.responseFormat)
         }
     }
 
@@ -888,7 +891,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         context: ChannelHandlerContext,
         messages: [[String: String]],
         params: SamplingParams, maxTokens: Int,
-        media: DecodedMedia? = nil
+        media: DecodedMedia? = nil,
+        responseFormat: ResponseFormat? = nil
     ) {
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
@@ -908,6 +912,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 if event.isEnd { break }
                 fullContent += event.text
             }
+            fullContent = StructuredOutput.coerce(fullContent, format: responseFormat)
 
             let stats = getStats()
             let response: [String: Any] = [
@@ -1150,10 +1155,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
         }
 
+        let genMessages = StructuredOutput.injectFormatSystem(
+            into: request.messages, format: request.responseFormat)
+        let respFormat = request.responseFormat
         Task {
             defer { mediaCopy?.cleanup() }
             let (tokenStream, getStats) = eng.generate(
-                messages: request.messages,
+                messages: genMessages,
                 params: request.sampling.samplingParams,
                 maxTokens: request.maxTokens,
                 imageData: imageData)
@@ -1209,6 +1217,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     if event.isEnd { break }
                     fullContent += event.text
                 }
+                fullContent = StructuredOutput.coerce(fullContent, format: respFormat)
 
                 let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
                 let stats = getStats()
@@ -1325,11 +1334,16 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let requestStart = CFAbsoluteTimeGetCurrent()
 
+        let respFormat = request.responseFormat
+        let genSystem: String? = respFormat.map { fmt in
+            (request.system.map { $0 + "\n\n" } ?? "")
+                + StructuredOutput.systemPrompt(for: fmt)
+        } ?? request.system
         Task {
             defer { mediaCopy?.cleanup() }
             let (tokenStream, getStats) = eng.generate(
                 prompt: request.prompt,
-                systemPrompt: request.system,
+                systemPrompt: genSystem,
                 params: request.sampling.samplingParams,
                 maxTokens: request.maxTokens,
                 imageData: imageData)
@@ -1385,6 +1399,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     if event.isEnd { break }
                     fullResponse += event.text
                 }
+                fullResponse = StructuredOutput.coerce(fullResponse, format: respFormat)
 
                 let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
                 let stats = getStats()

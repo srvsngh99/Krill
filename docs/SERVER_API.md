@@ -233,6 +233,18 @@ generate-until-EOS. `presence_penalty`, `frequency_penalty`, `mirostat*`,
 **accepted** for client compatibility; stateful application in the decode
 loop is a tracked follow-up (see `OLLAMA_MAC_PARITY_PLAN.md` §0).
 
+## Structured Output
+
+Ollama `format:"json"` or a JSON-schema object (on `/api/chat` and
+`/api/generate`), and OpenAI `response_format` (`{"type":"json_object"}`
+or `{"type":"json_schema","json_schema":{"schema":{…}}}`) on
+`/v1/chat/completions`, are honored. KrillLM injects a JSON-only system
+instruction (plus the schema, if given) and extracts the first balanced
+JSON value from the model output (stripping prose/fences). If the model
+produces no JSON, the raw text is returned so a refusal stays visible.
+Token-level grammar-constrained decoding is a tracked follow-up; today
+this is guided-prompt + best-effort extraction.
+
 ## Tool / Function Calling
 
 `tools: [{type:"function", function:{name, description, parameters}}]` is
