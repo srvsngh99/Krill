@@ -134,4 +134,20 @@ private let aliases: [String: ResolvedModel] = [
     "glm-4-9b": ResolvedModel(
         repo: "mlx-community/glm-4-9b-chat-4bit",
         name: "glm-4-9b", family: .glm, params: "9B", quant: "4bit", context: 131072),
+
+    // Sentence-embedding models (dedicated encoders for /api/embed,
+    // /v1/embeddings). Original sentence-transformers/BAAI repos ship
+    // model.safetensors + tokenizer.json, loaded by EmbeddingEngine.
+    "all-minilm": ResolvedModel(
+        repo: "sentence-transformers/all-MiniLM-L6-v2",
+        name: "all-minilm", family: .bert, params: "23M", quant: "fp32", context: 512),
+    "all-minilm-l6-v2": ResolvedModel(
+        repo: "sentence-transformers/all-MiniLM-L6-v2",
+        name: "all-minilm-l6-v2", family: .bert, params: "23M", quant: "fp32", context: 512),
+    "bge-small-en": ResolvedModel(
+        repo: "BAAI/bge-small-en-v1.5",
+        name: "bge-small-en", family: .bert, params: "33M", quant: "fp32", context: 512),
+    "bge-base-en": ResolvedModel(
+        repo: "BAAI/bge-base-en-v1.5",
+        name: "bge-base-en", family: .bert, params: "109M", quant: "fp32", context: 512),
 ]

@@ -126,6 +126,29 @@ final class PullerTests: XCTestCase {
         )
     }
 
+    func testPullRejectsTraversalNameBeforeAnyFilesystemOp() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let registry = Registry(baseDir: tempDir)
+        try registry.ensureDirectories()
+        // Sentinel that a registry-root wipe would destroy.
+        let sentinel = registry.modelsDir.appendingPathComponent("sentinel.txt")
+        try "keep".write(to: sentinel, atomically: true, encoding: .utf8)
+
+        let puller = Puller(registry: registry)
+        let evil = ResolvedModel(
+            repo: "x/..", name: "..", family: .llama,
+            params: "?", quant: "4bit", context: 8192)
+        do {
+            _ = try await puller.pull(evil)
+            XCTFail("expected pull to reject traversal name")
+        } catch {
+            // expected - RegistryError.invalidModelName
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sentinel.path),
+                      "registry must not be touched by a rejected pull")
+    }
+
     private func makeTempDir() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("krillm-puller-test-\(UUID().uuidString)")

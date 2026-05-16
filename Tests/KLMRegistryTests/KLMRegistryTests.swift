@@ -2,6 +2,122 @@ import XCTest
 @testable import KLMRegistry
 
 final class KLMRegistryTests: XCTestCase {
+    func testModelNameValidationRejectsTraversal() {
+        XCTAssertTrue(Registry.isValidModelName("llama-3.2-1b"))
+        XCTAssertTrue(Registry.isValidModelName("my_model.v2"))
+        for bad in ["../etc/passwd", "a/b", "..", ".hidden", "/abs",
+                    "~/x", "a\\b", "with\u{0}null", ""] {
+            XCTAssertFalse(Registry.isValidModelName(bad), "should reject \(bad)")
+        }
+    }
+
+    func testCreateModelRejectsTraversalName() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-trav-\(UUID().uuidString)")
+        let reg = Registry(baseDir: base)
+        try reg.ensureDirectories()
+        try reg.saveManifest(ModelManifest(
+            name: "safe-base", family: .llama, params: "1B", quant: "4bit",
+            source: "x", context: 4096, files: [], chatTemplate: "t",
+            sizeBytes: 1))
+        let mf = try ModelfileParser.parse("FROM safe-base\nSYSTEM hi")
+        XCTAssertThrowsError(try reg.createModel(name: "../escape", from: mf))
+        XCTAssertThrowsError(try reg.removeModel("../safe-base"))
+    }
+
+    func testModelfileParserDirectives() throws {
+        let mf = try ModelfileParser.parse("""
+        # a comment
+        FROM llama-3.2-1b
+        PARAMETER temperature 0.4
+        PARAMETER top_p 0.9
+        SYSTEM \"\"\"
+        You are a terse assistant.
+        Always answer in one line.
+        \"\"\"
+        MESSAGE user Hi
+        MESSAGE assistant Hello.
+        ADAPTER ./lora
+        """)
+        XCTAssertEqual(mf.from, "llama-3.2-1b")
+        XCTAssertEqual(mf.parameters["temperature"], "0.4")
+        XCTAssertEqual(mf.parameters["top_p"], "0.9")
+        XCTAssertTrue(mf.system?.contains("terse assistant") ?? false)
+        XCTAssertTrue(mf.system?.contains("one line") ?? false)
+        XCTAssertEqual(mf.messages.count, 2)
+        XCTAssertNotNil(mf.adapterWarning)
+    }
+
+    func testModelfileParserRequiresFROM() {
+        XCTAssertThrowsError(try ModelfileParser.parse("SYSTEM hi"))
+    }
+
+    func testCreateModelReferencesBaseAndStoresOverrides() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-create-\(UUID().uuidString)")
+        let reg = Registry(baseDir: base)
+        try reg.ensureDirectories()
+        // Seed a base model + a blob dir to symlink.
+        let baseManifest = ModelManifest(
+            name: "base-llama", family: .llama, params: "1B", quant: "4bit",
+            source: "mlx-community/x", context: 4096, files: [],
+            chatTemplate: "llama3", sizeBytes: 1000)
+        try reg.saveManifest(baseManifest)
+        try FileManager.default.createDirectory(
+            at: reg.modelPath("base-llama"), withIntermediateDirectories: true)
+
+        let mf = try ModelfileParser.parse("""
+        FROM base-llama
+        PARAMETER temperature 0.2
+        SYSTEM You are Krill.
+        """)
+        let created = try reg.createModel(name: "my-krill", from: mf)
+        XCTAssertEqual(created.overrides?.system, "You are Krill.")
+        XCTAssertEqual(created.overrides?.parameters["temperature"], "0.2")
+        XCTAssertEqual(created.family, .llama)
+        XCTAssertTrue(reg.hasModel("my-krill"))
+        // Blob dir is a real directory whose entries symlink into the base
+        // (no weight copy). Seed a base file to verify the link.
+        try "w".write(to: reg.modelPath("base-llama")
+            .appendingPathComponent("model.safetensors"),
+            atomically: true, encoding: .utf8)
+        _ = try reg.createModel(name: "my-krill2", from: mf)
+        let linked = reg.modelPath("my-krill2")
+            .appendingPathComponent("model.safetensors")
+        let attrs = try FileManager.default
+            .attributesOfItem(atPath: linked.path)
+        XCTAssertEqual(attrs[.type] as? FileAttributeType, .typeSymbolicLink)
+    }
+
+    func testCreateModelRejectsMissingBase() {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-create2-\(UUID().uuidString)")
+        let reg = Registry(baseDir: base)
+        let mf = try! ModelfileParser.parse("FROM not-installed\nSYSTEM hi")
+        XCTAssertThrowsError(try reg.createModel(name: "x", from: mf))
+    }
+
+    func testOllamaEnvAliasesWithKrillPrecedence() {
+        setenv("OLLAMA_CONTEXT_LENGTH", "4096", 1)
+        setenv("OLLAMA_KEEP_ALIVE", "10m", 1)
+        setenv("OLLAMA_NUM_PARALLEL", "3", 1)
+        setenv("OLLAMA_ORIGINS", "https://a.com, https://b.com", 1)
+        setenv("OLLAMA_HOST", "http://0.0.0.0:12345", 1)
+        setenv("KRILL_CONTEXT_LENGTH", "8192", 1)  // KRILL_* must win
+        defer {
+            for k in ["OLLAMA_CONTEXT_LENGTH", "OLLAMA_KEEP_ALIVE",
+                      "OLLAMA_NUM_PARALLEL", "OLLAMA_ORIGINS", "OLLAMA_HOST",
+                      "KRILL_CONTEXT_LENGTH"] { unsetenv(k) }
+        }
+        let cfg = KrillConfig.load()
+        XCTAssertEqual(cfg.contextLength, 8192)          // KRILL_ over OLLAMA_
+        XCTAssertEqual(cfg.keepAlive, "10m")
+        XCTAssertEqual(cfg.numParallel, 3)
+        XCTAssertEqual(cfg.origins, ["https://a.com", "https://b.com"])
+        XCTAssertEqual(cfg.serverHost, "0.0.0.0")
+        XCTAssertEqual(cfg.serverPort, 12345)
+    }
+
     func testAliasMapResolvesKnownModel() {
         let resolved = AliasMap.resolve("llama-3.2-3b")
         XCTAssertNotNil(resolved)

@@ -19,8 +19,12 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Host to bind to")
     var host: String = "127.0.0.1"
 
+    @Option(name: .long, help: "Client compat surface: ollama | openai | both (default both). For an Ollama drop-in also pass --port 11434.")
+    var compat: String = "both"
+
     func run() async throws {
         let registry = Registry()
+        let config = KrillConfig.load()
 
         let engine: InferenceEngine
 
@@ -60,7 +64,19 @@ struct ServeCommand: AsyncParsableCommand {
             }
         }
 
-        let server = KLMServer(host: host, port: port, engine: engine, registry: registry)
+        guard let compatMode = CompatMode(label: compat) else {
+            print("Error: invalid --compat '\(compat)'. Use: ollama | openai | both")
+            throw ExitCode.failure
+        }
+
+        let server = KLMServer(host: host, port: port, compat: compatMode,
+                               engine: engine, registry: registry,
+                               corsOrigins: config.origins,
+                               keepAliveDefaultSeconds:
+                                KeepAliveParse.duration(config.keepAlive) ?? 300,
+                               defaultContextLimit: config.contextLength,
+                               numParallel: config.numParallel,
+                               maxQueue: config.maxQueue)
         try await server.start()
     }
 }

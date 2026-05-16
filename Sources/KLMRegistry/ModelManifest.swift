@@ -38,6 +38,11 @@ public struct ModelManifest: Codable, Sendable {
     /// When this model was pulled
     public let pulledAt: Date
 
+    /// Modelfile-derived customizations (WS-C). Optional + decoded with
+    /// `decodeIfPresent` (synthesized), so pre-existing manifests without
+    /// this key still decode.
+    public let overrides: ModelOverrides?
+
     public init(
         name: String,
         family: ModelFamily,
@@ -49,7 +54,8 @@ public struct ModelManifest: Codable, Sendable {
         draftPair: String? = nil,
         chatTemplate: String,
         sizeBytes: Int64,
-        pulledAt: Date = Date()
+        pulledAt: Date = Date(),
+        overrides: ModelOverrides? = nil
     ) {
         self.name = name
         self.family = family
@@ -62,6 +68,27 @@ public struct ModelManifest: Codable, Sendable {
         self.chatTemplate = chatTemplate
         self.sizeBytes = sizeBytes
         self.pulledAt = pulledAt
+        self.overrides = overrides
+    }
+}
+
+/// Modelfile-derived overrides layered on top of a base model (WS-C / T1-2).
+public struct ModelOverrides: Codable, Sendable, Equatable {
+    public var system: String?
+    public var template: String?
+    public var license: String?
+    public var parameters: [String: String]
+    public var messages: [[String: String]]
+
+    public init(system: String? = nil, template: String? = nil,
+                license: String? = nil,
+                parameters: [String: String] = [:],
+                messages: [[String: String]] = []) {
+        self.system = system
+        self.template = template
+        self.license = license
+        self.parameters = parameters
+        self.messages = messages
     }
 }
 
@@ -93,6 +120,9 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case phi
     case glm
     case deepseek
+    /// Dedicated sentence-embedding encoder (BERT/RoBERTa/MiniLM/BGE/E5).
+    /// Not a causal LM - served only via the embeddings endpoints.
+    case bert
 
     /// Detect model family from HuggingFace config.json's `architectures` field.
     public static func detect(from configJSON: [String: Any]) -> ModelFamily? {
@@ -107,6 +137,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
 
         let archLower = arch.lowercased()
         // Order matters: check specific before generic
+        if archLower.contains("bert") || archLower.contains("roberta") { return .bert }
         if archLower.contains("gemma4") { return .gemma4 }
         if archLower.contains("gemma") { return .gemma }
         if archLower.contains("chatglm") || archLower.contains("glm") { return .glm }
@@ -128,6 +159,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         case "phi", "phi3": return .phi
         case "chatglm", "glm", "glm4_moe": return .glm
         case "deepseek_v3": return .deepseek
+        case "bert", "roberta", "xlm-roberta", "mpnet", "distilbert": return .bert
         default: return nil
         }
     }
