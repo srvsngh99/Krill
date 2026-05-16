@@ -201,24 +201,38 @@ What is still required before this can be tagged a production release.
 Items that have shipped since PR #9 are crossed out; see Section 4 for the
 landing details.
 
-### 3.1 Release benchmark gate fails
+### 3.1 Release benchmark gate
 
-Both gate profiles still exit `1` against the accepted multimodal report
-(`.build/benchmarks/v6-mm.json`). Under `release_candidate`, prefill TPS is
-advisory and audio is out_of_scope; after PR #16, **`text_decode_ratio` is
-the sole remaining hard miss** (`memory_ratio` now passes — see below). See
+Against the accepted multimodal report (`.build/benchmarks/v6-mm.json`):
+
+- **`release_candidate` exits `0` (GATE: PASS)** under the owner-accepted
+  decode gate semantics (PR #16 + the 2026-05-16 gate proposal). All
+  user-visible-latency and class-equal-memory metrics hard-pass, plus the
+  hard `text_decode_ratio_floor >= 1.0x` (KrillLM never decodes slower
+  than Ollama). `text_decode_ratio`'s `>= 1.5x` target is **advisory** and
+  still printed as a WARN — the gate does not claim KrillLM hit 1.5x
+  decode.
+- **`strict` exits `1`** — unchanged; the uncompromised reference still
+  fails `text_decode_ratio`, prefill TPS, and audio.
+
+See `docs/RELEASE_GATE_DECODE_PROPOSAL.md` for the full rationale,
+anti-relaxation safeguards, and the objective re-promotion contract, and
 `docs/BENCHMARKING.md` for the per-metric kind table.
 
-- **`text_decode_ratio` ~1.15x** (0.322-run: 1.1937x) — hard under
-  `release_candidate`, target `>= 1.5x`. Measured 1.13–1.19x across 5 fresh
-  runs: a *structural*, not variance, gap. KrillLM decodes ~103–106 tok/s
-  vs Ollama's ~88–95 tok/s on the tiny 5B 4-bit Gemma 4 e2b, where
-  llama.cpp's hand-tuned Metal decode kernels are genuinely competitive.
-  User-visible latency still wins decisively (text TTFT ~5x, text wall
-  ~1.57x, image wall ~1.77x faster). Closing the *decode-tok/s ratio* to
-  1.5x requires the Gemma 4-compatible self-speculative decoding workstream
-  (Workstream 2) — multi-week and quality-risky for greedy parity, so it is
-  an explicit documented follow-up, not part of PR #16. This build is a
+- **`text_decode_ratio` ~1.15x** (v6 run: 1.1937x; 1.13–1.19x across 5
+  fresh runs) — **advisory** at the `>= 1.5x` target under
+  `release_candidate`, with a **hard `>= 1.0x` non-regression floor**.
+  This is a *structural*, not variance, gap: KrillLM decodes ~103–106
+  tok/s vs Ollama's ~88–95 tok/s on the tiny 5B 4-bit Gemma 4 e2b, where
+  llama.cpp's hand-tuned Metal decode kernels are genuinely competitive,
+  and per-token weight-read bandwidth bounds dense decode. User-visible
+  latency still wins decisively (text TTFT ~5x, text wall ~1.57x, image
+  wall ~1.77x faster) — those are the metrics that substantiate the
+  "1.5x–3x faster" product claim and they hard-pass. `text_decode_ratio`
+  re-promotes to hard `>= 1.5x` when **either** Gemma 4 speculative
+  decoding (Workstream 2) sustains `>= 1.5x` with greedy parity **or** the
+  matrix adds a long-output decode task where decode dominates wall time.
+  `strict` keeps it hard `>= 1.5x` regardless. This build remains a
   release-readiness baseline, not a production tag.
 - ~~**`memory_ratio` 1.1447x**~~ — **CLOSED in PR #16.** Two compounding
   causes, both now fixed (see Section 4.4):
@@ -306,7 +320,7 @@ release-ready only when all of the following are true:
 - No benchmark compares non-equivalent KrillLM/Ollama inputs (e.g. text
   placeholder vs real media).
 
-## Recommended Release Language Until The Gate Passes
+## Recommended Release Language
 
 > This build implements Gemma 4 native text and image, audio via the
 > persistent `mlx-vlm` bridge, server multimodal end-to-end (Ollama and
@@ -314,17 +328,18 @@ release-ready only when all of the following are true:
 > prefix cache, and an opt-in int8 KV cache that composes with the
 > prefix cache. A bounded MLX Metal buffer cache
 > (`KRILL_MLX_CACHE_LIMIT_MB`, default 256 MB) keeps peak `phys_footprint`
-> in check. The release gate has a `release_candidate` profile that
-> hard-gates user-visible latency and class-equal peak memory while
-> marking prefill TPS advisory and audio out_of_scope until native Swift
-> audio lands. On the v6 multimodal snapshot, text/image wall-time, TTFT,
-> and class-equal peak memory all pass; `release_candidate` exits `1`
-> solely because `text_decode_ratio` (~1.15x, target ≥1.5x) misses its
-> hard threshold — a structural decode-kernel gap against llama.cpp on a
-> tiny 4-bit model, scoped to the speculative-decoding follow-up. Under
-> `strict`, prefill and audio metrics also fail. This is a
-> release-readiness baseline plus a documented follow-up roadmap, not a
-> production release.
+> in check (KrillLM ~2.85–3.0 GB vs Ollama ~8.2–8.4 GB on Gemma 4 e2b).
+> On the v6 multimodal snapshot the **`release_candidate` gate passes**:
+> user-visible latency wins decisively (text TTFT ~5x, text wall ~1.57x,
+> image wall ~1.77x faster than Ollama) and class-equal peak memory passes
+> hard, with a hard floor guaranteeing KrillLM never decodes slower than
+> Ollama. KrillLM is competitive but **not** 1.5x ahead on raw
+> decode-token/s against llama.cpp's Metal kernels on this tiny 4-bit
+> model; that `>= 1.5x` decode target is a tracked advisory pending
+> speculative decoding, and no release language should claim faster raw
+> decode. The `strict` gate still exits `1` (decode, prefill, audio). This
+> is a release-readiness baseline plus a documented follow-up roadmap; a
+> production tag still requires the `strict` gate and native audio.
 
 ---
 
@@ -545,15 +560,17 @@ Verified on the M4 Pro 24 GB target (`native_server`,
 on, class-equal 4-bit-vs-4-bit), 5 fresh runs:
 
 ```text
-release_candidate --allow-dtype-mismatch  -> exit 1   (text_decode only)
+release_candidate --allow-dtype-mismatch  -> exit 0   GATE: PASS
+strict                                    -> exit 1   (unchanged)
 
-  HARD pass:  memory_ratio       0.32–0.84  (target <= 1.0; canonical 0.322)
-              text_wall_ratio    0.64–0.69  (target <= 0.67)
-              text_ttft_ratio    0.20–0.22  (target <= 0.67)
-              image_wall_ratio   0.56–0.58  (target <= 0.67)
-  HARD fail:  text_decode_ratio  1.13–1.19  (target >= 1.5)  [Workstream 2]
-  ADV  warn:  text_prefill_ratio / image_prefill_ratio (advisory)
-  SKIP:       audio_*            out_of_scope
+  HARD pass:  memory_ratio              0.3221  (target <= 1.0)
+              text_wall_ratio           0.6373  (target <= 0.67)
+              text_ttft_ratio           0.2102  (target <= 0.67)
+              image_wall_ratio          0.5645  (target <= 0.67)
+              text_decode_ratio_floor   1.1937  (target >= 1.0)  ← floor
+  ADV  warn:  text_decode_ratio         1.1937  (target >= 1.5)  ← demoted
+              text_prefill_ratio / image_prefill_ratio
+  SKIP:       audio_*                   out_of_scope
 
   KrillLM phys_footprint:  text/image ~2.85–3.0 GB  (was a contaminated
                            9.611 GB in v5)
@@ -562,9 +579,23 @@ release_candidate --allow-dtype-mismatch  -> exit 1   (text_decode only)
 
 Accepted report: `.build/benchmarks/v6-mm.json` (+ `v6-mm-gate.json`,
 `v6-mm-strict-gate.json`). `make test` 133/9/0, `make release` passed,
-CLI Gemma 4 text smoke coherent.
+CLI Gemma 4 text smoke coherent, `python3 -m unittest
+tools.test_release_gate` 17/17.
 
-Net effect: `memory_ratio` moves from hard-fail to hard-pass with margin.
-`text_decode_ratio` is now the **sole** hard release-candidate miss; it is
-documented Workstream 2 follow-up (speculative decoding). This remains a
-release-readiness baseline, not a production tag.
+**Gate semantics (owner-accepted 2026-05-16, `release_candidate` only;
+`strict` unchanged):** `text_decode_ratio` is demoted from hard to
+**advisory** at the `>= 1.5x` target, with a new synthetic **HARD
+`text_decode_ratio_floor >= 1.0x`** so a decode regression vs Ollama (or
+an unmeasured decode) still breaks the gate. Rationale, anti-relaxation
+safeguards, and the objective re-promotion contract:
+`docs/RELEASE_GATE_DECODE_PROPOSAL.md`. The gate report records the
+demotion in `scope.text_decode_ratio` and a caveat; the summary still
+prints `text_decode_ratio` as an advisory WARN at 1.19x — no claim that
+KrillLM hit 1.5x decode.
+
+Net effect: `memory_ratio` hard-passes; `release_candidate` exits `0`
+honestly on the metrics that substantiate the product claim plus a hard
+non-regression floor; `strict` still exits `1`. The `>= 1.5x` decode
+aspiration remains tracked and re-promotable (Workstream 2 — speculative
+decoding). This is the agreed release-candidate gate; `strict`-green and
+a production tag still require Workstreams 1–2.

@@ -10,18 +10,23 @@ Machine target: Apple Silicon M4 Pro, 24 GB RAM
 ## Current Position
 
 Four follow-up PRs have shipped on top of the PR #9 release-readiness baseline.
-PR #16 closed the hard `memory_ratio` miss: it root-caused the v5 ~9.6 GB
+PR #16 (a) closed the hard `memory_ratio` miss — root-caused the v5 ~9.6 GB
 KrillLM phys_footprint to an *unbounded* MLX Metal buffer pool plus a
 contaminated (non-`--krillm-server-pid`) measurement, added a default 256 MB
-cap (`KRILL_MLX_CACHE_LIMIT_MB`), and re-measured at ~2.85–3.0 GB
-(`memory_ratio` 0.32–0.84 across 5 fresh runs, always `<= 1.0`, no decode
-regression). **`text_decode_ratio` (~1.15x, target ≥1.5x) is now the sole
-hard `release_candidate` miss.** It is a structural decode-kernel gap against
-llama.cpp on the tiny 4-bit Gemma 4 e2b — not variance — and is owned by
-Workstream 2 (speculative decoding). Workstreams 1, 2, and 3 below remain
-before audio leaves `out_of_scope` and prefill TPS leaves advisory. Per owner
-decision (2026-05-16), this ships as an honest release-readiness baseline with
-the gate red on `text_decode_ratio`; not a production tag.
+cap (`KRILL_MLX_CACHE_LIMIT_MB`), re-measured at ~2.85–3.0 GB (`memory_ratio`
+0.32–0.84 across 5 fresh runs, always `<= 1.0`, no decode regression); and
+(b) per an owner-accepted gate proposal (2026-05-16), demoted
+`text_decode_ratio` to **advisory** at the `>= 1.5x` target under
+`release_candidate` only, while adding a new **hard
+`text_decode_ratio_floor >= 1.0x`** (KrillLM must never decode slower than
+Ollama; missing decode also hard-fails). **`release_candidate` now exits `0`
+(GATE: PASS)** on `.build/benchmarks/v6-mm.json`; **`strict` still exits `1`**
+(unchanged — decode/prefill/audio). The decode gap is structural (KrillLM
+~103–106 vs Ollama ~88–95 tok/s on tiny 4-bit Gemma 4 e2b, not variance); the
+`>= 1.5x` aspiration stays tracked and re-promotable (Workstream 2). No
+release language claims faster raw decode. Workstreams 1–3 below remain before
+`strict`-green and a production tag. See
+`docs/RELEASE_GATE_DECODE_PROPOSAL.md`.
 
 ### What landed since PR #9
 
@@ -106,35 +111,36 @@ python3 -m unittest tools.test_memory_sampling -> 17 tests pass
 ### Current gate verdict (`.build/benchmarks/v6-mm.json`, PR #16, 2026-05-16)
 
 ```text
-strict profile                            -> exit 1
-release_candidate --allow-dtype-mismatch  -> exit 1  (text_decode only)
+strict profile                            -> exit 1   (unchanged)
+release_candidate --allow-dtype-mismatch  -> exit 0   GATE: PASS
 ```
 
-Per-metric breakdown under `release_candidate` (canonical run; 5-run
-ranges in parentheses):
+Per-metric breakdown under `release_candidate` (canonical v6 run):
 
 ```text
-HARD  memory_ratio        0.3221x   target <= 1.0     PASS  (0.32–0.84) ← PR#16
-HARD  text_wall_ratio     0.6373x   target <= 0.67    PASS  (0.64–0.69)
-HARD  text_ttft_ratio     0.2102x   target <= 0.67    PASS  (0.20–0.22)
-HARD  image_wall_ratio    0.5645x   target <= 0.67    PASS  (0.56–0.58)
-HARD  text_decode_ratio   1.1937x   target >= 1.5     FAIL  (1.13–1.19)
+HARD  memory_ratio             0.3221x  target <= 1.0   PASS  ← PR#16 cap
+HARD  text_wall_ratio          0.6373x  target <= 0.67  PASS
+HARD  text_ttft_ratio          0.2102x  target <= 0.67  PASS
+HARD  image_wall_ratio         0.5645x  target <= 0.67  PASS
+HARD  text_decode_ratio_floor  1.1937x  target >= 1.0   PASS  ← non-regr.
+ADV   text_decode_ratio        1.1937x  target >= 1.5   WARN  ← demoted
+ADV   text_prefill_ratio       1.1898x  target >= 1.5   WARN
+ADV   image_prefill_ratio      1.1150x  target >= 1.5   WARN
 
-ADV   text_prefill_ratio  1.1898x   target >= 1.5     WARN (advisory)
-ADV   image_prefill_ratio 1.1150x   target >= 1.5     WARN (advisory)
+SKIP  audio_wall_ratio         3.9812x  target <= 0.67  out_of_scope
+SKIP  audio_prefill_ratio       N/A     target >= 1.5   out_of_scope
 
-SKIP  audio_wall_ratio    3.9812x   target <= 0.67    out_of_scope
-SKIP  audio_prefill_ratio  N/A      target >= 1.5     out_of_scope
-
-geometric mean speedup     1.223x   (memory_ratio excluded from headline)
+geometric mean speedup          1.223x  (memory_ratio excluded)
 
 KrillLM phys_footprint:    text/image ~2.85–3.0 GB  (was contaminated 9.6 GB)
 Ollama  phys_footprint:    text ~8.2–8.4 GB
 ```
 
-The release-candidate gate is now red **only** on `text_decode_ratio`
-(`memory_ratio` passes with large margin after PR #16). Notes on
-interpreting the history:
+`strict` keeps `text_decode_ratio` hard `>= 1.5x` (no floor) and still
+exits `1`. The `release_candidate` pass rests on user-visible latency +
+class-equal memory hard-passing, plus the hard non-regression floor — it
+does **not** assert KrillLM hit 1.5x decode (printed as advisory WARN).
+Notes on interpreting the history:
 
 - **The v5 9.6 GB memory reading was an artifact.** Two compounding
   causes (PR #16): an uncapped MLX buffer-recycling pool, and a
@@ -338,11 +344,26 @@ out-of-scope metrics via an explicit profile selected at the command line.
 
 Done:
 
-- `tools/release_gate.py --profile <name>` (default `strict`). The new
+- `tools/release_gate.py --profile <name>` (default `strict`). The
   `release_candidate` profile hard-gates user-visible latency
-  (text_decode, text_wall, text_ttft, image_wall) and treats prefill TPS
-  metrics as advisory (text_prefill, image_prefill).
+  (text_wall, text_ttft, image_wall) and class-equal memory, and treats
+  prefill TPS metrics as advisory (text_prefill, image_prefill).
   Audio metrics are out_of_scope until Workstream 1 lands.
+- **`text_decode_ratio` (owner-accepted 2026-05-16, `release_candidate`
+  only):** demoted to **advisory** at the `>= 1.5x` target, with a new
+  synthetic **hard `text_decode_ratio_floor >= 1.0x`**
+  (`release_gate.py:ADVISORY_HARD_FLOORS`). KrillLM must never decode
+  slower than Ollama; a missing decode value also hard-fails the floor.
+  Demotion + floor recorded in `scope.text_decode_ratio` and `caveats`;
+  the summary still prints decode as an advisory WARN (no 1.5x claim).
+  `strict` keeps `text_decode_ratio` hard `>= 1.5x` with no floor.
+  **Re-promotion contract:** `text_decode_ratio` returns to hard
+  `>= 1.5x` under `release_candidate` when EITHER (a) Gemma 4 speculative
+  decoding (Workstream 2) sustains `>= 1.5x` with greedy parity, OR (b)
+  the benchmark matrix adds a long-output decode task where decode
+  dominates wall time. Covered by `tools/test_release_gate.py`
+  (`DecodeAdvisoryFloorTests`, 17/17). See
+  `docs/RELEASE_GATE_DECODE_PROPOSAL.md`.
 - Missing hard metrics fail the gate; we cannot claim a metric passes
   without measuring it.
 - `memory_ratio` is **hard** under `release_candidate` (PR #14). It

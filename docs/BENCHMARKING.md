@@ -97,7 +97,7 @@ profile is recorded in the gate report so audit trails are unambiguous.
 
 | Metric | Kind | Rationale |
 |--------|------|-----------|
-| text_decode_ratio   | hard | Core decode throughput claim. |
+| text_decode_ratio   | strict: hard (≥1.5x). release_candidate: **advisory** (≥1.5x) + synthetic **hard `text_decode_ratio_floor` ≥1.0x** | Owner-accepted 2026-05-16 (`docs/RELEASE_GATE_DECODE_PROPOSAL.md`). Dense decode is per-token weight-read-bandwidth bound; on tiny 4-bit Gemma 4 e2b llama.cpp's Metal kernels are at parity, and the user-visible "1.5x faster" claim is carried by text_wall/text_ttft (hard). The floor still guarantees KrillLM never decodes slower than Ollama (a missing decode value hard-fails too). Re-promotes to hard ≥1.5x when speculative decoding sustains ≥1.5x with greedy parity OR a long-output decode task is added. `strict` keeps it hard ≥1.5x with no floor. |
 | text_wall_ratio     | hard | User-visible total latency. |
 | text_ttft_ratio     | hard | User-visible first-token latency. |
 | text_prefill_ratio  | advisory | Wall time and TTFT already gate user latency; prefill TPS is noisy on short prompts. |
@@ -181,16 +181,17 @@ cap and clean sampling, KrillLM text/image phys_footprint is ~2.85–3.0 GB.
 This build is a release-readiness baseline plus a documented
 release-candidate path, not yet a production release.
 
-- **`strict` gate** (default) currently exits `1` against the accepted
-  multimodal report. `text_decode_ratio`, `text_prefill_ratio`,
-  `image_prefill_ratio`, and `audio_wall_ratio` fail their hard
-  thresholds (see `.build/benchmarks/v6-mm.json`, PR #16).
-- **`release_candidate` gate** exits `1` **solely** on
-  `text_decode_ratio` (~1.15x canonical 1.19x, target ≥1.5x).
-  `memory_ratio` now **passes** at 0.32–0.84 (target ≤1.0x) after PR #16
-  capped the MLX buffer pool and fixed contaminated sampling; class-equal
-  4-bit comparison is unchanged. Audio is out_of_scope; prefill metrics
-  warn but do not gate.
+- **`release_candidate` gate** exits `0` (**GATE: PASS**) against the
+  accepted report `.build/benchmarks/v6-mm.json` (PR #16). User-visible
+  latency (text TTFT ~5x, text/image wall ~1.5–1.8x faster) and
+  class-equal `memory_ratio` (0.32–0.84) hard-pass, plus the hard
+  `text_decode_ratio_floor ≥1.0x`. `text_decode_ratio`'s ≥1.5x target is
+  advisory (printed as WARN at ~1.19x — **no claim KrillLM hit 1.5x
+  decode**). Audio out_of_scope; prefill advisory.
+- **`strict` gate** (default) still exits `1`: `text_decode_ratio`
+  (hard ≥1.5x, no floor), `text_prefill_ratio`, `image_prefill_ratio`,
+  and `audio_wall_ratio` fail. `strict` is the uncompromised reference and
+  is required (with native audio) for a production tag.
 
 Run `make bench-release-gate` for the latest per-metric results. The gate
 report at `.build/benchmarks/release-gate.json` contains exact ratios, the
