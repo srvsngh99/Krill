@@ -234,6 +234,14 @@ localhost/127.0.0.1.
 `OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_MAX_QUEUE`, `OLLAMA_KV_CACHE_TYPE`,
 `OLLAMA_FLASH_ATTENTION`.
 
+## Context Length
+
+`num_ctx` (Ollama, in `options` or top-level) and the
+`KRILL_CONTEXT_LENGTH` / `OLLAMA_CONTEXT_LENGTH` server default cap the
+prompt: if the tokenized prompt exceeds the limit the engine keeps the
+most-recent N tokens (so the latest turn + tool results survive) and
+logs a warning to stderr. Unset ⇒ the model's own maximum.
+
 ## Sampler Parameters
 
 `temperature`, `top_p`, `top_k`, `seed`, `repeat_penalty` and **`min_p`**

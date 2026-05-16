@@ -141,6 +141,22 @@ final class ServerTests: XCTestCase {
         XCTAssertTrue(past)
     }
 
+    func testOllamaParsesNumCtxFromOptionsAndTopLevel() throws {
+        let a = try ServerParsing.ollamaChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "options": ["num_ctx": 2048],
+        ])
+        XCTAssertEqual(a.contextLimit, 2048)
+        let b = try ServerParsing.ollamaGenerateRequest(from: [
+            "model": "m", "prompt": "hi", "stream": false, "num_ctx": 4096,
+        ])
+        XCTAssertEqual(b.contextLimit, 4096)
+        let c = try ServerParsing.ollamaChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+        ])
+        XCTAssertNil(c.contextLimit)
+    }
+
     func testOllamaChatParsesKeepAlive() throws {
         let req = try ServerParsing.ollamaChatRequest(from: [
             "model": "m",

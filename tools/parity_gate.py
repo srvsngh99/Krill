@@ -334,6 +334,19 @@ class Gate:
 
         self.check("T1-4", "H", "keep_alive + stop + ps", keep_alive)
 
+        def num_ctx() -> tuple[str, str]:
+            c, r = self._req(
+                "POST", "/api/chat",
+                {"model": "x", "stream": False,
+                 "messages": [{"role": "user", "content": "hi"}],
+                 "options": {"num_ctx": 2048}})
+            if c == 400:
+                return "FAIL", f"num_ctx rejected: {r[:100]!r}"
+            return ("PASS", f"accepted (status {c})") if c in (200, 503) \
+                else ("FAIL", f"unexpected {c}")
+
+        self.check("T1-3", "H", "context-length override (num_ctx)", num_ctx)
+
         def anthropic_messages() -> tuple[str, str]:
             # POST /v1/messages must be implemented (not the default 404)
             # and accept the Anthropic request shape.

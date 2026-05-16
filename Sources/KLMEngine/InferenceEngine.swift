@@ -178,7 +178,8 @@ public final class InferenceEngine: @unchecked Sendable {
         useSpeculative: Bool = false,
         usePrefixCache: Bool = true,
         imageData: Data? = nil,
-        audioData: Data? = nil
+        audioData: Data? = nil,
+        contextLimit: Int? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
@@ -189,7 +190,8 @@ public final class InferenceEngine: @unchecked Sendable {
         // and the prompt path agree on tokenization.
         return generate(messages: messages, params: params, maxTokens: maxTokens,
                         useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
-                        imageData: imageData, audioData: audioData)
+                        imageData: imageData, audioData: audioData,
+                        contextLimit: contextLimit)
     }
 
     /// Generate tokens from a full conversation history, streaming results.
@@ -208,7 +210,8 @@ public final class InferenceEngine: @unchecked Sendable {
         useSpeculative: Bool = false,
         usePrefixCache: Bool = true,
         imageData: Data? = nil,
-        audioData: Data? = nil
+        audioData: Data? = nil,
+        contextLimit: Int? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         guard let loadedModel, let tokenizer else {
             let emptyStream = AsyncStream<TokenEvent> { $0.finish() }
@@ -226,13 +229,24 @@ public final class InferenceEngine: @unchecked Sendable {
 
         // Use direct token ID path for Gemma4 to avoid decode→re-encode
         // round-trip that loses special tokens (105, 106, 107).
-        let promptTokens: [Int]
+        var promptTokensBuilt: [Int]
         if loadedModel.family == "gemma4" {
-            promptTokens = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
+            promptTokensBuilt = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
         } else {
             let formatted = tokenizer.applyChatTemplate(messages: preparedMessages)
-            promptTokens = tokenizer.encodeWithoutExtraBOS(formatted)
+            promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(formatted)
         }
+
+        // WS-D D4: honor a context-length cap (num_ctx / KRILL_CONTEXT_LENGTH).
+        // Keep the most recent `contextLimit` tokens so the latest turn and
+        // any tool results survive; warn rather than silently overflow.
+        if let limit = contextLimit, limit > 0, promptTokensBuilt.count > limit {
+            let dropped = promptTokensBuilt.count - limit
+            promptTokensBuilt = Array(promptTokensBuilt.suffix(limit))
+            FileHandle.standardError.write(Data(
+                "[KrillLM] num_ctx=\(limit): prompt truncated, dropped \(dropped) leading token(s).\n".utf8))
+        }
+        let promptTokens = promptTokensBuilt
 
         guard !promptTokens.isEmpty else {
             let emptyStream = AsyncStream<TokenEvent> { continuation in

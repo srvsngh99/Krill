@@ -27,13 +27,15 @@ public final class KLMServer: Sendable {
 
     private let corsOrigins: [String]
     private let keepAlive: KeepAliveController
+    private let defaultContextLimit: Int?
 
     public init(host: String = "127.0.0.1", port: Int = 11435,
                 compat: CompatMode = .both,
                 engine: InferenceEngine, registry: Registry,
                 embedEngine: EmbeddingEngine = EmbeddingEngine(),
                 corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
-                keepAliveDefaultSeconds: Int = 300) {
+                keepAliveDefaultSeconds: Int = 300,
+                defaultContextLimit: Int? = nil) {
         self.host = host
         self.port = port
         self.compat = compat
@@ -42,6 +44,7 @@ public final class KLMServer: Sendable {
         self.registry = registry
         self.embedEngine = embedEngine
         self.keepAlive = KeepAliveController(defaultSeconds: keepAliveDefaultSeconds)
+        self.defaultContextLimit = defaultContextLimit
     }
 
     internal static func _makeHTTPHandlerForTesting(
@@ -70,7 +73,8 @@ public final class KLMServer: Sendable {
                         HTTPHandler(engine: self.engine, registry: self.registry,
                                     compat: self.compat, embedEngine: self.embedEngine,
                                     keepAlive: self.keepAlive,
-                                    corsOrigins: self.corsOrigins)
+                                    corsOrigins: self.corsOrigins,
+                                    defaultContextLimit: self.defaultContextLimit)
                     )
                 }
             }
@@ -132,12 +136,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private let corsOrigins: [String]
     private let keepAlive: KeepAliveController
+    private let defaultContextLimit: Int?
     private var currentOrigin: String?
 
     init(engine: InferenceEngine, registry: Registry,
          compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
          keepAlive: KeepAliveController = KeepAliveController(defaultSeconds: 300),
          corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
+         defaultContextLimit: Int? = nil,
          maxBodySizeOverride: Int? = nil) {
         self.engine = engine
         self.registry = registry
@@ -145,6 +151,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         self.embedEngine = embedEngine
         self.keepAlive = keepAlive
         self.corsOrigins = corsOrigins
+        self.defaultContextLimit = defaultContextLimit
         self.maxBodySize = maxBodySizeOverride ?? ServerLimits.maxBodySize
     }
 
@@ -454,16 +461,18 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             into: applyModelSystemOverride(request.messages),
             format: request.responseFormat)
 
+        let effCtx = request.contextLimit ?? defaultContextLimit
         if request.stream {
             handleStreamingCompletion(
                 context: context, messages: genMessages,
                 params: request.sampling.samplingParams, maxTokens: request.maxTokens,
-                media: decodedMedia)
+                media: decodedMedia, contextLimit: effCtx)
         } else {
             handleNonStreamingCompletion(
                 context: context, messages: genMessages,
                 params: request.sampling.samplingParams, maxTokens: request.maxTokens,
-                media: decodedMedia, responseFormat: request.responseFormat)
+                media: decodedMedia, responseFormat: request.responseFormat,
+                contextLimit: effCtx)
         }
     }
 
@@ -495,7 +504,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             let (tokenStream, getStats) = eng.generate(
-                messages: msgs, params: params, maxTokens: maxTokens)
+                messages: msgs, params: params, maxTokens: maxTokens,
+                contextLimit: self.defaultContextLimit)
             var full = ""
             for await ev in tokenStream { if ev.isEnd { break }; full += ev.text }
 
@@ -596,7 +606,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             defer { mediaCopy?.cleanup() }
             let (tokenStream, getStats) = eng.generate(
                 messages: messages, params: params,
-                maxTokens: maxTokens, imageData: imageData)
+                maxTokens: maxTokens, imageData: imageData,
+                contextLimit: request.contextLimit ?? self.defaultContextLimit)
 
             var full = ""
             for await event in tokenStream {
@@ -988,7 +999,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         context: ChannelHandlerContext,
         messages: [[String: String]],
         params: SamplingParams, maxTokens: Int,
-        media: DecodedMedia? = nil
+        media: DecodedMedia? = nil,
+        contextLimit: Int? = nil
     ) {
         // Send SSE headers
         var headers = HTTPHeaders()
@@ -1008,7 +1020,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             let (tokenStream, _) = eng.generate(
                 messages: messages,
                 params: params, maxTokens: maxTokens,
-                imageData: imageData)
+                imageData: imageData, contextLimit: contextLimit)
 
             let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
 
@@ -1042,7 +1054,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         messages: [[String: String]],
         params: SamplingParams, maxTokens: Int,
         media: DecodedMedia? = nil,
-        responseFormat: ResponseFormat? = nil
+        responseFormat: ResponseFormat? = nil,
+        contextLimit: Int? = nil
     ) {
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
@@ -1055,7 +1068,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             let (tokenStream, getStats) = eng.generate(
                 messages: messages,
                 params: params, maxTokens: maxTokens,
-                imageData: imageData)
+                imageData: imageData, contextLimit: contextLimit)
 
             var fullContent = ""
             for await event in tokenStream {
@@ -1317,7 +1330,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 messages: genMessages,
                 params: request.sampling.samplingParams,
                 maxTokens: request.maxTokens,
-                imageData: imageData)
+                imageData: imageData,
+                contextLimit: request.contextLimit ?? self.defaultContextLimit)
 
             if request.stream {
                 var firstTokenTime: Double?
@@ -1500,7 +1514,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 systemPrompt: genSystem,
                 params: request.sampling.samplingParams,
                 maxTokens: request.maxTokens,
-                imageData: imageData)
+                imageData: imageData,
+                contextLimit: request.contextLimit ?? self.defaultContextLimit)
 
             if request.stream {
                 var firstTokenTime: Double?

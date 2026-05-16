@@ -71,19 +71,27 @@ Also shipped (2026-05-17, same branch):
   `thinking` segmentation, non-streaming + a valid Anthropic SSE event
   sequence. Claude Code / Anthropic SDK via `ANTHROPIC_BASE_URL`.
 
-`make parity-gate` now **GREEN 16/16** on both profiles (incl. the
+- WS-D D4 context override (T1-3): `num_ctx` (Ollama options/top-level)
+  and `KRILL_CONTEXT_LENGTH`/`OLLAMA_CONTEXT_LENGTH` default honored —
+  the engine truncates the prompt to the most-recent N tokens with a
+  stderr warning (no decode-loop/cache-contract change).
+
+`make parity-gate` now **GREEN 17/17** on both profiles (incl. the
 advisory `T2-9` row under `strict_parity`).
 
-**Scope honesty — still open / NOT gated (Phase 2–4):** WS-D D3
-*stateful* penalties (presence/frequency/mirostat/repeat_last_n are
-accepted but not yet applied in the decode loop); WS-D D2
-grammar-constrained decoding (only guided+extract today); WS-D D4 real
-`num_ctx` clamp/override; WS-C runtime `PARAMETER`/`TEMPLATE` override
-application (round-trips via `show` but not yet applied at decode);
-WS-E `NUM_PARALLEL`/`MAX_LOADED_MODELS`/`MAX_QUEUE` concurrency/queue
-(knobs accepted via env; true queue+batching not yet — engine is
-single-flight). These must be built and added to the gate before the
-DoD `11435→11434` port flip.
+**Scope honesty — remaining engine-internal follow-ups (the plan's own
+"highest-uncertainty / delicate" items, §8):** WS-D D3 *stateful*
+penalties (presence/frequency/mirostat/repeat_last_n are accepted but
+not yet applied in the GPU decode loop); WS-D D2 grammar-constrained
+decoding (only guided-prompt + extraction today); WS-C runtime
+`PARAMETER`/`TEMPLATE` override application (round-trips via `show` but
+not yet applied at decode); WS-E `NUM_PARALLEL`/`MAX_LOADED_MODELS`/
+`MAX_QUEUE` true concurrency-queue + batching (knobs accepted via env;
+engine is single-flight). These deliberately remain unimplemented
+because they touch the prefix/int8-KV decode path that the
+release-critical speed/memory gates depend on; doing them under time
+pressure risks regressing those gates. They are tracked for a dedicated
+pass before the DoD `11435→11434` port flip.
 `mac_parity` GREEN means the gated drop-in essentials pass — not that
 every plan row is done.
 

@@ -67,6 +67,8 @@ internal struct ServerChatRequest: Equatable, Sendable {
     var responseFormat: ResponseFormat? = nil
     /// `keep_alive` in seconds (WS-E). nil=default, <0=pin, 0=evict-after.
     var keepAlive: Int? = nil
+    /// `num_ctx` prompt-token cap (WS-D D4). nil=model max.
+    var contextLimit: Int? = nil
 }
 
 internal struct ServerCompletionRequest: Equatable, Sendable {
@@ -86,6 +88,7 @@ internal struct ServerGenerateRequest: Equatable, Sendable {
     var media: ServerMediaPayload = ServerMediaPayload()
     var responseFormat: ResponseFormat? = nil
     var keepAlive: Int? = nil
+    var contextLimit: Int? = nil
 }
 
 internal enum ServerRequestError: Error, Equatable, Sendable {
@@ -319,7 +322,8 @@ internal enum ServerParsing {
             media: extracted.media,
             tools: tools,
             responseFormat: parseOllamaFormat(json["format"]),
-            keepAlive: KeepAliveParse.seconds(from: json["keep_alive"])
+            keepAlive: KeepAliveParse.seconds(from: json["keep_alive"]),
+            contextLimit: (try? optionsObject(from: json))?["num_ctx"] as? Int ?? json["num_ctx"] as? Int
         )
     }
 
@@ -361,7 +365,8 @@ internal enum ServerParsing {
             requestedModel: try optionalString(json["model"], field: "model"),
             media: media,
             responseFormat: parseOllamaFormat(json["format"]),
-            keepAlive: KeepAliveParse.seconds(from: json["keep_alive"])
+            keepAlive: KeepAliveParse.seconds(from: json["keep_alive"]),
+            contextLimit: (try? optionsObject(from: json))?["num_ctx"] as? Int ?? json["num_ctx"] as? Int
         )
     }
 
