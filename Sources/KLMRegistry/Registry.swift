@@ -21,12 +21,22 @@ public final class Registry: Sendable {
     private let logger = Logger(label: "krillm.registry")
 
     /// Initialize registry at the default or custom location.
-    public init(baseDir: URL? = nil) {
-        let base = baseDir ?? Registry.defaultBaseDir()
-        self.baseDir = base
-        self.modelsDir = base.appendingPathComponent("models")
-        self.manifestsDir = modelsDir.appendingPathComponent("manifests")
-        self.blobsDir = modelsDir.appendingPathComponent("blobs")
+    ///
+    /// `modelsDir` (e.g. `OLLAMA_MODELS` / `KRILL_MODELS_DIR`) points directly
+    /// at the models directory and, when given, wins over `baseDir`; the
+    /// manifests/blobs subtree is rooted there exactly like Ollama. Otherwise
+    /// the models dir is derived as `baseDir/models`.
+    public init(baseDir: URL? = nil, modelsDir: URL? = nil) {
+        if let modelsDir {
+            self.modelsDir = modelsDir
+            self.baseDir = modelsDir.deletingLastPathComponent()
+        } else {
+            let base = baseDir ?? Registry.defaultBaseDir()
+            self.baseDir = base
+            self.modelsDir = base.appendingPathComponent("models")
+        }
+        self.manifestsDir = self.modelsDir.appendingPathComponent("manifests")
+        self.blobsDir = self.modelsDir.appendingPathComponent("blobs")
     }
 
     /// Default base directory: ~/.krillm

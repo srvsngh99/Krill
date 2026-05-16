@@ -47,12 +47,21 @@ public enum KeepAliveParse {
 ///
 /// `touch` is called on every generation; a background loop in
 /// ``KLMServer/start()`` unloads the engine once the deadline passes.
-/// Negative keep-alive ⇒ never evict (deadline = nil). Zero ⇒ evict on the
-/// next tick after the request.
+/// Negative keep-alive ⇒ never evict (deadline = nil). Zero ⇒ evict once the
+/// in-flight request that carried it has drained — never before or during it.
+///
+/// In-flight tracking (`beginRequest`/`endRequest`) makes eviction
+/// request-safe: the model is never unloaded while a request still holds it,
+/// even if a deadline elapses mid-generation. `keep_alive:0` matches Ollama's
+/// "unload right after this request" rather than racing the active call.
 public actor KeepAliveController {
     private let defaultSeconds: Int
     private var deadline: Date?
     private var evictImmediately = false
+    /// `keep_alive:0` seen; evict as soon as the last request drains.
+    private var evictAfterDrain = false
+    /// Requests currently holding the model (queue slot held).
+    private var inFlight = 0
 
     public init(defaultSeconds: Int) {
         self.defaultSeconds = defaultSeconds
@@ -60,24 +69,44 @@ public actor KeepAliveController {
     }
 
     /// Record activity. `override` (seconds) is the request's `keep_alive`:
-    /// nil ⇒ default, <0 ⇒ pin loaded, 0 ⇒ evict after this request.
+    /// nil ⇒ default, <0 ⇒ pin loaded, 0 ⇒ evict after this request drains.
     public func touch(override: Int?) {
         let secs = override ?? defaultSeconds
         if secs < 0 {
             deadline = nil
             evictImmediately = false
+            evictAfterDrain = false
         } else if secs == 0 {
-            evictImmediately = true
+            // Defer: don't evict until the request that set this drains.
+            // Resolved in `endRequest()` (or `shouldEvict` if nothing is
+            // in flight yet — e.g. a bare keep_alive:0 unload ping).
+            evictAfterDrain = true
+            evictImmediately = false
             deadline = Date()
         } else {
             evictImmediately = false
+            evictAfterDrain = false
             deadline = Date().addingTimeInterval(TimeInterval(secs))
         }
     }
 
-    /// Whether the model should be evicted now.
+    /// Mark a request as holding the model (call after acquiring a gen slot).
+    public func beginRequest() { inFlight += 1 }
+
+    /// Release a request's hold. When the last in-flight request drains and
+    /// `keep_alive:0` was requested, eviction is armed for the next tick.
+    public func endRequest() {
+        inFlight = max(0, inFlight - 1)
+        if inFlight == 0 && evictAfterDrain { evictImmediately = true }
+    }
+
+    /// Whether the model should be evicted now. Never evicts while a request
+    /// is in flight — the active request must complete first.
     public func shouldEvict(now: Date = Date()) -> Bool {
+        if inFlight > 0 { return false }
         if evictImmediately { return true }
+        // `keep_alive:0` with nothing in flight (bare unload ping): evict.
+        if evictAfterDrain { return true }
         guard let deadline else { return false }
         return now >= deadline
     }
@@ -87,5 +116,6 @@ public actor KeepAliveController {
     public func markEvicted() {
         deadline = nil
         evictImmediately = false
+        evictAfterDrain = false
     }
 }

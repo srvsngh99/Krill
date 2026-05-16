@@ -175,6 +175,32 @@ final class ServerTests: XCTestCase {
         XCTAssertTrue(past)
     }
 
+    /// PR #18 rereview: keep_alive:0 must evict ONLY after the in-flight
+    /// request that carried it drains — never before or during it.
+    func testKeepAliveZeroDefersEvictionUntilRequestDrains() async {
+        let c = KeepAliveController(defaultSeconds: 300)
+        await c.beginRequest()                 // a generate is in flight
+        await c.touch(override: 0)             // client asked keep_alive:0
+        var evict = await c.shouldEvict()
+        XCTAssertFalse(evict, "must not evict while the request is in flight")
+        await c.endRequest()                   // request completes
+        evict = await c.shouldEvict()
+        XCTAssertTrue(evict, "evicts once the active request has drained")
+    }
+
+    /// An elapsed deadline must also not evict a model out from under an
+    /// in-flight request.
+    func testKeepAliveDeadlineDoesNotEvictDuringActiveRequest() async {
+        let c = KeepAliveController(defaultSeconds: 300)
+        await c.beginRequest()
+        await c.touch(override: 300)
+        let duringRequest = await c.shouldEvict(now: Date().addingTimeInterval(400))
+        XCTAssertFalse(duringRequest, "deadline must wait for the request")
+        await c.endRequest()
+        let afterRequest = await c.shouldEvict(now: Date().addingTimeInterval(400))
+        XCTAssertTrue(afterRequest)
+    }
+
     func testSamplerPenaltiesActiveFlagGatesHistory() {
         XCTAssertFalse(SamplingParams(temperature: 0.7).penaltiesActive)
         XCTAssertTrue(SamplingParams(temperature: 0.7, repetitionPenalty: 1.2).penaltiesActive)
@@ -387,6 +413,30 @@ final class ServerTests: XCTestCase {
         XCTAssertNil(rh.headers.first(name: "Access-Control-Allow-Origin"))
         _ = try readResponseBody(from: channel)
         try readResponseEnd(from: channel)
+    }
+
+    /// PR #18 rereview: streaming (SSE / ndjson) response heads must carry
+    /// the CORS grant too, not only JSON responses, so browser clients can
+    /// consume `stream:true`.
+    func testStreamingResponseHeadsIncludeCorsHeaders() {
+        let cors = [("Access-Control-Allow-Origin", "http://localhost"),
+                    ("Vary", "Origin")]
+        let ollama = ServerResponseHeads.ollamaStreaming(cors: cors)
+        XCTAssertEqual(ollama.headers.first(name: "Content-Type"),
+                       "application/x-ndjson")
+        XCTAssertEqual(ollama.headers.first(name: "Access-Control-Allow-Origin"),
+                       "http://localhost")
+        XCTAssertEqual(ollama.headers.first(name: "Vary"), "Origin")
+
+        let openai = ServerResponseHeads.openAIStreaming(cors: cors)
+        XCTAssertEqual(openai.headers.first(name: "Content-Type"),
+                       "text/event-stream")
+        XCTAssertEqual(openai.headers.first(name: "Access-Control-Allow-Origin"),
+                       "http://localhost")
+
+        // No grant (disallowed/missing origin) ⇒ no CORS header injected.
+        XCTAssertNil(ServerResponseHeads.ollamaStreaming()
+            .headers.first(name: "Access-Control-Allow-Origin"))
     }
 
     func testOpenAIChatRequestParsesMaxCompletionTokensAlias() throws {
@@ -751,7 +801,19 @@ final class ServerTests: XCTestCase {
         let baseDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("krillm-copy-\(UUID().uuidString)")
         let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
-        try registry.saveManifest(Self.fixtureManifest(name: "src-model"))
+        // Seed a source whose Modelfile overrides must survive the copy
+        // (PR #18 rereview: /api/copy previously dropped them).
+        let src = Self.fixtureManifest(name: "src-model")
+        let withOverrides = ModelManifest(
+            name: src.name, family: src.family, params: src.params,
+            quant: src.quant, source: src.source, context: src.context,
+            files: src.files, draftPair: src.draftPair,
+            chatTemplate: src.chatTemplate, sizeBytes: src.sizeBytes,
+            pulledAt: src.pulledAt,
+            overrides: ModelOverrides(system: "You are a pirate.",
+                                      template: "{{ .Prompt }}",
+                                      parameters: ["temperature": "0.1"]))
+        try registry.saveManifest(withOverrides)
         let channel = try makeChannel(baseDir: baseDir, registry: registry)
         defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
 
@@ -761,7 +823,11 @@ final class ServerTests: XCTestCase {
         _ = try readResponseBody(from: channel)
         try readResponseEnd(from: channel)
         XCTAssertTrue(registry.hasModel("dst-model"))
-        XCTAssertEqual(registry.getModel("dst-model")?.family, .qwen)
+        let dst = registry.getModel("dst-model")
+        XCTAssertEqual(dst?.family, .qwen)
+        XCTAssertEqual(dst?.overrides?.system, "You are a pirate.")
+        XCTAssertEqual(dst?.overrides?.template, "{{ .Prompt }}")
+        XCTAssertEqual(dst?.overrides?.parameters["temperature"], "0.1")
     }
 
     func testApiCreateFromModelfileThenShowReflectsOverrides() throws {

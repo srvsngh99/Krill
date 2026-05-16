@@ -245,12 +245,15 @@ landing details.
 > surface (`--compat`, discovery/lifecycle endpoints, embeddings, tools,
 > structured output, Modelfile create/show/cp, keep_alive, Anthropic
 > messages, context overrides, stateful sampler penalties, and a serialized
-> generation queue). The parity gate was reported green on the PR, but the
-> follow-up release PR must close the rereview issues before a production
-> tag: `keep_alive:0` must evict only after the active request, `serve` must
-> actually honor `OLLAMA_HOST`/`OLLAMA_MODELS`, `/api/copy` must preserve
-> Modelfile overrides, and streaming responses must include CORS headers.
-> The `11435→11434` default-port flip remains deferred until that PR lands.
+> generation queue). The parity gate was reported green on the PR; the
+> four rereview issues are now **CLOSED in the PR #18 follow-up**
+> (`fix/pr18-rereview-release-blockers`, see Section 4.5): `keep_alive:0`
+> evicts only after the in-flight request drains, `serve` honors
+> `OLLAMA_HOST`/`OLLAMA_MODELS`, `/api/copy` preserves Modelfile overrides,
+> and streaming responses carry the CORS grant. The remaining
+> production-tag blocker is the fresh multimodal benchmark artifact
+> (Section 3.1). The `11435→11434` default-port flip remains deferred until
+> that artifact is attached.
 
 ### 3.1 Release benchmark gate
 
@@ -358,10 +361,11 @@ production release tag.
 5. ~~**Quantized KV state save/restore in the prefix cache.**~~ Shipped
    in PR #11. int8 KV and prefix cache compose end-to-end with no
    dequant→requant round trip. See Section 4.
-6. **PR #18 release-readiness fixes.** Close the four rereview issues:
-   `keep_alive:0` post-request eviction, `serve` env/config wiring,
-   `/api/copy` override preservation, and streaming CORS. Status:
-   required follow-up PR.
+6. ~~**PR #18 release-readiness fixes.**~~ **SHIPPED** in
+   `fix/pr18-rereview-release-blockers` (Section 4.5): `keep_alive:0`
+   post-request eviction, `serve` `OLLAMA_HOST`/`OLLAMA_MODELS` wiring,
+   `/api/copy` override preservation, and streaming CORS — all four
+   closed with regression tests; both parity profiles 18/18.
 7. **Fresh multimodal release artifact.** Restore/pull the local Gemma 4
    E2B checkpoint, rerun `make bench-gemma4-multimodal`, run
    `tools/release_gate.py --profile release_candidate`, and attach both
@@ -672,3 +676,52 @@ non-regression floor; `strict` still exits `1`. The `>= 1.5x` decode
 aspiration remains tracked and re-promotable (Workstream 2 — speculative
 decoding). This is the agreed release-candidate gate; `strict`-green and
 a production tag still require Workstreams 1–2.
+
+### 4.5 PR #18 follow-up — close the four parity rereview blockers
+
+Branch `fix/pr18-rereview-release-blockers`. Closes Section 3.2 item 6 and
+the Section 3 blockquote's four required fixes — the only remaining
+*code* gate between PR #18's parity surface and a production tag (the
+fresh multimodal benchmark artifact, Section 3.1, is the remaining
+*measurement* step).
+
+What landed:
+
+1. **`keep_alive:0` evicts only after the active request drains.**
+   `KeepAliveController` now tracks in-flight requests
+   (`beginRequest`/`endRequest`, wired to the generation-queue slot
+   lifecycle in `Server.swift`). `keep_alive:0` arms `evictAfterDrain`
+   instead of evicting immediately; `shouldEvict()` returns `false`
+   whenever a request is in flight, so neither `keep_alive:0` nor an
+   elapsed deadline can unload the model mid-generation. A bare
+   `keep_alive:0` ping with nothing in flight still evicts (Ollama
+   unload-ping parity).
+2. **`serve` honors `OLLAMA_HOST` / `OLLAMA_MODELS`.** `ServeCommand`'s
+   `--host`/`--port` became optional and now fall back to
+   `KrillConfig` (which already folds `OLLAMA_HOST`→host:port and
+   `OLLAMA_MODELS`→modelsDir, with `KRILL_*` winning). Precedence: CLI
+   flag > env > `config.toml` > default. `Registry` gained a
+   `modelsDir:` initializer so `OLLAMA_MODELS` roots manifests/blobs
+   exactly like Ollama (not under `<dir>/models`).
+3. **`/api/copy` preserves Modelfile overrides.** `handleOllamaCopy`
+   now passes `srcManifest.overrides` to the copied `ModelManifest`,
+   matching `krillm cp` (it previously dropped SYSTEM/TEMPLATE/PARAMETER).
+4. **Streaming responses carry the CORS grant.**
+   `ServerResponseHeads.ollamaStreaming`/`openAIStreaming` take a
+   `cors:` argument; all nine streaming-head call sites pass
+   `corsHeaders()`. Browser clients can now consume `stream:true`.
+
+Coverage (Swift `make test` 195/9/0 → **202/9/0**, 0 failures):
+
+- `ServerTests`: `testKeepAliveZeroDefersEvictionUntilRequestDrains`,
+  `testKeepAliveDeadlineDoesNotEvictDuringActiveRequest`,
+  `testStreamingResponseHeadsIncludeCorsHeaders`; extended
+  `testApiCopyRoundTripsManifest` to assert overrides survive.
+- `KLMRegistryTests`: extended the OLLAMA-alias test for `OLLAMA_MODELS`;
+  added `testRegistryModelsDirOverrideRootsManifestsAndBlobs`.
+
+Verified: `make test` 202/9/0, `make release` passed, `python3 -m
+unittest tools.test_release_gate` 17/17, `make parity-gate` **GREEN
+18/18 on BOTH `mac_parity` and `strict_parity`**. Remaining before a
+production tag: the fresh Gemma 4 text/vision/audio benchmark artifact
+(Section 3.1) and Workstreams 1–2 for `strict`-green + native audio.
