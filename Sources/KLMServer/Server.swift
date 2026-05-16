@@ -1232,6 +1232,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let eng = engine
 
         Task {
+            // WS-E: /v1/completions is engine-touching too - serialize it.
+            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+            defer { self.leaveQueue() }
             let (tokenStream, getStats) = eng.generate(
                 prompt: request.prompt,
                 params: request.sampling.samplingParams,
@@ -2030,6 +2033,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         guard let resolved = AliasMap.resolve(name) else {
             sendJSON(context: context, status: .badRequest, body: [
                 "error": "Cannot resolve '\(name)'. Use a known alias or an org/repo HuggingFace path."
+            ])
+            return
+        }
+        // Defense in depth: a crafted ref like "x/.." resolves to a name
+        // that would escape the registry root. Reject before any pull.
+        guard Registry.isValidModelName(resolved.name) else {
+            sendJSON(context: context, status: .badRequest, body: [
+                "error": "Invalid model name: must not contain path separators, '..', or a leading '.'"
             ])
             return
         }
