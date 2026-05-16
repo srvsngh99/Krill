@@ -2,6 +2,29 @@ import XCTest
 @testable import KLMRegistry
 
 final class KLMRegistryTests: XCTestCase {
+    func testModelNameValidationRejectsTraversal() {
+        XCTAssertTrue(Registry.isValidModelName("llama-3.2-1b"))
+        XCTAssertTrue(Registry.isValidModelName("my_model.v2"))
+        for bad in ["../etc/passwd", "a/b", "..", ".hidden", "/abs",
+                    "~/x", "a\\b", "with\u{0}null", ""] {
+            XCTAssertFalse(Registry.isValidModelName(bad), "should reject \(bad)")
+        }
+    }
+
+    func testCreateModelRejectsTraversalName() throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-trav-\(UUID().uuidString)")
+        let reg = Registry(baseDir: base)
+        try reg.ensureDirectories()
+        try reg.saveManifest(ModelManifest(
+            name: "safe-base", family: .llama, params: "1B", quant: "4bit",
+            source: "x", context: 4096, files: [], chatTemplate: "t",
+            sizeBytes: 1))
+        let mf = try ModelfileParser.parse("FROM safe-base\nSYSTEM hi")
+        XCTAssertThrowsError(try reg.createModel(name: "../escape", from: mf))
+        XCTAssertThrowsError(try reg.removeModel("../safe-base"))
+    }
+
     func testModelfileParserDirectives() throws {
         let mf = try ModelfileParser.parse("""
         # a comment

@@ -96,7 +96,7 @@ public final class KLMServer: Sendable {
             print("Ollama API: http://\(host):\(port)/api/chat")
         }
         if port != 11434 {
-            print("Note: default port is \(port). For Ollama drop-in, run with --port 11434 (default flip to 11434 deferred until full parity — see docs/OLLAMA_MAC_PARITY_PLAN.md).")
+            print("Note: default port is \(port). For Ollama drop-in, run with --port 11434 (default flip to 11434 deferred until full parity - see docs/OLLAMA_MAC_PARITY_PLAN.md).")
         }
         print("Press Ctrl+C to stop.")
 
@@ -357,6 +357,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private func leaveQueue() {
         let q = genQueue
         Task { await q.leave() }
+    }
+
+    /// Slot acquire that just returns success/failure (for streaming paths
+    /// whose 200 head is already on the wire, so a JSON 503 is impossible -
+    /// the caller closes the stream with a terminal error instead).
+    private func tryEnterQueue() async -> Bool {
+        do { try await genQueue.enter(); return true } catch { return false }
     }
 
     /// Apply a created model's Modelfile `PARAMETER` overrides (WS-C) as
@@ -779,13 +786,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func writeNDJSON(_ ctx: ChannelHandlerContext, _ obj: [String: Any]) {
         guard let d = try? JSONSerialization.data(withJSONObject: obj) else { return }
-        var b = ctx.channel.allocator.buffer(capacity: d.count + 1)
+        var b = ByteBufferAllocator().buffer(capacity: d.count + 1)
         b.writeBytes(d); b.writeString("\n")
         writeOnLoop(ctx, .body(.byteBuffer(b)), flush: true)
     }
 
     private func writeRaw(_ ctx: ChannelHandlerContext, _ s: String) {
-        var b = ctx.channel.allocator.buffer(capacity: s.utf8.count)
+        var b = ByteBufferAllocator().buffer(capacity: s.utf8.count)
         b.writeString(s)
         writeOnLoop(ctx, .body(.byteBuffer(b)), flush: true)
     }
@@ -932,15 +939,15 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     let chatId = "chatcmpl-\(UUID().uuidString.prefix(8))"
                     if requestStream {
                         let contentChunk = sseChunk(id: chatId, content: output, finishReason: nil)
-                        var buf1 = ctx.channel.allocator.buffer(capacity: contentChunk.utf8.count)
+                        var buf1 = ByteBufferAllocator().buffer(capacity: contentChunk.utf8.count)
                         buf1.writeString(contentChunk)
                         self.writeOnLoop(ctx, .body(.byteBuffer(buf1)), flush: true)
                         let stopChunk = sseChunk(id: chatId, content: nil, finishReason: "stop")
-                        var buf2 = ctx.channel.allocator.buffer(capacity: stopChunk.utf8.count)
+                        var buf2 = ByteBufferAllocator().buffer(capacity: stopChunk.utf8.count)
                         buf2.writeString(stopChunk)
                         self.writeOnLoop(ctx, .body(.byteBuffer(buf2)), flush: true)
                         let done = "data: [DONE]\n\n"
-                        var buf3 = ctx.channel.allocator.buffer(capacity: done.utf8.count)
+                        var buf3 = ByteBufferAllocator().buffer(capacity: done.utf8.count)
                         buf3.writeString(done)
                         self.writeOnLoop(ctx, .body(.byteBuffer(buf3)), flush: true)
                         self.writeOnLoop(ctx, .end(nil), flush: true)
@@ -973,7 +980,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         ]
                         let data1 = try? JSONSerialization.data(withJSONObject: body)
                         if let data1 {
-                            var buf = ctx.channel.allocator.buffer(capacity: data1.count + 1)
+                            var buf = ByteBufferAllocator().buffer(capacity: data1.count + 1)
                             buf.writeBytes(data1)
                             buf.writeString("\n")
                             self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
@@ -991,7 +998,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         ]
                         let data2 = try? JSONSerialization.data(withJSONObject: final)
                         if let data2 {
-                            var buf = ctx.channel.allocator.buffer(capacity: data2.count + 1)
+                            var buf = ByteBufferAllocator().buffer(capacity: data2.count + 1)
                             buf.writeBytes(data2)
                             buf.writeString("\n")
                             self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
@@ -1020,7 +1027,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         ]
                         let data1 = try? JSONSerialization.data(withJSONObject: body)
                         if let data1 {
-                            var buf = ctx.channel.allocator.buffer(capacity: data1.count + 1)
+                            var buf = ByteBufferAllocator().buffer(capacity: data1.count + 1)
                             buf.writeBytes(data1)
                             buf.writeString("\n")
                             self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
@@ -1038,7 +1045,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         ]
                         let data2 = try? JSONSerialization.data(withJSONObject: final)
                         if let data2 {
-                            var buf = ctx.channel.allocator.buffer(capacity: data2.count + 1)
+                            var buf = ByteBufferAllocator().buffer(capacity: data2.count + 1)
                             buf.writeBytes(data2)
                             buf.writeString("\n")
                             self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
@@ -1076,11 +1083,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         media: DecodedMedia? = nil,
         contextLimit: Int? = nil
     ) {
-        // Send SSE headers
+        // Write the SSE head synchronously within the channelRead call
+        // chain (NIO requires the response begin here, not from a detached
+        // Task - doing the latter trips a ChannelPipeline precondition).
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "text/event-stream")
         headers.add(name: "Cache-Control", value: "no-cache")
         headers.add(name: "Connection", value: "keep-alive")
+        for (k, v) in corsHeaders() { headers.add(name: k, value: v) }
         let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
         context.write(wrapOutboundOut(.head(head)), promise: nil)
 
@@ -1091,6 +1101,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             defer { mediaCopy?.cleanup() }
+            // Hold a generation slot for the whole token loop (WS-E). The
+            // 200 SSE head is already sent, so on overflow we close the
+            // stream with a valid terminal error chunk + [DONE].
+            guard await self.tryEnterQueue() else {
+                let errChunk = "data: {\"error\":\"server busy: max queue exceeded\"}\n\n"
+                var b = ByteBufferAllocator().buffer(capacity: errChunk.utf8.count)
+                b.writeString(errChunk + "data: [DONE]\n\n")
+                self.writeOnLoop(ctx, .body(.byteBuffer(b)), flush: true)
+                self.writeOnLoop(ctx, .end(nil), flush: true)
+                return
+            }
+            defer { self.leaveQueue() }
+
             let (tokenStream, _) = eng.generate(
                 messages: messages,
                 params: params, maxTokens: maxTokens,
@@ -1101,20 +1124,20 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             for await event in tokenStream {
                 if event.isEnd {
                     let chunk = sseChunk(id: id, content: nil, finishReason: "stop")
-                    var buf = ctx.channel.allocator.buffer(capacity: chunk.utf8.count)
+                    var buf = ByteBufferAllocator().buffer(capacity: chunk.utf8.count)
                     buf.writeString(chunk)
                     self.writeOnLoop(ctx, .body(.byteBuffer(buf)))
 
                     // Send [DONE]
                     let done = "data: [DONE]\n\n"
-                    var doneBuf = ctx.channel.allocator.buffer(capacity: done.utf8.count)
+                    var doneBuf = ByteBufferAllocator().buffer(capacity: done.utf8.count)
                     doneBuf.writeString(done)
                     self.writeOnLoop(ctx, .body(.byteBuffer(doneBuf)))
                     break
                 }
 
                 let chunk = sseChunk(id: id, content: event.text, finishReason: nil)
-                var buf = ctx.channel.allocator.buffer(capacity: chunk.utf8.count)
+                var buf = ByteBufferAllocator().buffer(capacity: chunk.utf8.count)
                 buf.writeString(chunk)
                 self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
             }
@@ -1276,7 +1299,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
 
         context.write(wrapOutboundOut(.head(head)), promise: nil)
-        var buf = context.channel.allocator.buffer(capacity: data.count)
+        var buf = ByteBufferAllocator().buffer(capacity: data.count)
         buf.writeBytes(data)
         context.write(wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
         context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
@@ -1391,10 +1414,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let mediaCopy = decodedMedia
 
         let requestStart = CFAbsoluteTimeGetCurrent()
-
-        if request.stream {
-            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
-        }
+        let wantStream = request.stream
 
         let genMessages = StructuredOutput.injectFormatSystem(
             into: applyModelSystemOverride(request.messages),
@@ -1404,8 +1424,24 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             sampling: request.sampling.samplingParams,
             maxTokens: request.maxTokens,
             contextLimit: request.contextLimit ?? defaultContextLimit)
+        if wantStream {
+            // NDJSON head must begin in the channelRead call chain (NIO).
+            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
+        }
         Task {
             defer { mediaCopy?.cleanup() }
+            // Hold a generation slot for the whole token loop (WS-E).
+            if wantStream {
+                guard await self.tryEnterQueue() else {
+                    self.writeNDJSON(ctx, ["model": modelName,
+                        "error": "server busy: max queue exceeded", "done": true])
+                    self.writeOnLoop(ctx, .end(nil), flush: true)
+                    return
+                }
+            } else {
+                guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+            }
+            defer { self.leaveQueue() }
             let (tokenStream, getStats) = eng.generate(
                 messages: genMessages,
                 params: ocParams,
@@ -1442,7 +1478,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                             finalChunk["ttft_ns"] = Int64((ftt - requestStart) * 1_000_000_000)
                         }
                         let data = try! JSONSerialization.data(withJSONObject: finalChunk)
-                        var buf = ctx.channel.allocator.buffer(capacity: data.count + 1)
+                        var buf = ByteBufferAllocator().buffer(capacity: data.count + 1)
                         buf.writeBytes(data)
                         buf.writeString("\n")
                         self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
@@ -1452,7 +1488,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     // Fast path: build JSON string directly instead of JSONSerialization
                     let escaped = escapeJSON(event.text)
                     let line = "{\"model\":\"\(modelName)\",\"message\":{\"role\":\"assistant\",\"content\":\"\(escaped)\"},\"done\":false}\n"
-                    var buf = ctx.channel.allocator.buffer(capacity: line.utf8.count)
+                    var buf = ByteBufferAllocator().buffer(capacity: line.utf8.count)
                     buf.writeString(line)
                     // Fix 4: dispatch writes onto the event loop.
                     self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
@@ -1576,11 +1612,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let imageData = Self.loadDataIfPath(decodedMedia?.imagePath)
         let mediaCopy = decodedMedia
 
-        if request.stream {
-            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
-        }
-
         let requestStart = CFAbsoluteTimeGetCurrent()
+        let wantStream = request.stream
 
         let respFormat = request.responseFormat
         let genSystem: String? = respFormat.map { fmt in
@@ -1591,8 +1624,22 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             sampling: request.sampling.samplingParams,
             maxTokens: request.maxTokens,
             contextLimit: request.contextLimit ?? defaultContextLimit)
+        if wantStream {
+            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
+        }
         Task {
             defer { mediaCopy?.cleanup() }
+            if wantStream {
+                guard await self.tryEnterQueue() else {
+                    self.writeNDJSON(ctx, ["error": "server busy: max queue exceeded",
+                                           "done": true])
+                    self.writeOnLoop(ctx, .end(nil), flush: true)
+                    return
+                }
+            } else {
+                guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+            }
+            defer { self.leaveQueue() }
             let (tokenStream, getStats) = eng.generate(
                 prompt: request.prompt,
                 systemPrompt: genSystem,
@@ -1631,7 +1678,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                             finalChunk["ttft_ns"] = Int64((ftt - requestStart) * 1_000_000_000)
                         }
                         let data = try! JSONSerialization.data(withJSONObject: finalChunk)
-                        var buf = ctx.channel.allocator.buffer(capacity: data.count + 1)
+                        var buf = ByteBufferAllocator().buffer(capacity: data.count + 1)
                         buf.writeBytes(data)
                         buf.writeString("\n")
                         self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
@@ -1641,7 +1688,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     // Fast path: build JSON string directly instead of JSONSerialization
                     let escaped = escapeJSON(event.text)
                     let line = "{\"model\":\"\(modelName)\",\"response\":\"\(escaped)\",\"done\":false}\n"
-                    var buf = ctx.channel.allocator.buffer(capacity: line.utf8.count)
+                    var buf = ByteBufferAllocator().buffer(capacity: line.utf8.count)
                     buf.writeString(line)
                     self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
                 }
@@ -1896,6 +1943,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                      body: ["error": "Missing 'source' or 'destination'"])
             return
         }
+        guard Registry.isValidModelName(source),
+              Registry.isValidModelName(destination) else {
+            sendJSON(context: context, status: .badRequest, body: [
+                "error": "Invalid model name: must not contain path separators, '..', or a leading '.'"
+            ])
+            return
+        }
         guard let srcManifest = registry.getModel(source) else {
             sendJSON(context: context, status: .notFound,
                      body: ["error": "model '\(source)' not found"])
@@ -1986,7 +2040,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let ndjson: @Sendable ([String: Any]) -> Void = { obj in
             guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
-            var b = ctx.channel.allocator.buffer(capacity: data.count + 1)
+            var b = ByteBufferAllocator().buffer(capacity: data.count + 1)
             b.writeBytes(data)
             b.writeString("\n")
             self.writeOnLoop(ctx, .body(.byteBuffer(b)), flush: true)
@@ -2068,7 +2122,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let ndjson: @Sendable ([String: Any]) -> Void = { obj in
             guard let d = try? JSONSerialization.data(withJSONObject: obj) else { return }
-            var b = ctx.channel.allocator.buffer(capacity: d.count + 1)
+            var b = ByteBufferAllocator().buffer(capacity: d.count + 1)
             b.writeBytes(d); b.writeString("\n")
             self.writeOnLoop(ctx, .body(.byteBuffer(b)), flush: true)
         }
@@ -2252,7 +2306,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
 
         context.write(wrapOutboundOut(.head(head)), promise: nil)
-        var buf = context.channel.allocator.buffer(capacity: data.count)
+        var buf = ByteBufferAllocator().buffer(capacity: data.count)
         buf.writeBytes(data)
         context.write(wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
         context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)

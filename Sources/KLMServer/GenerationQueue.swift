@@ -2,13 +2,13 @@ import Foundation
 
 /// Serializes inference so concurrent clients are *queued, not dropped*
 /// (WS-E / T1-5), and the single-flight engine + persistent prefix/int8-KV
-/// caches are never entered concurrently (a real correctness guard — the
+/// caches are never entered concurrently (a real correctness guard - the
 /// caches assume single-flight today).
 ///
 /// `numParallel` slots run at once (default 1 = fully serialized, matching
 /// Ollama's per-model default). Up to `maxQueue` requests may wait; beyond
 /// that `enter()` throws ``QueueFull`` and the handler returns HTTP 503.
-/// True batched execution across slots is a tracked follow-up — the parity
+/// True batched execution across slots is a tracked follow-up - the parity
 /// plan's WS-E acceptance explicitly permits serialized-first.
 public actor GenerationQueue {
     public struct QueueFull: Error {}

@@ -15,11 +15,11 @@ internal enum StructuredOutput {
     static func systemPrompt(for format: ResponseFormat) -> String {
         switch format {
         case .json:
-            return "You must respond with a single valid JSON value and nothing else — no prose, no markdown, no code fences."
+            return "You must respond with a single valid JSON value and nothing else - no prose, no markdown, no code fences."
         case .schema(let schema):
             return """
             You must respond with a single valid JSON value and nothing else \
-            — no prose, no markdown, no code fences. The JSON must conform to \
+            - no prose, no markdown, no code fences. The JSON must conform to \
             this JSON Schema:
             \(schema)
             """

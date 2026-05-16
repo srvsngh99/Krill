@@ -366,8 +366,13 @@ class Gate:
         self.check("T2-9", "A", "Anthropic /v1/messages", anthropic_messages)
 
         def concurrency() -> tuple[str, str]:
-            # Fire several concurrent requests; the server must answer every
-            # one (queued, not dropped/crashed) — WS-E serialized queue.
+            # SCOPE: this only checks the server stays responsive under
+            # overlapping connections (every request gets a clean, consistent
+            # response - no crash, hang, or dropped socket). With no model
+            # loaded these short-circuit at the model gate BEFORE the
+            # GenerationQueue, so this does NOT prove WS-E serialization /
+            # cache-safety - that is covered by the GenerationQueue unit
+            # tests and a manual loaded-model load test, not by this gate.
             import concurrent.futures as cf
             def one(_):
                 c, _ = self._req(
@@ -377,13 +382,13 @@ class Gate:
                 return c
             with cf.ThreadPoolExecutor(max_workers=6) as ex:
                 codes = list(ex.map(one, range(6)))
-            # No model loaded -> all should be a clean 503 (not a crash/hang
-            # or dropped connection). Consistency proves the path is stable.
-            if all(c in (200, 503) for c in codes):
-                return "PASS", f"6 concurrent all answered ({codes[0]})"
+            if all(c in (200, 503) for c in codes) and len(set(codes)) == 1:
+                return "PASS", (f"6 concurrent answered consistently "
+                                f"({codes[0]}); endpoint stable (not a "
+                                f"serialization proof - see unit tests)")
             return "FAIL", f"inconsistent/with errors: {codes}"
 
-        self.check("T1-5", "A", "concurrency/queue stability", concurrency)
+        self.check("T1-5", "A", "concurrent-request stability", concurrency)
 
     # -- verdict ----------------------------------------------------------
     def verdict(self, profile: str) -> bool:

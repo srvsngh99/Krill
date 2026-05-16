@@ -2,7 +2,7 @@ import ArgumentParser
 import Foundation
 import KLMRegistry
 
-/// `krillm stop <model>` — ask a running server to unload the model now
+/// `krillm stop <model>` - ask a running server to unload the model now
 /// (WS-E / T2-3). Talks to the local server's `/v1/models/unload`.
 struct StopCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -42,7 +42,7 @@ struct StopCommand: AsyncParsableCommand {
                 throw ExitCode.failure
             }
         } catch {
-            print("Error: could not reach server at \(h):\(p) — is `krillm serve` running? (\(error))")
+            print("Error: could not reach server at \(h):\(p) - is `krillm serve` running? (\(error))")
             throw ExitCode.failure
         }
     }

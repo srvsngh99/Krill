@@ -5,7 +5,7 @@ import KLMTokenizer
 
 /// Loads and runs a *dedicated* sentence-embedding model (BERT-style
 /// encoder: sentence-transformers / BGE / MiniLM / E5). Separate from
-/// `InferenceEngine` so embeddings do not require — or disturb — a loaded
+/// `InferenceEngine` so embeddings do not require - or disturb - a loaded
 /// chat model, and so a RAG client can embed while chat is unloaded.
 public final class EmbeddingEngine: @unchecked Sendable {
     private var model: BertEmbeddingModel?
@@ -72,7 +72,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
     }
 
     /// Embed a batch of texts. Each text is encoded and run independently
-    /// (batch=1) so no padding mask is needed — keeps the forward exact.
+    /// (batch=1) so no padding mask is needed - keeps the forward exact.
     public func embed(_ texts: [String]) throws -> EmbedResult {
         lock.lock()
         let model = self.model

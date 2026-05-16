@@ -121,7 +121,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case glm
     case deepseek
     /// Dedicated sentence-embedding encoder (BERT/RoBERTa/MiniLM/BGE/E5).
-    /// Not a causal LM — served only via the embeddings endpoints.
+    /// Not a causal LM - served only via the embeddings endpoints.
     case bert
 
     /// Detect model family from HuggingFace config.json's `architectures` field.

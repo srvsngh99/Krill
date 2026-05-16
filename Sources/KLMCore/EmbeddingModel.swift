@@ -5,9 +5,9 @@ import MLXNN
 // MARK: - Config
 
 /// Configuration for a BERT-style sentence-embedding encoder
-/// (sentence-transformers / BGE / MiniLM / E5 — all `BertModel` or
+/// (sentence-transformers / BGE / MiniLM / E5 - all `BertModel` or
 /// `XLMRobertaModel` architectures). This is a *dedicated embedding model*,
-/// distinct from the causal-LM families in `ModelLoader` — it has no
+/// distinct from the causal-LM families in `ModelLoader` - it has no
 /// `lm_head` and uses bidirectional (non-causal) attention.
 public struct BertEmbeddingConfig: Decodable, Sendable {
     public let hiddenSize: Int
@@ -249,7 +249,7 @@ public enum EmbeddingPooling: String, Sendable {
 
 /// Pool a `[1, T, H]` last-hidden-state into a `[H]` sentence vector and
 /// L2-normalize. Batch is 1 (callers embed one text at a time, so no
-/// padding mask is needed — every token is real).
+/// padding mask is needed - every token is real).
 public func poolSentenceEmbedding(
     _ lastHidden: MLXArray,
     pooling: EmbeddingPooling,

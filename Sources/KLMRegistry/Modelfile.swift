@@ -5,7 +5,7 @@ import Logging
 ///
 /// Supported directives: `FROM`, `PARAMETER <k> <v>`, `SYSTEM`, `TEMPLATE`,
 /// `LICENSE`, `MESSAGE <role> <content>`. `ADAPTER` (LoRA) is parsed and
-/// recorded as a warning only — out of scope for v1 per the parity plan §7.
+/// recorded as a warning only - out of scope for v1 per the parity plan §7.
 /// `SYSTEM`/`TEMPLATE`/`LICENSE` accept either a rest-of-line value or a
 /// triple-quoted `"""…"""` multi-line block.
 public struct Modelfile: Sendable, Equatable {
@@ -136,12 +136,14 @@ public enum ModelCreateError: Error, CustomStringConvertible {
 
 extension Registry {
     /// Create a customized model from a parsed Modelfile. The base weights
-    /// are *referenced* (the new blob dir is a symlink to the base) — no
-    /// weight copy — with the Modelfile overrides recorded on the manifest.
+    /// are *referenced* (the new blob dir is a symlink to the base) - no
+    /// weight copy - with the Modelfile overrides recorded on the manifest.
     @discardableResult
     public func createModel(name: String, from modelfile: Modelfile) throws -> ModelManifest {
         let logger = Logger(label: "krillm.create")
+        try Registry.requireValidName(name)
         let baseName = modelfile.from
+        try Registry.requireValidName(baseName)
         guard let base = getModel(baseName) else {
             throw ModelCreateError.baseNotInstalled(baseName)
         }

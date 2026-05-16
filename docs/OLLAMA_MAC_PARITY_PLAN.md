@@ -79,12 +79,19 @@ Also shipped (2026-05-17, same branch):
 - WS-E concurrency queue (T1-5): `GenerationQueue` actor serializes
   inference (`KRILL_NUM_PARALLEL` slots, default 1) so concurrent
   clients are *queued, not dropped* and the single-flight engine +
-  prefix/int8-KV caches are never entered in parallel (a real
-  correctness guard, not just parity); beyond `KRILL_MAX_QUEUE` →
-  HTTP 503. Wired into every engine-touching path
-  (chat/tool/anthropic/embeddings, defer-released — no deadlock).
-  Live-verified: 4 concurrent `/v1/chat/completions` all answered,
-  serialized, none dropped or cache-corrupted.
+  prefix/int8-KV caches are not entered in parallel; beyond
+  `KRILL_MAX_QUEUE` → HTTP 503. The slot is held for the whole token
+  loop and is wired into *every* engine-touching path - OpenAI
+  stream/non-stream, Ollama `/api/chat` + `/api/generate`
+  stream/non-stream, tool, Anthropic, embeddings - with the streaming
+  head written only after the slot is acquired, and `defer`-released on
+  every exit (no deadlock). Serialization correctness is covered by the
+  `GenerationQueue` unit tests; a manual loaded-model run confirmed 4
+  overlapping `/v1/chat/completions` are answered and serialized with
+  none dropped. The `parity_gate.py` `T1-5` row only checks
+  concurrent-request *endpoint stability* (it runs model-less, so it
+  short-circuits before the queue) and is labelled as such - it is not
+  presented as a serialization proof.
 
 `make parity-gate` now **GREEN 18/18** on both profiles (incl. the
 advisory `T2-9`/`T1-5` rows under `strict_parity`).

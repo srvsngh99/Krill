@@ -79,7 +79,7 @@ public struct SamplingParams: Sendable {
 /// until the final token ID is read.
 public final class Sampler: @unchecked Sendable {
     private let params: SamplingParams
-    /// Mirostat running estimate (v1/v2). Per-generation state — `Sampler`
+    /// Mirostat running estimate (v1/v2). Per-generation state - `Sampler`
     /// is constructed once per request so this is request-scoped.
     private var mirostatMu: Float
 
@@ -125,7 +125,7 @@ public final class Sampler: @unchecked Sendable {
     /// repetition_penalty (divide positive / multiply negative logits at
     /// seen tokens), presence_penalty (flat per distinct seen token), and
     /// frequency_penalty (× occurrence count). Applied via a single
-    /// scatter over the small unique-recent set — O(window), not O(vocab).
+    /// scatter over the small unique-recent set - O(window), not O(vocab).
     private func applyPenalties(_ logits: MLXArray, recent: [Int]) -> MLXArray {
         let n = params.repeatLastN
         let window: [Int]
@@ -251,7 +251,7 @@ private func topKFilter(_ logits: MLXArray, k: Int) -> MLXArray {
 }
 
 /// Min-p filter: keep only tokens whose probability is at least
-/// `minP * max(prob)`. A relative cutoff that adapts to confidence —
+/// `minP * max(prob)`. A relative cutoff that adapts to confidence -
 /// stricter when the model is peaked, looser when it is flat.
 private func minPFilter(_ logits: MLXArray, minP: Float) -> MLXArray {
     let probs = softmax(logits)

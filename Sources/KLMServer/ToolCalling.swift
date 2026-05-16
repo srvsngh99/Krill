@@ -20,7 +20,7 @@ internal enum ToolCalling {
     struct ParsedToolCall: Equatable, Sendable {
         let name: String
         /// Arguments as a JSON *string* (OpenAI wants a string; Ollama wants
-        /// the decoded object — callers convert as needed).
+        /// the decoded object - callers convert as needed).
         let argumentsJSON: String
     }
 
@@ -36,7 +36,7 @@ internal enum ToolCalling {
                 "{\"name\": \"\(t.name)\", \"description\": \"\(escapeForPrompt(t.description))\", \"parameters\": \(t.parametersJSON)}")
         }
         lines.append("")
-        lines.append("To call a tool, output ONLY this exact line and nothing else — no explanation, no code fences, do not repeat the schema:")
+        lines.append("To call a tool, output ONLY this exact line and nothing else - no explanation, no code fences, do not repeat the schema:")
         lines.append("<tool_call>{\"name\": \"<tool-name>\", \"arguments\": {<the actual argument values>}}</tool_call>")
         lines.append("`arguments` must be the concrete values for this request, not the schema.")
         lines.append("Use multiple <tool_call> lines to call multiple tools.")
@@ -75,13 +75,13 @@ internal enum ToolCalling {
         var cleaned = text
 
         // For each opening sentinel, extract the first balanced JSON object
-        // after it — tolerating a missing close tag, surrounding backticks,
+        // after it - tolerating a missing close tag, surrounding backticks,
         // and trailing punctuation (small models routinely do all three).
         for (open, close) in pairs {
             while let s = cleaned.range(of: open) {
                 let after = cleaned[s.upperBound...]
                 guard let (json, jsonEnd) = Self.firstJSONObject(in: after) else {
-                    // No JSON after the marker — drop the bare marker so it
+                    // No JSON after the marker - drop the bare marker so it
                     // doesn't leak into user-visible content.
                     cleaned.removeSubrange(s.lowerBound ..< s.upperBound)
                     continue
