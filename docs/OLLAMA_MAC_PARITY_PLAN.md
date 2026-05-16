@@ -52,7 +52,7 @@ Tiers reflect "how badly this breaks a drop-in Ollama replacement on Mac."
 
 | ID | Gap | Ollama | KrillLM today | Gate |
 |----|-----|--------|---------------|------|
-| T0-1 | Default port | `11434` | `11435` | H |
+| T0-1 | Default port | `11434` | `11435` (flip deferred — see §4 WS-A1) | H |
 | T0-2 | Embeddings | `/api/embed`, `/api/embeddings`, `/v1/embeddings` | none | H |
 | T0-3 | Discovery endpoints | `/api/version`, `/api/ps`, `/api/show` | none | H |
 | T0-4 | Tool / function calling | native + OpenAI/Anthropic compat | `--tools` rejected, parser stubbed | H |
@@ -102,13 +102,29 @@ File paths are current as of `c17356d` — verify before editing.
 
 ### WS-A — Wire compatibility (Tier 0, unblocks everything)
 
-**A1. Default port + Ollama-compat mode.**
-Change `serve` default to `11434` (Ollama's port), keep `--port` override.
-Add `--compat ollama|openai|both` (default `both`). Document the change
-prominently — this is a behavior change for existing KrillLM users; flag in
-release notes and `README.md`.
-Touch: `Sources/KLMCLI/ServeCommand.swift`, `Sources/KLMRegistry/Config.swift`
-(`server_port` default), `docs/SERVER_API.md`, `README.md`.
+**A1. Ollama-compat mode (port flip DEFERRED).**
+
+**Owner decision (2026-05-16): the default port stays `11435` until full
+Mac parity is reached.** Flipping the default to `11434` early would make
+stock Ollama clients auto-discover KrillLM and then hit missing endpoints —
+a half-working "Ollama impostor" is worse than a clean opt-in. So:
+
+- *Now / Phase 1:* keep default `11435`. `krillm serve --port 11434` must
+  work so early adopters can opt in and we can run the parity gate against
+  `:11434`. Document in `README.md`/`docs/SERVER_API.md` that the default
+  flip is intentionally deferred and tracked here (T0-1).
+- *Final activation (Phase 4 / DoD):* once the `mac_parity` gate is green,
+  flip the `serve` default to `11434` in one PR with a loud release note
+  and a one-release deprecation path for `11435`. This is the single
+  "drop-in is now real" switch.
+
+Also add `--compat ollama|openai|both` (default `both`) now — this is
+independent of the port and safe to ship in Phase 1.
+Touch (Phase 1): `Sources/KLMCLI/ServeCommand.swift` (`--compat`, accept
+`--port 11434`), `docs/SERVER_API.md`, `README.md` (deferral note).
+Touch (final activation): `Sources/KLMRegistry/Config.swift`
+(`server_port` default), `Sources/KLMCLI/ServeCommand.swift`,
+release notes.
 
 **A2. Discovery endpoints.**
 Implement `GET /api/version` (return KrillLM version + a spoofable
@@ -254,17 +270,23 @@ identically; a browser-extension client passes CORS preflight.
 
 Each phase = one or more PRs, gated and documented like the speedup plan.
 
-- **Phase 1 — "It connects" (WS-A, WS-B).** Port 11434, discovery + lifecycle
-  endpoints, embeddings. Outcome: stock Ollama clients connect, list, pull,
-  chat, embed unchanged. Highest ROI.
+- **Phase 1 — "It connects" (WS-A, WS-B).** `--compat` flag, discovery +
+  lifecycle endpoints, embeddings. Default port stays `11435`;
+  `--port 11434` works for opt-in + gate runs. Outcome: an opted-in Ollama
+  client (pointed at `:11434`) connects, lists, pulls, chats, embeds
+  unchanged. Highest ROI.
 - **Phase 2 — "It's useful" (WS-D D1/D2/D4, WS-C).** Tool calling, JSON/schema
   output, `num_ctx`, Modelfile + `create`/`show`/`cp`. Outcome: agentic and
   RAG clients work; custom models persist.
 - **Phase 3 — "It scales & matches knobs" (WS-E, WS-D D3, WS-G).** Keep-alive
   + auto-evict + concurrency/queue, full sampler params, CORS + `OLLAMA_*`
   env aliases.
-- **Phase 4 — "Ecosystem polish" (WS-F, WS-D streaming tool deltas, advisory
-  items).** Anthropic `/v1/messages`, reasoning/thinking, Flash Attention.
+- **Phase 4 — "Ecosystem polish + activation" (WS-F, WS-D streaming tool
+  deltas, advisory items).** Anthropic `/v1/messages`, reasoning/thinking,
+  Flash Attention. **Final step, gated on `mac_parity` green: flip the
+  default `serve` port `11435 → 11434`** (T0-1 / WS-A1) — the single switch
+  that makes the drop-in real, with a loud release note + `11435`
+  deprecation.
 
 ## 6. Parity Gate
 
@@ -304,8 +326,10 @@ alongside the speed gates. A production tag requires *both* the speedup
 - **Concurrency vs prefix/KV cache**: the persistent prefix cache and int8
   KV path assume single-flight today; WS-E must add isolation or a per-slot
   cache, coordinated with the speedup plan owner.
-- **Port change is breaking** for current KrillLM users — needs a loud
-  release note and possibly a one-release deprecation of 11435.
+- **Port change is breaking** for current KrillLM users — *resolved by
+  deferral*: default stays `11435` until the `mac_parity` gate is green,
+  then flips to `11434` in Phase 4 with a release note + one-release
+  `11435` deprecation (WS-A1).
 - **Embedding model support scope** (WS-B): which MLX models, and whether to
   add a pooling head to decoder models, needs an owner decision.
 
