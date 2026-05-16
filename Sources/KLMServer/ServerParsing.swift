@@ -14,6 +14,12 @@ internal struct ServerSamplingOptions: Equatable, Sendable {
     let repetitionPenalty: Float
     let seed: UInt64?
     var minP: Float = 0.0
+    var presencePenalty: Float = 0.0
+    var frequencyPenalty: Float = 0.0
+    var repeatLastN: Int = 64
+    var mirostat: Int = 0
+    var mirostatTau: Float = 5.0
+    var mirostatEta: Float = 0.1
 
     var samplingParams: SamplingParams {
         SamplingParams(
@@ -22,7 +28,13 @@ internal struct ServerSamplingOptions: Equatable, Sendable {
             topK: topK,
             repetitionPenalty: repetitionPenalty,
             seed: seed,
-            minP: minP
+            minP: minP,
+            presencePenalty: presencePenalty,
+            frequencyPenalty: frequencyPenalty,
+            repeatLastN: repeatLastN,
+            mirostat: mirostat,
+            mirostatTau: mirostatTau,
+            mirostatEta: mirostatEta
         )
     }
 }
@@ -306,6 +318,14 @@ internal enum ServerParsing {
             seed: try optionalUInt64(json["seed"], field: "seed")
         )
         opts.minP = try nonNegativeFloat(json["min_p"], field: "min_p", defaultValue: 0.0)
+        // OpenAI penalties are in [-2, 2]; map onto our additive penalties
+        // (repetition_penalty stays multiplicative and OpenAI has none).
+        if let f = json["frequency_penalty"] as? NSNumber {
+            opts.frequencyPenalty = f.floatValue
+        }
+        if let p = json["presence_penalty"] as? NSNumber {
+            opts.presencePenalty = p.floatValue
+        }
         return opts
     }
 
@@ -387,10 +407,19 @@ internal enum ServerParsing {
             ),
             seed: try optionalUInt64(options["seed"] ?? json["seed"], field: "seed")
         )
-        var withMinP = result
-        withMinP.minP = try nonNegativeFloat(
+        var o = result
+        o.minP = try nonNegativeFloat(
             options["min_p"] ?? json["min_p"], field: "min_p", defaultValue: 0.0)
-        return withMinP
+        func num(_ k: String) -> NSNumber? {
+            (options[k] ?? json[k]) as? NSNumber
+        }
+        if let v = num("frequency_penalty") { o.frequencyPenalty = v.floatValue }
+        if let v = num("presence_penalty") { o.presencePenalty = v.floatValue }
+        if let v = num("repeat_last_n") { o.repeatLastN = v.intValue }
+        if let v = num("mirostat") { o.mirostat = v.intValue }
+        if let v = num("mirostat_tau") { o.mirostatTau = v.floatValue }
+        if let v = num("mirostat_eta") { o.mirostatEta = v.floatValue }
+        return o
     }
 
     /// Result of message extraction: structured messages plus any extracted media.

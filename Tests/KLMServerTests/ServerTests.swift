@@ -4,6 +4,8 @@ import NIOEmbedded
 import NIOHTTP1
 import KLMEngine
 import KLMRegistry
+import KLMSampler
+import MLX
 @testable import KLMServer
 
 final class ServerTests: XCTestCase {
@@ -139,6 +141,70 @@ final class ServerTests: XCTestCase {
         XCTAssertFalse(evict)
         let past = await c.shouldEvict(now: Date().addingTimeInterval(400))
         XCTAssertTrue(past)
+    }
+
+    func testSamplerPenaltiesActiveFlagGatesHistory() {
+        XCTAssertFalse(SamplingParams(temperature: 0.7).penaltiesActive)
+        XCTAssertTrue(SamplingParams(temperature: 0.7, repetitionPenalty: 1.2).penaltiesActive)
+        XCTAssertTrue(SamplingParams(temperature: 0.7, presencePenalty: 0.5).penaltiesActive)
+        XCTAssertTrue(SamplingParams(temperature: 0.7, mirostat: 2).penaltiesActive)
+        XCTAssertFalse(Sampler(params: SamplingParams(temperature: 0.7)).needsHistory)
+    }
+
+    func testRepetitionPenaltyDownweightsRecentTokenGreedy() {
+        // Greedy: without penalty argmax=index2; a strong repetition penalty
+        // on token 2 must change the winner.
+        let logits = MLXArray([1.0, 2.0, 5.0, 0.5] as [Float])
+        let plain = Sampler(params: SamplingParams(temperature: 0.0))
+        XCTAssertEqual(plain.sample(logits, recent: []), 2)
+        let penal = Sampler(params: SamplingParams(
+            temperature: 0.0, repetitionPenalty: 10.0, repeatLastN: 64))
+        XCTAssertNotEqual(penal.sample(logits, recent: [2, 2, 2]), 2)
+    }
+
+    func testPresencePenaltyShiftsGreedyWinner() {
+        let logits = MLXArray([3.0, 2.9] as [Float])
+        let s = Sampler(params: SamplingParams(
+            temperature: 0.0, presencePenalty: 1.0, repeatLastN: 64))
+        // Token 0 seen -> penalized by 1.0 -> token 1 should win.
+        XCTAssertEqual(s.sample(logits, recent: [0]), 1)
+    }
+
+    func testMirostatProducesValidToken() {
+        let logits = MLXArray([0.1, 0.2, 5.0, 0.3, 0.05] as [Float])
+        let s = Sampler(params: SamplingParams(
+            temperature: 1.0, mirostat: 2, mirostatTau: 5.0, mirostatEta: 0.1))
+        let t = s.sample(logits, recent: [])
+        XCTAssertTrue((0..<5).contains(t))
+    }
+
+    func testOllamaParsesPenaltyAndMirostatOptions() throws {
+        let req = try ServerParsing.ollamaChatRequest(from: [
+            "model": "m",
+            "messages": [["role": "user", "content": "hi"]],
+            "options": [
+                "presence_penalty": 0.7, "frequency_penalty": 0.4,
+                "repeat_last_n": 128, "mirostat": 2,
+                "mirostat_tau": 4.0, "mirostat_eta": 0.2,
+            ],
+        ])
+        let sp = req.sampling.samplingParams
+        XCTAssertEqual(sp.presencePenalty, 0.7, accuracy: 1e-6)
+        XCTAssertEqual(sp.frequencyPenalty, 0.4, accuracy: 1e-6)
+        XCTAssertEqual(sp.repeatLastN, 128)
+        XCTAssertEqual(sp.mirostat, 2)
+        XCTAssertEqual(sp.mirostatTau, 4.0, accuracy: 1e-6)
+        XCTAssertTrue(sp.penaltiesActive)
+    }
+
+    func testOpenAIParsesPresenceFrequencyPenalty() throws {
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m",
+            "messages": [["role": "user", "content": "hi"]],
+            "presence_penalty": 0.5, "frequency_penalty": 0.25,
+        ])
+        XCTAssertEqual(req.sampling.samplingParams.presencePenalty, 0.5, accuracy: 1e-6)
+        XCTAssertEqual(req.sampling.samplingParams.frequencyPenalty, 0.25, accuracy: 1e-6)
     }
 
     func testOllamaParsesNumCtxFromOptionsAndTopLevel() throws {

@@ -283,7 +283,11 @@ public final class InferenceEngine: @unchecked Sendable {
             }
             return true
         }()
+        // Penalty/mirostat sampling needs a sequential per-step recent-token
+        // window, which the multi-token speculative path cannot honor; fall
+        // back to the standard decode loop when penalties are active.
         let shouldSpec = useSpeculative && specDecoder != nil && !useInt8KV
+            && !params.penaltiesActive
         let capturedImageData = imageData
 
         // int8 KV + prefix cache coexist via the quantized snapshot path
@@ -509,6 +513,13 @@ public final class InferenceEngine: @unchecked Sendable {
                     }
                 } else {
                     // === Standard Decode Path ===
+                    // WS-D D3: only when the request opts into penalties /
+                    // mirostat do we maintain a recent-token window; the
+                    // default path below is byte-for-byte unchanged.
+                    let trackHistory = sampler.needsHistory
+                    var recent: [Int] = trackHistory
+                        ? Array(promptTokens.suffix(512)) : []
+
                     // Two-deep on-GPU pipeline: the just-sampled token stays as
                     // a lazy MLXArray and is fed directly into the next forward.
                     // We schedule the next forward + sample, then sync only on
@@ -529,7 +540,13 @@ public final class InferenceEngine: @unchecked Sendable {
                         // allocation and keeps the dependency graph on-device.
                         let tokenInput = nextTokenArr.reshaped(1, 1)
                         let logits = capturedForward(tokenInput, caches)
-                        let nextTokenArr2 = sampler.sampleArray(logits)
+                        let nextTokenArr2: MLXArray
+                        if trackHistory {
+                            recent.append(nextToken)
+                            nextTokenArr2 = sampler.sampleArray(logits, recent: recent)
+                        } else {
+                            nextTokenArr2 = sampler.sampleArray(logits)
+                        }
 
                         // Schedule both the forward and the next sample to run
                         // on the GPU in the background while we decode/yield.

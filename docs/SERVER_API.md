@@ -244,12 +244,14 @@ logs a warning to stderr. Unset ⇒ the model's own maximum.
 
 ## Sampler Parameters
 
-`temperature`, `top_p`, `top_k`, `seed`, `repeat_penalty` and **`min_p`**
-(functional, GPU logit filter) are applied. `num_predict:-1` means
-generate-until-EOS. `presence_penalty`, `frequency_penalty`, `mirostat*`,
-`typical_p`, `tfs_z`, `repeat_last_n`, `num_keep`, `penalize_newline` are
-**accepted** for client compatibility; stateful application in the decode
-loop is a tracked follow-up (see `OLLAMA_MAC_PARITY_PLAN.md` §0).
+`temperature`, `top_p`, `top_k`, `seed`, `min_p`, and the **stateful
+penalties** — `repeat_penalty`/`repetition_penalty`, `presence_penalty`,
+`frequency_penalty`, `repeat_last_n`, and `mirostat` (v1/v2 with
+`mirostat_tau`/`mirostat_eta`) — are applied during decoding.
+`num_predict:-1` = generate-until-EOS. Penalty application is
+zero-overhead unless a penalty is set (the default decode path is
+unchanged). `typical_p`, `tfs_z`, `num_keep`, `penalize_newline` are
+accepted for client compatibility (no-op).
 
 ## Model Lifecycle (keep-alive)
 

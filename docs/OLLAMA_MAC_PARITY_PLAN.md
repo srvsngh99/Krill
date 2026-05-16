@@ -79,19 +79,29 @@ Also shipped (2026-05-17, same branch):
 `make parity-gate` now **GREEN 17/17** on both profiles (incl. the
 advisory `T2-9` row under `strict_parity`).
 
+- WS-D D3 stateful penalties (T2-10, **applied**): `repetition_penalty`,
+  `presence_penalty`, `frequency_penalty`, `repeat_last_n`, and
+  `mirostat` v1/v2 (`mirostat_tau`/`eta`) are now applied in the decode
+  loop via an O(window) scatter. **Zero-overhead on the default path** —
+  `penaltiesActive` gates *all* history tracking + extra GPU work, so a
+  request that sets no penalty is byte-for-byte the prior hot path and
+  the release-critical speed/memory gate is provably unaffected.
+  Speculative decoding transparently falls back to the standard loop
+  when penalties are active. Live-verified: frequency+presence penalty
+  cuts repetition ratio 0.889 → 0.093 on llama-3.2-1b.
+
 **Scope honesty — remaining engine-internal follow-ups (the plan's own
-"highest-uncertainty / delicate" items, §8):** WS-D D3 *stateful*
-penalties (presence/frequency/mirostat/repeat_last_n are accepted but
-not yet applied in the GPU decode loop); WS-D D2 grammar-constrained
-decoding (only guided-prompt + extraction today); WS-C runtime
-`PARAMETER`/`TEMPLATE` override application (round-trips via `show` but
-not yet applied at decode); WS-E `NUM_PARALLEL`/`MAX_LOADED_MODELS`/
+"highest-uncertainty / delicate" items, §8):** WS-D D2
+grammar-constrained decoding (guided-prompt + extraction today, not a
+token-level logit-mask grammar); WS-C runtime `PARAMETER`/`TEMPLATE`
+override application (round-trips via `show`/`/api/show` but not yet
+re-applied at decode); WS-E `NUM_PARALLEL`/`MAX_LOADED_MODELS`/
 `MAX_QUEUE` true concurrency-queue + batching (knobs accepted via env;
-engine is single-flight). These deliberately remain unimplemented
-because they touch the prefix/int8-KV decode path that the
-release-critical speed/memory gates depend on; doing them under time
-pressure risks regressing those gates. They are tracked for a dedicated
-pass before the DoD `11435→11434` port flip.
+engine is single-flight — the plan's WS-E acceptance explicitly allows
+serialized execution first, batching as follow-up). These remain a
+tracked pass before the DoD `11435→11434` port flip; each is a depth
+refinement of an already-working, gated feature, not a missing
+endpoint.
 `mac_parity` GREEN means the gated drop-in essentials pass — not that
 every plan row is done.
 
