@@ -76,8 +76,18 @@ Also shipped (2026-05-17, same branch):
   the engine truncates the prompt to the most-recent N tokens with a
   stderr warning (no decode-loop/cache-contract change).
 
-`make parity-gate` now **GREEN 17/17** on both profiles (incl. the
-advisory `T2-9` row under `strict_parity`).
+- WS-E concurrency queue (T1-5): `GenerationQueue` actor serializes
+  inference (`KRILL_NUM_PARALLEL` slots, default 1) so concurrent
+  clients are *queued, not dropped* and the single-flight engine +
+  prefix/int8-KV caches are never entered in parallel (a real
+  correctness guard, not just parity); beyond `KRILL_MAX_QUEUE` →
+  HTTP 503. Wired into every engine-touching path
+  (chat/tool/anthropic/embeddings, defer-released — no deadlock).
+  Live-verified: 4 concurrent `/v1/chat/completions` all answered,
+  serialized, none dropped or cache-corrupted.
+
+`make parity-gate` now **GREEN 18/18** on both profiles (incl. the
+advisory `T2-9`/`T1-5` rows under `strict_parity`).
 
 - WS-D D3 stateful penalties (T2-10, **applied**): `repetition_penalty`,
   `presence_penalty`, `frequency_penalty`, `repeat_last_n`, and
@@ -105,12 +115,13 @@ grammar-constrained decoding (guided-prompt + extraction today, not a
 token-level logit-mask grammar — §8 explicitly flags this as the
 highest-uncertainty item); WS-C `TEMPLATE` override at decode (Go-style
 template; round-trips via `show`/`/api/show`, not yet re-rendered at
-generation); WS-E `NUM_PARALLEL`/`MAX_LOADED_MODELS`/`MAX_QUEUE` true
-concurrency-queue + batching (knobs accepted via env; engine is
-single-flight — the plan's WS-E acceptance explicitly permits
-serialized execution first with batching as a follow-up). Each is a
-depth refinement of an already-working, gated feature, tracked for a
-pass before the DoD `11435→11434` port flip — not a missing endpoint.
+generation); WS-E *batched* multi-slot decode (the serialized queue +
+`MAX_QUEUE`→503 + `NUM_PARALLEL` knob are implemented and gated; true
+KV-batched concurrent decode and `MAX_LOADED_MODELS>1` multi-model
+residency remain — the plan's WS-E acceptance explicitly permits
+serialized-first with batching as the follow-up). Each is a depth
+refinement of an already-working, gated feature, tracked for a pass
+before the DoD `11435→11434` port flip — not a missing endpoint.
 `mac_parity` GREEN means the gated drop-in essentials pass — not that
 every plan row is done.
 

@@ -116,6 +116,38 @@ final class ServerTests: XCTestCase {
         try readResponseEnd(from: channel)
     }
 
+    func testGenerationQueueSerializesAndCapsAtMaxQueue() async throws {
+        // numParallel=1, maxQueue=1: one active + one queued allowed; a
+        // third concurrent enter() must throw QueueFull (-> 503).
+        let q = GenerationQueue(numParallel: 1, maxQueue: 1)
+        try await q.enter()                       // active
+        let waiter = Task { try await q.enter() } // queued (depth 1)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let d = await q.depth
+        XCTAssertEqual(d, 1)
+        do {
+            try await q.enter()                   // exceeds maxQueue
+            XCTFail("expected QueueFull")
+        } catch is GenerationQueue.QueueFull {
+            // expected
+        }
+        await q.leave()                           // hand slot to waiter
+        try await waiter.value
+        await q.leave()
+    }
+
+    func testGenerationQueueWithSlotReleasesOnThrow() async {
+        let q = GenerationQueue(numParallel: 1, maxQueue: 0)
+        struct E: Error {}
+        do {
+            try await q.withSlot { throw E() }
+        } catch {}
+        // Slot must have been released despite the throw: a fresh enter
+        // succeeds immediately.
+        do { try await q.enter(); await q.leave() }
+        catch { XCTFail("slot leaked after throw") }
+    }
+
     func testKeepAliveDurationParsing() {
         XCTAssertEqual(KeepAliveParse.duration("5m"), 300)
         XCTAssertEqual(KeepAliveParse.duration("30s"), 30)

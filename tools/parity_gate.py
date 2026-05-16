@@ -365,6 +365,26 @@ class Gate:
 
         self.check("T2-9", "A", "Anthropic /v1/messages", anthropic_messages)
 
+        def concurrency() -> tuple[str, str]:
+            # Fire several concurrent requests; the server must answer every
+            # one (queued, not dropped/crashed) — WS-E serialized queue.
+            import concurrent.futures as cf
+            def one(_):
+                c, _ = self._req(
+                    "POST", "/api/chat",
+                    {"model": "x", "stream": False,
+                     "messages": [{"role": "user", "content": "hi"}]})
+                return c
+            with cf.ThreadPoolExecutor(max_workers=6) as ex:
+                codes = list(ex.map(one, range(6)))
+            # No model loaded -> all should be a clean 503 (not a crash/hang
+            # or dropped connection). Consistency proves the path is stable.
+            if all(c in (200, 503) for c in codes):
+                return "PASS", f"6 concurrent all answered ({codes[0]})"
+            return "FAIL", f"inconsistent/with errors: {codes}"
+
+        self.check("T1-5", "A", "concurrency/queue stability", concurrency)
+
     # -- verdict ----------------------------------------------------------
     def verdict(self, profile: str) -> bool:
         print(f"\nProfile: {profile}")

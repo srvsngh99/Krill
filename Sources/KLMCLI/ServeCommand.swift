@@ -74,7 +74,9 @@ struct ServeCommand: AsyncParsableCommand {
                                corsOrigins: config.origins,
                                keepAliveDefaultSeconds:
                                 KeepAliveParse.duration(config.keepAlive) ?? 300,
-                               defaultContextLimit: config.contextLength)
+                               defaultContextLimit: config.contextLength,
+                               numParallel: config.numParallel,
+                               maxQueue: config.maxQueue)
         try await server.start()
     }
 }

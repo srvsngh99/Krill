@@ -28,6 +28,7 @@ public final class KLMServer: Sendable {
     private let corsOrigins: [String]
     private let keepAlive: KeepAliveController
     private let defaultContextLimit: Int?
+    private let genQueue: GenerationQueue
 
     public init(host: String = "127.0.0.1", port: Int = 11435,
                 compat: CompatMode = .both,
@@ -35,7 +36,8 @@ public final class KLMServer: Sendable {
                 embedEngine: EmbeddingEngine = EmbeddingEngine(),
                 corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
                 keepAliveDefaultSeconds: Int = 300,
-                defaultContextLimit: Int? = nil) {
+                defaultContextLimit: Int? = nil,
+                numParallel: Int = 1, maxQueue: Int = 512) {
         self.host = host
         self.port = port
         self.compat = compat
@@ -45,6 +47,7 @@ public final class KLMServer: Sendable {
         self.embedEngine = embedEngine
         self.keepAlive = KeepAliveController(defaultSeconds: keepAliveDefaultSeconds)
         self.defaultContextLimit = defaultContextLimit
+        self.genQueue = GenerationQueue(numParallel: numParallel, maxQueue: maxQueue)
     }
 
     internal static func _makeHTTPHandlerForTesting(
@@ -57,6 +60,7 @@ public final class KLMServer: Sendable {
         HTTPHandler(engine: engine, registry: registry, compat: compat,
                     embedEngine: embedEngine,
                     keepAlive: KeepAliveController(defaultSeconds: 300),
+                    genQueue: GenerationQueue(numParallel: 1, maxQueue: 512),
                     maxBodySizeOverride: maxBodySizeOverride)
     }
 
@@ -74,7 +78,8 @@ public final class KLMServer: Sendable {
                                     compat: self.compat, embedEngine: self.embedEngine,
                                     keepAlive: self.keepAlive,
                                     corsOrigins: self.corsOrigins,
-                                    defaultContextLimit: self.defaultContextLimit)
+                                    defaultContextLimit: self.defaultContextLimit,
+                                    genQueue: self.genQueue)
                     )
                 }
             }
@@ -137,6 +142,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let corsOrigins: [String]
     private let keepAlive: KeepAliveController
     private let defaultContextLimit: Int?
+    private let genQueue: GenerationQueue
     private var currentOrigin: String?
 
     init(engine: InferenceEngine, registry: Registry,
@@ -144,6 +150,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
          keepAlive: KeepAliveController = KeepAliveController(defaultSeconds: 300),
          corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
          defaultContextLimit: Int? = nil,
+         genQueue: GenerationQueue = GenerationQueue(numParallel: 1, maxQueue: 512),
          maxBodySizeOverride: Int? = nil) {
         self.engine = engine
         self.registry = registry
@@ -152,6 +159,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         self.keepAlive = keepAlive
         self.corsOrigins = corsOrigins
         self.defaultContextLimit = defaultContextLimit
+        self.genQueue = genQueue
         self.maxBodySize = maxBodySizeOverride ?? ServerLimits.maxBodySize
     }
 
@@ -326,6 +334,29 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             sendJSON(context: context, status: .notFound,
                      body: ["error": "Not found: \(head.method) \(path)"])
         }
+    }
+
+    /// WS-E queue: acquire a generation slot, or return false having sent a
+    /// 503. Callers must `leaveQueue()` (deferred) once done. Concurrent
+    /// requests are queued up to `maxQueue`; beyond that they get 503 so the
+    /// single-flight engine + prefix/KV caches are never entered in
+    /// parallel.
+    private func enterQueueOr503(_ ctx: ChannelHandlerContext,
+                                 _ eventLoop: EventLoop) async -> Bool {
+        do {
+            try await genQueue.enter()
+            return true
+        } catch {
+            sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
+                           status: .serviceUnavailable,
+                           body: ["error": "server busy: max queue exceeded (KRILL_MAX_QUEUE)"])
+            return false
+        }
+    }
+
+    private func leaveQueue() {
+        let q = genQueue
+        Task { await q.leave() }
     }
 
     /// Apply a created model's Modelfile `PARAMETER` overrides (WS-C) as
@@ -540,6 +571,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             contextLimit: defaultContextLimit)
 
         Task {
+            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+            defer { self.leaveQueue() }
             let (tokenStream, getStats) = eng.generate(
                 messages: msgs, params: params, maxTokens: maxTokens,
                 contextLimit: ctxLimit)
@@ -643,6 +676,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             defer { mediaCopy?.cleanup() }
+            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+            defer { self.leaveQueue() }
             let (tokenStream, getStats) = eng.generate(
                 messages: messages, params: params,
                 maxTokens: maxTokens, imageData: imageData,
@@ -1104,6 +1139,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             defer { mediaCopy?.cleanup() }
+            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+            defer { self.leaveQueue() }
             let (tokenStream, getStats) = eng.generate(
                 messages: messages,
                 params: params, maxTokens: maxTokens,
@@ -1717,6 +1754,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let started = CFAbsoluteTimeGetCurrent()
         Task {
+            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+            defer { self.leaveQueue() }
             do {
                 try await embed.load(directory: dir)
                 let result = try embed.embed(inputs)

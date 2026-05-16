@@ -261,8 +261,13 @@ value (keep loaded indefinitely). The server default is `KRILL_KEEP_ALIVE`
 / `OLLAMA_KEEP_ALIVE` (default `5m`). A background evictor unloads the
 model once the deadline passes; `GET /api/ps` reports the live
 `expires_at`. `krillm stop` (or `POST /v1/models/unload`) unloads now.
-(Multi-model concurrency — `NUM_PARALLEL`/`MAX_LOADED_MODELS`/`MAX_QUEUE`
-— is a tracked follow-up; the engine is single-flight today.)
+
+Concurrency: requests are serialized through a queue
+(`KRILL_NUM_PARALLEL`/`OLLAMA_NUM_PARALLEL` slots, default 1) so
+concurrent clients are queued, not dropped, and the engine + caches are
+never entered in parallel; beyond `KRILL_MAX_QUEUE`/`OLLAMA_MAX_QUEUE`
+the server returns `503`. True KV-batched multi-slot decode and
+`MAX_LOADED_MODELS>1` are tracked follow-ups.
 
 ## Modelfile & Customization
 
