@@ -64,6 +64,56 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(request.sampling.topK, 41)
     }
 
+    func testAnthropicParseSystemToolsAndBlocks() {
+        let p = AnthropicCompat.parse([
+            "model": "claude-x",
+            "max_tokens": 256,
+            "system": "You are helpful.",
+            "messages": [
+                ["role": "user", "content": "weather?"],
+                ["role": "assistant", "content": [
+                    ["type": "tool_use", "id": "t1", "name": "get_weather",
+                     "input": ["city": "NYC"]]]],
+                ["role": "user", "content": [
+                    ["type": "tool_result", "tool_use_id": "t1",
+                     "content": "{\"temp\":70}"]]],
+            ],
+            "tools": [["name": "get_weather", "description": "w",
+                       "input_schema": ["type": "object"]]],
+            "thinking": ["type": "enabled", "budget_tokens": 1024],
+        ])
+        XCTAssertEqual(p.messages.first?["role"], "system")
+        XCTAssertEqual(p.maxTokens, 256)
+        XCTAssertEqual(p.tools.first?.name, "get_weather")
+        XCTAssertTrue(p.thinking)
+        XCTAssertTrue(p.messages.contains { $0["content"]?.contains("<tool_call>") ?? false })
+        XCTAssertTrue(p.messages.contains { $0["content"]?.contains("<tool_response>") ?? false })
+    }
+
+    func testAnthropicResponseToolUseShape() {
+        let r = AnthropicCompat.response(
+            model: "m", text: "",
+            toolCalls: [ToolCalling.ParsedToolCall(name: "f", argumentsJSON: "{\"a\":1}")],
+            thinking: nil, inputTokens: 3, outputTokens: 4)
+        XCTAssertEqual(r["type"] as? String, "message")
+        XCTAssertEqual(r["stop_reason"] as? String, "tool_use")
+        let content = r["content"] as? [[String: Any]]
+        XCTAssertEqual(content?.first?["type"] as? String, "tool_use")
+        XCTAssertEqual(content?.first?["name"] as? String, "f")
+    }
+
+    func testAnthropicMessagesWithoutModelReturns503() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        try writeJSONRequest(to: channel, method: .POST, uri: "/v1/messages", body: [
+            "model": "claude-x", "max_tokens": 64,
+            "messages": [["role": "user", "content": "hi"]],
+        ])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .serviceUnavailable)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
     func testKeepAliveDurationParsing() {
         XCTAssertEqual(KeepAliveParse.duration("5m"), 300)
         XCTAssertEqual(KeepAliveParse.duration("30s"), 30)

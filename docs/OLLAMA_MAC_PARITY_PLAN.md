@@ -65,7 +65,14 @@ Also shipped (2026-05-17, same branch):
   background auto-unload evictor (`KeepAlive.swift` actor), `krillm
   stop` CLI, `/api/ps` `expires_at` from the live deadline.
 
-`make parity-gate` now **GREEN 15/15** on both profiles.
+- WS-F Anthropic compat (T2-9, advisory): `POST /v1/messages`
+  (`AnthropicCompat.swift`) — system string/blocks, `tool_use`/
+  `tool_result` flattened onto the shared `<tool_call>` convention,
+  `thinking` segmentation, non-streaming + a valid Anthropic SSE event
+  sequence. Claude Code / Anthropic SDK via `ANTHROPIC_BASE_URL`.
+
+`make parity-gate` now **GREEN 16/16** on both profiles (incl. the
+advisory `T2-9` row under `strict_parity`).
 
 **Scope honesty — still open / NOT gated (Phase 2–4):** WS-D D3
 *stateful* penalties (presence/frequency/mirostat/repeat_last_n are
@@ -75,8 +82,8 @@ grammar-constrained decoding (only guided+extract today); WS-D D4 real
 application (round-trips via `show` but not yet applied at decode);
 WS-E `NUM_PARALLEL`/`MAX_LOADED_MODELS`/`MAX_QUEUE` concurrency/queue
 (knobs accepted via env; true queue+batching not yet — engine is
-single-flight); WS-F Anthropic `/v1/messages` + thinking. These must be
-built and added to the gate before the DoD `11435→11434` port flip.
+single-flight). These must be built and added to the gate before the
+DoD `11435→11434` port flip.
 `mac_parity` GREEN means the gated drop-in essentials pass — not that
 every plan row is done.
 

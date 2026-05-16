@@ -248,6 +248,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         case (.POST, "/v1/embeddings"):
             guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleEmbeddings(context: context, body: body, style: .openAI)
+        case (.POST, "/v1/messages"):
+            guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleAnthropicMessages(context: context, body: body)
 
         // Model management (KrillLM-native, available in any compat mode)
         case (.POST, "/v1/models/load"):
@@ -461,6 +464,102 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 context: context, messages: genMessages,
                 params: request.sampling.samplingParams, maxTokens: request.maxTokens,
                 media: decodedMedia, responseFormat: request.responseFormat)
+        }
+    }
+
+    // MARK: - Anthropic: POST /v1/messages (WS-F)
+
+    private func handleAnthropicMessages(context: ChannelHandlerContext, body: ByteBuffer) {
+        guard let json = parseJSON(body) else {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid JSON"])
+            return
+        }
+        let p = AnthropicCompat.parse(json)
+        guard requireModel(context: context) else { return }
+        touchKeepAlive(nil)
+
+        var msgs = ToolCalling.injectToolSystem(into: p.messages, tools: p.tools)
+        if p.thinking {
+            msgs = StructuredOutput.injectFormatSystem(into: msgs, format: nil)
+            msgs.insert(["role": "system",
+                         "content": "Think step by step inside <thinking>...</thinking> before your final answer."],
+                        at: 0)
+        }
+        let modelName = engine.modelName ?? p.model ?? "unknown"
+        let eventLoop = context.eventLoop
+        nonisolated(unsafe) let ctx = context
+        let eng = engine
+        let wantStream = p.stream
+        let params = p.sampling.samplingParams
+        let maxTokens = p.maxTokens
+
+        Task {
+            let (tokenStream, getStats) = eng.generate(
+                messages: msgs, params: params, maxTokens: maxTokens)
+            var full = ""
+            for await ev in tokenStream { if ev.isEnd { break }; full += ev.text }
+
+            // Split out <thinking> if present.
+            var thinking: String? = nil
+            var visible = full
+            if let s = full.range(of: "<thinking>"),
+               let e = full.range(of: "</thinking>") {
+                thinking = String(full[s.upperBound ..< e.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                visible.removeSubrange(s.lowerBound ..< e.upperBound)
+            }
+            let (calls, cleaned) = ToolCalling.extractToolCalls(from: visible)
+            let stats = getStats()
+            let inTok = stats?.promptTokens ?? 0
+            let outTok = stats?.generatedTokens ?? 0
+
+            if !wantStream {
+                let resp = AnthropicCompat.response(
+                    model: modelName, text: cleaned, toolCalls: calls,
+                    thinking: thinking, inputTokens: inTok, outputTokens: outTok)
+                self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
+                                    status: .ok, body: resp)
+                return
+            }
+
+            // Minimal but valid Anthropic SSE event sequence.
+            self.writeOnLoop(ctx, .head(ServerResponseHeads.openAIStreaming()))
+            func sse(_ event: String, _ obj: [String: Any]) {
+                if let d = try? JSONSerialization.data(withJSONObject: obj),
+                   let s = String(data: d, encoding: .utf8) {
+                    self.writeRaw(ctx, "event: \(event)\ndata: \(s)\n\n")
+                }
+            }
+            let msgId = "msg_\(UUID().uuidString.prefix(12))"
+            sse("message_start", [
+                "type": "message_start",
+                "message": ["id": msgId, "type": "message", "role": "assistant",
+                            "model": modelName, "content": [[String: Any]](),
+                            "stop_reason": NSNull(),
+                            "usage": ["input_tokens": inTok, "output_tokens": 0]],
+            ])
+            if calls.isEmpty {
+                sse("content_block_start", ["type": "content_block_start", "index": 0,
+                    "content_block": ["type": "text", "text": ""]])
+                sse("content_block_delta", ["type": "content_block_delta", "index": 0,
+                    "delta": ["type": "text_delta", "text": cleaned]])
+                sse("content_block_stop", ["type": "content_block_stop", "index": 0])
+            } else {
+                for (i, c) in calls.enumerated() {
+                    let input = (try? JSONSerialization.jsonObject(
+                        with: Data(c.argumentsJSON.utf8))) ?? [String: Any]()
+                    sse("content_block_start", ["type": "content_block_start", "index": i,
+                        "content_block": ["type": "tool_use",
+                                          "id": "toolu_\(UUID().uuidString.prefix(8))",
+                                          "name": c.name, "input": input]])
+                    sse("content_block_stop", ["type": "content_block_stop", "index": i])
+                }
+            }
+            sse("message_delta", ["type": "message_delta",
+                "delta": ["stop_reason": calls.isEmpty ? "end_turn" : "tool_use"],
+                "usage": ["output_tokens": outTok]])
+            sse("message_stop", ["type": "message_stop"])
+            self.writeOnLoop(ctx, .end(nil), flush: true)
         }
     }
 

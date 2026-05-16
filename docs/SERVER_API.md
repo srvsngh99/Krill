@@ -210,6 +210,16 @@ Returns `{"object":"list","data":[{"object":"embedding","index":0,
 Requesting embeddings against a non-embedding (chat) model returns `400`;
 an uninstalled model returns `404` with a `krillm pull` hint.
 
+## Anthropic Messages API
+
+`POST /v1/messages` implements the Anthropic Messages shape so Claude
+Code / the Anthropic SDK work via `ANTHROPIC_BASE_URL=http://localhost:11434`.
+Supports `system` (string or blocks), multi-turn `content` blocks,
+`tools` (`input_schema`), `tool_use`/`tool_result` (mapped onto the
+shared tool-call convention), `thinking` (segmented into a `thinking`
+content block), non-streaming and a valid streaming event sequence
+(`message_start` → `content_block_*` → `message_delta` → `message_stop`).
+
 ## CORS & Environment Aliases
 
 CORS: set `KRILL_ORIGINS` (or `OLLAMA_ORIGINS`) to a comma-separated

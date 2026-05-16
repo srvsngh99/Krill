@@ -334,6 +334,24 @@ class Gate:
 
         self.check("T1-4", "H", "keep_alive + stop + ps", keep_alive)
 
+        def anthropic_messages() -> tuple[str, str]:
+            # POST /v1/messages must be implemented (not the default 404)
+            # and accept the Anthropic request shape.
+            code, raw = self._req(
+                "POST", "/v1/messages",
+                {"model": "claude-x", "max_tokens": 64,
+                 "system": "be brief",
+                 "messages": [{"role": "user", "content": "hi"}],
+                 "tools": [{"name": "t", "description": "d",
+                            "input_schema": {"type": "object"}}]})
+            if code == 404 and b"Not found:" in raw:
+                return "FAIL", "endpoint not implemented"
+            if code in (200, 503):
+                return "PASS", f"accepted (status {code})"
+            return "FAIL", f"unexpected status {code}: {raw[:120]!r}"
+
+        self.check("T2-9", "A", "Anthropic /v1/messages", anthropic_messages)
+
     # -- verdict ----------------------------------------------------------
     def verdict(self, profile: str) -> bool:
         print(f"\nProfile: {profile}")
