@@ -2,10 +2,26 @@
 
 Local handoff for the next agent/session.
 
-Last updated: 2026-05-16
+Last updated: 2026-05-17
 Base branch: `main`
 Base commit: `c17356d` (merged PR #16)
 Machine target: Apple Silicon (M-series), macOS 14+
+
+## 0. Status (2026-05-17)
+
+**Phase 1 partial — wire compatibility landed (branch
+`feat/ollama-parity-phase1`).**
+
+Shipped: `--compat ollama|openai|both`; `GET /api/version`, `GET /api/ps`,
+`POST /api/show`; `POST /api/pull` (NDJSON), `DELETE /api/delete`,
+`POST /api/copy`, `HEAD|POST /api/blobs/:digest`; `GET /v1/models/{id}`;
+`tools/parity_gate.py` + `make parity-gate` (profiles `mac_parity`,
+`strict_parity`). Default port stays `11435` (T0-1 deferral intact).
+
+`make parity-gate` current verdict: **8/10 hard wire checks PASS**; the two
+outstanding `H` rows are **T0-2 embeddings (WS-B, Phase 1 remaining)** and
+**T0-4 tools (WS-D D1, Phase 2)**. `mac_parity` is correctly NOT yet green.
+Next: WS-B embeddings to finish Phase 1.
 
 ## 1. Goal
 

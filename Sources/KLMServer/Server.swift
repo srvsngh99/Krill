@@ -21,12 +21,15 @@ public final class KLMServer: Sendable {
     private let port: Int
     private let engine: InferenceEngine
     private let registry: Registry
+    private let compat: CompatMode
     private let logger = Logger(label: "krillm.server")
 
     public init(host: String = "127.0.0.1", port: Int = 11435,
+                compat: CompatMode = .both,
                 engine: InferenceEngine, registry: Registry) {
         self.host = host
         self.port = port
+        self.compat = compat
         self.engine = engine
         self.registry = registry
     }
@@ -34,9 +37,11 @@ public final class KLMServer: Sendable {
     internal static func _makeHTTPHandlerForTesting(
         engine: InferenceEngine,
         registry: Registry,
+        compat: CompatMode = .both,
         maxBodySizeOverride: Int? = nil
     ) -> any ChannelHandler & Sendable {
-        HTTPHandler(engine: engine, registry: registry, maxBodySizeOverride: maxBodySizeOverride)
+        HTTPHandler(engine: engine, registry: registry, compat: compat,
+                    maxBodySizeOverride: maxBodySizeOverride)
     }
 
     /// Start the HTTP server (blocks until shutdown).
@@ -49,7 +54,8 @@ public final class KLMServer: Sendable {
             .childChannelInitializer { channel in
                 channel.pipeline.configureHTTPServerPipeline().flatMap {
                     channel.pipeline.addHandler(
-                        HTTPHandler(engine: self.engine, registry: self.registry)
+                        HTTPHandler(engine: self.engine, registry: self.registry,
+                                    compat: self.compat)
                     )
                 }
             }
@@ -58,9 +64,16 @@ public final class KLMServer: Sendable {
 
         let channel = try await bootstrap.bind(host: host, port: port).get()
         logger.info("KrillLM server listening on http://\(host):\(port)")
-        print("KrillLM server listening on http://\(host):\(port)")
-        print("OpenAI API: http://\(host):\(port)/v1/chat/completions")
-        print("Ollama API: http://\(host):\(port)/api/chat")
+        print("KrillLM server listening on http://\(host):\(port)  (compat: \(compat.rawValue))")
+        if compat.openAIEnabled {
+            print("OpenAI API: http://\(host):\(port)/v1/chat/completions")
+        }
+        if compat.ollamaEnabled {
+            print("Ollama API: http://\(host):\(port)/api/chat")
+        }
+        if port != 11434 {
+            print("Note: default port is \(port). For Ollama drop-in, run with --port 11434 (default flip to 11434 deferred until full parity — see docs/OLLAMA_MAC_PARITY_PLAN.md).")
+        }
         print("Press Ctrl+C to stop.")
 
         try await channel.closeFuture.get()
@@ -77,6 +90,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private let engine: InferenceEngine
     private let registry: Registry
+    private let compat: CompatMode
     private let logger = Logger(label: "krillm.http")
     private let startedAt = Date()
 
@@ -85,9 +99,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private var requestHead: HTTPRequestHead?
     private var body: ByteBuffer = ByteBuffer()
 
-    init(engine: InferenceEngine, registry: Registry, maxBodySizeOverride: Int? = nil) {
+    init(engine: InferenceEngine, registry: Registry,
+         compat: CompatMode = .both, maxBodySizeOverride: Int? = nil) {
         self.engine = engine
         self.registry = registry
+        self.compat = compat
         self.maxBodySize = maxBodySizeOverride ?? ServerLimits.maxBodySize
     }
 
@@ -125,16 +141,33 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private func handleRequest(context: ChannelHandlerContext, head: HTTPRequestHead, body: ByteBuffer) {
         let path = head.uri.split(separator: "?").first.map(String.init) ?? head.uri
 
+        // Path-parameter routes (matched before the exact-match switch).
+        if path.hasPrefix("/api/blobs/") {
+            guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleBlob(context: context, method: head.method,
+                       digest: String(path.dropFirst("/api/blobs/".count)), body: body)
+            return
+        }
+        if head.method == .GET, path.hasPrefix("/v1/models/"),
+           path != "/v1/models/load", path != "/v1/models/unload" {
+            guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleModelDetail(context: context, id: String(path.dropFirst("/v1/models/".count)))
+            return
+        }
+
         switch (head.method, path) {
         // OpenAI endpoints
         case (.POST, "/v1/chat/completions"):
+            guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleChatCompletions(context: context, body: body)
         case (.POST, "/v1/completions"):
+            guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleCompletions(context: context, body: body)
         case (.GET, "/v1/models"):
+            guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleModels(context: context)
 
-        // Model management
+        // Model management (KrillLM-native, available in any compat mode)
         case (.POST, "/v1/models/load"):
             handleLoadModel(context: context, body: body)
         case (.POST, "/v1/models/unload"):
@@ -146,13 +179,38 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         // Ollama endpoints
         case (.POST, "/api/chat"):
+            guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleOllamaChat(context: context, body: body)
         case (.POST, "/api/generate"):
+            guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleOllamaGenerate(context: context, body: body)
         case (.GET, "/api/tags"):
+            guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleOllamaTags(context: context)
 
-        // Health and metrics
+        // Ollama discovery (WS-A2)
+        case (.GET, "/api/version"):
+            guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
+            sendJSON(context: context, status: .ok, body: OllamaCompat.versionPayload())
+        case (.GET, "/api/ps"):
+            guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleOllamaPS(context: context)
+        case (.POST, "/api/show"):
+            guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleOllamaShow(context: context, body: body)
+
+        // Ollama lifecycle (WS-A3)
+        case (.POST, "/api/pull"):
+            guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleOllamaPull(context: context, body: body)
+        case (.DELETE, "/api/delete"):
+            guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleOllamaDelete(context: context, body: body)
+        case (.POST, "/api/copy"):
+            guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleOllamaCopy(context: context, body: body)
+
+        // Health and metrics (always available)
         case (.GET, "/healthz"), (.GET, "/health"):
             sendJSON(context: context, status: .ok, body: [
                 "status": "ok",
@@ -167,6 +225,15 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             sendJSON(context: context, status: .notFound,
                      body: ["error": "Not found: \(head.method) \(path)"])
         }
+    }
+
+    /// 404 with a clear reason when an endpoint exists but its compat family
+    /// is disabled by `--compat`. 404 (not 403) keeps client probing logic
+    /// behaving as if the server simply doesn't speak that protocol.
+    private func sendCompatDisabled(context: ChannelHandlerContext, path: String) {
+        sendJSON(context: context, status: .notFound, body: [
+            "error": "Endpoint \(path) is disabled in compat mode '\(compat.rawValue)'. Restart krillm serve with --compat both."
+        ])
     }
 
     /// Guard: returns false and sends 503 if no model is loaded or a swap is in progress.
@@ -1141,6 +1208,240 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             ]
         }
         sendJSON(context: context, status: .ok, body: ["models": models])
+    }
+
+    // MARK: - Ollama discovery: GET /api/ps
+
+    /// Extract the model name from an Ollama request body (`model` or the
+    /// legacy `name` field).
+    private func ollamaModelName(_ json: [String: Any]?) -> String? {
+        guard let json else { return nil }
+        if let m = json["model"] as? String, !m.isEmpty { return m }
+        if let n = json["name"] as? String, !n.isEmpty { return n }
+        return nil
+    }
+
+    private func handleOllamaPS(context: ChannelHandlerContext) {
+        guard engine.isLoaded, let modelName = engine.modelName else {
+            sendJSON(context: context, status: .ok, body: ["models": [[String: Any]]()])
+            return
+        }
+        let manifest = registry.getModel(modelName)
+        let size = manifest?.sizeBytes ?? 0
+        let idle = KrillConfig.load().idleTimeout
+        let base = engine.loadedAt ?? Date()
+        let expiresAt = base.addingTimeInterval(TimeInterval(idle))
+        let entry = OllamaCompat.psEntry(
+            manifest: manifest, modelName: modelName,
+            sizeBytes: size, expiresAt: expiresAt)
+        sendJSON(context: context, status: .ok, body: ["models": [entry]])
+    }
+
+    // MARK: - Ollama discovery: POST /api/show
+
+    private func handleOllamaShow(context: ChannelHandlerContext, body: ByteBuffer) {
+        guard let name = ollamaModelName(parseJSON(body)) else {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Missing 'model' field"])
+            return
+        }
+        let verbose = (parseJSON(body)?["verbose"] as? Bool) ?? false
+        guard let manifest = registry.getModel(name) else {
+            sendJSON(context: context, status: .notFound,
+                     body: ["error": "model '\(name)' not found"])
+            return
+        }
+        sendJSON(context: context, status: .ok,
+                 body: OllamaCompat.showPayload(for: manifest, verbose: verbose))
+    }
+
+    // MARK: - OpenAI: GET /v1/models/{id}
+
+    private func handleModelDetail(context: ChannelHandlerContext, id: String) {
+        guard let manifest = registry.getModel(id) else {
+            sendJSON(context: context, status: .notFound,
+                     body: ["error": "model '\(id)' not found"])
+            return
+        }
+        sendJSON(context: context, status: .ok, body: [
+            "id": manifest.name,
+            "object": "model",
+            "owned_by": "local",
+            "created": Int(manifest.pulledAt.timeIntervalSince1970),
+        ])
+    }
+
+    // MARK: - Ollama lifecycle: DELETE /api/delete
+
+    private func handleOllamaDelete(context: ChannelHandlerContext, body: ByteBuffer) {
+        guard let name = ollamaModelName(parseJSON(body)) else {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Missing 'model' field"])
+            return
+        }
+        guard registry.hasModel(name) else {
+            sendJSON(context: context, status: .notFound,
+                     body: ["error": "model '\(name)' not found"])
+            return
+        }
+        do {
+            try registry.removeModel(name)
+            sendJSON(context: context, status: .ok, body: ["status": "success"])
+        } catch {
+            sendJSON(context: context, status: .internalServerError,
+                     body: ["error": "failed to delete '\(name)': \(error)"])
+        }
+    }
+
+    // MARK: - Ollama lifecycle: POST /api/copy
+
+    private func handleOllamaCopy(context: ChannelHandlerContext, body: ByteBuffer) {
+        guard let json = parseJSON(body),
+              let source = (json["source"] as? String) ?? (json["src"] as? String),
+              let destination = (json["destination"] as? String) ?? (json["dst"] as? String),
+              !source.isEmpty, !destination.isEmpty else {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Missing 'source' or 'destination'"])
+            return
+        }
+        guard let srcManifest = registry.getModel(source) else {
+            sendJSON(context: context, status: .notFound,
+                     body: ["error": "model '\(source)' not found"])
+            return
+        }
+        let fm = FileManager.default
+        let srcDir = registry.modelPath(source)
+        let dstDir = registry.modelPath(destination)
+        do {
+            if fm.fileExists(atPath: dstDir.path) {
+                try fm.removeItem(at: dstDir)
+            }
+            if fm.fileExists(atPath: srcDir.path) {
+                try fm.copyItem(at: srcDir, to: dstDir)
+            }
+            let copied = ModelManifest(
+                name: destination, family: srcManifest.family,
+                params: srcManifest.params, quant: srcManifest.quant,
+                source: srcManifest.source, context: srcManifest.context,
+                files: srcManifest.files, draftPair: srcManifest.draftPair,
+                chatTemplate: srcManifest.chatTemplate,
+                sizeBytes: srcManifest.sizeBytes, pulledAt: Date())
+            try registry.saveManifest(copied)
+            sendJSON(context: context, status: .ok, body: ["status": "success"])
+        } catch {
+            sendJSON(context: context, status: .internalServerError,
+                     body: ["error": "copy failed: \(error)"])
+        }
+    }
+
+    // MARK: - Ollama lifecycle: POST /api/blobs/:digest
+
+    /// Digest blob store backing `ollama create` uploads. `/api/create`
+    /// itself is Phase 2 (Modelfile); this provides shape-correct
+    /// HEAD/POST so blob-precheck clients don't hard-fail.
+    private func blobStorePath(_ digest: String) -> URL {
+        let safe = digest.replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "..", with: "_")
+        return registry.modelsDir.appendingPathComponent("blobs-sha")
+            .appendingPathComponent(safe)
+    }
+
+    private func handleBlob(context: ChannelHandlerContext, method: HTTPMethod,
+                            digest: String, body: ByteBuffer) {
+        let path = blobStorePath(digest)
+        switch method {
+        case .HEAD:
+            let exists = FileManager.default.fileExists(atPath: path.path)
+            sendJSON(context: context, status: exists ? .ok : .notFound, body: [:])
+        case .POST:
+            do {
+                try FileManager.default.createDirectory(
+                    at: path.deletingLastPathComponent(),
+                    withIntermediateDirectories: true)
+                var buf = body
+                let bytes = buf.readBytes(length: buf.readableBytes) ?? []
+                try Data(bytes).write(to: path)
+                sendJSON(context: context, status: .created, body: [:])
+            } catch {
+                sendJSON(context: context, status: .internalServerError,
+                         body: ["error": "blob store failed: \(error)"])
+            }
+        default:
+            sendJSON(context: context, status: .methodNotAllowed,
+                     body: ["error": "blobs supports HEAD and POST"])
+        }
+    }
+
+    // MARK: - Ollama lifecycle: POST /api/pull
+
+    private func handleOllamaPull(context: ChannelHandlerContext, body: ByteBuffer) {
+        guard let json = parseJSON(body), let name = ollamaModelName(json) else {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Missing 'model' field"])
+            return
+        }
+        let stream = (json["stream"] as? Bool) ?? true
+        guard let resolved = AliasMap.resolve(name) else {
+            sendJSON(context: context, status: .badRequest, body: [
+                "error": "Cannot resolve '\(name)'. Use a known alias or an org/repo HuggingFace path."
+            ])
+            return
+        }
+
+        let reg = registry
+        let eventLoop = context.eventLoop
+        nonisolated(unsafe) let ctx = context
+
+        let ndjson: @Sendable ([String: Any]) -> Void = { obj in
+            guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
+            var b = ctx.channel.allocator.buffer(capacity: data.count + 1)
+            b.writeBytes(data)
+            b.writeString("\n")
+            self.writeOnLoop(ctx, .body(.byteBuffer(b)), flush: true)
+        }
+
+        if stream {
+            context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
+        }
+
+        Task {
+            do {
+                let puller = Puller(registry: reg)
+                let progress: Puller.ProgressHandler = { done, total, file in
+                    if stream {
+                        if file == "done" {
+                            ndjson(["status": "verifying sha256 digest"])
+                        } else {
+                            ndjson([
+                                "status": "downloading \(file)",
+                                "digest": file,
+                                "total": total,
+                                "completed": done,
+                            ])
+                        }
+                    }
+                }
+                if stream { ndjson(["status": "pulling manifest"]) }
+                _ = try await puller.pull(resolved, force: false, progress: progress)
+                if stream {
+                    ndjson(["status": "success"])
+                    self.writeOnLoop(ctx, .end(nil), flush: true)
+                } else {
+                    self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
+                                        status: .ok, body: ["status": "success"])
+                }
+            } catch {
+                let msg = String(describing: error).prefix(300)
+                if stream {
+                    ndjson(["error": "pull failed: \(msg)"])
+                    self.writeOnLoop(ctx, .end(nil), flush: true)
+                } else {
+                    self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
+                                        status: .internalServerError,
+                                        body: ["error": "pull failed: \(msg)"])
+                }
+            }
+        }
     }
 
     // MARK: - Model Management: POST /v1/models/load

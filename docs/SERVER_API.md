@@ -18,6 +18,24 @@ krillm serve --model llama-3.2-1b --port 11435
 
 Default: `127.0.0.1:11435`
 
+### Compat mode and the Ollama port
+
+`krillm serve` accepts `--compat ollama|openai|both` (default `both`):
+
+- `both` — `/api/*` and `/v1/*` are both served (default).
+- `ollama` — only `/api/*` + `/healthz` + `/metrics`.
+- `openai` — only `/v1/*` + `/healthz` + `/metrics`.
+
+Endpoints disabled by the compat mode return `404` with an explanatory
+`error` body, so client protocol-probing behaves as if the server simply
+does not speak that protocol.
+
+**Port deferral (T0-1):** the default port intentionally remains `11435`.
+For an Ollama drop-in run `krillm serve --port 11434 --compat both`. The
+default flip to `11434` is deliberately deferred until the `mac_parity`
+gate is green — see [`OLLAMA_MAC_PARITY_PLAN.md`](OLLAMA_MAC_PARITY_PLAN.md)
+§4 WS-A1. Verify parity progress with `make parity-gate`.
+
 ## OpenAI-Compatible Endpoints
 
 ### POST /v1/chat/completions
@@ -120,6 +138,50 @@ Chat-style endpoint. Each message accepts an optional `images` array (Gemma 4 on
 ### GET /api/tags
 
 Returns installed models in Ollama format.
+
+### GET /api/version
+
+Returns `{"version": "<ollama-compat>", "krillm_version": "<krillm>"}`. The
+advertised Ollama-compat version is spoofable via the
+`KRILL_OLLAMA_COMPAT_VERSION` env var so version-gated clients proceed.
+
+### GET /api/ps
+
+Lists the currently-loaded model with `size`, `details`, and a best-effort
+`expires_at` (derived from `idle_timeout` until per-request `keep_alive`
+lands in a later phase). Empty `models` list when nothing is loaded.
+
+### POST /api/show
+
+Body: `{"model": "<name>", "verbose": false}`. Returns `modelfile`,
+`parameters`, `template`, `system`, `details`, `model_info`,
+`capabilities`, `modified_at`. `404` if the model is not installed.
+
+### POST /api/pull
+
+Body: `{"model": "<alias-or-hf-repo>", "stream": true}`. Streams NDJSON
+progress (`pulling manifest` → `downloading …` → `success`); set
+`stream: false` for a single terminal JSON. Names resolve through the same
+alias map as `krillm pull`.
+
+### DELETE /api/delete
+
+Body: `{"model": "<name>"}`. Removes the manifest + blobs. `404` if absent.
+
+### POST /api/copy
+
+Body: `{"source": "<name>", "destination": "<name>"}`. Duplicates the
+model + manifest under a new name.
+
+### HEAD|POST /api/blobs/:digest
+
+Digest blob store backing `ollama create` uploads. `HEAD` → `200` if the
+blob exists else `404`; `POST` stores the body. (`/api/create` itself is a
+later phase; see the parity plan.)
+
+### GET /v1/models/{id}
+
+OpenAI single-model lookup. Returns the model object or `404`.
 
 ## Multimodal Notes
 

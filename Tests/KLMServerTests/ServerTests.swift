@@ -313,14 +313,158 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(head.headers.first(name: "Transfer-Encoding"), "chunked")
     }
 
-    private func makeChannel() throws -> EmbeddedChannel {
+    // MARK: - Ollama compat endpoints (Phase 1: WS-A)
+
+    func testApiVersionReturnsVersionAndKrillmVersion() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+
+        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/api/version")
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.end(nil)))
+
+        XCTAssertEqual(try readResponseHead(from: channel).status, .ok)
+        let json = try readJSONResponseBody(from: channel)
+        XCTAssertNotNil(json["version"] as? String)
+        XCTAssertEqual(json["krillm_version"] as? String, OllamaCompat.krillVersion)
+        try readResponseEnd(from: channel)
+    }
+
+    func testApiPsWithoutModelReturnsEmptyList() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+
+        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/api/ps")
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.end(nil)))
+
+        XCTAssertEqual(try readResponseHead(from: channel).status, .ok)
+        let json = try readJSONResponseBody(from: channel)
+        XCTAssertEqual((json["models"] as? [[String: Any]])?.count, 0)
+        try readResponseEnd(from: channel)
+    }
+
+    func testApiShowUnknownModelReturns404() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+
+        try writeJSONRequest(to: channel, method: .POST, uri: "/api/show",
+                             body: ["model": "does-not-exist"])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .notFound)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
+    func testApiShowKnownModelReturnsMetadata() throws {
         let baseDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-server-tests-\(UUID().uuidString)")
-        let engine = InferenceEngine(modelDirectory: baseDir.appendingPathComponent("model"))
+            .appendingPathComponent("krillm-show-\(UUID().uuidString)")
         let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
+        try registry.saveManifest(Self.fixtureManifest(name: "fixture-7b"))
+        let channel = try makeChannel(baseDir: baseDir, registry: registry)
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+
+        try writeJSONRequest(to: channel, method: .POST, uri: "/api/show",
+                             body: ["model": "fixture-7b"])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .ok)
+        let json = try readJSONResponseBody(from: channel)
+        XCTAssertNotNil(json["modelfile"] as? String)
+        XCTAssertNotNil(json["template"] as? String)
+        XCTAssertEqual((json["capabilities"] as? [String])?.contains("completion"), true)
+        let details = try XCTUnwrap(json["details"] as? [String: Any])
+        XCTAssertEqual(details["family"] as? String, "qwen")
+        try readResponseEnd(from: channel)
+    }
+
+    func testApiDeleteUnknownModelReturns404() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+
+        try writeJSONRequest(to: channel, method: .DELETE, uri: "/api/delete",
+                             body: ["model": "ghost"])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .notFound)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
+    func testApiCopyRoundTripsManifest() throws {
+        let baseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-copy-\(UUID().uuidString)")
+        let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
+        try registry.saveManifest(Self.fixtureManifest(name: "src-model"))
+        let channel = try makeChannel(baseDir: baseDir, registry: registry)
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+
+        try writeJSONRequest(to: channel, method: .POST, uri: "/api/copy",
+                             body: ["source": "src-model", "destination": "dst-model"])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .ok)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+        XCTAssertTrue(registry.hasModel("dst-model"))
+        XCTAssertEqual(registry.getModel("dst-model")?.family, .qwen)
+    }
+
+    func testApiBlobHeadMissingReturns404() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+
+        let head = HTTPRequestHead(version: .http1_1, method: .HEAD,
+                                   uri: "/api/blobs/sha256:deadbeef")
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.end(nil)))
+        XCTAssertEqual(try readResponseHead(from: channel).status, .notFound)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
+    func testCompatOpenAIModeDisablesOllamaEndpoints() throws {
+        let channel = try makeChannel(compat: .openai)
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+
+        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/api/version")
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.end(nil)))
+        XCTAssertEqual(try readResponseHead(from: channel).status, .notFound)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
+    func testCompatModeParsing() {
+        XCTAssertEqual(CompatMode(label: "OLLAMA"), .ollama)
+        XCTAssertEqual(CompatMode(label: "both"), .both)
+        XCTAssertNil(CompatMode(label: "garbage"))
+        XCTAssertTrue(CompatMode.both.ollamaEnabled && CompatMode.both.openAIEnabled)
+        XCTAssertFalse(CompatMode.openai.ollamaEnabled)
+    }
+
+    func testOllamaCompatShowPayloadShape() {
+        let m = Self.fixtureManifest(name: "shape-test")
+        let payload = OllamaCompat.showPayload(for: m)
+        XCTAssertTrue((payload["modelfile"] as? String)?.contains("FROM") ?? false)
+        let details = payload["details"] as? [String: Any]
+        XCTAssertEqual(details?["quantization_level"] as? String, "4bit")
+        XCTAssertEqual(payload["capabilities"] as? [String], ["completion"])
+    }
+
+    static func fixtureManifest(name: String) -> ModelManifest {
+        ModelManifest(
+            name: name, family: .qwen, params: "7B", quant: "4bit",
+            source: "mlx-community/Qwen2.5-7B-Instruct-4bit", context: 32768,
+            files: [], draftPair: nil, chatTemplate: "chatml",
+            sizeBytes: 4_200_000_000, pulledAt: Date())
+    }
+
+    private func makeChannel(
+        baseDir: URL? = nil,
+        registry: Registry? = nil,
+        compat: CompatMode = .both
+    ) throws -> EmbeddedChannel {
+        let root = baseDir ?? FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-server-tests-\(UUID().uuidString)")
+        let engine = InferenceEngine(modelDirectory: root.appendingPathComponent("model"))
+        let reg = registry ?? Registry(baseDir: root.appendingPathComponent("registry"))
         let channel = EmbeddedChannel()
         try channel.pipeline.addHandler(
-            KLMServer._makeHTTPHandlerForTesting(engine: engine, registry: registry)
+            KLMServer._makeHTTPHandlerForTesting(engine: engine, registry: reg, compat: compat)
         ).wait()
         return channel
     }

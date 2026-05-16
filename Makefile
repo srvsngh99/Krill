@@ -22,7 +22,7 @@ GEMMA4_BENCH_WARMUP ?= 1
 KRILLM_PYTHON ?= $(HOME)/.krillm/venv/bin/python3
 KRILLM_VENV_PYTHON ?= python3
 
-.PHONY: build release install uninstall clean test bench bench-compare bench-gemma4-multimodal bench-release-gate setup-mlx-vlm metallib dist version
+.PHONY: build release install uninstall clean test bench bench-compare bench-gemma4-multimodal bench-release-gate parity-gate setup-mlx-vlm metallib dist version
 
 # Debug build (default)
 build:
@@ -168,6 +168,17 @@ bench-release-gate:
 			--output "$(GATE_REPORT)" \
 			$(GATE_ALLOW_FLAGS); \
 	fi
+
+# macOS Ollama parity gate. Boots `krillm serve` and asserts Ollama-client
+# response-shape parity per docs/OLLAMA_MAC_PARITY_PLAN.md.
+# Usage:
+#   make parity-gate                          # mac_parity profile
+#   make parity-gate PARITY_PROFILE=strict_parity
+#   make parity-gate PARITY_ARGS="--base-url http://127.0.0.1:11434"
+PARITY_PROFILE ?= mac_parity
+PARITY_ARGS ?=
+parity-gate: build
+	python3 tools/parity_gate.py --profile $(PARITY_PROFILE) $(PARITY_ARGS)
 
 # Install the Python bridge used by Gemma 4 image/audio support.
 setup-mlx-vlm:
