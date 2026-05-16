@@ -98,12 +98,16 @@ public enum OllamaCompat {
         if verbose {
             modelInfo["general.source"] = m.source
         }
+        let ov = m.overrides
+        let paramsStr = (ov?.parameters).map { p in
+            p.map { "\($0.key) \($0.value)" }.joined(separator: "\n")
+        } ?? "num_ctx \(m.context)"
         return [
-            "license": "See model source: \(m.source)",
+            "license": ov?.license ?? "See model source: \(m.source)",
             "modelfile": modelfile(for: m),
-            "parameters": "num_ctx \(m.context)",
-            "template": "{{ .Prompt }}",
-            "system": "",
+            "parameters": paramsStr,
+            "template": ov?.template ?? "{{ .Prompt }}",
+            "system": ov?.system ?? "",
             "details": details(for: m),
             "model_info": modelInfo,
             "capabilities": capabilities(for: m),

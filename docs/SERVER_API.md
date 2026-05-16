@@ -233,6 +233,19 @@ generate-until-EOS. `presence_penalty`, `frequency_penalty`, `mirostat*`,
 **accepted** for client compatibility; stateful application in the decode
 loop is a tracked follow-up (see `OLLAMA_MAC_PARITY_PLAN.md` §0).
 
+## Modelfile & Customization
+
+`krillm create <name> -f Modelfile` and `POST /api/create` build a
+customized model from a Modelfile (`FROM`, `PARAMETER`, `SYSTEM`,
+`TEMPLATE`, `LICENSE`, `MESSAGE`; `ADAPTER` is parse-and-warn). Base
+weights are **referenced via symlink** (no duplication); the Modelfile
+overrides are stored on the manifest. `krillm show <name>`
+(`--modelfile/--parameters/--template/--system`) and `POST /api/show`
+surface them; `krillm cp <src> <dst>` clones by reference. The `SYSTEM`
+override is injected at serve time when the request has no system
+message. (Runtime `PARAMETER`/`TEMPLATE` application round-trips through
+`show` today; applying them in the decode path is a tracked follow-up.)
+
 ## Structured Output
 
 Ollama `format:"json"` or a JSON-schema object (on `/api/chat` and

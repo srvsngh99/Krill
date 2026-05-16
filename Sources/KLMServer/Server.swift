@@ -260,6 +260,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         case (.POST, "/api/pull"):
             guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleOllamaPull(context: context, body: body)
+        case (.POST, "/api/create"):
+            guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleOllamaCreate(context: context, body: body)
         case (.DELETE, "/api/delete"):
             guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleOllamaDelete(context: context, body: body)
@@ -282,6 +285,21 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             sendJSON(context: context, status: .notFound,
                      body: ["error": "Not found: \(head.method) \(path)"])
         }
+    }
+
+    /// Apply a created model's Modelfile `SYSTEM` override (WS-C): if the
+    /// loaded model has a system override and the request carries no system
+    /// message, prepend it. PARAMETER/TEMPLATE overrides round-trip via
+    /// `show` today; runtime application of those is a tracked follow-up.
+    private func applyModelSystemOverride(
+        _ messages: [[String: String]]
+    ) -> [[String: String]] {
+        guard let name = engine.modelName,
+              let sys = registry.getModel(name)?.overrides?.system,
+              !sys.isEmpty,
+              !messages.contains(where: { $0["role"] == "system" })
+        else { return messages }
+        return [["role": "system", "content": sys]] + messages
     }
 
     /// 404 with a clear reason when an endpoint exists but its compat family
@@ -398,7 +416,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         let genMessages = StructuredOutput.injectFormatSystem(
-            into: request.messages, format: request.responseFormat)
+            into: applyModelSystemOverride(request.messages),
+            format: request.responseFormat)
 
         if request.stream {
             handleStreamingCompletion(
@@ -1156,7 +1175,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         let genMessages = StructuredOutput.injectFormatSystem(
-            into: request.messages, format: request.responseFormat)
+            into: applyModelSystemOverride(request.messages),
+            format: request.responseFormat)
         let respFormat = request.responseFormat
         Task {
             defer { mediaCopy?.cleanup() }
@@ -1770,6 +1790,70 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                                         status: .internalServerError,
                                         body: ["error": "pull failed: \(msg)"])
                 }
+            }
+        }
+    }
+
+    // MARK: - Ollama lifecycle: POST /api/create (WS-C)
+
+    private func handleOllamaCreate(context: ChannelHandlerContext, body: ByteBuffer) {
+        guard let json = parseJSON(body), let name = ollamaModelName(json) else {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Missing 'model' field"])
+            return
+        }
+        // Accept the `modelfile` string form (most common). The structured
+        // {from, system, parameters,...} form maps onto the same parser by
+        // synthesizing a Modelfile.
+        var mfText = json["modelfile"] as? String
+        if mfText == nil, let from = json["from"] as? String {
+            var lines = ["FROM \(from)"]
+            if let s = json["system"] as? String { lines.append("SYSTEM \(s)") }
+            if let p = json["parameters"] as? [String: Any] {
+                for (k, v) in p { lines.append("PARAMETER \(k) \(v)") }
+            }
+            if let t = json["template"] as? String { lines.append("TEMPLATE \(t)") }
+            mfText = lines.joined(separator: "\n")
+        }
+        guard let mfText else {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Missing 'modelfile' or 'from'"])
+            return
+        }
+        let stream = (json["stream"] as? Bool) ?? true
+        let reg = registry
+        nonisolated(unsafe) let ctx = context
+
+        let ndjson: @Sendable ([String: Any]) -> Void = { obj in
+            guard let d = try? JSONSerialization.data(withJSONObject: obj) else { return }
+            var b = ctx.channel.allocator.buffer(capacity: d.count + 1)
+            b.writeBytes(d); b.writeString("\n")
+            self.writeOnLoop(ctx, .body(.byteBuffer(b)), flush: true)
+        }
+
+        do {
+            let mf = try ModelfileParser.parse(mfText)
+            if stream {
+                context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming())), promise: nil)
+                ndjson(["status": "reading modelfile"])
+                ndjson(["status": "creating model layer"])
+            }
+            _ = try reg.createModel(name: name, from: mf)
+            if stream {
+                if let w = mf.adapterWarning { ndjson(["status": "warning: \(w)"]) }
+                ndjson(["status": "success"])
+                writeOnLoop(ctx, .end(nil), flush: true)
+            } else {
+                sendJSON(context: context, status: .ok, body: ["status": "success"])
+            }
+        } catch {
+            let msg = String(describing: error).prefix(300)
+            if stream {
+                ndjson(["error": "\(msg)"])
+                writeOnLoop(ctx, .end(nil), flush: true)
+            } else {
+                sendJSON(context: context, status: .badRequest,
+                         body: ["error": "\(msg)"])
             }
         }
     }

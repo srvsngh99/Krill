@@ -291,6 +291,30 @@ class Gate:
         self.check("T1-1", "H", "structured output (JSON/schema)",
                    structured_output)
 
+        def modelfile_create() -> tuple[str, str]:
+            _, traw = self._req("GET", "/api/tags")
+            models = [m["name"] for m in json.loads(traw).get("models", [])]
+            base = next((m for m in models
+                         if (json.loads(self._req("POST", "/api/show",
+                             {"model": m})[1]).get("details") or {}).get("family")
+                         not in ("bert", None)), None)
+            if not base:
+                return "SKIP", "no chat base model installed"
+            new = "_paritygate_custom"
+            self._req("DELETE", "/api/delete", {"model": new})
+            mf = f"FROM {base}\nPARAMETER temperature 0.1\nSYSTEM You are Krill."
+            c, r = self._req("POST", "/api/create",
+                             {"model": new, "modelfile": mf, "stream": False})
+            if c != 200:
+                return "FAIL", f"create status {c}: {r[:120]!r}"
+            c2, r2 = self._req("POST", "/api/show", {"model": new})
+            ok = c2 == 200 and json.loads(r2).get("system") == "You are Krill."
+            self._req("DELETE", "/api/delete", {"model": new})
+            return ("PASS", "create->show overrides round-trip") if ok \
+                else ("FAIL", f"show did not reflect overrides: {r2[:120]!r}")
+
+        self.check("T1-2", "H", "Modelfile create + show", modelfile_create)
+
     # -- verdict ----------------------------------------------------------
     def verdict(self, profile: str) -> bool:
         print(f"\nProfile: {profile}")

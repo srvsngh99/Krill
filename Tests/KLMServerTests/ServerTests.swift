@@ -558,6 +558,47 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(registry.getModel("dst-model")?.family, .qwen)
     }
 
+    func testApiCreateFromModelfileThenShowReflectsOverrides() throws {
+        let baseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-create-srv-\(UUID().uuidString)")
+        let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
+        try registry.ensureDirectories()
+        try registry.saveManifest(Self.fixtureManifest(name: "qwen-base"))
+        try FileManager.default.createDirectory(
+            at: registry.modelPath("qwen-base"), withIntermediateDirectories: true)
+        let channel = try makeChannel(baseDir: baseDir, registry: registry)
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+
+        try writeJSONRequest(to: channel, method: .POST, uri: "/api/create", body: [
+            "model": "qwen-custom", "stream": false,
+            "modelfile": "FROM qwen-base\nPARAMETER temperature 0.1\nSYSTEM You are Krill.",
+        ])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .ok)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+        XCTAssertEqual(registry.getModel("qwen-custom")?.overrides?.system, "You are Krill.")
+
+        // /api/show reflects the overrides.
+        try writeJSONRequest(to: channel, method: .POST, uri: "/api/show",
+                             body: ["model": "qwen-custom"])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .ok)
+        let j = try readJSONResponseBody(from: channel)
+        XCTAssertEqual(j["system"] as? String, "You are Krill.")
+        XCTAssertTrue((j["parameters"] as? String)?.contains("temperature 0.1") ?? false)
+        try readResponseEnd(from: channel)
+    }
+
+    func testApiCreateMissingBaseReturnsError() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        try writeJSONRequest(to: channel, method: .POST, uri: "/api/create", body: [
+            "model": "x", "stream": false, "modelfile": "FROM ghost\nSYSTEM hi",
+        ])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .badRequest)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
     func testApiBlobHeadMissingReturns404() throws {
         let channel = try makeChannel()
         defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
