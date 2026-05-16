@@ -13,6 +13,7 @@ internal struct ServerSamplingOptions: Equatable, Sendable {
     let topK: Int
     let repetitionPenalty: Float
     let seed: UInt64?
+    var minP: Float = 0.0
 
     var samplingParams: SamplingParams {
         SamplingParams(
@@ -20,7 +21,8 @@ internal struct ServerSamplingOptions: Equatable, Sendable {
             topP: topP,
             topK: topK,
             repetitionPenalty: repetitionPenalty,
-            seed: seed
+            seed: seed,
+            minP: minP
         )
     }
 }
@@ -103,7 +105,7 @@ internal enum ServerParsing {
         "parallel_tool_calls",
         "functions", "function_call",
         "response_format", "logprobs", "top_logprobs",
-        "stop", "frequency_penalty", "presence_penalty", "logit_bias",
+        "stop", "logit_bias",
         "stream_options"
     ]
 
@@ -245,13 +247,15 @@ internal enum ServerParsing {
     }
 
     static func openAISamplingOptions(from json: [String: Any]) throws -> ServerSamplingOptions {
-        ServerSamplingOptions(
+        var opts = ServerSamplingOptions(
             temperature: try nonNegativeFloat(json["temperature"], field: "temperature", defaultValue: 0.0),
             topP: try topPValue(json["top_p"], field: "top_p"),
             topK: try nonNegativeInt(json["top_k"], field: "top_k", defaultValue: 0),
             repetitionPenalty: 1.0,
             seed: try optionalUInt64(json["seed"], field: "seed")
         )
+        opts.minP = try nonNegativeFloat(json["min_p"], field: "min_p", defaultValue: 0.0)
+        return opts
     }
 
     static func ollamaChatRequest(from json: [String: Any]) throws -> ServerChatRequest {
@@ -311,7 +315,7 @@ internal enum ServerParsing {
 
     static func ollamaSamplingOptions(from json: [String: Any]) throws -> ServerSamplingOptions {
         let options = try optionsObject(from: json)
-        return ServerSamplingOptions(
+        let result = ServerSamplingOptions(
             temperature: try nonNegativeFloat(
                 options["temperature"] ?? json["temperature"],
                 field: "temperature",
@@ -326,6 +330,10 @@ internal enum ServerParsing {
             ),
             seed: try optionalUInt64(options["seed"] ?? json["seed"], field: "seed")
         )
+        var withMinP = result
+        withMinP.minP = try nonNegativeFloat(
+            options["min_p"] ?? json["min_p"], field: "min_p", defaultValue: 0.0)
+        return withMinP
     }
 
     /// Result of message extraction: structured messages plus any extracted media.
@@ -541,6 +549,12 @@ internal enum ServerParsing {
     ) throws -> Int? {
         var found: (field: String, value: Int)?
         for field in fields where json[field] != nil {
+            // num_predict == -1 means "generate until EOS" (Ollama). Map to a
+            // large sentinel cap rather than rejecting it as non-positive.
+            if field == "num_predict", let n = json[field] as? Int, n == -1 {
+                found = (field, 1 << 20)
+                continue
+            }
             let value = try positiveInt(json[field], field: field)
             if let existing = found, existing.value != value {
                 throw ServerRequestError.invalidValue(

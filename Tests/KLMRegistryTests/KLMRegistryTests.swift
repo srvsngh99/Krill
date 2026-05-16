@@ -2,6 +2,27 @@ import XCTest
 @testable import KLMRegistry
 
 final class KLMRegistryTests: XCTestCase {
+    func testOllamaEnvAliasesWithKrillPrecedence() {
+        setenv("OLLAMA_CONTEXT_LENGTH", "4096", 1)
+        setenv("OLLAMA_KEEP_ALIVE", "10m", 1)
+        setenv("OLLAMA_NUM_PARALLEL", "3", 1)
+        setenv("OLLAMA_ORIGINS", "https://a.com, https://b.com", 1)
+        setenv("OLLAMA_HOST", "http://0.0.0.0:12345", 1)
+        setenv("KRILL_CONTEXT_LENGTH", "8192", 1)  // KRILL_* must win
+        defer {
+            for k in ["OLLAMA_CONTEXT_LENGTH", "OLLAMA_KEEP_ALIVE",
+                      "OLLAMA_NUM_PARALLEL", "OLLAMA_ORIGINS", "OLLAMA_HOST",
+                      "KRILL_CONTEXT_LENGTH"] { unsetenv(k) }
+        }
+        let cfg = KrillConfig.load()
+        XCTAssertEqual(cfg.contextLength, 8192)          // KRILL_ over OLLAMA_
+        XCTAssertEqual(cfg.keepAlive, "10m")
+        XCTAssertEqual(cfg.numParallel, 3)
+        XCTAssertEqual(cfg.origins, ["https://a.com", "https://b.com"])
+        XCTAssertEqual(cfg.serverHost, "0.0.0.0")
+        XCTAssertEqual(cfg.serverPort, 12345)
+    }
+
     func testAliasMapResolvesKnownModel() {
         let resolved = AliasMap.resolve("llama-3.2-3b")
         XCTAssertNotNil(resolved)

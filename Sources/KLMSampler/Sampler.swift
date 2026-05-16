@@ -10,19 +10,24 @@ public struct SamplingParams: Sendable {
     public var topK: Int
     public var repetitionPenalty: Float
     public var seed: UInt64?
+    /// Min-p (relative) nucleus cutoff: keep tokens with prob >= minP * pMax.
+    /// 0 disables. (WS-D D3 / T2-10)
+    public var minP: Float
 
     public init(
         temperature: Float = 0.0,
         topP: Float = 1.0,
         topK: Int = 0,
         repetitionPenalty: Float = 1.0,
-        seed: UInt64? = nil
+        seed: UInt64? = nil,
+        minP: Float = 0.0
     ) {
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
         self.repetitionPenalty = repetitionPenalty
         self.seed = seed
+        self.minP = minP
     }
 
     /// Greedy decoding (temperature = 0).
@@ -92,6 +97,11 @@ public final class Sampler: @unchecked Sendable {
             scaled = topPFilter(scaled, p: params.topP)
         }
 
+        // Min-p filtering (relative to the peak probability).
+        if params.minP > 0.0 {
+            scaled = minPFilter(scaled, minP: params.minP)
+        }
+
         // Sample from the distribution. categorical returns shape [1] uint32.
         let probs = softmax(scaled)
         let token = MLXRandom.categorical(expandedDimensions(probs, axis: 0))
@@ -107,6 +117,16 @@ private func topKFilter(_ logits: MLXArray, k: Int) -> MLXArray {
     let topk = sorted(logits, axis: -1)[logits.dim(0) - k]
     let mask = logits .< topk
     return which(mask, MLXArray(Float(-1e9)), logits)
+}
+
+/// Min-p filter: keep only tokens whose probability is at least
+/// `minP * max(prob)`. A relative cutoff that adapts to confidence —
+/// stricter when the model is peaked, looser when it is flat.
+private func minPFilter(_ logits: MLXArray, minP: Float) -> MLXArray {
+    let probs = softmax(logits)
+    let pMax = MLX.max(probs)
+    let threshold = pMax * MLXArray(minP)
+    return which(probs .< threshold, MLXArray(Float(-1e9)), logits)
 }
 
 /// Filter logits outside the top-p cumulative probability mass.

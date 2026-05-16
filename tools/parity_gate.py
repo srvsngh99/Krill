@@ -232,6 +232,41 @@ class Gate:
 
         self.check("T0-4", "H", "tools/function calling", tools)
 
+        def cors() -> tuple[str, str]:
+            # OPTIONS preflight from a localhost origin must be granted.
+            req = urllib.request.Request(
+                self.base_url + "/api/chat", method="OPTIONS",
+                headers={"Origin": "http://localhost",
+                         "Access-Control-Request-Method": "POST"})
+            try:
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    ao = r.headers.get("Access-Control-Allow-Origin")
+            except urllib.error.HTTPError as e:
+                ao = e.headers.get("Access-Control-Allow-Origin")
+            except Exception as e:  # noqa: BLE001
+                return "FAIL", f"preflight error: {e}"
+            return ("PASS", f"ACAO={ao}") if ao else \
+                ("FAIL", "no Access-Control-Allow-Origin on preflight")
+
+        self.check("T3-1", "H", "CORS preflight (OPTIONS)", cors)
+
+        def sampler_params() -> tuple[str, str]:
+            # min_p / presence_penalty / frequency_penalty must be accepted
+            # (no parse-time 400). 503 (no model) or 200 are both fine.
+            code, raw = self._req(
+                "POST", "/v1/chat/completions",
+                {"model": "x",
+                 "messages": [{"role": "user", "content": "hi"}],
+                 "min_p": 0.05, "presence_penalty": 0.2,
+                 "frequency_penalty": 0.2})
+            if code == 400:
+                return "FAIL", f"rejected sampler params: {raw[:120]!r}"
+            if code in (200, 503):
+                return "PASS", f"accepted (status {code})"
+            return "FAIL", f"unexpected status {code}"
+
+        self.check("T2-10", "H", "extended sampler params", sampler_params)
+
     # -- verdict ----------------------------------------------------------
     def verdict(self, profile: str) -> bool:
         print(f"\nProfile: {profile}")

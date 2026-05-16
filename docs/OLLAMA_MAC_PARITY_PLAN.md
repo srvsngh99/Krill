@@ -33,13 +33,29 @@ Shipped:
 
 Default port stays `11435` (T0-1 deferral intact; flip is Phase 4 / DoD).
 
-**Scope honesty:** the `parity_gate.py` check-set covers the Tier-0
-breakers + key lifecycle rows (the drop-in essentials). Remaining plan
-workstreams are *not yet gated* and still open: WS-C Modelfile/`create`,
-WS-D D2 structured output (`format`), WS-D D3 full sampler params,
-WS-D D4 `num_ctx`, WS-E keep-alive/concurrency/queue, WS-F Anthropic
-`/v1/messages`, WS-G CORS + `OLLAMA_*` env aliases. These are Phase 2–4
-and should be added to the gate as they land before the DoD port flip.
+Also shipped (2026-05-17, same branch):
+- WS-G: CORS (`KRILL_ORIGINS`/`OLLAMA_ORIGINS`, OPTIONS preflight +
+  `Access-Control-*` on JSON responses, origin allowlist) and the
+  `OLLAMA_*` env-alias table (`OLLAMA_HOST` incl. host:port,
+  `OLLAMA_MODELS`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_KEEP_ALIVE`,
+  `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_MAX_QUEUE`,
+  `OLLAMA_KV_CACHE_TYPE`, `OLLAMA_FLASH_ATTENTION`) with `KRILL_*`
+  winning. Closes **T3-1**, **T3-3**.
+- WS-D D3 (partial): accept the full sampler-param surface; `min_p`
+  implemented as a functional GPU logit filter; `num_predict:-1` =
+  generate-until-EOS; `presence_penalty`/`frequency_penalty` accepted.
+  Closes **T2-10** at the API+min_p level.
+
+`make parity-gate` now **GREEN 12/12** on both profiles.
+
+**Scope honesty — still open / NOT gated (Phase 2–4):** WS-C
+Modelfile/`create`/`show`/`cp`; WS-D D2 structured output (`format`);
+WS-D D3 *stateful* penalties (presence/frequency/mirostat/repeat_last_n
+are accepted but not yet applied in the decode loop); WS-D D4 real
+`num_ctx` clamp/override; WS-E keep-alive/auto-unload/concurrency/queue;
+WS-F Anthropic `/v1/messages` + thinking. These must be built and added
+to the gate before the DoD `11435→11434` port flip. `mac_parity` GREEN
+means the gated drop-in essentials pass — not that every plan row is done.
 
 ## 1. Goal
 

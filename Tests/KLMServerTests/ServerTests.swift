@@ -64,6 +64,74 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(request.sampling.topK, 41)
     }
 
+    func testOpenAIChatParsesMinPAndAcceptsPenalties() throws {
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m",
+            "messages": [["role": "user", "content": "hi"]],
+            "min_p": 0.05,
+            "presence_penalty": 0.5,
+            "frequency_penalty": 0.3,
+        ])
+        XCTAssertEqual(req.sampling.minP, 0.05, accuracy: 1e-6)
+        XCTAssertEqual(req.sampling.samplingParams.minP, 0.05, accuracy: 1e-6)
+    }
+
+    func testOllamaNumPredictMinusOneMeansInfinite() throws {
+        let req = try ServerParsing.ollamaGenerateRequest(from: [
+            "model": "m", "prompt": "hi", "stream": false,
+            "options": ["num_predict": -1],
+        ])
+        XCTAssertGreaterThan(req.maxTokens, 1 << 19)
+    }
+
+    func testOllamaChatParsesMinPFromOptions() throws {
+        let req = try ServerParsing.ollamaChatRequest(from: [
+            "model": "m",
+            "messages": [["role": "user", "content": "hi"]],
+            "options": ["min_p": 0.1],
+        ])
+        XCTAssertEqual(req.sampling.minP, 0.1, accuracy: 1e-6)
+    }
+
+    func testCorsPreflightReturns204WithAllowOrigin() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        var head = HTTPRequestHead(version: .http1_1, method: .OPTIONS, uri: "/api/chat")
+        head.headers.add(name: "Origin", value: "http://localhost")
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.end(nil)))
+        let rh = try readResponseHead(from: channel)
+        XCTAssertEqual(rh.status, .noContent)
+        XCTAssertEqual(rh.headers.first(name: "Access-Control-Allow-Origin"), "http://localhost")
+        try readResponseEnd(from: channel)
+    }
+
+    func testCorsHeaderOnJSONResponseForAllowedOrigin() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/healthz")
+        head.headers.add(name: "Origin", value: "http://127.0.0.1")
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.end(nil)))
+        let rh = try readResponseHead(from: channel)
+        XCTAssertEqual(rh.headers.first(name: "Access-Control-Allow-Origin"), "http://127.0.0.1")
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
+    func testCorsNoGrantForDisallowedOrigin() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/healthz")
+        head.headers.add(name: "Origin", value: "https://evil.example")
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.end(nil)))
+        let rh = try readResponseHead(from: channel)
+        XCTAssertNil(rh.headers.first(name: "Access-Control-Allow-Origin"))
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
     func testOpenAIChatRequestParsesMaxCompletionTokensAlias() throws {
         let request = try ServerParsing.openAIChatRequest(from: [
             "model": "local-model",
@@ -292,7 +360,9 @@ final class ServerTests: XCTestCase {
         try readResponseEnd(from: channel)
     }
 
-    func testOllamaGenerateInvalidNumPredictReturnsBadRequestBeforeModelCheck() throws {
+    func testOllamaGenerateNumPredictMinusOneIsAcceptedAsInfinite() throws {
+        // Ollama parity: num_predict=-1 means "generate until EOS", not an
+        // error. The request must pass parsing and reach the model gate.
         let channel = try makeChannel()
         defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
 
@@ -308,10 +378,10 @@ final class ServerTests: XCTestCase {
         )
 
         let responseHead = try readResponseHead(from: channel)
-        XCTAssertEqual(responseHead.status, .badRequest)
+        XCTAssertEqual(responseHead.status, .serviceUnavailable)
 
         let body = try readJSONResponseBody(from: channel)
-        XCTAssertEqual(body["error"] as? String, "Field 'num_predict' is invalid: must be greater than 0")
+        XCTAssertTrue((body["error"] as? String)?.contains("No model loaded") ?? false)
 
         try readResponseEnd(from: channel)
     }

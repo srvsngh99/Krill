@@ -25,13 +25,17 @@ public final class KLMServer: Sendable {
     private let embedEngine: EmbeddingEngine
     private let logger = Logger(label: "krillm.server")
 
+    private let corsOrigins: [String]
+
     public init(host: String = "127.0.0.1", port: Int = 11435,
                 compat: CompatMode = .both,
                 engine: InferenceEngine, registry: Registry,
-                embedEngine: EmbeddingEngine = EmbeddingEngine()) {
+                embedEngine: EmbeddingEngine = EmbeddingEngine(),
+                corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"]) {
         self.host = host
         self.port = port
         self.compat = compat
+        self.corsOrigins = corsOrigins
         self.engine = engine
         self.registry = registry
         self.embedEngine = embedEngine
@@ -59,7 +63,8 @@ public final class KLMServer: Sendable {
                 channel.pipeline.configureHTTPServerPipeline().flatMap {
                     channel.pipeline.addHandler(
                         HTTPHandler(engine: self.engine, registry: self.registry,
-                                    compat: self.compat, embedEngine: self.embedEngine)
+                                    compat: self.compat, embedEngine: self.embedEngine,
+                                    corsOrigins: self.corsOrigins)
                     )
                 }
             }
@@ -104,14 +109,38 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private var requestHead: HTTPRequestHead?
     private var body: ByteBuffer = ByteBuffer()
 
+    private let corsOrigins: [String]
+    private var currentOrigin: String?
+
     init(engine: InferenceEngine, registry: Registry,
          compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
+         corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
          maxBodySizeOverride: Int? = nil) {
         self.engine = engine
         self.registry = registry
         self.compat = compat
         self.embedEngine = embedEngine
+        self.corsOrigins = corsOrigins
         self.maxBodySize = maxBodySizeOverride ?? ServerLimits.maxBodySize
+    }
+
+    /// Resolve the `Access-Control-Allow-Origin` value for a request Origin.
+    /// `*` in the allowlist (or no Origin header) yields `*`; an allowed
+    /// Origin is echoed back; anything else gets no CORS grant.
+    private func allowedOrigin(for origin: String?) -> String? {
+        if corsOrigins.contains("*") { return "*" }
+        guard let origin else { return nil }
+        return corsOrigins.contains(origin) ? origin : nil
+    }
+
+    private func corsHeaders() -> [(String, String)] {
+        guard let ao = allowedOrigin(for: currentOrigin) else { return [] }
+        return [
+            ("Access-Control-Allow-Origin", ao),
+            ("Access-Control-Allow-Methods", "GET, POST, DELETE, HEAD, OPTIONS"),
+            ("Access-Control-Allow-Headers", "Content-Type, Authorization"),
+            ("Vary", "Origin"),
+        ]
     }
 
     /// Best-effort load of file bytes for a path. Returns nil if the path is
@@ -147,6 +176,18 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func handleRequest(context: ChannelHandlerContext, head: HTTPRequestHead, body: ByteBuffer) {
         let path = head.uri.split(separator: "?").first.map(String.init) ?? head.uri
+        currentOrigin = head.headers.first(name: "Origin")
+
+        // CORS preflight (WS-G / T3-1): answer any OPTIONS with the grant.
+        if head.method == .OPTIONS {
+            var headers = HTTPHeaders()
+            for (k, v) in corsHeaders() { headers.add(name: k, value: v) }
+            headers.add(name: "Content-Length", value: "0")
+            let h = HTTPResponseHead(version: .http1_1, status: .noContent, headers: headers)
+            context.write(wrapOutboundOut(.head(h)), promise: nil)
+            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+            return
+        }
 
         // Path-parameter routes (matched before the exact-match switch).
         if path.hasPrefix("/api/blobs/") {
@@ -1866,6 +1907,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
         headers.add(name: "Content-Length", value: "\(data.count)")
+        for (k, v) in corsHeaders() { headers.add(name: k, value: v) }
         let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
 
         context.write(wrapOutboundOut(.head(head)), promise: nil)

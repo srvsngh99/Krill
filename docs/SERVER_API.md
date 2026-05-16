@@ -210,6 +210,29 @@ Returns `{"object":"list","data":[{"object":"embedding","index":0,
 Requesting embeddings against a non-embedding (chat) model returns `400`;
 an uninstalled model returns `404` with a `krillm pull` hint.
 
+## CORS & Environment Aliases
+
+CORS: set `KRILL_ORIGINS` (or `OLLAMA_ORIGINS`) to a comma-separated
+allowlist (`*` = any). `OPTIONS` preflight is answered `204` and allowed
+JSON responses carry `Access-Control-Allow-*`. Default allowlist is
+localhost/127.0.0.1.
+
+`OLLAMA_*` env vars are accepted as drop-in fallbacks for the native
+`KRILL_*` settings (the matching `KRILL_*` always wins): `OLLAMA_HOST`
+(supports `host`, `host:port`, `http://host:port`), `OLLAMA_MODELS`,
+`OLLAMA_CONTEXT_LENGTH`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_NUM_PARALLEL`,
+`OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_MAX_QUEUE`, `OLLAMA_KV_CACHE_TYPE`,
+`OLLAMA_FLASH_ATTENTION`.
+
+## Sampler Parameters
+
+`temperature`, `top_p`, `top_k`, `seed`, `repeat_penalty` and **`min_p`**
+(functional, GPU logit filter) are applied. `num_predict:-1` means
+generate-until-EOS. `presence_penalty`, `frequency_penalty`, `mirostat*`,
+`typical_p`, `tfs_z`, `repeat_last_n`, `num_keep`, `penalize_newline` are
+**accepted** for client compatibility; stateful application in the decode
+loop is a tracked follow-up (see `OLLAMA_MAC_PARITY_PLAN.md` §0).
+
 ## Tool / Function Calling
 
 `tools: [{type:"function", function:{name, description, parameters}}]` is

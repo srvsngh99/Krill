@@ -24,6 +24,7 @@ struct ServeCommand: AsyncParsableCommand {
 
     func run() async throws {
         let registry = Registry()
+        let config = KrillConfig.load()
 
         let engine: InferenceEngine
 
@@ -69,7 +70,8 @@ struct ServeCommand: AsyncParsableCommand {
         }
 
         let server = KLMServer(host: host, port: port, compat: compatMode,
-                               engine: engine, registry: registry)
+                               engine: engine, registry: registry,
+                               corsOrigins: config.origins)
         try await server.start()
     }
 }
