@@ -52,9 +52,24 @@ LOWER_IS_BETTER = {
 # Metrics where higher is better (ratio should be >= threshold)
 HIGHER_IS_BETTER = {
     "text_decode_ratio",
+    "text_decode_ratio_floor",
     "text_prefill_ratio",
     "image_prefill_ratio",
     "audio_prefill_ratio",
+}
+
+# Hard non-regression floors applied under non-strict profiles for a metric
+# that the profile demoted to "advisory" but which must still never regress.
+# When `text_decode_ratio` is advisory (release_candidate), a synthetic
+# `<metric>_floor` HARD evaluation is appended so the gate still hard-fails
+# if KrillLM ever decodes SLOWER than Ollama (ratio < 1.0). The advisory
+# >= 1.5 target is still evaluated and printed; it just no longer blocks.
+# Owner-accepted 2026-05-16; see docs/RELEASE_GATE_DECODE_PROPOSAL.md and
+# OLLAMA_SPEEDUP_EXECUTION_PLAN.md §4 for the rationale and the objective
+# re-promotion contract. `strict` keeps the metric hard at >= 1.5 and never
+# applies a floor.
+ADVISORY_HARD_FLOORS = {
+    "text_decode_ratio": 1.0,
 }
 
 # ---------------------------------------------------------------------------
@@ -81,6 +96,17 @@ HIGHER_IS_BETTER = {
 #     measured prefill window, so this bucket understates the user win that
 #     image_wall already captures. Re-promote to hard-gate once the cache mode
 #     is excluded from prefill TPS or the metric is redefined.
+#   - text_decode_ratio: advisory at the >= 1.5x target, but with a HARD
+#     non-regression floor (>= 1.0x; see ADVISORY_HARD_FLOORS). Decode of a
+#     dense model is per-token weight-read-bandwidth bound; on tiny 4-bit
+#     Gemma 4 e2b, llama.cpp's mature Metal kernels are at parity, and the
+#     user-visible "1.5x faster" claim is carried by text_wall/text_ttft
+#     (both hard and passing). The floor still guarantees KrillLM is never
+#     slower than Ollama at decode. Re-promote text_decode_ratio to hard
+#     >= 1.5x when EITHER (a) Gemma 4 speculative decoding lands and sustains
+#     >= 1.5x with greedy parity, OR (b) the matrix adds a long-output decode
+#     task where decode dominates wall time. Owner-accepted 2026-05-16; see
+#     docs/RELEASE_GATE_DECODE_PROPOSAL.md.
 # Audio metrics are out_of_scope until Workstream 1 (native Swift audio) lands;
 # the audio benchmark currently exercises the mlx-vlm sidecar and the gap to
 # Ollama is a known implementation gap, not a perf tuning target.
@@ -97,7 +123,10 @@ GATE_PROFILES: dict[str, dict[str, str]] = {
         "memory_ratio":          "hard",
     },
     "release_candidate": {
-        "text_decode_ratio":     "hard",
+        # advisory at >= 1.5x, but ADVISORY_HARD_FLOORS adds a synthetic
+        # HARD `text_decode_ratio_floor` (>= 1.0x) so a decode regression
+        # vs Ollama still breaks the gate. See the comment block above.
+        "text_decode_ratio":     "advisory",
         "text_wall_ratio":       "hard",
         "text_ttft_ratio":       "hard",
         "text_prefill_ratio":    "advisory",
@@ -655,6 +684,35 @@ def main() -> int:
                 continue
 
         evaluations.append(evaluate_metric(name, value, threshold, kind=kind))
+
+        # Non-regression floor: when a non-strict profile demoted this metric
+        # to advisory but it carries a hard floor, append a synthetic HARD
+        # `<metric>_floor` evaluation so a regression past the floor still
+        # breaks the gate. A MISSING value also hard-fails the floor — a
+        # release cannot rest on unmeasured decode. Fully visible in
+        # evaluations / summary / report.
+        if (
+            args.profile != "strict"
+            and kind == "advisory"
+            and name in ADVISORY_HARD_FLOORS
+        ):
+            floor = ADVISORY_HARD_FLOORS[name]
+            floor_name = f"{name}_floor"
+            evaluations.append(
+                evaluate_metric(floor_name, value, floor, kind="hard")
+            )
+            scope_info[name] = (
+                f"{GATE_PROFILES[args.profile].get(name)} (>= {threshold}x "
+                f"advisory) + HARD non-regression floor {floor_name} "
+                f">= {floor}x"
+            )
+            caveats.append(
+                f"{name} demoted to advisory under '{args.profile}' (>= "
+                f"{threshold}x target) but hard-gated by {floor_name} >= "
+                f"{floor}x: KrillLM must never decode slower than Ollama. "
+                f"Owner-accepted 2026-05-16; re-promotes to hard >= "
+                f"{threshold}x per docs/RELEASE_GATE_DECODE_PROPOSAL.md."
+            )
 
     # Compute aggregate stats
     speedup_factors = compute_speedup_factors(metrics)
