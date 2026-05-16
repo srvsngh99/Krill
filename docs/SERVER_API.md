@@ -233,6 +233,17 @@ generate-until-EOS. `presence_penalty`, `frequency_penalty`, `mirostat*`,
 **accepted** for client compatibility; stateful application in the decode
 loop is a tracked follow-up (see `OLLAMA_MAC_PARITY_PLAN.md` §0).
 
+## Model Lifecycle (keep-alive)
+
+Requests accept `keep_alive`: a duration string (`"5m"`, `"1h30m"`), an
+integer (seconds), `0` (unload right after this request), or a negative
+value (keep loaded indefinitely). The server default is `KRILL_KEEP_ALIVE`
+/ `OLLAMA_KEEP_ALIVE` (default `5m`). A background evictor unloads the
+model once the deadline passes; `GET /api/ps` reports the live
+`expires_at`. `krillm stop` (or `POST /v1/models/unload`) unloads now.
+(Multi-model concurrency — `NUM_PARALLEL`/`MAX_LOADED_MODELS`/`MAX_QUEUE`
+— is a tracked follow-up; the engine is single-flight today.)
+
 ## Modelfile & Customization
 
 `krillm create <name> -f Modelfile` and `POST /api/create` build a

@@ -315,6 +315,25 @@ class Gate:
 
         self.check("T1-2", "H", "Modelfile create + show", modelfile_create)
 
+        def keep_alive() -> tuple[str, str]:
+            # keep_alive must be accepted (not 400) and `stop`
+            # (/v1/models/unload) must succeed.
+            c1, r1 = self._req(
+                "POST", "/api/chat",
+                {"model": "x", "stream": False, "keep_alive": "10m",
+                 "messages": [{"role": "user", "content": "hi"}]})
+            if c1 == 400:
+                return "FAIL", f"keep_alive rejected: {r1[:100]!r}"
+            c2, _ = self._req("POST", "/v1/models/unload", {})
+            if c2 != 200:
+                return "FAIL", f"stop/unload status {c2}"
+            c3, r3 = self._req("GET", "/api/ps")
+            if c3 != 200 or "models" not in json.loads(r3):
+                return "FAIL", "/api/ps malformed"
+            return "PASS", "keep_alive accepted; stop + ps ok"
+
+        self.check("T1-4", "H", "keep_alive + stop + ps", keep_alive)
+
     # -- verdict ----------------------------------------------------------
     def verdict(self, profile: str) -> bool:
         print(f"\nProfile: {profile}")

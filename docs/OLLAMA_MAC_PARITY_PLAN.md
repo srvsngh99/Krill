@@ -60,7 +60,12 @@ Also shipped (2026-05-17, same branch):
   `SYSTEM` override applied at serve time; `show`/`/api/show` reflect
   `system`/`parameters`/`template`/`license`.
 
-`make parity-gate` now **GREEN 14/14** on both profiles.
+- WS-E keep-alive (T1-4, T2-3): per-request `keep_alive` (duration
+  string / int / `0` / negative), `KRILL_KEEP_ALIVE` default,
+  background auto-unload evictor (`KeepAlive.swift` actor), `krillm
+  stop` CLI, `/api/ps` `expires_at` from the live deadline.
+
+`make parity-gate` now **GREEN 15/15** on both profiles.
 
 **Scope honesty — still open / NOT gated (Phase 2–4):** WS-D D3
 *stateful* penalties (presence/frequency/mirostat/repeat_last_n are
@@ -68,10 +73,12 @@ accepted but not yet applied in the decode loop); WS-D D2
 grammar-constrained decoding (only guided+extract today); WS-D D4 real
 `num_ctx` clamp/override; WS-C runtime `PARAMETER`/`TEMPLATE` override
 application (round-trips via `show` but not yet applied at decode);
-WS-E keep-alive/auto-unload/concurrency/queue; WS-F Anthropic
-`/v1/messages` + thinking. These must be built and added to the gate
-before the DoD `11435→11434` port flip. `mac_parity` GREEN means the
-gated drop-in essentials pass — not that every plan row is done.
+WS-E `NUM_PARALLEL`/`MAX_LOADED_MODELS`/`MAX_QUEUE` concurrency/queue
+(knobs accepted via env; true queue+batching not yet — engine is
+single-flight); WS-F Anthropic `/v1/messages` + thinking. These must be
+built and added to the gate before the DoD `11435→11434` port flip.
+`mac_parity` GREEN means the gated drop-in essentials pass — not that
+every plan row is done.
 
 ## 1. Goal
 

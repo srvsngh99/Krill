@@ -26,12 +26,14 @@ public final class KLMServer: Sendable {
     private let logger = Logger(label: "krillm.server")
 
     private let corsOrigins: [String]
+    private let keepAlive: KeepAliveController
 
     public init(host: String = "127.0.0.1", port: Int = 11435,
                 compat: CompatMode = .both,
                 engine: InferenceEngine, registry: Registry,
                 embedEngine: EmbeddingEngine = EmbeddingEngine(),
-                corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"]) {
+                corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
+                keepAliveDefaultSeconds: Int = 300) {
         self.host = host
         self.port = port
         self.compat = compat
@@ -39,6 +41,7 @@ public final class KLMServer: Sendable {
         self.engine = engine
         self.registry = registry
         self.embedEngine = embedEngine
+        self.keepAlive = KeepAliveController(defaultSeconds: keepAliveDefaultSeconds)
     }
 
     internal static func _makeHTTPHandlerForTesting(
@@ -49,7 +52,9 @@ public final class KLMServer: Sendable {
         maxBodySizeOverride: Int? = nil
     ) -> any ChannelHandler & Sendable {
         HTTPHandler(engine: engine, registry: registry, compat: compat,
-                    embedEngine: embedEngine, maxBodySizeOverride: maxBodySizeOverride)
+                    embedEngine: embedEngine,
+                    keepAlive: KeepAliveController(defaultSeconds: 300),
+                    maxBodySizeOverride: maxBodySizeOverride)
     }
 
     /// Start the HTTP server (blocks until shutdown).
@@ -64,6 +69,7 @@ public final class KLMServer: Sendable {
                     channel.pipeline.addHandler(
                         HTTPHandler(engine: self.engine, registry: self.registry,
                                     compat: self.compat, embedEngine: self.embedEngine,
+                                    keepAlive: self.keepAlive,
                                     corsOrigins: self.corsOrigins)
                     )
                 }
@@ -84,6 +90,21 @@ public final class KLMServer: Sendable {
             print("Note: default port is \(port). For Ollama drop-in, run with --port 11434 (default flip to 11434 deferred until full parity — see docs/OLLAMA_MAC_PARITY_PLAN.md).")
         }
         print("Press Ctrl+C to stop.")
+
+        // WS-E: background auto-unload when the keep-alive deadline passes.
+        let eng = engine
+        let ka = keepAlive
+        let evictor = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10 * 1_000_000_000)
+                if eng.isLoaded, await ka.shouldEvict() {
+                    eng.unload()
+                    await ka.markEvicted()
+                    self.logger.info("[KLMServer] auto-unloaded model (keep_alive expired)")
+                }
+            }
+        }
+        defer { evictor.cancel() }
 
         try await channel.closeFuture.get()
         try await group.shutdownGracefully()
@@ -110,18 +131,28 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private var body: ByteBuffer = ByteBuffer()
 
     private let corsOrigins: [String]
+    private let keepAlive: KeepAliveController
     private var currentOrigin: String?
 
     init(engine: InferenceEngine, registry: Registry,
          compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
+         keepAlive: KeepAliveController = KeepAliveController(defaultSeconds: 300),
          corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
          maxBodySizeOverride: Int? = nil) {
         self.engine = engine
         self.registry = registry
         self.compat = compat
         self.embedEngine = embedEngine
+        self.keepAlive = keepAlive
         self.corsOrigins = corsOrigins
         self.maxBodySize = maxBodySizeOverride ?? ServerLimits.maxBodySize
+    }
+
+    /// Record activity for WS-E auto-unload; honors a per-request
+    /// `keep_alive` override (seconds; nil=default, <0=pin, 0=evict-after).
+    private func touchKeepAlive(_ override: Int?) {
+        let ka = keepAlive
+        Task { await ka.touch(override: override) }
     }
 
     /// Resolve the `Access-Control-Allow-Origin` value for a request Origin.
@@ -368,6 +399,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         guard requireModel(context: context) else { return }
+        touchKeepAlive(request.keepAlive)
 
         guard !request.messages.isEmpty else {
             sendJSON(context: context, status: .badRequest, body: ["error": "No valid messages"])
@@ -982,6 +1014,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         guard requireModel(context: context) else { return }
+        touchKeepAlive(nil)
 
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
@@ -1116,6 +1149,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         guard requireModel(context: context) else { return }
+        touchKeepAlive(request.keepAlive)
 
         guard !request.messages.isEmpty else {
             sendJSON(context: context, status: .badRequest, body: ["error": "No valid messages"])
@@ -1299,6 +1333,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         guard requireModel(context: context) else { return }
+        touchKeepAlive(request.keepAlive)
 
         let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
 
@@ -1578,13 +1613,20 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         let manifest = registry.getModel(modelName)
         let size = manifest?.sizeBytes ?? 0
-        let idle = KrillConfig.load().idleTimeout
-        let base = engine.loadedAt ?? Date()
-        let expiresAt = base.addingTimeInterval(TimeInterval(idle))
-        let entry = OllamaCompat.psEntry(
-            manifest: manifest, modelName: modelName,
-            sizeBytes: size, expiresAt: expiresAt)
-        sendJSON(context: context, status: .ok, body: ["models": [entry]])
+        let fallback = (engine.loadedAt ?? Date())
+            .addingTimeInterval(TimeInterval(KrillConfig.load().idleTimeout))
+        let ka = keepAlive
+        let eventLoop = context.eventLoop
+        nonisolated(unsafe) let ctx = context
+        Task {
+            // Prefer the live keep-alive deadline; fall back to idle timeout.
+            let expiresAt = (await ka.expiresAt()) ?? fallback
+            let entry = OllamaCompat.psEntry(
+                manifest: manifest, modelName: modelName,
+                sizeBytes: size, expiresAt: expiresAt)
+            self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
+                                status: .ok, body: ["models": [entry]])
+        }
     }
 
     // MARK: - Ollama discovery: POST /api/show

@@ -64,6 +64,48 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(request.sampling.topK, 41)
     }
 
+    func testKeepAliveDurationParsing() {
+        XCTAssertEqual(KeepAliveParse.duration("5m"), 300)
+        XCTAssertEqual(KeepAliveParse.duration("30s"), 30)
+        XCTAssertEqual(KeepAliveParse.duration("1h"), 3600)
+        XCTAssertEqual(KeepAliveParse.duration("1h30m"), 5400)
+        XCTAssertEqual(KeepAliveParse.duration("90"), 90)
+        XCTAssertEqual(KeepAliveParse.seconds(from: -1), -1)
+        XCTAssertEqual(KeepAliveParse.seconds(from: 0), 0)
+        XCTAssertEqual(KeepAliveParse.seconds(from: "10m"), 600)
+        XCTAssertNil(KeepAliveParse.seconds(from: nil))
+    }
+
+    func testKeepAliveControllerEvictionSemantics() async {
+        let c = KeepAliveController(defaultSeconds: 300)
+        await c.touch(override: -1)            // pin: never evict
+        var evict = await c.shouldEvict()
+        XCTAssertFalse(evict)
+        await c.touch(override: 0)             // evict immediately
+        evict = await c.shouldEvict()
+        XCTAssertTrue(evict)
+        await c.touch(override: 300)          // fresh 5m deadline
+        evict = await c.shouldEvict()
+        XCTAssertFalse(evict)
+        let past = await c.shouldEvict(now: Date().addingTimeInterval(400))
+        XCTAssertTrue(past)
+    }
+
+    func testOllamaChatParsesKeepAlive() throws {
+        let req = try ServerParsing.ollamaChatRequest(from: [
+            "model": "m",
+            "messages": [["role": "user", "content": "hi"]],
+            "keep_alive": "10m",
+        ])
+        XCTAssertEqual(req.keepAlive, 600)
+        let req2 = try ServerParsing.ollamaChatRequest(from: [
+            "model": "m",
+            "messages": [["role": "user", "content": "hi"]],
+            "keep_alive": -1,
+        ])
+        XCTAssertEqual(req2.keepAlive, -1)
+    }
+
     func testOllamaFormatJsonParsed() throws {
         let req = try ServerParsing.ollamaChatRequest(from: [
             "model": "m",

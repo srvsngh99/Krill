@@ -71,7 +71,9 @@ struct ServeCommand: AsyncParsableCommand {
 
         let server = KLMServer(host: host, port: port, compat: compatMode,
                                engine: engine, registry: registry,
-                               corsOrigins: config.origins)
+                               corsOrigins: config.origins,
+                               keepAliveDefaultSeconds:
+                                KeepAliveParse.duration(config.keepAlive) ?? 300)
         try await server.start()
     }
 }

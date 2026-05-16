@@ -65,6 +65,8 @@ internal struct ServerChatRequest: Equatable, Sendable {
     var media: ServerMediaPayload = ServerMediaPayload()
     var tools: [ServerToolSpec] = []
     var responseFormat: ResponseFormat? = nil
+    /// `keep_alive` in seconds (WS-E). nil=default, <0=pin, 0=evict-after.
+    var keepAlive: Int? = nil
 }
 
 internal struct ServerCompletionRequest: Equatable, Sendable {
@@ -83,6 +85,7 @@ internal struct ServerGenerateRequest: Equatable, Sendable {
     let requestedModel: String?
     var media: ServerMediaPayload = ServerMediaPayload()
     var responseFormat: ResponseFormat? = nil
+    var keepAlive: Int? = nil
 }
 
 internal enum ServerRequestError: Error, Equatable, Sendable {
@@ -269,7 +272,8 @@ internal enum ServerParsing {
             requestedModel: try optionalString(json["model"], field: "model"),
             media: extracted.media,
             tools: tools,
-            responseFormat: parseOpenAIResponseFormat(json["response_format"])
+            responseFormat: parseOpenAIResponseFormat(json["response_format"]),
+            keepAlive: KeepAliveParse.seconds(from: json["keep_alive"])
         )
     }
 
@@ -314,7 +318,8 @@ internal enum ServerParsing {
             requestedModel: try optionalString(json["model"], field: "model"),
             media: extracted.media,
             tools: tools,
-            responseFormat: parseOllamaFormat(json["format"])
+            responseFormat: parseOllamaFormat(json["format"]),
+            keepAlive: KeepAliveParse.seconds(from: json["keep_alive"])
         )
     }
 
@@ -355,7 +360,8 @@ internal enum ServerParsing {
             sampling: try ollamaSamplingOptions(from: json),
             requestedModel: try optionalString(json["model"], field: "model"),
             media: media,
-            responseFormat: parseOllamaFormat(json["format"])
+            responseFormat: parseOllamaFormat(json["format"]),
+            keepAlive: KeepAliveParse.seconds(from: json["keep_alive"])
         )
     }
 
