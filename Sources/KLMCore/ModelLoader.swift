@@ -41,6 +41,11 @@ public struct LoadedModel: @unchecked Sendable {
 public func loadModel(from directory: URL) throws -> LoadedModel {
     try MLXMetalRuntime.validateForNativeInference()
 
+    // Bound MLX's Metal buffer-recycling pool so it does not inflate the
+    // process phys_footprint (the figure the release benchmark samples for
+    // memory_ratio). Idempotent; safe to call on every load.
+    MLXMemoryConfig.apply()
+
     let configURL = directory.appendingPathComponent("config.json")
     let configData = try Data(contentsOf: configURL)
 

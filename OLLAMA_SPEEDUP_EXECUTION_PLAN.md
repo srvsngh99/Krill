@@ -2,22 +2,41 @@
 
 Local handoff for the next agent/session.
 
-Last updated: 2026-05-15 (post PR #14 merge)
+Last updated: 2026-05-16 (PR #16 — MLX cache cap, memory_ratio closed)
 Base branch: `main`
-Base commit: `cf05085` (merged PR #14)
+Base commit: `d61ce08` (merged PR #15)
 Machine target: Apple Silicon M4 Pro, 24 GB RAM
 
 ## Current Position
 
-Three follow-up PRs have shipped on top of the PR #9 release-readiness baseline.
-The product goal — beating Ollama by 1.5x to 3x with honest inputs — is closer,
-but the refreshed `release_candidate` gate is still red on hard
-`text_decode_ratio` and `memory_ratio` misses. Workstreams 1, 2, and 3 below
-also remain before we can promote audio out of `out_of_scope` and prefill TPS
-out of advisory.
+Four follow-up PRs have shipped on top of the PR #9 release-readiness baseline.
+PR #16 closed the hard `memory_ratio` miss: it root-caused the v5 ~9.6 GB
+KrillLM phys_footprint to an *unbounded* MLX Metal buffer pool plus a
+contaminated (non-`--krillm-server-pid`) measurement, added a default 256 MB
+cap (`KRILL_MLX_CACHE_LIMIT_MB`), and re-measured at ~2.85–3.0 GB
+(`memory_ratio` 0.32–0.84 across 5 fresh runs, always `<= 1.0`, no decode
+regression). **`text_decode_ratio` (~1.15x, target ≥1.5x) is now the sole
+hard `release_candidate` miss.** It is a structural decode-kernel gap against
+llama.cpp on the tiny 4-bit Gemma 4 e2b — not variance — and is owned by
+Workstream 2 (speculative decoding). Workstreams 1, 2, and 3 below remain
+before audio leaves `out_of_scope` and prefill TPS leaves advisory. Per owner
+decision (2026-05-16), this ships as an honest release-readiness baseline with
+the gate red on `text_decode_ratio`; not a production tag.
 
 ### What landed since PR #9
 
+- **PR #16 (`feat: cap MLX Metal buffer cache; close memory_ratio`,
+  branch `feat/mlx-cache-cap-memory-gate`).** Added
+  `Sources/KLMCore/MLXMemoryConfig.swift` — a pure env resolver
+  (`resolveCacheLimitMB`) plus `apply()` that sets `MLX.Memory.cacheLimit`,
+  wired into `loadModel(from:)` at the single native-load chokepoint.
+  Default cap 256 MB; `KRILL_MLX_CACHE_LIMIT_MB` overrides (`0` = legacy
+  unbounded). Root-caused the v5 9.6 GB reading to (1) an uncapped MLX
+  recycling pool and (2) a contaminated, non-`--krillm-server-pid`
+  measurement. Re-measured at ~2.85–3.0 GB; `memory_ratio` 0.32–0.84
+  across 5 fresh `native_server` runs (always `<= 1.0`), no decode
+  regression. 5 new unit tests; Swift suite 128/9 → 133/9, 0 failures.
+  Accepted report `.build/benchmarks/v6-mm.json`.
 - **PR #14 (`feat: peak-memory sampling + release_candidate memory hard-gate`,
   merged at `cf05085`).**
   `gemma4_multimodal_benchmark.py` samples each engine's process-tree
@@ -74,48 +93,55 @@ out of advisory.
 Latest verified baseline:
 
 ```text
-make test                       -> 128 tests, 9 skipped, 0 failures
+make test                       -> 133 tests, 9 skipped, 0 failures (PR #16)
 make release                    -> passed
 live int8 KV parity             -> passed
 live int8 + prefix cache replay -> passed
 live image-conditioning regr.   -> passed
+CLI Gemma 4 text smoke (PR #16) -> coherent
 python3 -m unittest tools.test_release_gate    -> 13 tests pass (was 7)
-python3 -m unittest tools.test_memory_sampling -> 17 tests pass (new)
+python3 -m unittest tools.test_memory_sampling -> 17 tests pass
 ```
 
-### Current gate verdict (`.build/benchmarks/v5-mm.json`, refreshed 2026-05-13)
+### Current gate verdict (`.build/benchmarks/v6-mm.json`, PR #16, 2026-05-16)
 
 ```text
 strict profile                            -> exit 1
-release_candidate --allow-dtype-mismatch  -> exit 1
+release_candidate --allow-dtype-mismatch  -> exit 1  (text_decode only)
 ```
 
-Per-metric breakdown under `release_candidate`:
+Per-metric breakdown under `release_candidate` (canonical run; 5-run
+ranges in parentheses):
 
 ```text
-HARD  text_wall_ratio     0.6351x   target <= 0.67    PASS
-HARD  text_ttft_ratio     0.2126x   target <= 0.67    PASS
-HARD  image_wall_ratio    0.6656x   target <= 0.67    PASS  (margin <1%)
-HARD  text_decode_ratio   1.1738x   target >= 1.5     FAIL
-HARD  memory_ratio        1.1447x   target <= 1.0     FAIL  (4-bit-vs-4-bit;
-                                                          auto-downgrade does
-                                                          not apply)
+HARD  memory_ratio        0.3221x   target <= 1.0     PASS  (0.32–0.84) ← PR#16
+HARD  text_wall_ratio     0.6373x   target <= 0.67    PASS  (0.64–0.69)
+HARD  text_ttft_ratio     0.2102x   target <= 0.67    PASS  (0.20–0.22)
+HARD  image_wall_ratio    0.5645x   target <= 0.67    PASS  (0.56–0.58)
+HARD  text_decode_ratio   1.1937x   target >= 1.5     FAIL  (1.13–1.19)
 
-ADV   text_prefill_ratio  1.2231x   target >= 1.5     WARN (advisory)
-ADV   image_prefill_ratio 0.8899x   target >= 1.5     WARN (advisory)
+ADV   text_prefill_ratio  1.1898x   target >= 1.5     WARN (advisory)
+ADV   image_prefill_ratio 1.1150x   target >= 1.5     WARN (advisory)
 
-SKIP  audio_wall_ratio    3.7868x   target <= 0.67    out_of_scope
+SKIP  audio_wall_ratio    3.9812x   target <= 0.67    out_of_scope
 SKIP  audio_prefill_ratio  N/A      target >= 1.5     out_of_scope
 
-geometric mean speedup     1.157x   (memory_ratio excluded from headline)
+geometric mean speedup     1.223x   (memory_ratio excluded from headline)
 
-KrillLM phys_footprint:    text 9.611 GB / image 9.611 GB / audio 10.481 GB
-Ollama  phys_footprint:    text 8.396 GB / image 8.495 GB / audio 8.511 GB
+KrillLM phys_footprint:    text/image ~2.85–3.0 GB  (was contaminated 9.6 GB)
+Ollama  phys_footprint:    text ~8.2–8.4 GB
 ```
 
-The release-candidate gate is currently red on `text_decode_ratio` and
-`memory_ratio`. Two notes on interpreting the regression vs the v4-mm
-snapshot:
+The release-candidate gate is now red **only** on `text_decode_ratio`
+(`memory_ratio` passes with large margin after PR #16). Notes on
+interpreting the history:
+
+- **The v5 9.6 GB memory reading was an artifact.** Two compounding
+  causes (PR #16): an uncapped MLX buffer-recycling pool, and a
+  measurement taken without the prescribed `--krillm-server-pid` clean
+  per-process override. Both fixed; memory is genuinely hard-gateable and
+  now passes.
+- Two notes on the earlier v4→v5 decode interpretation:
 
 - **The v4 "bf16-vs-Q4" framing was wrong.** v4 was invoked with
   `--krill-model gemma-4-e2b` (registry name); `krill_quantization()`
@@ -140,23 +166,27 @@ Do not tag a production release until either:
 
 ## Goal For The Next PR
 
-PR #14 closed the peak-memory sampling gap. The next implementation PR should
-pick **one** current hard release-candidate miss and close it with benchmark
-evidence. Recommended order:
+PR #14 closed peak-memory sampling; PR #16 closed the `memory_ratio` hard
+miss. **`text_decode_ratio` is now the sole hard `release_candidate` miss**
+and is the one thing standing between this baseline and a green
+release-candidate gate. The next implementation PR should:
 
-1. **Memory footprint narrow slice:** reduce `memory_ratio` from 1.1447x to
-   `<= 1.0x` on the class-equal 4-bit snapshot, or prove and document that the
-   threshold needs a different basis. Start with KV-cache sizing, reusable MLX
-   buffers, and any eagerly materialized working tensors.
-2. **Workstream 2:** add Gemma 4-compatible self-speculative decoding so
-   `text_decode_ratio` consistently exceeds 1.5x with margin. Larger scope;
-   requires a draft path that does not break greedy parity.
-3. **Workstream 3, prefill slice:** profile text_prefill and find an
+1. **Workstream 2 (now top priority):** add Gemma 4-compatible
+   self-speculative decoding so `text_decode_ratio` consistently exceeds
+   1.5x with margin and greedy parity preserved. The gap is structural
+   (~1.15x, KrillLM ~103–106 tok/s vs Ollama ~88–95 tok/s on tiny 4-bit
+   e2b), not variance — micro-optimization will not close it. Larger scope;
+   requires a draft path that does not break greedy parity. Track accepted/
+   rejected tokens and effective tok/s; benchmark with cache mode + draft
+   metadata.
+2. **Workstream 3, prefill slice:** profile text_prefill and find an
    optimization that pushes the advisory ratio past 1.5x, or redefine the
-   prefill gate around TTFT/wall time for short prompts. This does not unblock
-   release by itself while hard `text_decode_ratio` and `memory_ratio` fail.
-4. **Workstream 1:** port Gemma 4's audio Conformer to native Swift+MLX so
+   prefill gate around TTFT/wall time for short prompts. Does not unblock
+   release by itself while hard `text_decode_ratio` fails.
+3. **Workstream 1:** port Gemma 4's audio Conformer to native Swift+MLX so
    `audio_*` can leave `out_of_scope`. Largest scope; multi-week effort.
+
+Memory (formerly item 1) is **done** — see "What landed since PR #9" PR #16.
 
 The product claim remains: KrillLM should beat Ollama by 1.5x to 3x on the
 accepted benchmark matrix, with equivalent inputs and honest metadata.
