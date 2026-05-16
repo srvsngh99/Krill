@@ -168,20 +168,25 @@ class ReleaseCandidateProfileTests(unittest.TestCase):
         self.assertEqual(kinds.get("text_wall_ratio"), "hard")
         self.assertEqual(kinds.get("image_wall_ratio"), "hard")
 
-    def test_missing_hard_metric_fails_the_gate(self):
-        # Strip text_decode (a hard-gated metric) from the report by handing
-        # the gate a results section with no decode_tokens_per_second_median.
-        # The gate must treat the absence as a failure, not a silent pass.
+    def test_missing_decode_still_fails_the_gate_via_floor(self):
+        # Strip text_decode from the report. Under release_candidate
+        # text_decode_ratio is advisory, but the synthetic HARD
+        # text_decode_ratio_floor must still fail on a missing value: a
+        # release cannot rest on unmeasured decode (guarantee preserved,
+        # relocated from the demoted metric to its floor).
         report = self._baseline_report()
         for engine in ("krillm", "ollama"):
             report["results"]["text"][engine]["summary"].pop("decode_tokens_per_second_median", None)
 
         code, gate = run_gate(report, "--profile", "release_candidate", "--allow-dtype-mismatch")
-        self.assertEqual(code, 1, "missing hard metric must fail the gate")
+        self.assertEqual(code, 1, "missing decode must still fail the gate")
         decode = next(e for e in gate["evaluations"] if e["name"] == "text_decode_ratio")
         self.assertIsNone(decode["value"])
-        self.assertEqual(decode["kind"], "hard")
-        self.assertFalse(decode["pass"])
+        self.assertEqual(decode["kind"], "advisory")
+        floor = next(e for e in gate["evaluations"] if e["name"] == "text_decode_ratio_floor")
+        self.assertEqual(floor["kind"], "hard")
+        self.assertIsNone(floor["value"])
+        self.assertFalse(floor["pass"], "missing decode must hard-fail the floor")
         self.assertFalse(gate["summary"]["hard_metrics_pass"])
 
 
@@ -245,6 +250,65 @@ class MemoryMetricTests(unittest.TestCase):
             g1["summary"]["geometric_mean_speedup"],
             "memory_ratio must not move the geometric-mean speedup headline",
         )
+
+
+class DecodeAdvisoryFloorTests(unittest.TestCase):
+    """Under `release_candidate`, `text_decode_ratio` is advisory at the
+    >= 1.5x target but carries a synthetic HARD `text_decode_ratio_floor`
+    (>= 1.0x): KrillLM must never decode slower than Ollama. `strict` keeps
+    `text_decode_ratio` hard at >= 1.5x and has no floor.
+    Owner-accepted; see docs/RELEASE_GATE_DECODE_PROPOSAL.md."""
+
+    def _eval(self, gate: dict, name: str):
+        return next((e for e in gate["evaluations"] if e["name"] == name), None)
+
+    def test_rc_decode_below_target_above_floor_passes(self):
+        # 1.19x: misses advisory >=1.5 target, clears hard >=1.0 floor.
+        report = baseline_report(text_decode=(119.0, 100.0))
+        code, gate = run_gate(report, "--profile", "release_candidate")
+        self.assertEqual(code, 0, "RC must pass: decode advisory, floor met")
+        self.assertEqual(gate["gate"], "pass")
+        dec = self._eval(gate, "text_decode_ratio")
+        self.assertEqual(dec["kind"], "advisory")
+        self.assertFalse(dec["pass"], "1.19 should miss the >=1.5 advisory")
+        floor = self._eval(gate, "text_decode_ratio_floor")
+        self.assertIsNotNone(floor, "synthetic floor eval must exist under RC")
+        self.assertEqual(floor["kind"], "hard")
+        self.assertTrue(floor["pass"], "1.19 >= 1.0 floor must pass")
+        self.assertIn("text_decode_ratio", gate["scope"])
+        self.assertTrue(
+            any("never decode slower" in c for c in gate["caveats"]),
+            "the demotion+floor must be recorded as a caveat",
+        )
+
+    def test_rc_decode_regression_fails_via_hard_floor(self):
+        # 0.90x: KrillLM slower than Ollama -> hard floor breaks the gate.
+        report = baseline_report(text_decode=(90.0, 100.0))
+        code, gate = run_gate(report, "--profile", "release_candidate")
+        self.assertEqual(code, 1, "decode regression must hard-fail via floor")
+        self.assertEqual(gate["gate"], "fail")
+        floor = self._eval(gate, "text_decode_ratio_floor")
+        self.assertEqual(floor["kind"], "hard")
+        self.assertFalse(floor["pass"], "0.90 < 1.0 floor must fail")
+
+    def test_strict_decode_below_target_still_hard_fails(self):
+        # strict is unchanged: 1.19x < 1.5x hard threshold -> fail, no floor.
+        report = baseline_report(text_decode=(119.0, 100.0))
+        code, gate = run_gate(report)  # default profile = strict
+        self.assertEqual(code, 1, "strict must still hard-fail decode < 1.5")
+        dec = self._eval(gate, "text_decode_ratio")
+        self.assertEqual(dec["kind"], "hard")
+        self.assertFalse(dec["pass"])
+        self.assertIsNone(
+            self._eval(gate, "text_decode_ratio_floor"),
+            "strict must not introduce a decode floor",
+        )
+
+    def test_strict_decode_at_target_passes_unchanged(self):
+        report = baseline_report(text_decode=(150.0, 100.0))
+        code, _ = run_gate(report)
+        self.assertEqual(code, 1, "strict still fails on the prefill near-miss")
+        # (decode itself passes at 1.50; failure is the unchanged prefill gate)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ Built on Apple's [MLX](https://github.com/ml-explore/mlx-swift) framework. Ships
 
 ## Release Status
 
-This is not yet a production release. Server multimodal is implemented for Gemma 4 — native image, bridge-backed audio — and shipped with end-to-end tests. The int8 KV cache composes with the prefix cache on Gemma 4 (PR #11), and the release gate now distinguishes hard, advisory, and out_of_scope metrics via `--profile release_candidate` (PR #12). Peak-memory sampling is wired into the benchmark and `memory_ratio` is hard-gated for class-equal comparisons (PR #14). The current refreshed gate is still red: `release_candidate` fails hard on `text_decode_ratio` and `memory_ratio`, while `strict` also fails prefill and audio metrics. See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) and [`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](OLLAMA_SPEEDUP_EXECUTION_PLAN.md) for the full status, the per-metric promotion contract, and acceptance criteria.
+This is not yet a production release. Server multimodal is implemented for Gemma 4 — native image, bridge-backed audio — and shipped with end-to-end tests. The int8 KV cache composes with the prefix cache on Gemma 4 (PR #11), and the release gate now distinguishes hard, advisory, and out_of_scope metrics via `--profile release_candidate` (PR #12). Peak-memory sampling is wired into the benchmark and `memory_ratio` is hard-gated for class-equal comparisons (PR #14). PR #16 capped the MLX Metal buffer pool (`KRILL_MLX_CACHE_LIMIT_MB`), closed the `memory_ratio` hard miss (now 0.32–0.84, passing), and — per an owner-accepted gate proposal (`docs/RELEASE_GATE_DECODE_PROPOSAL.md`) — demoted `text_decode_ratio` to advisory under `release_candidate` with a new **hard `text_decode_ratio_floor ≥1.0x`** (KrillLM must never decode slower than Ollama). **`release_candidate` now exits `0` (GATE: PASS)** on `.build/benchmarks/v6-mm.json`; `strict` still exits `1` (text decode hard ≥1.5x, prefill, audio). The gate makes **no claim** that KrillLM hit 1.5x raw decode — that target is a tracked advisory pending speculative decoding. See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) and [`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](OLLAMA_SPEEDUP_EXECUTION_PLAN.md) for the full status, the per-metric promotion contract, and acceptance criteria.
 
 ### Support Matrix
 
@@ -92,7 +92,7 @@ make bench-release-gate GATE_KRILLM=krillm.json GATE_OLLAMA=ollama.json
 
 # release_candidate profile — hard-gates user-visible latency and class-equal
 # memory, marks prefill TPS advisory, scopes audio out until native Swift audio
-python3 tools/release_gate.py .build/benchmarks/v5-mm.json \
+python3 tools/release_gate.py .build/benchmarks/v6-mm.json \
   --profile release_candidate --allow-dtype-mismatch
 ```
 
@@ -100,9 +100,9 @@ The gate writes `.build/benchmarks/release-gate.json` with per-metric pass/fail,
 
 ### Performance claims
 
-KrillLM is competitive with Ollama on Gemma4 E2B decode throughput on Apple Silicon and can exceed Ollama in some local 4-bit-class decode tests. On the refreshed v5 multimodal snapshot, text and image wall-time ratios still pass the release-candidate gate, but the release-candidate gate fails hard on text decode throughput and peak memory. Ollama is currently stronger on multimodal prefill TPS and on audio (where KrillLM still routes through `mlx-vlm`). KrillLM's next performance milestones are sustained `text_decode_ratio >= 1.5x`, `memory_ratio <= 1.0x`, and eventually a fully native Gemma4 multimodal path with a `strict`-profile release gate exiting `0`.
+KrillLM beats Ollama decisively on user-visible latency for Gemma4 E2B on Apple Silicon — text TTFT ~5x, text wall-time ~1.57x, image wall-time ~1.77x faster on the v6 multimodal snapshot — and now also passes the hard class-equal peak-memory gate (PR #16 capped the MLX Metal buffer pool: KrillLM ~2.85–3.0 GB vs Ollama ~8.2–8.4 GB). It remains competitive but not 1.5x ahead on raw decode-token/s against llama.cpp's hand-tuned Metal kernels on this tiny 4-bit model. Ollama is currently stronger on multimodal prefill TPS and on audio (where KrillLM still routes through `mlx-vlm`). KrillLM's remaining milestones are a sustained `text_decode_ratio >= 1.5x` (Workstream 2 — Gemma 4 speculative decoding; re-promotes the metric to hard) and a fully native multimodal path with the `strict`-profile gate exiting `0`.
 
-The `strict` benchmark gate currently fails on text decode, prefill TPS, audio wall time, and memory. The `release_candidate` profile keeps prefill TPS advisory and audio out_of_scope, but now hard-gates class-equal memory; on `.build/benchmarks/v5-mm.json` it exits `1` because `text_decode_ratio` and `memory_ratio` miss their hard thresholds. This is a release-readiness baseline plus a documented follow-up roadmap, not a production release. Performance claims in this README are not updated unless `make bench-release-gate` passes under the agreed profile and the report is committed or linked.
+The `strict` benchmark gate (the uncompromised reference) still fails on text decode, prefill TPS, and audio wall time. The `release_candidate` profile keeps prefill TPS advisory, audio out_of_scope, and `text_decode_ratio` advisory-with-a-hard-≥1.0x-floor; on `.build/benchmarks/v6-mm.json` it **exits `0` (GATE: PASS)** — user-visible latency and class-equal memory hard-pass and KrillLM is never slower than Ollama at decode. This is a release-readiness baseline plus a documented follow-up roadmap, not a production release (which needs `strict`-green and native audio). Performance claims in this README are not updated unless `make bench-release-gate` passes under the agreed profile and the report is committed or linked; no claim states KrillLM decodes faster than Ollama.
 
 ## Install
 
