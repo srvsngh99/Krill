@@ -349,6 +349,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
+        if !request.tools.isEmpty {
+            handleToolChat(
+                context: context, request: request,
+                media: decodedMedia, style: .openAI)
+            return
+        }
+
         if request.stream {
             handleStreamingCompletion(
                 context: context, messages: request.messages,
@@ -360,6 +367,148 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 params: request.sampling.samplingParams, maxTokens: request.maxTokens,
                 media: decodedMedia)
         }
+    }
+
+    // MARK: - Tool/function calling (WS-D D1)
+
+    private enum ToolChatStyle { case openAI, ollama }
+
+    /// Buffered (non-token-streaming) generation for tool-enabled chat.
+    /// Tool definitions are injected as a system turn; the completed text is
+    /// scanned for tool-call sentinels and shaped into the OpenAI/Ollama
+    /// `tool_calls` response. Honors `stream` by emitting the assembled
+    /// result as a single well-formed SSE / NDJSON sequence (token-level
+    /// tool-call deltas are Phase 4 per the parity plan).
+    private func handleToolChat(
+        context: ChannelHandlerContext,
+        request: ServerChatRequest,
+        media: DecodedMedia?,
+        style: ToolChatStyle
+    ) {
+        let messages = ToolCalling.injectToolSystem(
+            into: request.messages, tools: request.tools)
+        let eventLoop = context.eventLoop
+        nonisolated(unsafe) let ctx = context
+        let eng = engine
+        let imageData = Self.loadDataIfPath(media?.imagePath)
+        let mediaCopy = media
+        let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
+        let params = request.sampling.samplingParams
+        let maxTokens = request.maxTokens
+        let wantStream = request.stream
+        let started = CFAbsoluteTimeGetCurrent()
+
+        Task {
+            defer { mediaCopy?.cleanup() }
+            let (tokenStream, getStats) = eng.generate(
+                messages: messages, params: params,
+                maxTokens: maxTokens, imageData: imageData)
+
+            var full = ""
+            for await event in tokenStream {
+                if event.isEnd { break }
+                full += event.text
+            }
+            let (calls, cleaned) = ToolCalling.extractToolCalls(from: full)
+            let stats = getStats()
+            let totalNs = Int64((CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
+
+            let response: [String: Any]
+            switch style {
+            case .openAI:
+                var message: [String: Any] = ["role": "assistant"]
+                if calls.isEmpty {
+                    message["content"] = cleaned
+                } else {
+                    message["content"] = NSNull()
+                    message["tool_calls"] = ToolCalling.openAIToolCalls(calls)
+                }
+                response = [
+                    "id": "chatcmpl-\(UUID().uuidString.prefix(8))",
+                    "object": "chat.completion",
+                    "created": Int(Date().timeIntervalSince1970),
+                    "model": modelName,
+                    "choices": [[
+                        "index": 0,
+                        "message": message,
+                        "finish_reason": calls.isEmpty ? "stop" : "tool_calls",
+                    ]],
+                    "usage": [
+                        "prompt_tokens": stats?.promptTokens ?? 0,
+                        "completion_tokens": stats?.generatedTokens ?? 0,
+                        "total_tokens": (stats?.promptTokens ?? 0) + (stats?.generatedTokens ?? 0),
+                    ],
+                ]
+            case .ollama:
+                var message: [String: Any] = ["role": "assistant",
+                                              "content": calls.isEmpty ? cleaned : ""]
+                if !calls.isEmpty {
+                    message["tool_calls"] = ToolCalling.ollamaToolCalls(calls)
+                }
+                response = [
+                    "model": modelName,
+                    "message": message,
+                    "done": true,
+                    "done_reason": calls.isEmpty ? "stop" : "tool_calls",
+                    "total_duration": totalNs,
+                    "prompt_eval_count": stats?.promptTokens ?? 0,
+                    "eval_count": stats?.generatedTokens ?? 0,
+                ]
+            }
+
+            if !wantStream {
+                self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
+                                    status: .ok, body: response)
+                return
+            }
+
+            // Streaming clients: emit the assembled result as one chunk.
+            switch style {
+            case .openAI:
+                let choice = (response["choices"] as? [[String: Any]])?.first ?? [:]
+                let msg = choice["message"] as? [String: Any] ?? [:]
+                var delta: [String: Any] = ["role": "assistant"]
+                if let tc = msg["tool_calls"] { delta["tool_calls"] = tc }
+                if let c = msg["content"] as? String { delta["content"] = c }
+                let chunk: [String: Any] = [
+                    "id": response["id"] ?? "chatcmpl",
+                    "object": "chat.completion.chunk",
+                    "created": Int(Date().timeIntervalSince1970),
+                    "model": modelName,
+                    "choices": [[
+                        "index": 0, "delta": delta,
+                        "finish_reason": choice["finish_reason"] ?? "stop",
+                    ]],
+                ]
+                self.writeOnLoop(ctx, .head(ServerResponseHeads.openAIStreaming()))
+                self.writeSSEJSON(ctx, chunk)
+                self.writeRaw(ctx, "data: [DONE]\n\n")
+                self.writeOnLoop(ctx, .end(nil), flush: true)
+            case .ollama:
+                self.writeOnLoop(ctx, .head(ServerResponseHeads.ollamaStreaming()))
+                self.writeNDJSON(ctx, response)
+                self.writeOnLoop(ctx, .end(nil), flush: true)
+            }
+        }
+    }
+
+    private func writeSSEJSON(_ ctx: ChannelHandlerContext, _ obj: [String: Any]) {
+        guard let d = try? JSONSerialization.data(withJSONObject: obj),
+              let s = String(data: d, encoding: .utf8) else { return }
+        writeRaw(ctx, "data: \(s)\n\n")
+    }
+
+    private func writeNDJSON(_ ctx: ChannelHandlerContext, _ obj: [String: Any]) {
+        guard let d = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        var b = ctx.channel.allocator.buffer(capacity: d.count + 1)
+        b.writeBytes(d); b.writeString("\n")
+        writeOnLoop(ctx, .body(.byteBuffer(b)), flush: true)
+    }
+
+    private func writeRaw(_ ctx: ChannelHandlerContext, _ s: String) {
+        var b = ctx.channel.allocator.buffer(capacity: s.utf8.count)
+        b.writeString(s)
+        writeOnLoop(ctx, .body(.byteBuffer(b)), flush: true)
     }
 
     // MARK: - Media decoding shared helper
@@ -938,6 +1087,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 bridgeStyle: .ollamaChat,
                 requestStream: request.stream
             )
+            return
+        }
+
+        if !request.tools.isEmpty {
+            handleToolChat(context: context, request: request,
+                           media: decodedMedia, style: .ollama)
             return
         }
 

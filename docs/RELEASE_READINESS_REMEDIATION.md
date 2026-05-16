@@ -204,13 +204,16 @@ landing details.
 > **macOS Ollama parity gate (new track, 2026-05-17).** A production tag now
 > requires *both* the speedup `release_candidate` gate **and** the
 > `mac_parity` gate (`make parity-gate`) green, per
-> [`OLLAMA_MAC_PARITY_PLAN.md`](OLLAMA_MAC_PARITY_PLAN.md) §6. Phase 1 is
-> complete (`--compat`, `/api/version|ps|show|pull|delete|copy`,
-> `/api/blobs`, `/v1/models/{id}`, **WS-B embeddings — dedicated BERT
-> encoder + `/api/embed`, `/api/embeddings`, `/v1/embeddings`**);
-> `make parity-gate` reports **9/10 hard checks PASS** (embeddings
-> verified live). Sole outstanding `H` row: T0-4 tools/function calling
-> (WS-D D1, Phase 2). `mac_parity` correctly NOT yet green — one left.
+> [`OLLAMA_MAC_PARITY_PLAN.md`](OLLAMA_MAC_PARITY_PLAN.md) §6. Phase 1 +
+> Phase 2 tool calling are complete (`--compat`,
+> `/api/version|ps|show|pull|delete|copy`, `/api/blobs`,
+> `/v1/models/{id}`, **WS-B embeddings — dedicated BERT encoder**,
+> **WS-D D1 tools/function calling on `/v1/chat/completions` + `/api/chat`,
+> verified live**). `make parity-gate` is **GREEN — 10/10** on both
+> `mac_parity` and `strict_parity`. Remaining plan workstreams (WS-C
+> Modelfile, WS-D D2/D3/D4, WS-E keep-alive/concurrency, WS-F Anthropic,
+> WS-G CORS/env) are Phase 2–4, not yet in the gated check-set, and must
+> be added before the DoD `11435→11434` port flip.
 
 ### 3.1 Release benchmark gate
 

@@ -74,14 +74,42 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(request.maxTokens, 33)
     }
 
-    func testOpenAIChatRequestRejectsUnsupportedTools() {
-        XCTAssertThrowsError(try ServerParsing.openAIChatRequest(from: [
+    func testOpenAIChatRequestParsesTools() throws {
+        let req = try ServerParsing.openAIChatRequest(from: [
             "model": "local-model",
-            "messages": [["role": "user", "content": "hello"]],
-            "tools": [],
-        ])) { error in
-            XCTAssertEqual(error as? ServerRequestError, .unsupportedField("tools"))
-        }
+            "messages": [["role": "user", "content": "weather?"]],
+            "tools": [[
+                "type": "function",
+                "function": [
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": ["type": "object",
+                                   "properties": ["city": ["type": "string"]]],
+                ],
+            ]],
+        ])
+        XCTAssertEqual(req.tools.count, 1)
+        XCTAssertEqual(req.tools.first?.name, "get_weather")
+        XCTAssertTrue(req.tools.first?.parametersJSON.contains("city") ?? false)
+    }
+
+    func testChatRequestNormalizesToolResultTurns() throws {
+        // assistant tool_calls + role:tool result must round-trip into the
+        // [String:String] message path without a 400.
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m",
+            "messages": [
+                ["role": "user", "content": "weather in NYC?"],
+                ["role": "assistant", "content": NSNull(),
+                 "tool_calls": [["type": "function",
+                                 "function": ["name": "get_weather",
+                                               "arguments": "{\"city\":\"NYC\"}"]]]],
+                ["role": "tool", "name": "get_weather", "content": "{\"temp\":72}"],
+            ],
+        ])
+        XCTAssertEqual(req.messages.count, 3)
+        XCTAssertTrue(req.messages[1]["content"]?.contains("<tool_call>") ?? false)
+        XCTAssertTrue(req.messages[2]["content"]?.contains("<tool_response>") ?? false)
     }
 
     func testOpenAIChatRequestRejectsInvalidTokenLimit() {
@@ -234,7 +262,9 @@ final class ServerTests: XCTestCase {
         try readResponseEnd(from: channel)
     }
 
-    func testChatCompletionsUnsupportedToolsReturnsBadRequestBeforeModelCheck() throws {
+    func testChatCompletionsToolsAcceptedReachesModelGate() throws {
+        // tools[] is now supported: the request must pass parsing and reach
+        // the model gate (503, no model loaded) rather than 400-rejecting.
         let channel = try makeChannel()
         defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
 
@@ -244,16 +274,20 @@ final class ServerTests: XCTestCase {
             uri: "/v1/chat/completions",
             body: [
                 "model": "local-model",
-                "messages": [["role": "user", "content": "hello"]],
-                "tools": [],
+                "messages": [["role": "user", "content": "weather?"]],
+                "tools": [[
+                    "type": "function",
+                    "function": ["name": "get_weather", "description": "w",
+                                 "parameters": ["type": "object"]],
+                ]],
             ]
         )
 
         let responseHead = try readResponseHead(from: channel)
-        XCTAssertEqual(responseHead.status, .badRequest)
+        XCTAssertEqual(responseHead.status, .serviceUnavailable)
 
         let body = try readJSONResponseBody(from: channel)
-        XCTAssertEqual(body["error"] as? String, "Field 'tools' is not supported by this endpoint")
+        XCTAssertTrue((body["error"] as? String)?.contains("No model loaded") ?? false)
 
         try readResponseEnd(from: channel)
     }
@@ -519,6 +553,67 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(try readResponseHead(from: channel).status, .badRequest)
         _ = try readResponseBody(from: channel)
         try readResponseEnd(from: channel)
+    }
+
+    // MARK: - Tool calling (WS-D D1)
+
+    func testToolCallExtractionSentinel() {
+        let text = "Sure.\n<tool_call>{\"name\": \"get_weather\", \"arguments\": {\"city\": \"NYC\"}}</tool_call>"
+        let (calls, cleaned) = ToolCalling.extractToolCalls(from: text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "get_weather")
+        XCTAssertTrue(calls.first?.argumentsJSON.contains("NYC") ?? false)
+        XCTAssertEqual(cleaned, "Sure.")
+    }
+
+    func testToolCallExtractionToleratesMissingCloseTagAndBackticks() {
+        // Real llama-3.2-1b output shape: backticks, no </tool_call>, trailing ;
+        let text = "`<tool_call>{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Tokyo\"}};`"
+        let (calls, cleaned) = ToolCalling.extractToolCalls(from: text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "get_weather")
+        XCTAssertTrue(calls.first?.argumentsJSON.contains("Tokyo") ?? false)
+        XCTAssertFalse(cleaned.contains("tool_call"))
+    }
+
+    func testToolCallExtractionBalancedNestedBraces() {
+        let text = "<tool_call>{\"name\":\"f\",\"arguments\":{\"q\":{\"a\":1},\"s\":\"}}\"}}</tool_call>"
+        let (calls, _) = ToolCalling.extractToolCalls(from: text)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "f")
+    }
+
+    func testToolCallExtractionBareJSON() {
+        let (calls, _) = ToolCalling.extractToolCalls(
+            from: "{\"name\":\"f\",\"arguments\":{\"x\":1}}")
+        XCTAssertEqual(calls.first?.name, "f")
+    }
+
+    func testToolCallExtractionNoneIsPlainText() {
+        let (calls, cleaned) = ToolCalling.extractToolCalls(from: "Just a normal answer.")
+        XCTAssertTrue(calls.isEmpty)
+        XCTAssertEqual(cleaned, "Just a normal answer.")
+    }
+
+    func testToolSystemInjectionMergesIntoExistingSystem() {
+        let msgs = [["role": "system", "content": "Be terse."],
+                    ["role": "user", "content": "hi"]]
+        let spec = ServerToolSpec(name: "t", description: "d", parametersJSON: "{}")
+        let out = ToolCalling.injectToolSystem(into: msgs, tools: [spec])
+        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out[0]["role"], "system")
+        XCTAssertTrue(out[0]["content"]?.contains("Be terse.") ?? false)
+        XCTAssertTrue(out[0]["content"]?.contains("<tool_call>") ?? false)
+    }
+
+    func testOpenAIVsOllamaToolCallShapes() {
+        let calls = [ToolCalling.ParsedToolCall(name: "f", argumentsJSON: "{\"a\":1}")]
+        let oa = ToolCalling.openAIToolCalls(calls)
+        XCTAssertEqual((oa[0]["function"] as? [String: Any])?["arguments"] as? String, "{\"a\":1}")
+        XCTAssertEqual(oa[0]["type"] as? String, "function")
+        let ol = ToolCalling.ollamaToolCalls(calls)
+        let olArgs = (ol[0]["function"] as? [String: Any])?["arguments"] as? [String: Any]
+        XCTAssertEqual(olArgs?["a"] as? Int, 1)
     }
 
     static func fixtureEmbeddingManifest(name: String) -> ModelManifest {

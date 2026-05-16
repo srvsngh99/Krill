@@ -9,24 +9,37 @@ Machine target: Apple Silicon (M-series), macOS 14+
 
 ## 0. Status (2026-05-17)
 
-**Phase 1 COMPLETE — wire compatibility + embeddings (branch
-`feat/ollama-parity-phase1`).**
+**Phase 1 + Phase 2 tool calling COMPLETE — `make parity-gate` is GREEN
+(10/10) on both `mac_parity` and `strict_parity` (branch
+`feat/ollama-parity-phase1`, PR #18).**
 
-Shipped: `--compat ollama|openai|both`; `GET /api/version`, `GET /api/ps`,
-`POST /api/show`; `POST /api/pull` (NDJSON), `DELETE /api/delete`,
-`POST /api/copy`, `HEAD|POST /api/blobs/:digest`; `GET /v1/models/{id}`;
-**WS-B embeddings — dedicated BERT/MiniLM/BGE encoder (`EmbeddingModel.swift`
-+ `EmbeddingEngine.swift`), `POST /api/embed`, `POST /api/embeddings`,
-`POST /v1/embeddings`, `bert` family + embed aliases**;
-`tools/parity_gate.py` + `make parity-gate`. Default port stays `11435`
-(T0-1 deferral intact).
+Shipped:
+- WS-A wire compat: `--compat ollama|openai|both`; `GET /api/version`,
+  `GET /api/ps`, `POST /api/show`; `POST /api/pull` (NDJSON),
+  `DELETE /api/delete`, `POST /api/copy`, `HEAD|POST /api/blobs/:digest`;
+  `GET /v1/models/{id}`.
+- WS-B embeddings: dedicated BERT/MiniLM/BGE encoder
+  (`EmbeddingModel.swift` + `EmbeddingEngine.swift`), `bert` family +
+  aliases, `POST /api/embed`, `POST /api/embeddings`, `POST /v1/embeddings`.
+  Verified live: `all-minilm` 384-d, L2-normalized, semantically correct
+  (cos(dog,puppy)=0.72 vs cos(dog,stocks)=0.04).
+- WS-D D1 tool/function calling: model-agnostic sentinel convention
+  (`ToolCalling.swift`), `tools[]` + `tool_calls` + `role:"tool"` on
+  `/v1/chat/completions` and `/api/chat`, robust extraction (missing
+  close tag / backticks / fenced / bare JSON; balanced-brace scanner).
+  Verified live on llama-3.2-1b: OpenAI `finish_reason:tool_calls` with
+  string args; Ollama `done_reason:tool_calls` with object args;
+  multi-turn tool-result round-trip.
 
-`make parity-gate` verdict: **9/10 hard checks PASS** (embeddings verified
-live: `all-minilm` 384-d, L2-normalized, semantically correct —
-cos(dog,puppy)=0.72 vs cos(dog,stocks)=0.04). The single remaining `H`
-row is **T0-4 tools/function calling (WS-D D1, Phase 2)**. `mac_parity`
-is correctly NOT yet green — one blocker left.
-Next: WS-D D1 tool/function calling.
+Default port stays `11435` (T0-1 deferral intact; flip is Phase 4 / DoD).
+
+**Scope honesty:** the `parity_gate.py` check-set covers the Tier-0
+breakers + key lifecycle rows (the drop-in essentials). Remaining plan
+workstreams are *not yet gated* and still open: WS-C Modelfile/`create`,
+WS-D D2 structured output (`format`), WS-D D3 full sampler params,
+WS-D D4 `num_ctx`, WS-E keep-alive/concurrency/queue, WS-F Anthropic
+`/v1/messages`, WS-G CORS + `OLLAMA_*` env aliases. These are Phase 2–4
+and should be added to the gate as they land before the DoD port flip.
 
 ## 1. Goal
 

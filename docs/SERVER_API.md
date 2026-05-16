@@ -210,6 +210,25 @@ Returns `{"object":"list","data":[{"object":"embedding","index":0,
 Requesting embeddings against a non-embedding (chat) model returns `400`;
 an uninstalled model returns `404` with a `krillm pull` hint.
 
+## Tool / Function Calling
+
+`tools: [{type:"function", function:{name, description, parameters}}]` is
+accepted on `POST /v1/chat/completions` and `POST /api/chat`. KrillLM
+injects the tool schemas as a system turn and instructs the model to emit
+`<tool_call>{"name":...,"arguments":{...}}</tool_call>`; extraction is
+tolerant of a missing close tag, backticks, fenced blocks, and bare JSON.
+
+- OpenAI: a tool call yields `choices[0].message.tool_calls` (arguments as
+  a JSON **string**), `content:null`, `finish_reason:"tool_calls"`.
+- Ollama: `message.tool_calls` (arguments as a decoded **object**),
+  `done_reason:"tool_calls"`.
+- Multi-turn: send the assistant `tool_calls` message back followed by a
+  `{"role":"tool","name":...,"content":...}` result; both round-trip.
+
+Tool-call *quality* depends on the model (small local models are weaker —
+the same as Ollama). Token-level streaming tool deltas are Phase 4; with
+`stream:true` the assembled call is emitted as one SSE/NDJSON chunk.
+
 ## Multimodal Notes
 
 - Image input is supported on all four chat/generate endpoints when a Gemma 4 model is loaded; it is rejected with HTTP 400 for any other model family.

@@ -38,6 +38,15 @@ internal struct ServerMediaPayload: Equatable, Sendable {
     var isEmpty: Bool { images.isEmpty && audio == nil }
 }
 
+/// A normalized tool/function definition (Sendable). `parametersJSON` is
+/// the raw JSON-schema object serialized to a string so it can flow through
+/// Sendable boundaries and be embedded verbatim into the tool prompt.
+internal struct ServerToolSpec: Equatable, Sendable {
+    let name: String
+    let description: String
+    let parametersJSON: String
+}
+
 internal struct ServerChatRequest: Equatable, Sendable {
     let messages: [[String: String]]
     let stream: Bool
@@ -45,6 +54,7 @@ internal struct ServerChatRequest: Equatable, Sendable {
     let sampling: ServerSamplingOptions
     let requestedModel: String?
     var media: ServerMediaPayload = ServerMediaPayload()
+    var tools: [ServerToolSpec] = []
 }
 
 internal struct ServerCompletionRequest: Equatable, Sendable {
@@ -90,7 +100,7 @@ internal enum ServerParsing {
     private static let defaultOllamaMaxTokens = 2048
 
     private static let unsupportedOpenAIChatFields: Set<String> = [
-        "tools", "tool_choice", "parallel_tool_calls",
+        "parallel_tool_calls",
         "functions", "function_call",
         "response_format", "logprobs", "top_logprobs",
         "stop", "frequency_penalty", "presence_penalty", "logit_bias",
@@ -103,7 +113,7 @@ internal enum ServerParsing {
     ]
 
     private static let unsupportedOllamaChatFields: Set<String> = [
-        "tools", "format"
+        "format"
     ]
 
     private static let unsupportedOllamaGenerateFields: Set<String> = [
@@ -128,9 +138,80 @@ internal enum ServerParsing {
         }
     }
 
+    /// Parse OpenAI/Ollama `tools: [{type:"function", function:{name,
+    /// description, parameters}}]`. Tolerant: bare `{name, description,
+    /// parameters}` entries are also accepted.
+    static func parseTools(from json: [String: Any]) throws -> [ServerToolSpec] {
+        guard let raw = json["tools"] else { return [] }
+        guard let arr = raw as? [[String: Any]] else {
+            throw ServerRequestError.invalidType(field: "tools", expected: "an array of tool objects")
+        }
+        var specs: [ServerToolSpec] = []
+        for (i, t) in arr.enumerated() {
+            let fn = (t["function"] as? [String: Any]) ?? t
+            guard let name = fn["name"] as? String, !name.isEmpty else {
+                throw ServerRequestError.invalidValue(
+                    field: "tools[\(i)].function.name", reason: "is required")
+            }
+            let desc = (fn["description"] as? String) ?? ""
+            let params = fn["parameters"] ?? ["type": "object", "properties": [String: Any]()]
+            let paramsJSON = (try? JSONSerialization.data(withJSONObject: params))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            specs.append(ServerToolSpec(name: name, description: desc, parametersJSON: paramsJSON))
+        }
+        return specs
+    }
+
+    /// Rewrite tool-related conversation turns into plain text so the
+    /// existing `[[String:String]]` prompt path round-trips multi-turn tool
+    /// loops without every chat template needing a native `tool` role:
+    ///  - assistant `tool_calls` (often `content:null`) -> assistant text
+    ///    with `<tool_call>{...}</tool_call>` lines.
+    ///  - role `tool` (a tool result) -> user text wrapped in
+    ///    `<tool_response>...</tool_response>`.
+    private static func normalizeToolTurns(in json: [String: Any]) -> [String: Any] {
+        guard let msgs = json["messages"] as? [[String: Any]] else { return json }
+        var out: [[String: Any]] = []
+        for m in msgs {
+            let role = m["role"] as? String ?? "user"
+            if role == "tool" {
+                let result = (m["content"] as? String) ?? ""
+                let name = (m["name"] as? String) ?? ""
+                out.append([
+                    "role": "user",
+                    "content": "<tool_response>\(name.isEmpty ? "" : "name=\(name) ")\(result)</tool_response>"
+                ])
+                continue
+            }
+            if role == "assistant", let calls = m["tool_calls"] as? [[String: Any]] {
+                var parts: [String] = []
+                if let c = m["content"] as? String, !c.isEmpty { parts.append(c) }
+                for call in calls {
+                    let fn = (call["function"] as? [String: Any]) ?? [:]
+                    let name = (fn["name"] as? String) ?? ""
+                    let argsAny = fn["arguments"] ?? [String: Any]()
+                    let argsStr: String
+                    if let s = argsAny as? String {
+                        argsStr = s
+                    } else if let d = try? JSONSerialization.data(withJSONObject: argsAny) {
+                        argsStr = String(data: d, encoding: .utf8) ?? "{}"
+                    } else { argsStr = "{}" }
+                    parts.append("<tool_call>{\"name\": \"\(name)\", \"arguments\": \(argsStr)}</tool_call>")
+                }
+                out.append(["role": "assistant", "content": parts.joined(separator: "\n")])
+                continue
+            }
+            out.append(m)
+        }
+        var copy = json
+        copy["messages"] = out
+        return copy
+    }
+
     static func openAIChatRequest(from json: [String: Any]) throws -> ServerChatRequest {
         try rejectUnsupportedFields(in: json, fields: unsupportedOpenAIChatFields)
-        let extracted = try openAIMessages(from: json)
+        let tools = try parseTools(from: json)
+        let extracted = try openAIMessages(from: normalizeToolTurns(in: json))
         return ServerChatRequest(
             messages: extracted.messages,
             stream: try boolValue(json["stream"], field: "stream") ?? false,
@@ -141,7 +222,8 @@ internal enum ServerParsing {
             ),
             sampling: try openAISamplingOptions(from: json),
             requestedModel: try optionalString(json["model"], field: "model"),
-            media: extracted.media
+            media: extracted.media,
+            tools: tools
         )
     }
 
@@ -174,14 +256,16 @@ internal enum ServerParsing {
 
     static func ollamaChatRequest(from json: [String: Any]) throws -> ServerChatRequest {
         try rejectUnsupportedFields(in: json, fields: unsupportedOllamaChatFields)
-        let extracted = try ollamaMessages(from: json)
+        let tools = try parseTools(from: json)
+        let extracted = try ollamaMessages(from: normalizeToolTurns(in: json))
         return ServerChatRequest(
             messages: extracted.messages,
             stream: try boolValue(json["stream"], field: "stream") ?? true,
             maxTokens: try ollamaTokenLimit(from: json),
             sampling: try ollamaSamplingOptions(from: json),
             requestedModel: try optionalString(json["model"], field: "model"),
-            media: extracted.media
+            media: extracted.media,
+            tools: tools
         )
     }
 

@@ -199,13 +199,36 @@ class Gate:
             code, raw = self._req(
                 "POST", "/v1/chat/completions",
                 {"model": "x",
-                 "messages": [{"role": "user", "content": "hi"}],
-                 "tools": []})
-            # Today tools[] is rejected at parse time (400). Parity needs
-            # it accepted -> WS-D D1 (Phase 2).
+                 "messages": [{"role": "user", "content": "weather in NYC?"}],
+                 "tools": [{
+                     "type": "function",
+                     "function": {
+                         "name": "get_weather",
+                         "description": "Get weather for a city",
+                         "parameters": {
+                             "type": "object",
+                             "properties": {"city": {"type": "string"}},
+                             "required": ["city"],
+                         },
+                     },
+                 }]})
+            # tools[] must be accepted (no parse-time 400 rejection). With no
+            # model loaded the request reaches the model gate (503); with a
+            # model it returns a 200 chat completion (optionally tool_calls).
             if code == 400 and b"not supported" in raw:
-                return "FAIL", "tools rejected (WS-D D1, Phase 2 pending)"
-            return "PASS", f"status {code}"
+                return "FAIL", "tools rejected at parse time"
+            if code == 503:
+                return "PASS", "accepted (reaches model gate; no model loaded)"
+            if code == 200:
+                try:
+                    j = json.loads(raw)
+                    msg = j["choices"][0]["message"]
+                    if "tool_calls" in msg or "content" in msg:
+                        return "PASS", "accepted; well-formed chat completion"
+                except Exception:  # noqa: BLE001
+                    pass
+                return "FAIL", "200 but malformed completion"
+            return "FAIL", f"unexpected status {code}: {raw[:120]!r}"
 
         self.check("T0-4", "H", "tools/function calling", tools)
 
