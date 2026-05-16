@@ -183,15 +183,25 @@ release-candidate path, not yet a production release.
 
 - **`release_candidate` gate** exits `0` (**GATE: PASS**) against the
   accepted report `.build/benchmarks/v6-mm.json` (PR #16). User-visible
-  latency (text TTFT ~5x, text/image wall ~1.5–1.8x faster) and
+  latency (text TTFT ~5x, text wall ~1.57x faster, native vision/image
+  wall ~1.77x faster) and
   class-equal `memory_ratio` (0.32–0.84) hard-pass, plus the hard
   `text_decode_ratio_floor ≥1.0x`. `text_decode_ratio`'s ≥1.5x target is
   advisory (printed as WARN at ~1.19x — **no claim KrillLM hit 1.5x
-  decode**). Audio out_of_scope; prefill advisory.
+  decode**). Voice/audio remains out_of_scope because it runs through the
+  `mlx-vlm` bridge and is slower than Ollama on the accepted report.
+  Prefill is advisory.
 - **`strict` gate** (default) still exits `1`: `text_decode_ratio`
   (hard ≥1.5x, no floor), `text_prefill_ratio`, `image_prefill_ratio`,
   and `audio_wall_ratio` fail. `strict` is the uncompromised reference and
   is required (with native audio) for a production tag.
+
+Post-merge PR #18 note: a text-only `llama-3.2-1b` vs `llama3.2:1b`
+server sanity run produced strong decode numbers, but the report failed
+`release_candidate` on TTFT/wall time and had a prompt-token mismatch.
+It is useful regression signal, not a release benchmark artifact. The next
+release PR must rerun the full Gemma 4 text/vision/audio benchmark after
+restoring the local Gemma 4 checkpoint and attach the generated report.
 
 Run `make bench-release-gate` for the latest per-metric results. The gate
 report at `.build/benchmarks/release-gate.json` contains exact ratios, the
@@ -200,17 +210,16 @@ KV cache dtype the run used. See
 [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for
 the full plan, the per-metric promotion contract, and acceptance criteria.
 
-Key gaps as of the last reviewed run:
+Key release gaps as of the last reviewed run:
 
-- `text_decode_ratio` (~1.15x on v6-mm, 1.13–1.19 across 5 runs) is
-  **hard** and currently failing — the **sole** remaining hard
-  release-candidate miss. KrillLM decodes ~103–106 tok/s vs Ollama's
-  ~88–95 tok/s on the tiny 5B 4-bit Gemma 4 e2b, where llama.cpp's
-  hand-tuned Metal decode kernels are genuinely competitive. This is a
-  structural kernel gap, not variance; closing it to ≥1.5x is owned by
-  Workstream 2 (Gemma 4-compatible speculative decoding) and is a
-  documented multi-week follow-up. User-visible latency still wins
-  decisively (text TTFT ~5x, text wall ~1.57x, image wall ~1.77x).
+- `text_decode_ratio` (~1.19x on v6-mm) is advisory under
+  `release_candidate` but hard under `strict`. KrillLM decodes ~102 tok/s
+  vs Ollama's ~86 tok/s on the accepted Gemma 4 E2B report, where
+  llama.cpp's hand-tuned Metal decode kernels are genuinely competitive.
+  Closing it to ≥1.5x is owned by Workstream 2 (Gemma 4-compatible
+  speculative decoding) and is a documented multi-week follow-up.
+  User-visible latency still wins decisively (text TTFT ~5x, text wall
+  ~1.57x, native vision wall ~1.77x).
 - `text_prefill_ratio` (1.22x) is advisory under `release_candidate`;
   re-promote once a drafter, fused kernel, or eval-cadence change
   pushes it past 1.5x.
@@ -226,7 +235,9 @@ Key gaps as of the last reviewed run:
   so the comparison is genuinely hard-gated.
 - Audio benchmarks still run through `mlx-vlm`; native Swift audio is
   Workstream 1 of the execution plan and `audio_*` is `out_of_scope`
-  under `release_candidate` until that ships.
+  under `release_candidate` until that ships. On v6-mm, bridge-backed
+  audio wall time is about 1.53 s for KrillLM vs 0.38 s for Ollama, so it
+  must not be described as production-parity voice performance.
 - Server multimodal benchmarks now exercise real media payloads (image
   native, audio bridge).
 - int8 KV cache and the prefix cache compose end-to-end on Gemma 4 (PR
