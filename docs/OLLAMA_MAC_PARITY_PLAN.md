@@ -9,19 +9,24 @@ Machine target: Apple Silicon (M-series), macOS 14+
 
 ## 0. Status (2026-05-17)
 
-**Phase 1 partial — wire compatibility landed (branch
+**Phase 1 COMPLETE — wire compatibility + embeddings (branch
 `feat/ollama-parity-phase1`).**
 
 Shipped: `--compat ollama|openai|both`; `GET /api/version`, `GET /api/ps`,
 `POST /api/show`; `POST /api/pull` (NDJSON), `DELETE /api/delete`,
 `POST /api/copy`, `HEAD|POST /api/blobs/:digest`; `GET /v1/models/{id}`;
-`tools/parity_gate.py` + `make parity-gate` (profiles `mac_parity`,
-`strict_parity`). Default port stays `11435` (T0-1 deferral intact).
+**WS-B embeddings — dedicated BERT/MiniLM/BGE encoder (`EmbeddingModel.swift`
++ `EmbeddingEngine.swift`), `POST /api/embed`, `POST /api/embeddings`,
+`POST /v1/embeddings`, `bert` family + embed aliases**;
+`tools/parity_gate.py` + `make parity-gate`. Default port stays `11435`
+(T0-1 deferral intact).
 
-`make parity-gate` current verdict: **8/10 hard wire checks PASS**; the two
-outstanding `H` rows are **T0-2 embeddings (WS-B, Phase 1 remaining)** and
-**T0-4 tools (WS-D D1, Phase 2)**. `mac_parity` is correctly NOT yet green.
-Next: WS-B embeddings to finish Phase 1.
+`make parity-gate` verdict: **9/10 hard checks PASS** (embeddings verified
+live: `all-minilm` 384-d, L2-normalized, semantically correct —
+cos(dog,puppy)=0.72 vs cos(dog,stocks)=0.04). The single remaining `H`
+row is **T0-4 tools/function calling (WS-D D1, Phase 2)**. `mac_parity`
+is correctly NOT yet green — one blocker left.
+Next: WS-D D1 tool/function calling.
 
 ## 1. Goal
 

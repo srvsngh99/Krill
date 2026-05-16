@@ -22,26 +22,30 @@ public final class KLMServer: Sendable {
     private let engine: InferenceEngine
     private let registry: Registry
     private let compat: CompatMode
+    private let embedEngine: EmbeddingEngine
     private let logger = Logger(label: "krillm.server")
 
     public init(host: String = "127.0.0.1", port: Int = 11435,
                 compat: CompatMode = .both,
-                engine: InferenceEngine, registry: Registry) {
+                engine: InferenceEngine, registry: Registry,
+                embedEngine: EmbeddingEngine = EmbeddingEngine()) {
         self.host = host
         self.port = port
         self.compat = compat
         self.engine = engine
         self.registry = registry
+        self.embedEngine = embedEngine
     }
 
     internal static func _makeHTTPHandlerForTesting(
         engine: InferenceEngine,
         registry: Registry,
         compat: CompatMode = .both,
+        embedEngine: EmbeddingEngine = EmbeddingEngine(),
         maxBodySizeOverride: Int? = nil
     ) -> any ChannelHandler & Sendable {
         HTTPHandler(engine: engine, registry: registry, compat: compat,
-                    maxBodySizeOverride: maxBodySizeOverride)
+                    embedEngine: embedEngine, maxBodySizeOverride: maxBodySizeOverride)
     }
 
     /// Start the HTTP server (blocks until shutdown).
@@ -55,7 +59,7 @@ public final class KLMServer: Sendable {
                 channel.pipeline.configureHTTPServerPipeline().flatMap {
                     channel.pipeline.addHandler(
                         HTTPHandler(engine: self.engine, registry: self.registry,
-                                    compat: self.compat)
+                                    compat: self.compat, embedEngine: self.embedEngine)
                     )
                 }
             }
@@ -91,6 +95,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let engine: InferenceEngine
     private let registry: Registry
     private let compat: CompatMode
+    private let embedEngine: EmbeddingEngine
     private let logger = Logger(label: "krillm.http")
     private let startedAt = Date()
 
@@ -100,10 +105,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private var body: ByteBuffer = ByteBuffer()
 
     init(engine: InferenceEngine, registry: Registry,
-         compat: CompatMode = .both, maxBodySizeOverride: Int? = nil) {
+         compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
+         maxBodySizeOverride: Int? = nil) {
         self.engine = engine
         self.registry = registry
         self.compat = compat
+        self.embedEngine = embedEngine
         self.maxBodySize = maxBodySizeOverride ?? ServerLimits.maxBodySize
     }
 
@@ -166,6 +173,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         case (.GET, "/v1/models"):
             guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleModels(context: context)
+        case (.POST, "/v1/embeddings"):
+            guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleEmbeddings(context: context, body: body, style: .openAI)
 
         // Model management (KrillLM-native, available in any compat mode)
         case (.POST, "/v1/models/load"):
@@ -198,6 +208,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         case (.POST, "/api/show"):
             guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleOllamaShow(context: context, body: body)
+        case (.POST, "/api/embed"):
+            guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleEmbeddings(context: context, body: body, style: .ollamaBatch)
+        case (.POST, "/api/embeddings"):
+            guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleEmbeddings(context: context, body: body, style: .ollamaLegacy)
 
         // Ollama lifecycle (WS-A3)
         case (.POST, "/api/pull"):
@@ -1208,6 +1224,109 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             ]
         }
         sendJSON(context: context, status: .ok, body: ["models": models])
+    }
+
+    // MARK: - Embeddings: /api/embed, /api/embeddings, /v1/embeddings
+
+    private enum EmbedStyle {
+        case openAI       // POST /v1/embeddings
+        case ollamaBatch  // POST /api/embed
+        case ollamaLegacy // POST /api/embeddings (single "prompt")
+    }
+
+    /// Extract the input texts for an embeddings request across the three
+    /// shapes (`input` string|[string] for OpenAI/Ollama-batch; `prompt`
+    /// string for the Ollama legacy endpoint).
+    private func embedInputs(_ json: [String: Any], style: EmbedStyle) -> [String]? {
+        if style == .ollamaLegacy {
+            if let p = json["prompt"] as? String { return [p] }
+            return nil
+        }
+        if let s = json["input"] as? String { return [s] }
+        if let arr = json["input"] as? [Any] {
+            let strs = arr.compactMap { $0 as? String }
+            return strs.count == arr.count ? strs : nil
+        }
+        return nil
+    }
+
+    private func handleEmbeddings(context: ChannelHandlerContext,
+                                  body: ByteBuffer, style: EmbedStyle) {
+        guard let json = parseJSON(body) else {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid JSON"])
+            return
+        }
+        guard let name = ollamaModelName(json) else {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Missing 'model' field"])
+            return
+        }
+        guard let inputs = embedInputs(json, style: style), !inputs.isEmpty else {
+            sendJSON(context: context, status: .badRequest, body: [
+                "error": style == .ollamaLegacy
+                    ? "Missing 'prompt' (string)"
+                    : "Missing 'input' (string or array of strings)"
+            ])
+            return
+        }
+        guard let manifest = registry.getModel(name) else {
+            sendJSON(context: context, status: .notFound, body: [
+                "error": "embedding model '\(name)' not found. Install with: krillm pull \(name)"
+            ])
+            return
+        }
+        guard manifest.family == .bert else {
+            sendJSON(context: context, status: .badRequest, body: [
+                "error": "'\(name)' (family \(manifest.family.rawValue)) is not a sentence-embedding model. Use a dedicated embedding model, e.g. krillm pull bge-small-en"
+            ])
+            return
+        }
+
+        let dir = registry.modelPath(name)
+        let eventLoop = context.eventLoop
+        nonisolated(unsafe) let ctx = context
+        let embed = embedEngine
+        let modelName = manifest.name
+
+        let started = CFAbsoluteTimeGetCurrent()
+        Task {
+            do {
+                try await embed.load(directory: dir)
+                let result = try embed.embed(inputs)
+                let totalNs = Int64((CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
+                let response: [String: Any]
+                switch style {
+                case .openAI:
+                    response = [
+                        "object": "list",
+                        "model": modelName,
+                        "data": result.vectors.enumerated().map { i, v in
+                            ["object": "embedding", "index": i, "embedding": v]
+                        },
+                        "usage": [
+                            "prompt_tokens": result.promptTokens,
+                            "total_tokens": result.promptTokens,
+                        ],
+                    ]
+                case .ollamaBatch:
+                    response = [
+                        "model": modelName,
+                        "embeddings": result.vectors,
+                        "total_duration": totalNs,
+                        "prompt_eval_count": result.promptTokens,
+                    ]
+                case .ollamaLegacy:
+                    response = ["embedding": result.vectors.first ?? []]
+                }
+                self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
+                                    status: .ok, body: response)
+            } catch {
+                let msg = String(describing: error).prefix(300)
+                self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
+                                    status: .internalServerError,
+                                    body: ["error": "embedding failed: \(msg)"])
+            }
+        }
     }
 
     // MARK: - Ollama discovery: GET /api/ps

@@ -93,6 +93,9 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case phi
     case glm
     case deepseek
+    /// Dedicated sentence-embedding encoder (BERT/RoBERTa/MiniLM/BGE/E5).
+    /// Not a causal LM — served only via the embeddings endpoints.
+    case bert
 
     /// Detect model family from HuggingFace config.json's `architectures` field.
     public static func detect(from configJSON: [String: Any]) -> ModelFamily? {
@@ -107,6 +110,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
 
         let archLower = arch.lowercased()
         // Order matters: check specific before generic
+        if archLower.contains("bert") || archLower.contains("roberta") { return .bert }
         if archLower.contains("gemma4") { return .gemma4 }
         if archLower.contains("gemma") { return .gemma }
         if archLower.contains("chatglm") || archLower.contains("glm") { return .glm }
@@ -128,6 +132,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         case "phi", "phi3": return .phi
         case "chatglm", "glm", "glm4_moe": return .glm
         case "deepseek_v3": return .deepseek
+        case "bert", "roberta", "xlm-roberta", "mpnet", "distilbert": return .bert
         default: return nil
         }
     }

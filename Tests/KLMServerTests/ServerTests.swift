@@ -445,6 +445,90 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(payload["capabilities"] as? [String], ["completion"])
     }
 
+    // MARK: - Embeddings (WS-B)
+
+    func testEmbedMissingModelReturns400() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        try writeJSONRequest(to: channel, method: .POST, uri: "/api/embed",
+                             body: ["input": "hello"])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .badRequest)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
+    func testEmbedMissingInputReturns400() throws {
+        let baseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-emb1-\(UUID().uuidString)")
+        let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
+        try registry.saveManifest(Self.fixtureEmbeddingManifest(name: "bge-x"))
+        let channel = try makeChannel(baseDir: baseDir, registry: registry)
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        try writeJSONRequest(to: channel, method: .POST, uri: "/api/embed",
+                             body: ["model": "bge-x"])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .badRequest)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
+    func testEmbedUnknownModelReturns404() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        try writeJSONRequest(to: channel, method: .POST, uri: "/api/embed",
+                             body: ["model": "nope", "input": "hi"])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .notFound)
+        let j = try readJSONResponseBody(from: channel)
+        XCTAssertTrue((j["error"] as? String)?.contains("krillm pull") ?? false)
+        try readResponseEnd(from: channel)
+    }
+
+    func testEmbedRejectsNonEmbeddingModelFamily() throws {
+        let baseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-emb2-\(UUID().uuidString)")
+        let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
+        try registry.saveManifest(Self.fixtureManifest(name: "qwen-chat"))
+        let channel = try makeChannel(baseDir: baseDir, registry: registry)
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        try writeJSONRequest(to: channel, method: .POST, uri: "/api/embed",
+                             body: ["model": "qwen-chat", "input": "hi"])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .badRequest)
+        let j = try readJSONResponseBody(from: channel)
+        XCTAssertTrue((j["error"] as? String)?.contains("not a sentence-embedding") ?? false)
+        try readResponseEnd(from: channel)
+    }
+
+    func testOpenAIEmbeddingsUnknownModelReturns404() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        try writeJSONRequest(to: channel, method: .POST, uri: "/v1/embeddings",
+                             body: ["model": "nope", "input": ["a", "b"]])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .notFound)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
+    func testLegacyEmbeddingsMissingPromptReturns400() throws {
+        let baseDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-emb3-\(UUID().uuidString)")
+        let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
+        try registry.saveManifest(Self.fixtureEmbeddingManifest(name: "bge-y"))
+        let channel = try makeChannel(baseDir: baseDir, registry: registry)
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        try writeJSONRequest(to: channel, method: .POST, uri: "/api/embeddings",
+                             body: ["model": "bge-y"])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .badRequest)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
+    static func fixtureEmbeddingManifest(name: String) -> ModelManifest {
+        ModelManifest(
+            name: name, family: .bert, params: "33M", quant: "fp32",
+            source: "BAAI/bge-small-en-v1.5", context: 512,
+            files: [], draftPair: nil, chatTemplate: "none",
+            sizeBytes: 133_000_000, pulledAt: Date())
+    }
+
     static func fixtureManifest(name: String) -> ModelManifest {
         ModelManifest(
             name: name, family: .qwen, params: "7B", quant: "4bit",

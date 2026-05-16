@@ -183,6 +183,33 @@ later phase; see the parity plan.)
 
 OpenAI single-model lookup. Returns the model object or `404`.
 
+## Embeddings
+
+KrillLM serves embeddings from a **dedicated sentence-embedding model**
+(BERT/RoBERTa/MiniLM/BGE/E5 — `bert` family), independent of any loaded
+chat model. Pull one first, e.g. `krillm pull all-minilm` (also
+`bge-small-en`, `bge-base-en`). Vectors are mean-pooled (override with
+`KRILL_EMBED_POOLING=cls`) and L2-normalized.
+
+### POST /api/embed
+
+Body: `{"model": "all-minilm", "input": "text" | ["t1","t2"]}`. Returns
+`{"model", "embeddings": [[...]], "prompt_eval_count", "total_duration"}`.
+
+### POST /api/embeddings (legacy)
+
+Body: `{"model": "all-minilm", "prompt": "text"}`. Returns
+`{"embedding": [...]}` (single vector).
+
+### POST /v1/embeddings
+
+OpenAI shape. Body: `{"model": "all-minilm", "input": "text" | [...]}`.
+Returns `{"object":"list","data":[{"object":"embedding","index":0,
+"embedding":[...]}],"model","usage"}`.
+
+Requesting embeddings against a non-embedding (chat) model returns `400`;
+an uninstalled model returns `404` with a `krillm pull` hint.
+
 ## Multimodal Notes
 
 - Image input is supported on all four chat/generate endpoints when a Gemma 4 model is loaded; it is rejected with HTTP 400 for any other model family.

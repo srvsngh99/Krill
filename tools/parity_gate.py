@@ -164,11 +164,34 @@ class Gate:
         # Not yet implemented (later phases) -- recorded so the profile
         # verdict honestly reflects that mac_parity is not yet green.
         def embeddings() -> tuple[str, str]:
-            code, _ = self._req("POST", "/api/embed",
-                                 {"model": "x", "input": "hi"})
-            if code == 404:
-                return "FAIL", "not implemented (WS-B, Phase 1 pending)"
-            return "PASS", f"status {code}"
+            # If a dedicated embedding model is installed, do a real embed
+            # and assert a numeric vector. Otherwise verify the endpoint is
+            # *implemented* (route exists, validates model/input) rather
+            # than the default "Not found:" 404.
+            _, traw = self._req("GET", "/api/tags")
+            models = json.loads(traw).get("models", [])
+            embed_model = next(
+                (m["name"] for m in models
+                 if (m.get("details") or {}).get("family") == "bert"), None)
+            if embed_model:
+                code, raw = self._req(
+                    "POST", "/api/embed",
+                    {"model": embed_model, "input": "hello world"})
+                if code != 200:
+                    return "FAIL", f"status {code}: {raw[:120]!r}"
+                vecs = json.loads(raw).get("embeddings")
+                if (not vecs or not isinstance(vecs[0], list)
+                        or not isinstance(vecs[0][0], (int, float))):
+                    return "FAIL", "malformed embeddings array"
+                return "PASS", f"{embed_model}: dim={len(vecs[0])}"
+            code, raw = self._req("POST", "/api/embed",
+                                   {"model": "__not_installed__", "input": "hi"})
+            if code == 404 and b"Not found:" in raw:
+                return "FAIL", "endpoint not implemented"
+            if code in (400, 404):
+                return "PASS", ("implemented (no embed model installed; "
+                                "pull e.g. bge-small-en for a live check)")
+            return "FAIL", f"unexpected status {code}"
 
         self.check("T0-2", "H", "POST /api/embed", embeddings)
 
