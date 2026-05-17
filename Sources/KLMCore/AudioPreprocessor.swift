@@ -1,5 +1,8 @@
 import Foundation
 import MLX
+#if canImport(AVFoundation)
+@preconcurrency import AVFoundation
+#endif
 
 // MARK: - Native Gemma 4 Audio Preprocessor (USM feature extractor)
 
@@ -46,14 +49,22 @@ public enum AudioPreprocessor {
         public let numTokens: Int
     }
 
-    /// True iff `data` begins with a RIFF/WAVE header. The native frontend
-    /// is WAV-PCM-only; callers use this to keep non-WAV codecs
-    /// (mp3/flac/ogg/m4a) on the `mlx-vlm` bridge instead of failing here.
+    /// True iff `data` begins with a RIFF/WAVE header.
     public static func isWAV(_ data: Data) -> Bool {
         guard data.count >= 12 else { return false }
         let b = [UInt8](data.prefix(12))
         return b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46
             && b[8] == 0x57 && b[9] == 0x41 && b[10] == 0x56 && b[11] == 0x45
+    }
+
+    /// Decode common audio containers/codecs to PCM and produce native
+    /// features. WAV keeps the strict in-repo decoder for exact PCM behavior;
+    /// other containers use the platform audio decoder, then share the same
+    /// resampling and USM log-mel pipeline.
+    public static func features(fromAudio data: Data) throws -> Features {
+        let (raw, fileSR) = try loadAudio(from: data)
+        let mono = resampleAudio(raw, from: fileSR, to: sampleRate)
+        return try features(waveform: mono)
     }
 
     /// Decode WAV bytes and produce native audio features.
@@ -214,4 +225,84 @@ public enum AudioPreprocessor {
         }
         return MLXArray(fb, [numFreqBins, melBins])
     }
+
+    private static func loadAudio(from data: Data) throws -> (samples: [Float], sampleRate: Int) {
+        if isWAV(data) {
+            return try loadWAV(from: data)
+        }
+#if canImport(AVFoundation)
+        return try loadAudioWithAVFoundation(from: data)
+#else
+        throw MultimodalPreprocessingError.audioPreprocessingUnavailable
+#endif
+    }
+
+#if canImport(AVFoundation)
+    private static func loadAudioWithAVFoundation(from data: Data) throws -> (samples: [Float], sampleRate: Int) {
+        let ext = inferredAudioExtension(for: data) ?? "audio"
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-audio-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let url = dir.appendingPathComponent("input.\(ext)")
+        try data.write(to: url, options: .atomic)
+
+        let file = try AVAudioFile(forReading: url)
+        let inputFormat = file.processingFormat
+        guard file.length > 0,
+              let inputBuffer = AVAudioPCMBuffer(
+                pcmFormat: inputFormat,
+                frameCapacity: AVAudioFrameCount(file.length)) else {
+            throw MultimodalPreprocessingError.audioPreprocessingUnavailable
+        }
+        try file.read(into: inputBuffer)
+
+        guard let channels = inputBuffer.floatChannelData else {
+            throw MultimodalPreprocessingError.audioPreprocessingUnavailable
+        }
+        let frameCount = Int(inputBuffer.frameLength)
+        let channelCount = Int(inputFormat.channelCount)
+        guard frameCount > 0, channelCount > 0 else {
+            throw MultimodalPreprocessingError.audioPreprocessingUnavailable
+        }
+        if channelCount == 1 {
+            return (Array(UnsafeBufferPointer(start: channels[0], count: frameCount)),
+                    Int(inputFormat.sampleRate.rounded()))
+        }
+
+        var mono = [Float](repeating: 0, count: frameCount)
+        for frame in 0 ..< frameCount {
+            var sum: Float = 0
+            for ch in 0 ..< channelCount {
+                sum += channels[ch][frame]
+            }
+            mono[frame] = sum / Float(channelCount)
+        }
+        return (mono, Int(inputFormat.sampleRate.rounded()))
+    }
+
+    private static func inferredAudioExtension(for data: Data) -> String? {
+        let b = [UInt8](data.prefix(16))
+        guard !b.isEmpty else { return nil }
+        if isWAV(data) { return "wav" }
+        if b.count >= 4, b[0] == 0x66, b[1] == 0x4c, b[2] == 0x61, b[3] == 0x43 {
+            return "flac"
+        }
+        if b.count >= 4, b[0] == 0x4f, b[1] == 0x67, b[2] == 0x67, b[3] == 0x53 {
+            return "ogg"
+        }
+        if b.count >= 3, b[0] == 0x49, b[1] == 0x44, b[2] == 0x33 {
+            return "mp3"
+        }
+        if b.count >= 2, b[0] == 0xff, (b[1] & 0xe0) == 0xe0 {
+            return "mp3"
+        }
+        if b.count >= 12,
+           b[4] == 0x66, b[5] == 0x74, b[6] == 0x79, b[7] == 0x70 {
+            return "m4a"
+        }
+        return nil
+    }
+#endif
 }

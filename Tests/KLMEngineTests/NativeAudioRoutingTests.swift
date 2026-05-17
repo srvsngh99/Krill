@@ -71,7 +71,7 @@ final class NativeAudioRoutingTests: XCTestCase {
 
         // Prove the native frontend actually decodes this fixture (so a
         // silent text-only fallback can't masquerade as a pass).
-        let feats = try AudioPreprocessor.features(fromWAV: audioData)
+        let feats = try AudioPreprocessor.features(fromAudio: audioData)
         XCTAssertGreaterThan(feats.numTokens, 0)
         XCTAssertEqual(feats.mel.dim(2), AudioPreprocessor.melBins)
 

@@ -35,7 +35,7 @@ struct RunCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Image file path for Gemma 4 (native vision)")
     var image: String?
 
-    @Option(name: .long, help: "Audio file path for Gemma 4 (requires mlx-vlm)")
+    @Option(name: .long, help: "Audio file path for Gemma 4 (bridge by default; native with KRILL_NATIVE_AUDIO=1)")
     var audio: String?
 
     @Option(name: .long, help: "Tools JSON file for function calling (not yet supported)")

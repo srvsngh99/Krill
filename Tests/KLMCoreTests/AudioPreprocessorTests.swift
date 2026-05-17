@@ -1,6 +1,9 @@
 import XCTest
 import MLX
 @testable import KLMCore
+#if canImport(AVFoundation)
+@preconcurrency import AVFoundation
+#endif
 
 /// WS5 unit tests for the native Gemma 4 USM audio frontend. Deterministic
 /// in-memory WAVs (no external assets) pin shapes, the soft-token cadence,
@@ -30,6 +33,41 @@ final class AudioPreprocessorTests: XCTestCase {
         return (0 ..< n).map { Float(0.5 * sin(2.0 * .pi * freq * Double($0) / Double(sr))) }
     }
 
+#if canImport(AVFoundation)
+    private func makeM4A(_ samples: [Float], sampleRate: Int = 16_000) throws -> Data {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-audio-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("tone.m4a")
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: Double(sampleRate),
+            AVNumberOfChannelsKey: 1,
+        ]
+        do {
+            let file = try AVAudioFile(forWriting: url, settings: settings)
+            guard let format = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: Double(sampleRate),
+                channels: 1,
+                interleaved: false),
+                  let buffer = AVAudioPCMBuffer(
+                    pcmFormat: format,
+                    frameCapacity: AVAudioFrameCount(samples.count)) else {
+                throw MultimodalPreprocessingError.audioPreprocessingUnavailable
+            }
+            buffer.frameLength = AVAudioFrameCount(samples.count)
+            guard let ch = buffer.floatChannelData?[0] else {
+                throw MultimodalPreprocessingError.audioPreprocessingUnavailable
+            }
+            for (i, sample) in samples.enumerated() { ch[i] = sample }
+            try file.write(from: buffer)
+        }
+        return try Data(contentsOf: url)
+    }
+#endif
+
     func testMelShapeAndTokenCadenceForOneSecond() throws {
         let wav = makeWAV(sine(seconds: 1.0))
         let f = try AudioPreprocessor.features(fromWAV: wav)
@@ -42,6 +80,26 @@ final class AudioPreprocessorTests: XCTestCase {
         XCTAssertGreaterThan(f.mel.dim(1), 0)
         // 1000 ms / 40 ms-per-token = 25 soft tokens.
         XCTAssertEqual(f.numTokens, 25)
+    }
+
+    func testGenericAudioDecoderHandlesWAVAndM4A() throws {
+        let samples = sine(seconds: 1.0)
+        let wav = makeWAV(samples)
+        let wavFeatures = try AudioPreprocessor.features(fromAudio: wav)
+        XCTAssertEqual(wavFeatures.numTokens, 25)
+        XCTAssertEqual(wavFeatures.mel.dim(2), AudioPreprocessor.melBins)
+
+#if canImport(AVFoundation)
+        let m4a: Data
+        do {
+            m4a = try makeM4A(samples)
+        } catch {
+            throw XCTSkip("M4A encoder unavailable in this environment: \(error)")
+        }
+        let m4aFeatures = try AudioPreprocessor.features(fromAudio: m4a)
+        XCTAssertEqual(m4aFeatures.numTokens, 25)
+        XCTAssertEqual(m4aFeatures.mel.dim(2), AudioPreprocessor.melBins)
+#endif
     }
 
     func testTokenCadenceScalesAndCapsAt750() throws {
@@ -90,9 +148,8 @@ final class AudioPreprocessorTests: XCTestCase {
         XCTAssertThrowsError(try AudioPreprocessor.features(fromWAV: Data([0, 1, 2, 3])))
     }
 
-    /// PR #21 review P1: the native frontend is WAV-only; `isWAV` lets the
-    /// server keep mp3/flac/ogg/m4a on the bridge instead of silently
-    /// dropping the audio and answering as text-only.
+    /// `isWAV` keeps the exact PCM decoder path available for RIFF/WAVE while
+    /// non-WAV containers go through the platform decoder.
     func testIsWAVDiscriminatesContainers() {
         XCTAssertTrue(AudioPreprocessor.isWAV(makeWAV(sine(seconds: 0.05))))
         XCTAssertFalse(AudioPreprocessor.isWAV(Data()))

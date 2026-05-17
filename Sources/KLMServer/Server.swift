@@ -4,7 +4,6 @@ import NIOPosix
 import NIOHTTP1
 import Logging
 import KLMEngine
-import KLMCore
 import KLMRegistry
 import KLMSampler
 
@@ -197,26 +196,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return try? Data(contentsOf: URL(fileURLWithPath: path))
     }
 
-    /// True iff the file looks like a RIFF/WAVE container. The native audio
-    /// frontend is WAV-PCM-only; mp3/flac/ogg/m4a payloads (which the
-    /// server still accepts) must stay on the `mlx-vlm` bridge that can
-    /// decode them, instead of being silently dropped (PR #21 review P1).
-    static func audioIsNativeWAV(_ path: String?) -> Bool {
-        guard let path,
-              let fh = FileHandle(forReadingAtPath: path) else { return false }
-        defer { try? fh.close() }
-        guard let head = try? fh.read(upToCount: 12) else { return false }
-        return AudioPreprocessor.isWAV(head)
-    }
-
-    /// Audio routes natively only when the model+flag select it AND the
-    /// payload is WAV the native frontend can actually decode; otherwise
-    /// the bridge handles it (or, if the bridge is unavailable, the native
-    /// path surfaces an explicit decode error rather than text-only).
+    /// Audio routes natively when the model+flag select it. Container decode
+    /// happens in KLMCore before the shared USM preprocessing pipeline, so
+    /// accepted formats are not artificially limited to WAV.
     func audioRoutesNative(_ media: DecodedMedia?) -> Bool {
         guard let media, media.audioPath != nil else { return false }
         return engine.canUseNativeAudio
-            && Self.audioIsNativeWAV(media.audioPath)
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -1148,6 +1133,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         nonisolated(unsafe) let ctx = context
         let eng = engine
         let imageData = Self.loadDataIfPath(media?.imagePath)
+        let audioData = Self.loadDataIfPath(media?.audioPath)
         let mediaCopy = media
 
         Task {
@@ -1168,7 +1154,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             let (tokenStream, _) = eng.generate(
                 messages: messages,
                 params: params, maxTokens: maxTokens,
-                imageData: imageData, contextLimit: contextLimit)
+                imageData: imageData, audioData: audioData,
+                contextLimit: contextLimit)
 
             let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
 
@@ -1209,6 +1196,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         nonisolated(unsafe) let ctx = context
         let eng = engine
         let imageData = Self.loadDataIfPath(media?.imagePath)
+        let audioData = Self.loadDataIfPath(media?.audioPath)
         let mediaCopy = media
 
         Task {
@@ -1218,7 +1206,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             let (tokenStream, getStats) = eng.generate(
                 messages: messages,
                 params: params, maxTokens: maxTokens,
-                imageData: imageData, contextLimit: contextLimit)
+                imageData: imageData, audioData: audioData,
+                contextLimit: contextLimit)
 
             var fullContent = ""
             for await event in tokenStream {

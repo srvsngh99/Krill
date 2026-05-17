@@ -255,17 +255,17 @@ public final class InferenceEngine: @unchecked Sendable {
         let nativeAudio: AudioPreprocessor.Features?
         if nativeAudioChosen, let aud = audioData {
             do {
-                nativeAudio = try AudioPreprocessor.features(fromWAV: aud)
+                nativeAudio = try AudioPreprocessor.features(fromAudio: aud)
             } catch {
                 // The native path was selected for this audio request but
-                // decoding failed (corrupt/truncated WAV, or a non-WAV
-                // payload that slipped past the server's WAV gate). Fail
-                // LOUDLY — never silently drop the audio and answer the
-                // prompt as if it were text-only (PR #21 review P1).
-                let msg = "Error: native audio decode failed (WAV PCM 16/32-bit required; non-WAV formats use the mlx-vlm bridge): \(error)"
+                // decoding failed. Fail loudly: never silently drop the audio
+                // and answer the prompt as if it were text-only.
+                let msg = "Error: native audio decode failed: \(error)"
                 let errStream = AsyncStream<TokenEvent> { continuation in
                     continuation.yield(TokenEvent(
-                        tokenId: 0, text: msg, elapsed: 0, isEnd: true))
+                        tokenId: 0, text: msg, elapsed: 0, isEnd: false))
+                    continuation.yield(TokenEvent(
+                        tokenId: 0, text: "", elapsed: 0, isEnd: true))
                     continuation.finish()
                 }
                 return (errStream, { nil })
