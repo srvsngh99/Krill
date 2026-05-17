@@ -16,11 +16,13 @@ Gemma 4 (`gemma-4-e2b`):
 
 | Path | Text | Image | Audio |
 |------|------|-------|-------|
-| CLI native | Supported | Supported | — |
+| CLI native | Supported | Supported | Implemented, opt-in [^native-audio] |
 | CLI bridge | — | — | Supported (mlx-vlm) |
-| Server | Supported | Supported (Gemma 4 only) | Supported (Gemma 4 only) [^audio-bridge] |
+| Server | Supported | Supported (Gemma 4 only) | Default bridge; native opt-in (Gemma 4) [^audio-bridge] [^native-audio] |
 
-[^audio-bridge]: Server-side audio uses the same `mlx-vlm` Python bridge as the CLI; install with `make setup-mlx-vlm`. Image input on the server runs through the native Swift SigLIP2 path.
+[^audio-bridge]: Server-side audio defaults to the same `mlx-vlm` Python bridge as the CLI; install with `make setup-mlx-vlm`. Image input on the server runs through the native Swift SigLIP2 path.
+
+[^native-audio]: A native Swift+MLX Gemma 4 USM Conformer audio path (`Sources/KLMCore/AudioPreprocessor.swift` + `AudioEncoder.swift`) is implemented and unit/shape-tested. It is **opt-in** via `KRILL_NATIVE_AUDIO=1` (`KRILL_AUDIO_BRIDGE_ONLY=1` forces the bridge) pending live numerical validation against the `mlx-vlm` oracle on the M4 target; until then the bridge remains the default and the `strict` audio metric is unchanged. No production voice claim. See [`docs/NATIVE_GEMMA4_AUDIO_PLAN.md`](docs/NATIVE_GEMMA4_AUDIO_PLAN.md).
 
 All other model families (Llama, Qwen, Mistral, Gemma 2, Phi, GLM-4) are text-only on both CLI and server.
 

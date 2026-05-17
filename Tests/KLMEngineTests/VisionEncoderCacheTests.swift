@@ -135,12 +135,12 @@ final class VisionEncoderCacheTests: XCTestCase {
         let dummyTokens = MLXArray([Int32(0)]).reshaped(1, 1)
 
         mmModel.visionCache.resetCounters()
-        let logitsA = mmForward(dummyTokens, nil, pixels, nil, hash)
+        let logitsA = mmForward(dummyTokens, nil, pixels, nil, nil, hash)
         MLX.eval(logitsA)
         XCTAssertEqual(mmModel.visionCache.misses, 1)
         XCTAssertEqual(mmModel.visionCache.hits, 0)
 
-        let logitsB = mmForward(dummyTokens, nil, pixels, nil, hash)
+        let logitsB = mmForward(dummyTokens, nil, pixels, nil, nil, hash)
         MLX.eval(logitsB)
         XCTAssertEqual(mmModel.visionCache.hits, 1, "second call should be a cache hit")
 
@@ -152,7 +152,7 @@ final class VisionEncoderCacheTests: XCTestCase {
 
         // Two different hashes should both populate the cache.
         let altHash = "deadbeef" + String(repeating: "0", count: 56)
-        _ = mmForward(dummyTokens, nil, pixels, nil, altHash)
+        _ = mmForward(dummyTokens, nil, pixels, nil, nil, altHash)
         XCTAssertEqual(mmModel.visionCache.count, 2)
     }
 }

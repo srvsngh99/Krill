@@ -1,8 +1,44 @@
 # Native Gemma 4 Audio Implementation Plan
 
 Created: 2026-05-17
-Status: implementation handoff
+Status: WS1-5 implemented (native path behind `KRILL_NATIVE_AUDIO`,
+opt-in); WS6 pending live numerical validation on the M4 target
 Owner: unassigned
+
+## Implementation Status (2026-05-17)
+
+- **WS1 Discovery — DONE.** `audio_config`, `audio_tower.*` /
+  `embed_audio.*` keys+shapes, USM feature-extractor defaults, and the
+  weight-key map are documented in `docs/GEMMA4_INTERNALS.md` ("Audio
+  Encoder"), cross-checked against the `mlx-vlm` oracle.
+- **WS2 Preprocessing — DONE.** `Sources/KLMCore/AudioPreprocessor.swift`
+  is an exact Swift port of `Gemma4AudioFeatureExtractor` defaults
+  (mono 16 kHz, semicausal pad, periodic-Hann STFT rfft 512, HTK mel
+  257x128, `log(.+1e-3)`, pad-frame zeroing, `ceil(ms/40)` cap 750).
+  Unit-tested (`AudioPreprocessorTests`, 7 tests).
+- **WS3 Audio tower — DONE.** `Sources/KLMCore/AudioEncoder.swift`
+  rewritten from the placeholder into the real USM Conformer (SSCP conv
+  subsampling, 12 macaron blocks, chunked relative-position attention
+  with logit softcap, causal lightweight conv, `output_proj`); module
+  keys mirror `audio_tower.*` exactly. Fixed a dormant ModelLoader
+  conv-weight transpose that corrupted the already-MLX-layout mlx-vlm
+  conv tensors. Full-graph shape tests (`AudioEncoderShapeTests`).
+- **WS4 Integration — DONE.** `audio_tower` + `embed_audio` wired into
+  `Gemma4MultimodalModel` with a combined image+audio native forward;
+  `LoadedModel.multimodalForward` extended to carry audio mel+mask;
+  engine emits the matching `<|audio|>` count; CLI and all three server
+  multimodal handlers route audio natively when `KRILL_NATIVE_AUDIO=1`,
+  else bridge. `KRILL_AUDIO_BRIDGE_ONLY=1` forces the oracle.
+- **WS5 Tests — DONE (unit) / live gated.** 216 Swift tests green
+  (+13). Live native-audio E2E test is `KLM_GEMMA4_MODEL_PATH`-gated
+  (skips in CI).
+- **WS6 Benchmark/gate — PENDING.** Requires running native audio on
+  the real Gemma 4 E2B checkpoint on the M4 target vs the `mlx-vlm`
+  oracle and Ollama to numerically validate parity, then flipping the
+  default and re-scoping the `strict` audio metric. Until that lands
+  native audio stays **opt-in** and `release_candidate` is unchanged
+  (audio still bridge-backed `out_of_scope`); no gate is weakened and
+  no production voice claim is made.
 
 ## Goal
 
