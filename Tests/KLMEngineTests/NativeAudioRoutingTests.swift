@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import KLMCore
 @testable import KLMEngine
 
 /// WS5 routing tests: the native-vs-bridge decision flag, plus a
@@ -67,12 +68,32 @@ final class NativeAudioRoutingTests: XCTestCase {
                       "native audio path must be active with the flag on")
 
         let audioData = try Data(contentsOf: wav)
-        let (stream, _) = engine.generate(
-            prompt: "What do you hear in this audio?",
-            maxTokens: 16, imageData: nil, audioData: audioData)
-        var out = ""
-        for await ev in stream { out += ev.text; if ev.isEnd { break } }
-        XCTAssertFalse(out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                       "native audio produced empty output")
+
+        // Prove the native frontend actually decodes this fixture (so a
+        // silent text-only fallback can't masquerade as a pass).
+        let feats = try AudioPreprocessor.features(fromWAV: audioData)
+        XCTAssertGreaterThan(feats.numTokens, 0)
+        XCTAssertEqual(feats.mel.dim(2), AudioPreprocessor.melBins)
+
+        let prompt = "What do you hear in this audio?"
+        func run(_ audio: Data?) async -> String {
+            let (stream, _) = engine.generate(
+                prompt: prompt, maxTokens: 24,
+                imageData: nil, audioData: audio)
+            var out = ""
+            for await ev in stream { out += ev.text; if ev.isEnd { break } }
+            return out.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let withAudio = await run(audioData)
+        let textOnly = await run(nil)
+
+        XCTAssertFalse(withAudio.isEmpty, "native audio produced empty output")
+        // If audio were silently dropped, greedy decoding of the identical
+        // prompt would yield identical text. Different output proves the
+        // audio embeddings actually conditioned generation.
+        XCTAssertNotEqual(withAudio, textOnly,
+            "audio-conditioned output must differ from the text-only answer; "
+            + "identical output means the native audio path did not run")
     }
 }

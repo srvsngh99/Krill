@@ -46,6 +46,16 @@ public enum AudioPreprocessor {
         public let numTokens: Int
     }
 
+    /// True iff `data` begins with a RIFF/WAVE header. The native frontend
+    /// is WAV-PCM-only; callers use this to keep non-WAV codecs
+    /// (mp3/flac/ogg/m4a) on the `mlx-vlm` bridge instead of failing here.
+    public static func isWAV(_ data: Data) -> Bool {
+        guard data.count >= 12 else { return false }
+        let b = [UInt8](data.prefix(12))
+        return b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46
+            && b[8] == 0x57 && b[9] == 0x41 && b[10] == 0x56 && b[11] == 0x45
+    }
+
     /// Decode WAV bytes and produce native audio features.
     public static func features(fromWAV wavData: Data) throws -> Features {
         let (raw, fileSR) = try loadWAV(from: wavData)

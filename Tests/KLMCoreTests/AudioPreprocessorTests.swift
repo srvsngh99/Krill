@@ -89,4 +89,20 @@ final class AudioPreprocessorTests: XCTestCase {
         XCTAssertThrowsError(try AudioPreprocessor.features(waveform: []))
         XCTAssertThrowsError(try AudioPreprocessor.features(fromWAV: Data([0, 1, 2, 3])))
     }
+
+    /// PR #21 review P1: the native frontend is WAV-only; `isWAV` lets the
+    /// server keep mp3/flac/ogg/m4a on the bridge instead of silently
+    /// dropping the audio and answering as text-only.
+    func testIsWAVDiscriminatesContainers() {
+        XCTAssertTrue(AudioPreprocessor.isWAV(makeWAV(sine(seconds: 0.05))))
+        XCTAssertFalse(AudioPreprocessor.isWAV(Data()))
+        XCTAssertFalse(AudioPreprocessor.isWAV(Data([0, 1, 2, 3])))
+        // ID3-tagged MP3 header.
+        XCTAssertFalse(AudioPreprocessor.isWAV(Data("ID3\u{04}\u{00}\u{00}\u{00}\u{00}\u{00}\u{00}\u{00}\u{00}".utf8)))
+        // RIFF but not WAVE (e.g. AVI) must be rejected.
+        var riffNotWave = Data("RIFF".utf8)
+        riffNotWave.append(Data([0, 0, 0, 0]))
+        riffNotWave.append(Data("AVI ".utf8))
+        XCTAssertFalse(AudioPreprocessor.isWAV(riffNotWave))
+    }
 }

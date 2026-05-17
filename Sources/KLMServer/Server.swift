@@ -4,6 +4,7 @@ import NIOPosix
 import NIOHTTP1
 import Logging
 import KLMEngine
+import KLMCore
 import KLMRegistry
 import KLMSampler
 
@@ -194,6 +195,28 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     static func loadDataIfPath(_ path: String?) -> Data? {
         guard let path else { return nil }
         return try? Data(contentsOf: URL(fileURLWithPath: path))
+    }
+
+    /// True iff the file looks like a RIFF/WAVE container. The native audio
+    /// frontend is WAV-PCM-only; mp3/flac/ogg/m4a payloads (which the
+    /// server still accepts) must stay on the `mlx-vlm` bridge that can
+    /// decode them, instead of being silently dropped (PR #21 review P1).
+    static func audioIsNativeWAV(_ path: String?) -> Bool {
+        guard let path,
+              let fh = FileHandle(forReadingAtPath: path) else { return false }
+        defer { try? fh.close() }
+        guard let head = try? fh.read(upToCount: 12) else { return false }
+        return AudioPreprocessor.isWAV(head)
+    }
+
+    /// Audio routes natively only when the model+flag select it AND the
+    /// payload is WAV the native frontend can actually decode; otherwise
+    /// the bridge handles it (or, if the bridge is unavailable, the native
+    /// path surfaces an explicit decode error rather than text-only).
+    func audioRoutesNative(_ media: DecodedMedia?) -> Bool {
+        guard let media, media.audioPath != nil else { return false }
+        return engine.canUseNativeAudio
+            && Self.audioIsNativeWAV(media.audioPath)
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -533,7 +556,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         if let media = decodedMedia, media.audioPath != nil,
-           !engine.canUseNativeAudio {
+           !audioRoutesNative(media) {
             // Audio -> Python bridge fallback. With KRILL_NATIVE_AUDIO=1 the
             // native Swift+MLX path handles it inline (see eng.generate).
             handleBridgeChat(
@@ -1420,7 +1443,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         if let media = decodedMedia, media.audioPath != nil,
-           !engine.canUseNativeAudio {
+           !audioRoutesNative(media) {
             handleBridgeChat(
                 context: context,
                 messages: request.messages,
@@ -1622,7 +1645,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         if let media = decodedMedia, media.audioPath != nil,
-           !engine.canUseNativeAudio {
+           !audioRoutesNative(media) {
             // Audio path: bridge through Python (entire request, even with
             // image). Native Swift+MLX audio (KRILL_NATIVE_AUDIO=1) instead
             // falls through to the native generate path below.

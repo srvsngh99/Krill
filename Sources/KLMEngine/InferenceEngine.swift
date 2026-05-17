@@ -247,13 +247,32 @@ public final class InferenceEngine: @unchecked Sendable {
         // become silently text-only.
         // Native audio: decode WAV -> log-mel + validity once, up front, so
         // the `<|audio|>` placeholder count matches the encoder frame count.
-        // Disabled (nil) unless the model is audio-capable and the native
-        // flag is on; otherwise audio stays on the bridge (server level).
-        let nativeAudio: AudioPreprocessor.Features? = {
-            guard let aud = audioData, canUseNativeAudio,
-                  loadedModel.family == "gemma4" else { return nil }
-            return try? AudioPreprocessor.features(fromWAV: aud)
-        }()
+        // The native frontend is selected only when the model is
+        // audio-capable and the native flag is on; otherwise audio stays on
+        // the bridge (server level).
+        let nativeAudioChosen = audioData != nil && canUseNativeAudio
+            && loadedModel.family == "gemma4"
+        let nativeAudio: AudioPreprocessor.Features?
+        if nativeAudioChosen, let aud = audioData {
+            do {
+                nativeAudio = try AudioPreprocessor.features(fromWAV: aud)
+            } catch {
+                // The native path was selected for this audio request but
+                // decoding failed (corrupt/truncated WAV, or a non-WAV
+                // payload that slipped past the server's WAV gate). Fail
+                // LOUDLY — never silently drop the audio and answer the
+                // prompt as if it were text-only (PR #21 review P1).
+                let msg = "Error: native audio decode failed (WAV PCM 16/32-bit required; non-WAV formats use the mlx-vlm bridge): \(error)"
+                let errStream = AsyncStream<TokenEvent> { continuation in
+                    continuation.yield(TokenEvent(
+                        tokenId: 0, text: msg, elapsed: 0, isEnd: true))
+                    continuation.finish()
+                }
+                return (errStream, { nil })
+            }
+        } else {
+            nativeAudio = nil
+        }
 
         let preparedMessages = injectMediaPlaceholders(
             into: messages, imageData: imageData, audioData: audioData,
