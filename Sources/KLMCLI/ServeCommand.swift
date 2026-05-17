@@ -13,18 +13,29 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Model to pre-load (name or path)")
     var model: String?
 
-    @Option(name: .long, help: "Port to listen on")
-    var port: Int = 11435
+    @Option(name: .long, help: "Port to listen on (default: $OLLAMA_HOST port / config / 11435)")
+    var port: Int?
 
-    @Option(name: .long, help: "Host to bind to")
-    var host: String = "127.0.0.1"
+    @Option(name: .long, help: "Host to bind to (default: $OLLAMA_HOST / config / 127.0.0.1)")
+    var host: String?
 
     @Option(name: .long, help: "Client compat surface: ollama | openai | both (default both). For an Ollama drop-in also pass --port 11434.")
     var compat: String = "both"
 
     func run() async throws {
-        let registry = Registry()
+        // Precedence (CLI flag > env > config.toml > default): KrillConfig.load()
+        // already folds OLLAMA_HOST/OLLAMA_MODELS (and KRILL_* which win over
+        // them) into serverHost/serverPort/modelsDir; an explicit CLI flag,
+        // when present, still overrides everything.
         let config = KrillConfig.load()
+        let host = self.host ?? config.serverHost
+        let port = self.port ?? config.serverPort
+        let registry: Registry
+        if let md = config.modelsDir, !md.isEmpty {
+            registry = Registry(modelsDir: URL(fileURLWithPath: md))
+        } else {
+            registry = Registry()
+        }
 
         let engine: InferenceEngine
 
