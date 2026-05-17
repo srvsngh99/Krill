@@ -695,7 +695,14 @@ What landed:
    whenever a request is in flight, so neither `keep_alive:0` nor an
    elapsed deadline can unload the model mid-generation. A bare
    `keep_alive:0` ping with nothing in flight still evicts (Ollama
-   unload-ping parity).
+   unload-ping parity). **PR #20 review P1 follow-up:** the model hold
+   is now registered at request *acceptance* (`beginRequest()` before
+   `genQueue.enter()`, balanced on the 503 path), and `leaveQueue()`
+   releases the queue slot before dropping the hold. A request accepted
+   while the model was loaded but still queued behind another request
+   therefore counts as a hold, so `inFlight` never transiently hits 0
+   in the slot-handoff window and the evictor cannot unload between a
+   draining request and its queued successor.
 2. **`serve` honors `OLLAMA_HOST` / `OLLAMA_MODELS`.** `ServeCommand`'s
    `--host`/`--port` became optional and now fall back to
    `KrillConfig` (which already folds `OLLAMA_HOST`→host:port and
