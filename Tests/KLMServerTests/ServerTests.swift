@@ -188,6 +188,24 @@ final class ServerTests: XCTestCase {
         XCTAssertTrue(evict, "evicts once the active request has drained")
     }
 
+    /// PR #20 review P1: a request accepted while the model was loaded but
+    /// still queued behind another request must keep the model loaded. With
+    /// the hold registered at acceptance (before queueing), inFlight never
+    /// hits 0 — and thus the evictor can't unload — until *every* accepted
+    /// request, queued ones included, has drained.
+    func testKeepAliveZeroWaitsForQueuedRequestNotJustActiveOne() async {
+        let c = KeepAliveController(defaultSeconds: 300)
+        await c.beginRequest()                 // A: active
+        await c.beginRequest()                 // B: accepted, queued behind A
+        await c.touch(override: 0)             // client asked keep_alive:0
+        await c.endRequest()                   // A drains; B still queued
+        var evict = await c.shouldEvict()
+        XCTAssertFalse(evict, "queued request B must still hold the model")
+        await c.endRequest()                   // B drains too
+        evict = await c.shouldEvict()
+        XCTAssertTrue(evict, "evicts only once the whole accepted set drains")
+    }
+
     /// An elapsed deadline must also not evict a model out from under an
     /// in-flight request.
     func testKeepAliveDeadlineDoesNotEvictDuringActiveRequest() async {

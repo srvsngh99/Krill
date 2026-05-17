@@ -343,11 +343,21 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     /// parallel.
     private func enterQueueOr503(_ ctx: ChannelHandlerContext,
                                  _ eventLoop: EventLoop) async -> Bool {
+        // Register the model hold BEFORE queueing (PR #20 review P1): a
+        // request accepted while the model is loaded must keep it loaded
+        // even while it waits behind another request. If beginRequest() ran
+        // only after genQueue.enter() returned, a waiter would not count as
+        // a hold; when the active request drained, inFlight could hit 0 with
+        // keep_alive:0 / an elapsed deadline armed and the background evictor
+        // could unload the model in the slot-handoff window — the resumed
+        // waiter would then generate against an unloaded engine. Holding
+        // from acceptance keeps inFlight >= 1 for the whole accepted set.
+        await keepAlive.beginRequest()
         do {
             try await genQueue.enter()
-            await keepAlive.beginRequest()
             return true
         } catch {
+            await keepAlive.endRequest()   // rejected: balance the hold
             sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
                            status: .serviceUnavailable,
                            body: ["error": "server busy: max queue exceeded (KRILL_MAX_QUEUE)"])
@@ -358,21 +368,26 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private func leaveQueue() {
         let q = genQueue
         let ka = keepAlive
-        // endRequest() before leave(): the model's hold is released only
-        // after this request fully drains, so keep_alive:0 / an elapsed
-        // deadline can never evict mid-generation (PR #18 rereview).
-        Task { await ka.endRequest(); await q.leave() }
+        // Release the queue slot first so the next waiter resumes, then drop
+        // this request's hold. Any queued waiter already holds its own
+        // beginRequest()-registered hold (taken before it queued), so
+        // inFlight never transiently hits 0 during the handoff and the
+        // evictor can't unload between requests (PR #20 review P1).
+        Task { await q.leave(); await ka.endRequest() }
     }
 
     /// Slot acquire that just returns success/failure (for streaming paths
     /// whose 200 head is already on the wire, so a JSON 503 is impossible -
     /// the caller closes the stream with a terminal error instead).
     private func tryEnterQueue() async -> Bool {
+        await keepAlive.beginRequest()     // hold from acceptance (P1)
         do {
             try await genQueue.enter()
-            await keepAlive.beginRequest()
             return true
-        } catch { return false }
+        } catch {
+            await keepAlive.endRequest()   // rejected: balance the hold
+            return false
+        }
     }
 
     /// Apply a created model's Modelfile `PARAMETER` overrides (WS-C) as
