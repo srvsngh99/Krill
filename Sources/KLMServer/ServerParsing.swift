@@ -817,18 +817,25 @@ internal enum ServerParsing {
 }
 
 internal enum ServerResponseHeads {
-    static func ollamaStreaming(version: HTTPVersion = .http1_1) -> HTTPResponseHead {
+    /// `cors` carries the per-request CORS grant (from `corsHeaders()`); it
+    /// must be applied to streaming heads too, not only JSON ones, so
+    /// browser clients can consume `stream:true` responses (PR #18 rereview).
+    static func ollamaStreaming(version: HTTPVersion = .http1_1,
+                                cors: [(String, String)] = []) -> HTTPResponseHead {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/x-ndjson")
         headers.add(name: "Transfer-Encoding", value: "chunked")
+        for (k, v) in cors { headers.add(name: k, value: v) }
         return HTTPResponseHead(version: version, status: .ok, headers: headers)
     }
 
-    static func openAIStreaming(version: HTTPVersion = .http1_1) -> HTTPResponseHead {
+    static func openAIStreaming(version: HTTPVersion = .http1_1,
+                                cors: [(String, String)] = []) -> HTTPResponseHead {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "text/event-stream")
         headers.add(name: "Cache-Control", value: "no-cache")
         headers.add(name: "Connection", value: "keep-alive")
+        for (k, v) in cors { headers.add(name: k, value: v) }
         return HTTPResponseHead(version: version, status: .ok, headers: headers)
     }
 }

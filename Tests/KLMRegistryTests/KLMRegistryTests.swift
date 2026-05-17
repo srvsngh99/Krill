@@ -103,11 +103,12 @@ final class KLMRegistryTests: XCTestCase {
         setenv("OLLAMA_NUM_PARALLEL", "3", 1)
         setenv("OLLAMA_ORIGINS", "https://a.com, https://b.com", 1)
         setenv("OLLAMA_HOST", "http://0.0.0.0:12345", 1)
+        setenv("OLLAMA_MODELS", "/tmp/ollama-models", 1)
         setenv("KRILL_CONTEXT_LENGTH", "8192", 1)  // KRILL_* must win
         defer {
             for k in ["OLLAMA_CONTEXT_LENGTH", "OLLAMA_KEEP_ALIVE",
                       "OLLAMA_NUM_PARALLEL", "OLLAMA_ORIGINS", "OLLAMA_HOST",
-                      "KRILL_CONTEXT_LENGTH"] { unsetenv(k) }
+                      "OLLAMA_MODELS", "KRILL_CONTEXT_LENGTH"] { unsetenv(k) }
         }
         let cfg = KrillConfig.load()
         XCTAssertEqual(cfg.contextLength, 8192)          // KRILL_ over OLLAMA_
@@ -116,6 +117,24 @@ final class KLMRegistryTests: XCTestCase {
         XCTAssertEqual(cfg.origins, ["https://a.com", "https://b.com"])
         XCTAssertEqual(cfg.serverHost, "0.0.0.0")
         XCTAssertEqual(cfg.serverPort, 12345)
+        XCTAssertEqual(cfg.modelsDir, "/tmp/ollama-models")  // OLLAMA_MODELS
+    }
+
+    func testRegistryModelsDirOverrideRootsManifestsAndBlobs() {
+        // OLLAMA_MODELS / KRILL_MODELS_DIR points directly at the models dir;
+        // manifests/blobs must root there exactly (Ollama drop-in layout),
+        // not under `<dir>/models`.
+        let md = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-md-\(UUID().uuidString)")
+        let reg = Registry(modelsDir: md)
+        XCTAssertEqual(reg.modelsDir, md)
+        XCTAssertEqual(reg.manifestsDir, md.appendingPathComponent("manifests"))
+        XCTAssertEqual(reg.blobsDir, md.appendingPathComponent("blobs"))
+        // Default path (no override) still derives `<base>/models`.
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-base-\(UUID().uuidString)")
+        let def = Registry(baseDir: base)
+        XCTAssertEqual(def.modelsDir, base.appendingPathComponent("models"))
     }
 
     func testAliasMapResolvesKnownModel() {
