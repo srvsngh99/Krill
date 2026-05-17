@@ -25,10 +25,14 @@ public struct LoadedModel: @unchecked Sendable {
     /// boundary; passing a non-`KVCache` array to those families is a logic error caught by the engine.
     public let forward: (MLXArray, [KVCacheProtocol]?) -> MLXArray
 
-    /// Multimodal forward pass (tokens, caches, imageEmbeddings, audioEmbeddings, imageBytesHash) -> logits
-    /// Only set for models that support native multimodal (e.g. Gemma4).
-    /// `imageBytesHash` (when non-nil) keys the per-model vision encoder cache; pass nil to bypass.
-    public let multimodalForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, String?) -> MLXArray)?
+    /// Multimodal forward pass — only set for native-multimodal models
+    /// (Gemma 4). Arguments:
+    /// `(tokens, caches, pixelValues?, audioMel?, audioValidMask?, mediaHash?)`
+    /// where `audioMel` is `[1,T,128]` log-mel, `audioValidMask` is `[1,T]`
+    /// bool (true = real audio). `mediaHash` (when non-nil) keys the
+    /// per-model vision encoder cache; pass nil to bypass. Image and audio
+    /// may be supplied together (combined native path).
+    public let multimodalForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, MLXArray?, String?) -> MLXArray)?
 
     /// Vocab size for validation
     public let vocabSize: Int
@@ -173,7 +177,10 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
 
     // Use multimodal model if vision config is present
     if hasVisionConfig {
-        let model = Gemma4MultimodalModel(config, imageTokenId: imageTokenId, audioTokenId: audioTokenId)
+        let audioConfig = AudioConfig(from: rawConfig?["audio_config"] as? [String: Any])
+        let model = Gemma4MultimodalModel(
+            config, imageTokenId: imageTokenId, audioTokenId: audioTokenId,
+            audioConfig: audioConfig)
 
         // Quantize language model layers (exclude PLE and vision/audio towers)
         if let q = config.quantization {
@@ -203,17 +210,14 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
         // Tied embeddings: Gemma4 uses embed_tokens.as_linear() as the LM head.
         // No separate lm_head weights needed — the model reuses embed_tokens directly.
 
-        // Sanitize conv weights: PyTorch [out, in, kH, kW] -> MLX [out, kH, kW, in]
-        for key in flatWeights.keys {
-            if key.contains("subsample_conv_projection") && key.contains("conv.weight"),
-               let v = flatWeights[key], v.ndim == 4 {
-                flatWeights[key] = v.transposed(0, 2, 3, 1)
-            }
-            if key.contains("depthwise_conv1d.weight"),
-               let v = flatWeights[key], v.ndim == 3 {
-                flatWeights[key] = v.transposed(0, 2, 1)
-            }
-        }
+        // Audio conv weights ship in mlx-vlm/MLX channel-last layout already:
+        // Conv2d `subsample_conv_projection.*.conv.weight` is
+        // [C_out, kH, kW, C_in] (e.g. [128,3,3,1], [32,3,3,128]) and the
+        // depthwise `lconv1d.depthwise_conv1d.weight` is
+        // [C_out, kW, C_in/groups] ([1024,5,1]) — exactly what MLXNN.Conv2d
+        // and MLX.conv1d expect. No transpose (a prior PyTorch-layout
+        // transpose here corrupted these; it was dormant because the audio
+        // tower was never instantiated).
 
         let tuples = flatWeights.map { ($0.key, $0.value) }
         let nested = ModuleParameters.unflattened(tuples)
@@ -224,8 +228,11 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
             numLayers: config.numHiddenLayers,
             family: "gemma4",
             forward: { tokens, caches in model(tokens, caches: caches) },
-            multimodalForward: { tokens, caches, imageEmb, _, imageHash in
-                model(tokens, caches: caches, pixelValues: imageEmb, imageBytesHash: imageHash)
+            multimodalForward: { tokens, caches, imageEmb, audioMel, audioMask, mediaHash in
+                model(tokens, caches: caches,
+                      pixelValues: imageEmb,
+                      audioMel: audioMel, audioValidMask: audioMask,
+                      mediaHash: mediaHash)
             },
             vocabSize: config.vocabSize
         )

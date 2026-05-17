@@ -48,10 +48,27 @@ public final class InferenceEngine: @unchecked Sendable {
         loadedModel?.family == "gemma4" && loadedModel?.multimodalForward != nil
     }
 
-    /// Whether the loaded model can handle audio input (currently only via
-    /// Python bridge). Requires the same multimodal checkpoint as image input.
+    /// Whether the loaded model can handle audio input (native or bridge).
+    /// Requires the same multimodal checkpoint as image input.
     public var supportsAudio: Bool {
         loadedModel?.family == "gemma4" && loadedModel?.multimodalForward != nil
+    }
+
+    /// Native Swift+MLX audio is opt-in until numerically validated against
+    /// the `mlx-vlm` oracle on a real Gemma 4 checkpoint (see
+    /// `docs/NATIVE_GEMMA4_AUDIO_PLAN.md` WS5/WS6). `KRILL_NATIVE_AUDIO=1`
+    /// enables it; `KRILL_AUDIO_BRIDGE_ONLY=1` force-disables it (wins).
+    public static var nativeAudioEnabled: Bool {
+        let env = ProcessInfo.processInfo.environment
+        if env["KRILL_AUDIO_BRIDGE_ONLY"] == "1" { return false }
+        return env["KRILL_NATIVE_AUDIO"] == "1"
+    }
+
+    /// True when the loaded model can run audio through the native Swift
+    /// path right now (capable + flag on). Callers use this to choose
+    /// native vs the `mlx-vlm` bridge.
+    public var canUseNativeAudio: Bool {
+        supportsAudio && Self.nativeAudioEnabled
     }
 
     /// Model identifier for cache keying.
@@ -135,7 +152,8 @@ public final class InferenceEngine: @unchecked Sendable {
     func injectMediaPlaceholders(
         into messages: [[String: String]],
         imageData: Data?,
-        audioData: Data?
+        audioData: Data?,
+        audioTokenCount: Int = 1
     ) -> [[String: String]] {
         guard imageData != nil || audioData != nil else { return messages }
         var prefix = ""
@@ -143,7 +161,10 @@ public final class InferenceEngine: @unchecked Sendable {
             prefix += String(repeating: "<|image|>", count: computeImageTokenCount(imageData: img))
         }
         if audioData != nil {
-            prefix += "<|audio|>"
+            // Native audio scatters `audioTokenCount` encoder frames into
+            // exactly that many `<|audio|>` positions (mirrors the image
+            // path). Bridge fallback uses a single placeholder.
+            prefix += String(repeating: "<|audio|>", count: max(1, audioTokenCount))
         }
         var result = messages
         if let firstUserIndex = result.firstIndex(where: { $0["role"] == "user" }) {
@@ -224,8 +245,19 @@ public final class InferenceEngine: @unchecked Sendable {
         // (image_token_id=258880, audio_token_id=258881); without these tokens
         // the encoder output has nowhere to land and image/audio requests
         // become silently text-only.
+        // Native audio: decode WAV -> log-mel + validity once, up front, so
+        // the `<|audio|>` placeholder count matches the encoder frame count.
+        // Disabled (nil) unless the model is audio-capable and the native
+        // flag is on; otherwise audio stays on the bridge (server level).
+        let nativeAudio: AudioPreprocessor.Features? = {
+            guard let aud = audioData, canUseNativeAudio,
+                  loadedModel.family == "gemma4" else { return nil }
+            return try? AudioPreprocessor.features(fromWAV: aud)
+        }()
+
         let preparedMessages = injectMediaPlaceholders(
-            into: messages, imageData: imageData, audioData: audioData)
+            into: messages, imageData: imageData, audioData: audioData,
+            audioTokenCount: nativeAudio?.numTokens ?? 1)
 
         // Use direct token ID path for Gemma4 to avoid decode→re-encode
         // round-trip that loses special tokens (105, 106, 107).
@@ -289,6 +321,8 @@ public final class InferenceEngine: @unchecked Sendable {
         let shouldSpec = useSpeculative && specDecoder != nil && !useInt8KV
             && !params.penaltiesActive
         let capturedImageData = imageData
+        nonisolated(unsafe) let capturedAudioMel = nativeAudio?.mel
+        nonisolated(unsafe) let capturedAudioMask = nativeAudio?.validMask
 
         // int8 KV + prefix cache coexist via the quantized snapshot path
         // (PrefixCache.lookupQuantized / storeQuantized).
@@ -379,16 +413,27 @@ public final class InferenceEngine: @unchecked Sendable {
                 let inputArray = MLXArray(tokensToProcess.map { Int32($0) })
                     .reshaped(1, tokensToProcess.count)
 
-                // Multimodal prefill: if image data provided and model supports it,
-                // preprocess and pass pixel values through the vision encoder pipeline.
+                // Multimodal prefill: route image and/or native audio through
+                // the Swift encoder pipeline. Image and audio can be present
+                // together (single native pass, no bridge).
                 let prefillLogits: MLXArray
                 if let mmForward = capturedMultimodalForward,
-                   let imgData = capturedImageData,
-                   !cacheHit {
+                   !cacheHit,
+                   capturedImageData != nil || capturedAudioMel != nil {
                     do {
-                        let pixelValues = try preprocessImage(imgData)
-                        let imageHash = VisionEncoderCache.key(forImageBytes: imgData)
-                        prefillLogits = mmForward(inputArray, caches, pixelValues, nil, imageHash)
+                        var pixelValues: MLXArray? = nil
+                        var imageHash: String? = nil
+                        if let imgData = capturedImageData {
+                            pixelValues = try preprocessImage(imgData)
+                            // Only key the vision cache for pure-image
+                            // requests (combined audio bypasses the cache).
+                            imageHash = capturedAudioMel == nil
+                                ? VisionEncoderCache.key(forImageBytes: imgData)
+                                : nil
+                        }
+                        prefillLogits = mmForward(
+                            inputArray, caches, pixelValues,
+                            capturedAudioMel, capturedAudioMask, imageHash)
                     } catch {
                         // Fall back to text-only if preprocessing fails
                         prefillLogits = capturedForward(inputArray, caches)

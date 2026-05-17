@@ -594,12 +594,14 @@ public class MultimodalEmbedder: Module {
 ///   `language_model.*` — text model (Gemma4ForCausalLM)
 ///   `vision_tower.*` — SigLIP2 vision encoder
 ///   `embed_vision.*` — vision → language projection
-///   `audio_tower.*` — Conformer audio encoder (loaded but encoder rewrite pending)
+///   `audio_tower.*` — native USM Conformer audio encoder
 ///   `embed_audio.*` — audio → language projection
 public class Gemma4MultimodalModel: Module {
     @ModuleInfo(key: "language_model") var languageModel: Gemma4ForCausalLM
     @ModuleInfo(key: "vision_tower") var visionTower: VisionEncoder
     @ModuleInfo(key: "embed_vision") var embedVision: MultimodalEmbedder
+    @ModuleInfo(key: "audio_tower") var audioTower: AudioEncoder
+    @ModuleInfo(key: "embed_audio") var embedAudio: MultimodalEmbedder
 
     public let config: Gemma4Config
     public let imageTokenId: Int
@@ -608,13 +610,24 @@ public class Gemma4MultimodalModel: Module {
     // Per-instance cache: invalidated automatically when the model is unloaded.
     public let visionCache: VisionEncoderCache = VisionEncoderCache()
 
-    public init(_ config: Gemma4Config, imageTokenId: Int = 258880, audioTokenId: Int = 258881) {
+    public init(_ config: Gemma4Config, imageTokenId: Int = 258880,
+                audioTokenId: Int = 258881,
+                audioConfig: AudioConfig = AudioConfig()) {
         self.config = config
         self.imageTokenId = imageTokenId
         self.audioTokenId = audioTokenId
 
         _languageModel = ModuleInfo(
             wrappedValue: Gemma4ForCausalLM(config), key: "language_model")
+
+        _audioTower = ModuleInfo(
+            wrappedValue: AudioEncoder(audioConfig), key: "audio_tower")
+        _embedAudio = ModuleInfo(
+            wrappedValue: MultimodalEmbedder(
+                embeddingDim: audioConfig.outputProjDims,
+                textHiddenSize: config.hiddenSize,
+                eps: audioConfig.rmsNormEps),
+            key: "embed_audio")
 
         // Vision tower with config from vision_config
         _visionTower = ModuleInfo(
@@ -648,29 +661,54 @@ public class Gemma4MultimodalModel: Module {
         pixelValues: MLXArray? = nil,
         imageBytesHash: String? = nil
     ) -> MLXArray {
-        guard let pixels = pixelValues else {
+        callAsFunction(tokens, caches: caches, pixelValues: pixelValues,
+                       audioMel: nil, audioValidMask: nil,
+                       mediaHash: imageBytesHash)
+    }
+
+    /// Multimodal forward supporting image and/or native audio. `audioMel`
+    /// is `[1,T,128]` log-mel from `AudioPreprocessor`, `audioValidMask` is
+    /// `[1,T]` bool (true = real audio). When both image and audio are
+    /// present they run in one native Swift generation pass (no bridge).
+    public func callAsFunction(
+        _ tokens: MLXArray, caches: [KVCacheProtocol]? = nil,
+        pixelValues: MLXArray? = nil,
+        audioMel: MLXArray? = nil,
+        audioValidMask: MLXArray? = nil,
+        mediaHash: String? = nil
+    ) -> MLXArray {
+        if pixelValues == nil && audioMel == nil {
             return languageModel(tokens, caches: caches)
         }
 
-        let imageEmbeddings: MLXArray
-        if let key = imageBytesHash, let cached = visionCache.lookup(key) {
-            imageEmbeddings = cached
-        } else {
-            // Vision pipeline: pixels -> encoder -> projector -> embeddings
-            let visionFeatures = visionTower(pixels)
-            let computed = embedVision(visionFeatures)
-            if let key = imageBytesHash {
-                MLX.eval(computed)
-                visionCache.store(key, value: computed)
+        var imageEmbeddings: MLXArray? = nil
+        if let pixels = pixelValues {
+            if let key = mediaHash, let cached = visionCache.lookup(key) {
+                imageEmbeddings = cached
+            } else {
+                let computed = embedVision(visionTower(pixels))
+                // Only cache when this is a pure-image request (the hash is
+                // the image-bytes key); combined audio requests pass nil.
+                if let key = mediaHash, audioMel == nil {
+                    MLX.eval(computed)
+                    visionCache.store(key, value: computed)
+                }
+                imageEmbeddings = computed
             }
-            imageEmbeddings = computed
         }
 
-        // Inject into language model forward
+        var audioEmbeddings: MLXArray? = nil
+        if let mel = audioMel, let mask = audioValidMask {
+            let (enc, _) = audioTower(mel, validMask: mask)
+            audioEmbeddings = embedAudio(enc)
+        }
+
         return languageModel(
             tokens, caches: caches,
             imageEmbeddings: imageEmbeddings,
-            imageTokenId: imageTokenId)
+            audioEmbeddings: audioEmbeddings,
+            imageTokenId: imageTokenId,
+            audioTokenId: audioTokenId)
     }
 
     /// Number of transformer layers (for KV cache creation).

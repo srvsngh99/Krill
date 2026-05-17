@@ -532,8 +532,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             }
         }
 
-        if let media = decodedMedia, media.audioPath != nil {
-            // Audio (with or without image) -> Python bridge, non-streaming bridge response.
+        if let media = decodedMedia, media.audioPath != nil,
+           !engine.canUseNativeAudio {
+            // Audio -> Python bridge fallback. With KRILL_NATIVE_AUDIO=1 the
+            // native Swift+MLX path handles it inline (see eng.generate).
             handleBridgeChat(
                 context: context,
                 messages: request.messages,
@@ -696,6 +698,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         nonisolated(unsafe) let ctx = context
         let eng = engine
         let imageData = Self.loadDataIfPath(media?.imagePath)
+        let audioData = Self.loadDataIfPath(media?.audioPath)
         let mediaCopy = media
         let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
         let (params, maxTokens, toolCtx) = applyModelParams(
@@ -712,6 +715,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             let (tokenStream, getStats) = eng.generate(
                 messages: messages, params: params,
                 maxTokens: maxTokens, imageData: imageData,
+                audioData: audioData,
                 contextLimit: toolCtx)
 
             var full = ""
@@ -1415,7 +1419,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             }
         }
 
-        if let media = decodedMedia, media.audioPath != nil {
+        if let media = decodedMedia, media.audioPath != nil,
+           !engine.canUseNativeAudio {
             handleBridgeChat(
                 context: context,
                 messages: request.messages,
@@ -1438,6 +1443,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let eng = engine
         let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
         let imageData = Self.loadDataIfPath(decodedMedia?.imagePath)
+        let audioData = Self.loadDataIfPath(decodedMedia?.audioPath)
         let mediaCopy = decodedMedia
 
         let requestStart = CFAbsoluteTimeGetCurrent()
@@ -1474,6 +1480,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 params: ocParams,
                 maxTokens: ocMax,
                 imageData: imageData,
+                audioData: audioData,
                 contextLimit: ocCtx)
 
             if request.stream {
@@ -1614,9 +1621,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             }
         }
 
-        if let media = decodedMedia, media.audioPath != nil {
-            // Audio path: bridge through Python (entire request, even with image).
-            // Synthesize a single-message conversation for the bridge.
+        if let media = decodedMedia, media.audioPath != nil,
+           !engine.canUseNativeAudio {
+            // Audio path: bridge through Python (entire request, even with
+            // image). Native Swift+MLX audio (KRILL_NATIVE_AUDIO=1) instead
+            // falls through to the native generate path below.
             let messages: [[String: String]] = [
                 ["role": "user", "content": request.prompt]
             ]
@@ -1637,6 +1646,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         nonisolated(unsafe) let ctx = context
         let eng = engine
         let imageData = Self.loadDataIfPath(decodedMedia?.imagePath)
+        let audioData = Self.loadDataIfPath(decodedMedia?.audioPath)
         let mediaCopy = decodedMedia
 
         let requestStart = CFAbsoluteTimeGetCurrent()
@@ -1673,6 +1683,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 params: ogParams,
                 maxTokens: ogMax,
                 imageData: imageData,
+                audioData: audioData,
                 contextLimit: ogCtx)
 
             if request.stream {
