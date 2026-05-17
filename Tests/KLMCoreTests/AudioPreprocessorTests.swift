@@ -148,6 +148,22 @@ final class AudioPreprocessorTests: XCTestCase {
         XCTAssertThrowsError(try AudioPreprocessor.features(fromWAV: Data([0, 1, 2, 3])))
     }
 
+    /// PR #21 rereview P1b: undecodable bytes on the generic path must
+    /// throw — the engine turns this into a loud error stream rather than
+    /// a silent text-only answer. Covers a non-WAV garbage blob and a
+    /// RIFF/WAVE header with a corrupt body (isWAV true, decode fails).
+    func testGenericDecoderThrowsOnUndecodableAudio() {
+        XCTAssertThrowsError(
+            try AudioPreprocessor.features(fromAudio: Data([0, 1, 2, 3, 4])))
+        var corruptWav = Data("RIFF".utf8)
+        corruptWav.append(Data([0xff, 0xff, 0xff, 0xff]))
+        corruptWav.append(Data("WAVE".utf8))
+        corruptWav.append(Data(repeating: 0x7f, count: 8))   // no fmt/data
+        XCTAssertTrue(AudioPreprocessor.isWAV(corruptWav))
+        XCTAssertThrowsError(
+            try AudioPreprocessor.features(fromAudio: corruptWav))
+    }
+
     /// `isWAV` keeps the exact PCM decoder path available for RIFF/WAVE while
     /// non-WAV containers go through the platform decoder.
     func testIsWAVDiscriminatesContainers() {

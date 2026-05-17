@@ -71,6 +71,26 @@ public final class InferenceEngine: @unchecked Sendable {
         supportsAudio && Self.nativeAudioEnabled
     }
 
+    /// A generation stream that surfaces a hard pre-generation failure (e.g.
+    /// native audio decode error) so it is **never swallowed**. The message
+    /// is a NON-terminal content event followed by a SEPARATE terminal
+    /// event: consumers that break on `isEnd` before reading `text` (CLI,
+    /// non-streaming server loops) still receive the message in the prior
+    /// event, and streaming consumers emit it as a content chunk before the
+    /// final chunk. (PR #21 rereview P1b.)
+    static func mediaErrorStream(
+        _ message: String
+    ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
+        let stream = AsyncStream<TokenEvent> { continuation in
+            continuation.yield(TokenEvent(
+                tokenId: 0, text: message, elapsed: 0, isEnd: false))
+            continuation.yield(TokenEvent(
+                tokenId: 0, text: "", elapsed: 0, isEnd: true))
+            continuation.finish()
+        }
+        return (stream, { nil })
+    }
+
     /// Model identifier for cache keying.
     private var modelId: String { modelDirectory.lastPathComponent }
 
@@ -260,15 +280,8 @@ public final class InferenceEngine: @unchecked Sendable {
                 // The native path was selected for this audio request but
                 // decoding failed. Fail loudly: never silently drop the audio
                 // and answer the prompt as if it were text-only.
-                let msg = "Error: native audio decode failed: \(error)"
-                let errStream = AsyncStream<TokenEvent> { continuation in
-                    continuation.yield(TokenEvent(
-                        tokenId: 0, text: msg, elapsed: 0, isEnd: false))
-                    continuation.yield(TokenEvent(
-                        tokenId: 0, text: "", elapsed: 0, isEnd: true))
-                    continuation.finish()
-                }
-                return (errStream, { nil })
+                return Self.mediaErrorStream(
+                    "Error: native audio decode failed: \(error)")
             }
         } else {
             nativeAudio = nil

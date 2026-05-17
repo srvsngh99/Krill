@@ -96,4 +96,41 @@ final class NativeAudioRoutingTests: XCTestCase {
             "audio-conditioned output must differ from the text-only answer; "
             + "identical output means the native audio path did not run")
     }
+
+    /// PR #21 rereview P1b: with the native path selected, undecodable
+    /// audio must surface a loud decode error in the engine-visible
+    /// response — never a silent/empty "successful" text-only answer.
+    /// Consumed with the CLI/non-streaming idiom (break on `isEnd`).
+    func testLiveNativeAudioDecodeErrorIsSurfaced() async throws {
+        guard let path = ProcessInfo.processInfo.environment["KLM_GEMMA4_MODEL_PATH"],
+              !path.isEmpty else {
+            throw XCTSkip("KLM_GEMMA4_MODEL_PATH not set")
+        }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
+              isDir.boolValue else {
+            throw XCTSkip("KLM_GEMMA4_MODEL_PATH is not a directory")
+        }
+        setenv("KRILL_NATIVE_AUDIO", "1", 1)
+        defer { unsetenv("KRILL_NATIVE_AUDIO") }
+
+        let engine = InferenceEngine(modelDirectory: URL(fileURLWithPath: path))
+        try await engine.load()
+        XCTAssertTrue(engine.canUseNativeAudio)
+
+        // RIFF/WAVE header but a corrupt body: passes isWAV, fails decode.
+        var corrupt = Data("RIFF".utf8)
+        corrupt.append(Data([0xff, 0xff, 0xff, 0xff]))
+        corrupt.append(Data("WAVE".utf8))
+        corrupt.append(Data(repeating: 0x7f, count: 8))
+
+        let (stream, _) = engine.generate(
+            prompt: "What do you hear?", maxTokens: 24,
+            imageData: nil, audioData: corrupt)
+        // CLI/non-streaming idiom: break on isEnd BEFORE appending.
+        var out = ""
+        for await ev in stream { if ev.isEnd { break }; out += ev.text }
+        XCTAssertTrue(out.contains("native audio decode failed"),
+            "decode failure must be surfaced, not a silent text answer; got: \(out)")
+    }
 }
