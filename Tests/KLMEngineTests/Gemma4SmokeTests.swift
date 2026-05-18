@@ -118,4 +118,49 @@ final class Gemma4SmokeTests: XCTestCase {
         assertContainsAny(output, ["tone", "sine", "beep", "single", "steady", "continuous", "hum", "buzz"])
         assertContainsNone(output, ["dog", "bark", "music", "speech", "voice"])
     }
+
+    /// WS6 acceptance gate: native Swift+MLX audio must be **semantically
+    /// equivalent to the mlx-vlm oracle** on the deterministic sine fixture
+    /// — not merely non-empty. Runs both paths and holds the native output
+    /// to the SAME quality rubric the bridge satisfies above. This is the
+    /// numerical-validation check that must pass on the M4 target before
+    /// `KRILL_NATIVE_AUDIO` is flipped default-on and the bridge is retired.
+    /// Skips unless KLM_GEMMA4_MODEL_PATH + mlx-vlm + the fixture are present.
+    func testWS6NativeAudioMatchesBridgeOracleOnSineTone() async throws {
+        try requireMLXVLM()
+        let modelPath = try requireModel()
+        let audioPath = try requireAsset(named: "gemma4-sine-1khz-5s.wav")
+        let prompt = "What sound is in this audio? Answer briefly."
+        let expected = ["tone", "sine", "beep", "single", "steady",
+                        "continuous", "hum", "buzz"]
+        let forbidden = ["dog", "bark", "music", "speech", "voice"]
+
+        // Oracle (bridge).
+        let oracle = try await runFallback(
+            modelPath: modelPath, prompt: prompt,
+            audioPath: audioPath, maxTokens: 48)
+        XCTAssertFalse(oracle.isEmpty)
+        assertContainsAny(oracle, expected)
+        assertContainsNone(oracle, forbidden)
+
+        // Native Swift+MLX path.
+        setenv("KRILL_NATIVE_AUDIO", "1", 1)
+        defer { unsetenv("KRILL_NATIVE_AUDIO") }
+        let engine = InferenceEngine(modelDirectory: URL(fileURLWithPath: modelPath))
+        try await engine.load()
+        XCTAssertTrue(engine.canUseNativeAudio, "native audio must be active")
+        let audioData = try Data(contentsOf: URL(fileURLWithPath: audioPath))
+        let (stream, _) = engine.generate(
+            prompt: prompt, maxTokens: 48, imageData: nil, audioData: audioData)
+        var native = ""
+        for await ev in stream { native += ev.text; if ev.isEnd { break } }
+        native = native.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        XCTAssertFalse(native.isEmpty, "native audio produced empty output")
+        // The decisive parity assertion: native meets the same rubric as
+        // the oracle. (Greedy token-equality is too strict across two
+        // independent runtimes; rubric equivalence is the WS6 contract.)
+        assertContainsAny(native, expected)
+        assertContainsNone(native, forbidden)
+    }
 }

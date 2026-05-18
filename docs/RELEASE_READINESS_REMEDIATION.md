@@ -345,7 +345,14 @@ see Section 4. A new follow-up PR is required after PR #18 before any
 production release tag.
 
 1. **Native audio in Swift.** Required to close `audio_wall_ratio`.
-   Status: pending.
+   Status: **implemented, opt-in** (`KRILL_NATIVE_AUDIO=1`) — native USM
+   Conformer + feature extractor (`AudioPreprocessor.swift`,
+   `AudioEncoder.swift`), wired CLI+server, unit/shape-tested
+   (216 Swift tests). Still **pending** live numerical validation vs the
+   `mlx-vlm` oracle + a fresh native-audio benchmark on the M4 target
+   before it can default on and the `strict` audio metric is re-scoped
+   (see `docs/NATIVE_GEMMA4_AUDIO_PLAN.md` WS6). `release_candidate` is
+   unchanged; no gate weakened; no production voice claim.
 2. **Vocab-compatible Gemma 4 drafter or self-speculative decoding.**
    Required to push `text_decode_ratio` and `text_prefill_ratio`
    meaningfully past 1.5x. Status: pending.

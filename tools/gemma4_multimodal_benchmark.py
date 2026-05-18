@@ -443,7 +443,20 @@ def parse_args() -> argparse.Namespace:
             "How to run KrillLM image (and text) tasks. 'bridge' uses the in-process "
             "mlx-vlm Python path (legacy). 'native_cli' invokes the krillm CLI binary "
             "as a subprocess (matches what users run; fastest). 'native_server' sends "
-            "multimodal HTTP requests to --krillm-url. Audio always falls back to bridge."
+            "multimodal HTTP requests to --krillm-url. Audio uses the mlx-vlm bridge "
+            "unless native audio is enabled (see --krillm-native-audio)."
+        ),
+    )
+    parser.add_argument(
+        "--krillm-native-audio",
+        action="store_true",
+        default=os.environ.get("KRILL_NATIVE_AUDIO") == "1",
+        help=(
+            "Route audio tasks through the native Swift+MLX path "
+            "(native_server) instead of the mlx-vlm bridge. Defaults on when "
+            "KRILL_NATIVE_AUDIO=1 (the same switch the server honors). The "
+            "krillm server must be started with KRILL_NATIVE_AUDIO=1 for this "
+            "to take effect end to end."
         ),
     )
     parser.add_argument(
@@ -861,12 +874,11 @@ def run_krill_native_server_task(
 ) -> Optional[dict[str, Any]]:
     """Send a multimodal request to the KrillLM server using the Ollama /api/generate shape.
 
-    Image bytes are sent base64-encoded in the `images` field. Audio is not supported
-    on this path and must use the bridge.
+    Image bytes go base64-encoded in `images`; audio bytes in `audio` with
+    `audio_format` set from the file extension. The server must run with
+    KRILL_NATIVE_AUDIO=1 for audio to take the native path (otherwise it
+    handles the request via its own mlx-vlm bridge).
     """
-    if task.get("audio"):
-        raise RuntimeError("native_server path does not support audio tasks")
-
     payload: dict[str, Any] = {
         "model": "gemma-4-e2b",
         "prompt": task["prompt"],
@@ -882,6 +894,11 @@ def run_krill_native_server_task(
         payload["images"] = [
             base64.b64encode(Path(task["image"]).read_bytes()).decode("ascii")
         ]
+    if task.get("audio"):
+        audio_path = task["audio"]
+        payload["audio"] = base64.b64encode(
+            Path(audio_path).read_bytes()).decode("ascii")
+        payload["audio_format"] = Path(audio_path).suffix.lstrip(".").lower() or "wav"
     url = args.krillm_url.rstrip("/") + "/api/generate"
     request = urllib.request.Request(
         url,
@@ -1191,11 +1208,14 @@ def parity_field(
 def krill_path_for_task(args: argparse.Namespace, task: dict[str, Any], use_server: bool) -> str:
     """Decide which KrillLM path to use for a single task.
 
-    Audio always falls back to the bridge because no native audio path exists.
-    Text/image follow the explicit --krillm-image-mode selection, with
-    --krillm-url forcing the legacy server path when set.
+    Audio uses the mlx-vlm bridge unless native audio is requested
+    (--krillm-native-audio / KRILL_NATIVE_AUDIO=1), in which case it routes
+    through native_server like image/text. Text/image follow the explicit
+    --krillm-image-mode selection, with --krillm-url forcing the server path.
     """
     if task.get("audio"):
+        if getattr(args, "krillm_native_audio", False):
+            return "native_server"
         return "bridge"
     if use_server:
         return "native_server"
