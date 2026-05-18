@@ -190,6 +190,90 @@ let aligned = sourceFlat.take(indices % sourceSize, axis: 0)
 return MLX.where(maskFlat, aligned, inputTensor.flattened())
 ```
 
+## Audio Encoder (USM Conformer)
+
+Gemma 4 E2B audio is a Universal Speech Model (USM) Conformer. Discovered
+from the local checkpoint (`config.json` `audio_config`, `model.safetensors`
+`audio_tower.*` / `embed_audio.*`) and cross-checked against the `mlx-vlm`
+reference (`mlx_vlm/models/gemma4/audio.py`,
+`audio_feature_extractor.py`), which is the correctness oracle.
+
+### audio_config (checkpoint defaults)
+```
+hidden_size            1024     num_hidden_layers        12
+num_attention_heads    8        head_dim                 128 (=1024/8)
+subsampling_conv_channels [128, 32]   conv_kernel_size    5
+attention_chunk_size   12       attention_context_left   13
+attention_context_right 0       attention_logit_cap      50.0
+attention_invalid_logits_value -1e9
+residual_weight        0.5      rms_norm_eps             1e-6
+gradient_clipping      1e10     output_proj_dims         1536
+hidden_act             silu     use_clipped_linears      true
+```
+Tokens: `audio_token_id` 258881, `boa_token_id` 256000,
+`eoa_token_id`/`eoa_token_index` 258883, `image_token_id` 258880.
+
+### Preprocessing (Gemma4AudioFeatureExtractor defaults)
+The HF/local checkpoint ships **no** `feature_extractor` config, so all
+USM defaults apply (fixed for every Gemma 4 model):
+```
+feature_size (mel bins)  128      sampling_rate       16000
+frame_length_ms 20 -> 320 samples hop_length_ms 10 -> 160 samples
+fft_length 2^ceil(log2(320)) = 512 num_freq_bins  257 (=512/2+1)
+min_freq 0.0  max_freq 8000.0      mel_scale "htk", norm None
+preemphasis 0.0 (=> frame = unfold[..., :-1], size 320)
+window: periodic Hann, w[n]=0.5-0.5*cos(2*pi*n/320)
+mel_floor 1e-3   log_mel = log(|rfft| @ mel_filters + 1e-3)
+per_bin_mean/stddev None (no normalization)
+semicausal left-pad = frame_length//2 = 160 zeros
+frame_size_for_unfold = frame_length + 1 = 321, step = hop = 160
+max_length 480000 samples (30 s), pad_to_multiple_of 128, truncation on
+mask frame end index = arange(T)*hop + frame_size_for_unfold - 1
+padded spectrogram positions are zeroed
+```
+Soft-token count: `ceil(duration_ms / 40)` capped at `audio_seq_length`
+750; prompt expands to `boa + <|audio|>*N + eoa`. The 2x stride-2 conv
+subsampling turns 10 ms-hop frames (100/s) into ~25/s = 40 ms/token, so
+the tower output length matches N by construction.
+
+### Audio tower (`audio_tower.*`, BF16)
+- `subsample_conv_projection`: `layer0` Conv2d [128,3,3,1] +
+  LayerNorm(128) + ReLU, `layer1` Conv2d [32,3,3,128] + LayerNorm(32) +
+  ReLU (both stride 2, symmetric pad (1,1,1,1)); flatten F*C then
+  `input_proj_linear` [1024,1024]. Mask downsampled by time stride.
+- 12x `layers.N` Conformer block (macaron):
+  `feed_forward1` -> attention -> `lconv1d` -> `feed_forward2` ->
+  clip -> `norm_out`.
+  - `feed_forwardX`: `pre_layer_norm` (AudioRMSNorm) ->
+    `ffw_layer_1` ClippableLinear [4096,1024] -> SiLU ->
+    `ffw_layer_2` ClippableLinear [1024,4096] -> clip ->
+    `post_layer_norm`; out = residual + x*`residual_weight`(0.5).
+  - `self_attn`: `q/k/v_proj` ClippableLinear [1024,1024],
+    `relative_k_proj` [1024,1024], `per_dim_scale` [128], `post`
+    ClippableLinear [1024,1024]. Chunked local attention (chunk 12,
+    past 12, future 0, context 24) with sinusoidal relative-position
+    bias, logit softcap `tanh(l/50)*50`, validity+causal mask.
+    `q_scale = head_dim^-0.5 / ln2`, `k_scale = ln(1+e)/ln2`,
+    `per_dim_scale` via softplus.
+  - `lconv1d`: `pre_layer_norm` -> `linear_start` ClippableLinear
+    [2048,1024] -> GLU -> causal `depthwise_conv1d` [1024,5,1]
+    (groups=1024) -> clip -> `conv_norm` -> SiLU -> `linear_end`
+    ClippableLinear [1024,1024] + residual.
+- `output_proj`: Linear with bias, [1536,1024] -> 1536.
+
+### embed_audio (`embed_audio.*`, 4-bit quantized)
+`MultimodalEmbedder`: RMSNormNoScale(1536, eps 1e-6) then
+`embedding_projection` Linear 1536->1536 (weight U32 [1536,192] +
+scales/biases [1536,24], group_size 64, bits 4). Identical structure to
+`embed_vision`; output scattered into `<|audio|>` (258881) positions via
+the shared `maskedScatter`.
+
+### Native vs bridge
+Native Swift+MLX path lands in `Sources/KLMCore/AudioPreprocessor.swift`
+(frontend) + `Sources/KLMCore/AudioEncoder.swift` (tower, rewritten from
+the placeholder). The `mlx-vlm` bridge stays as fallback/oracle behind
+`KRILL_AUDIO_BRIDGE_ONLY=1`; native is gated by `KRILL_NATIVE_AUDIO`.
+
 ## Tokenizer (Gemma4 Special Tokens)
 
 | Token | ID | Purpose |
@@ -215,8 +299,8 @@ language_model.model.per_layer_model_projection.* -> Linear (BF16, not quantized
 vision_tower.patch_embedder.*                -> Linear + position table
 vision_tower.encoder.layers.N.*             -> ClippableLinear (BF16)
 embed_vision.embedding_projection.*          -> QuantizedLinear (4-bit)
-audio_tower.*                                -> BF16 (not loaded into Swift modules yet)
-embed_audio.*                                -> QuantizedLinear (4-bit, not loaded yet)
+audio_tower.*                                -> BF16 (native USM Conformer, see Audio Encoder)
+embed_audio.embedding_projection.*           -> QuantizedLinear (4-bit)
 ```
 
 ### Quantization Filter

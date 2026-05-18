@@ -196,6 +196,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return try? Data(contentsOf: URL(fileURLWithPath: path))
     }
 
+    /// Audio routes natively when the model+flag select it. Container decode
+    /// happens in KLMCore before the shared USM preprocessing pipeline, so
+    /// accepted formats are not artificially limited to WAV.
+    func audioRoutesNative(_ media: DecodedMedia?) -> Bool {
+        guard let media, media.audioPath != nil else { return false }
+        return engine.canUseNativeAudio
+    }
+
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let part = unwrapInboundIn(data)
 
@@ -532,8 +540,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             }
         }
 
-        if let media = decodedMedia, media.audioPath != nil {
-            // Audio (with or without image) -> Python bridge, non-streaming bridge response.
+        if let media = decodedMedia, media.audioPath != nil,
+           !audioRoutesNative(media) {
+            // Audio -> Python bridge fallback. With KRILL_NATIVE_AUDIO=1 the
+            // native Swift+MLX path handles it inline (see eng.generate).
             handleBridgeChat(
                 context: context,
                 messages: request.messages,
@@ -696,6 +706,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         nonisolated(unsafe) let ctx = context
         let eng = engine
         let imageData = Self.loadDataIfPath(media?.imagePath)
+        let audioData = Self.loadDataIfPath(media?.audioPath)
         let mediaCopy = media
         let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
         let (params, maxTokens, toolCtx) = applyModelParams(
@@ -712,6 +723,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             let (tokenStream, getStats) = eng.generate(
                 messages: messages, params: params,
                 maxTokens: maxTokens, imageData: imageData,
+                audioData: audioData,
                 contextLimit: toolCtx)
 
             var full = ""
@@ -1121,6 +1133,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         nonisolated(unsafe) let ctx = context
         let eng = engine
         let imageData = Self.loadDataIfPath(media?.imagePath)
+        let audioData = Self.loadDataIfPath(media?.audioPath)
         let mediaCopy = media
 
         Task {
@@ -1141,7 +1154,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             let (tokenStream, _) = eng.generate(
                 messages: messages,
                 params: params, maxTokens: maxTokens,
-                imageData: imageData, contextLimit: contextLimit)
+                imageData: imageData, audioData: audioData,
+                contextLimit: contextLimit)
 
             let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
 
@@ -1182,6 +1196,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         nonisolated(unsafe) let ctx = context
         let eng = engine
         let imageData = Self.loadDataIfPath(media?.imagePath)
+        let audioData = Self.loadDataIfPath(media?.audioPath)
         let mediaCopy = media
 
         Task {
@@ -1191,7 +1206,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             let (tokenStream, getStats) = eng.generate(
                 messages: messages,
                 params: params, maxTokens: maxTokens,
-                imageData: imageData, contextLimit: contextLimit)
+                imageData: imageData, audioData: audioData,
+                contextLimit: contextLimit)
 
             var fullContent = ""
             for await event in tokenStream {
@@ -1415,7 +1431,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             }
         }
 
-        if let media = decodedMedia, media.audioPath != nil {
+        if let media = decodedMedia, media.audioPath != nil,
+           !audioRoutesNative(media) {
             handleBridgeChat(
                 context: context,
                 messages: request.messages,
@@ -1438,6 +1455,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let eng = engine
         let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
         let imageData = Self.loadDataIfPath(decodedMedia?.imagePath)
+        let audioData = Self.loadDataIfPath(decodedMedia?.audioPath)
         let mediaCopy = decodedMedia
 
         let requestStart = CFAbsoluteTimeGetCurrent()
@@ -1474,6 +1492,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 params: ocParams,
                 maxTokens: ocMax,
                 imageData: imageData,
+                audioData: audioData,
                 contextLimit: ocCtx)
 
             if request.stream {
@@ -1614,9 +1633,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             }
         }
 
-        if let media = decodedMedia, media.audioPath != nil {
-            // Audio path: bridge through Python (entire request, even with image).
-            // Synthesize a single-message conversation for the bridge.
+        if let media = decodedMedia, media.audioPath != nil,
+           !audioRoutesNative(media) {
+            // Audio path: bridge through Python (entire request, even with
+            // image). Native Swift+MLX audio (KRILL_NATIVE_AUDIO=1) instead
+            // falls through to the native generate path below.
             let messages: [[String: String]] = [
                 ["role": "user", "content": request.prompt]
             ]
@@ -1637,6 +1658,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         nonisolated(unsafe) let ctx = context
         let eng = engine
         let imageData = Self.loadDataIfPath(decodedMedia?.imagePath)
+        let audioData = Self.loadDataIfPath(decodedMedia?.audioPath)
         let mediaCopy = decodedMedia
 
         let requestStart = CFAbsoluteTimeGetCurrent()
@@ -1673,6 +1695,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 params: ogParams,
                 maxTokens: ogMax,
                 imageData: imageData,
+                audioData: audioData,
                 contextLimit: ogCtx)
 
             if request.stream {

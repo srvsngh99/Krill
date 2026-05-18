@@ -35,7 +35,7 @@ struct RunCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Image file path for Gemma 4 (native vision)")
     var image: String?
 
-    @Option(name: .long, help: "Audio file path for Gemma 4 (requires mlx-vlm)")
+    @Option(name: .long, help: "Audio file path for Gemma 4 (bridge by default; native with KRILL_NATIVE_AUDIO=1)")
     var audio: String?
 
     @Option(name: .long, help: "Tools JSON file for function calling (not yet supported)")
@@ -78,11 +78,15 @@ struct RunCommand: AsyncParsableCommand {
         if let configData = try? Data(contentsOf: configURL),
            let configJSON = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
            isGemma4Config(configJSON) {
-            if audio != nil {
-                // Audio: native Conformer encoder rewrite is pending, use Python bridge
+            if audio != nil && !InferenceEngine.nativeAudioEnabled {
+                // Audio bridge fallback. Native Swift+MLX audio is used
+                // instead when KRILL_NATIVE_AUDIO=1 (and not forced off by
+                // KRILL_AUDIO_BRIDGE_ONLY) — then we fall through to the
+                // native engine path below, which decodes WAV/mp3/flac/ogg/
+                // m4a containers.
                 let availability = PythonFallback.checkAvailability()
                 guard availability.isAvailable else {
-                    print("Error: Gemma 4 audio requires the mlx-vlm Python bridge (native audio encoder pending).")
+                    print("Error: Gemma 4 audio requires the mlx-vlm Python bridge, or set KRILL_NATIVE_AUDIO=1 for the native encoder.")
                     print("Install: make setup-mlx-vlm")
                     throw ExitCode.failure
                 }
