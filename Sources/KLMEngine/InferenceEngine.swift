@@ -265,8 +265,9 @@ public final class InferenceEngine: @unchecked Sendable {
         // (image_token_id=258880, audio_token_id=258881); without these tokens
         // the encoder output has nowhere to land and image/audio requests
         // become silently text-only.
-        // Native audio: decode WAV -> log-mel + validity once, up front, so
-        // the `<|audio|>` placeholder count matches the encoder frame count.
+        // Native audio: decode the container (WAV/mp3/flac/ogg/m4a) ->
+        // log-mel + validity once, up front, so the `<|audio|>` placeholder
+        // count matches the encoder frame count.
         // The native frontend is selected only when the model is
         // audio-capable and the native flag is on; otherwise audio stays on
         // the bridge (server level).

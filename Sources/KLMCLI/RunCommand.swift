@@ -82,7 +82,8 @@ struct RunCommand: AsyncParsableCommand {
                 // Audio bridge fallback. Native Swift+MLX audio is used
                 // instead when KRILL_NATIVE_AUDIO=1 (and not forced off by
                 // KRILL_AUDIO_BRIDGE_ONLY) — then we fall through to the
-                // native engine path below, which handles WAV audio.
+                // native engine path below, which decodes WAV/mp3/flac/ogg/
+                // m4a containers.
                 let availability = PythonFallback.checkAvailability()
                 guard availability.isAvailable else {
                     print("Error: Gemma 4 audio requires the mlx-vlm Python bridge, or set KRILL_NATIVE_AUDIO=1 for the native encoder.")
