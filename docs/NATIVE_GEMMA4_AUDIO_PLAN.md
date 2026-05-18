@@ -428,6 +428,63 @@ Acceptance:
   separate release-gate proposal and accepted.
 - Benchmark report identifies the KrillLM audio path as native, not bridge.
 
+## WS6 Runbook (execute on the M4 target)
+
+Owner-chosen path (2026-05-18): keep the bridge as the oracle, validate
+native numerically first, then flip the default, then retire the bridge
+in a separate PR. Everything below runs on the machine with the real
+Gemma 4 E2B checkpoint + `mlx-vlm` + Ollama; it is gated/skipped in CI.
+
+1. **Numerical parity vs the oracle.** The decisive gate — native must be
+   semantically equivalent to the bridge on the deterministic fixture:
+
+   ```text
+   KLM_GEMMA4_MODEL_PATH=/Users/sourav/.krillm/models/blobs/gemma-4-e2b \
+   KLM_BENCH_ASSETS_DIR=.build/benchmarks/assets \
+   swift test --filter Gemma4SmokeTests/testWS6NativeAudioMatchesBridgeOracleOnSineTone
+   ```
+
+   Runs both the bridge oracle and the native path and holds native to the
+   same quality rubric (`tools/quality_rubric.json`). Extend with the
+   `gemma4-tone-5s` / `gemma4-silence-2s` fixtures before flipping default.
+
+2. **Native-audio benchmark + gates.** Boot the server with native audio
+   and run the multimodal benchmark through it (the script now supports
+   this via `--krillm-native-audio` / `KRILL_NATIVE_AUDIO=1`, which routes
+   audio to `native_server` instead of the bridge):
+
+   ```text
+   make release
+   KRILL_NATIVE_AUDIO=1 .build/release/krillm serve \
+     --model /Users/sourav/.krillm/models/blobs/gemma-4-e2b \
+     --host 127.0.0.1 --port 11435 --compat both &
+
+   /Users/sourav/.krillm/venv/bin/python3 tools/gemma4_multimodal_benchmark.py \
+     --krill-model /Users/sourav/.krillm/models/blobs/gemma-4-e2b \
+     --ollama-model gemma4:e2b --krillm-url http://127.0.0.1:11435 \
+     --krillm-image-mode native_server --krillm-native-audio \
+     --runs 4 --warmup 2 \
+     --output .build/benchmarks/native-audio-mm.json
+
+   make bench-release-gate GATE_INPUT=.build/benchmarks/native-audio-mm.json \
+     GATE_ALLOW_FLAGS="--profile release_candidate"
+   make bench-release-gate GATE_INPUT=.build/benchmarks/native-audio-mm.json \
+     GATE_ALLOW_FLAGS="--profile strict"
+   ```
+
+   Confirm the report's audio rows show `krillm_path = native_server`
+   (not `mlx-vlm-bridge`) and audio metrics are present, not `N/A`.
+
+3. **Flip the default.** Only after 1 and 2 pass: make
+   `InferenceEngine.nativeAudioEnabled` default to `true` (env still able
+   to force the bridge via `KRILL_AUDIO_BRIDGE_ONLY=1`), update the README
+   support matrix and `strict`-audio scoping, and ship one release.
+
+4. **Retire the bridge (separate follow-up PR).** Only after a release
+   has baked with native default-on: remove `PythonFallback`, the
+   sidecar, `make setup-mlx-vlm`, the server bridge handlers, and the
+   bridge docs. Not part of PR #21.
+
 ## Definition Of Done
 
 Native audio is done only when all are true:
