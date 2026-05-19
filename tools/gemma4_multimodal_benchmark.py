@@ -426,6 +426,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--engine", choices=["both", "krillm", "ollama"], default="both")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument(
+        "--drop-cold-run", action="store_true",
+        help="Exclude the first measured run from summary stats (it carries "
+             "one-time cold-start cost warmup does not absorb). Recommended "
+             "with >=4 runs for stable short-window metrics like prefill TPS.")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
@@ -1032,7 +1037,14 @@ def run_ollama_task(args: argparse.Namespace, task: dict[str, Any], measured: bo
     }
 
 
-def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize(runs: list[dict[str, Any]], drop_first: bool = False) -> dict[str, Any]:
+    # The first *measured* run carries one-time cold-start cost (Metal
+    # pipeline / audio-encoder first use) that warmup does not absorb; it
+    # makes short-window metrics like prefill TPS unrepresentative. When
+    # drop_first is set and there is more than one run, summarise over the
+    # remaining runs and record the omission for transparency.
+    full = list(runs)
+    stat_runs = full[1:] if (drop_first and len(full) > 1) else full
     keys = [
         "wall_time_s",
         "total_s",
@@ -1045,9 +1057,12 @@ def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "decode_tokens_per_second",
         "peak_memory_gb",
     ]
-    summary: dict[str, Any] = {"runs": len(runs)}
+    summary: dict[str, Any] = {"runs": len(full)}
+    if drop_first and len(full) > 1:
+        summary["runs_used"] = len(stat_runs)
+        summary["cold_run_dropped"] = True
     for key in keys:
-        values = [run[key] for run in runs if isinstance(run.get(key), (int, float))]
+        values = [run[key] for run in stat_runs if isinstance(run.get(key), (int, float))]
         if values:
             summary[f"{key}_median"] = statistics.median(values)
             summary[f"{key}_min"] = min(values)
@@ -1359,7 +1374,7 @@ def main() -> int:
                     group, source = apply_cache_mode(valid_runs, args.cache_mode, args.warmup, True)
                     task_results["krillm"] = {
                         "runs": valid_runs,
-                        "summary": summarize(valid_runs),
+                        "summary": summarize(valid_runs, drop_first=args.drop_cold_run),
                         "cache_mode": group,
                         "cache_mode_source": source,
                     }
@@ -1375,7 +1390,7 @@ def main() -> int:
                 group, source = apply_cache_mode(krill_runs, args.cache_mode, args.warmup, is_cache_hitting)
                 task_results["krillm"] = {
                     "runs": krill_runs,
-                    "summary": summarize([run for run in krill_runs if run]),
+                    "summary": summarize([run for run in krill_runs if run], drop_first=args.drop_cold_run),
                     "cache_mode": group,
                     "cache_mode_source": source,
                     "krillm_path": krill_path,
@@ -1386,7 +1401,7 @@ def main() -> int:
             group, source = apply_cache_mode(ollama_runs, args.cache_mode, args.warmup, False)
             task_results["ollama"] = {
                 "runs": ollama_runs,
-                "summary": summarize([run for run in ollama_runs if run]),
+                "summary": summarize([run for run in ollama_runs if run], drop_first=args.drop_cold_run),
                 "cache_mode": group,
                 "cache_mode_source": source,
             }

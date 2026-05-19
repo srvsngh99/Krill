@@ -101,10 +101,12 @@ def run_gate(report: dict, *extra_args: str) -> tuple[int, dict]:
 
 
 def baseline_report(**overrides) -> dict:
-    """A report whose wall/ttft/decode metrics pass, prefill metrics
-    near-miss (advisory under release_candidate), and audio passes the
-    now-hard audio gate (WS6: native Swift audio default-on, faster than
-    Ollama)."""
+    """A report whose wall/ttft/decode metrics pass and prefill metrics
+    near-miss (advisory under release_candidate). audio_wall passes the
+    hard bar; audio_prefill is advisory under release_candidate / hard
+    under strict (WS6: native Swift audio default-on, faster than Ollama;
+    audio prefill TPS is short-window-noisy so it is not hard-gated at
+    RC)."""
     defaults = dict(
         text_decode=(150.0, 100.0),    # ratio 1.50 (hard pass)
         text_prefill=(145.0, 100.0),   # ratio 1.45 (advisory warn)
@@ -113,16 +115,16 @@ def baseline_report(**overrides) -> dict:
         image_wall=(0.50, 1.00),       # ratio 0.50 (hard pass)
         image_prefill=(105.0, 100.0),  # ratio 1.05 (advisory warn)
         audio_wall=(0.50, 1.00),       # ratio 0.50 (hard pass, <= 0.67)
-        audio_prefill=(150.0, 100.0),  # ratio 1.50 (hard pass, >= 1.5)
+        audio_prefill=(145.0, 100.0),  # ratio 1.45 (advisory warn at RC)
     )
     defaults.update(overrides)
     return make_report(**defaults)
 
 
 class ReleaseCandidateProfileTests(unittest.TestCase):
-    """Profile 'release_candidate' downgrades prefill TPS to advisory and
-    scopes audio out, so a report with failing prefill TPS but passing wall
-    metrics must still gate-pass."""
+    """Profile 'release_candidate' downgrades prefill TPS (text/image/audio)
+    to advisory, so a report with failing prefill TPS but passing wall
+    metrics must still gate-pass. audio_wall stays hard."""
 
     def _baseline_report(self, **overrides) -> dict:
         return baseline_report(**overrides)
@@ -139,11 +141,23 @@ class ReleaseCandidateProfileTests(unittest.TestCase):
         self.assertEqual(gate["gate"], "pass")
         self.assertEqual(gate["profile"], "release_candidate")
 
-    def test_release_candidate_audio_is_hard_not_scoped_out(self):
-        # WS6: audio_* are hard in both profiles, not out_of_scope.
+    def test_release_candidate_audio_not_scoped_out(self):
+        # WS6: audio_* are gated (not out_of_scope) in both profiles.
         _, gate = run_gate(self._baseline_report(), "--profile", "release_candidate")
         skipped = {entry["metric"] for entry in gate.get("scope_skipped_metrics", [])}
         self.assertEqual(skipped, set(), "audio must no longer be scoped out")
+
+    def test_audio_prefill_advisory_at_rc_hard_at_strict(self):
+        # A low audio_prefill must NOT fail release_candidate (advisory) but
+        # MUST fail strict (hard). audio_wall kept passing in both.
+        bad = self._baseline_report(audio_prefill=(0.50, 100.0))  # ratio 0.005
+        code_rc, g_rc = run_gate(bad, "--profile", "release_candidate")
+        self.assertEqual(code_rc, 0,
+            "audio_prefill is advisory at release_candidate; must not fail the gate")
+        self.assertEqual(g_rc["gate"], "pass")
+        code_s, g_s = run_gate(bad, "--profile", "strict")
+        self.assertEqual(code_s, 1, "audio_prefill is hard under strict; must fail")
+        self.assertEqual(g_s["gate"], "fail")
 
     def test_release_candidate_fails_on_audio_regression(self):
         # Break audio_wall (now hard); the gate must fail.

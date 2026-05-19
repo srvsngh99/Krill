@@ -52,6 +52,26 @@ from typing import Callable, Iterable
 SPEECH_SENTENCE = "The quick brown fox jumps over the lazy dog."
 SPEECH_VOICE = "Samantha"  # ships with macOS; stable, clearly intelligible
 
+# A longer fixed passage (~18 s spoken) used by the multimodal benchmark so
+# audio prefill is measured over hundreds of ms instead of a ~20 ms window
+# (the short pangram makes audio_prefill_ratio unmeasurably noisy). The WS6
+# parity unit test keeps using the short pangram.
+SPEECH_LONG_PASSAGE = (
+    "The quick brown fox jumps over the lazy dog near the riverbank. "
+    "A native speech model should transcribe this passage clearly and "
+    "consistently. The morning sun rose over the quiet harbor while "
+    "fishing boats drifted past the old stone lighthouse. Children "
+    "laughed along the boardwalk as gulls circled the bright blue sky. "
+    "This benchmark sentence is intentionally long so that audio prefill "
+    "spans a stable measurement window."
+)
+
+# Speech fixtures: filename -> passage. Written via write_speech_wav.
+SPEECH_FIXTURES = {
+    "gemma4-speech-pangram.wav": SPEECH_SENTENCE,
+    "gemma4-speech-long.wav": SPEECH_LONG_PASSAGE,
+}
+
 SAMPLE_RATE_HZ = 16_000
 BITS_PER_SAMPLE = 16
 NUM_CHANNELS = 1
@@ -90,8 +110,8 @@ def silence_samples(duration_s: float) -> Iterable[int]:
         yield 0
 
 
-def write_speech_wav(path: Path) -> bool:
-    """Synthesise the speech pangram via macOS ``say`` + ``afconvert``.
+def write_speech_wav(path: Path, text: str = SPEECH_SENTENCE) -> bool:
+    """Synthesise a fixed spoken passage via macOS ``say`` + ``afconvert``.
 
     Returns True if written, False if skipped (non-macOS or tools missing).
     Output is 16 kHz mono 16-bit PCM WAV to match the other fixtures and the
@@ -110,7 +130,7 @@ def write_speech_wav(path: Path) -> bool:
     with tempfile.TemporaryDirectory() as tmp:
         raw = Path(tmp) / "speech_raw.aiff"
         subprocess.run(
-            ["say", "-v", SPEECH_VOICE, "-o", str(raw), SPEECH_SENTENCE],
+            ["say", "-v", SPEECH_VOICE, "-o", str(raw), text],
             check=True,
         )
         subprocess.run(
@@ -193,6 +213,23 @@ FIXTURES: list[tuple[str, FixtureBuilder, dict]] = [
             ],
         },
     ),
+    (
+        # Benchmark audio fixture: long enough for a stable prefill window.
+        # builder is None: self-written via write_speech_wav.
+        "gemma4-speech-long.wav",
+        None,
+        {
+            "description": (
+                f"~18 s spoken passage (voice={SPEECH_VOICE}), 16 kHz mono, "
+                "16-bit PCM. Used by the multimodal benchmark so "
+                "audio_prefill is measured over a stable window. "
+                "Content-deterministic, macOS-only."
+            ),
+            "prompt": "Transcribe this audio exactly.",
+            "expected_any": ["fox", "dog", "harbor", "lighthouse", "boardwalk"],
+            "forbidden": ["cat", "i cannot"],
+        },
+    ),
 ]
 
 # Builder names whose mismatch on out-of-distribution non-speech input is
@@ -237,7 +274,8 @@ def main() -> int:
         path = out_dir / name
         if builder is None:
             # Self-writing speech fixture (macOS say+afconvert).
-            if not write_speech_wav(path):
+            text = SPEECH_FIXTURES.get(name, SPEECH_SENTENCE)
+            if not write_speech_wav(path, text):
                 continue
         else:
             write_wav(path, builder())
