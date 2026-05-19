@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Benchmark KrillLM Gemma4 via mlx-vlm against Ollama Gemma4.
+"""Benchmark KrillLM Gemma 4 (native Swift+MLX) against Ollama Gemma 4.
+
+KrillLM runs via the native CLI binary or the native HTTP server; the
+mlx-vlm Python bridge was removed in WS6 Step 4.
 
 This benchmark intentionally treats text, image, and audio as separate tasks.
 It records exact quantization metadata and only labels the comparison as
@@ -33,15 +36,6 @@ from typing import Any, Optional
 # Pillow is only needed when generating/inspecting image fixtures; import it
 # lazily so the rest of the module (e.g. the memory sampler) works without it.
 
-try:
-    from mlx_vlm import generate, load  # type: ignore
-    _MLX_VLM_AVAILABLE = True
-    _MLX_VLM_IMPORT_ERROR: Optional[Exception] = None
-except Exception as _exc:  # pragma: no cover — optional dep when only using native paths
-    generate = None  # type: ignore[assignment]
-    load = None  # type: ignore[assignment]
-    _MLX_VLM_AVAILABLE = False
-    _MLX_VLM_IMPORT_ERROR = _exc
 
 
 DEFAULT_KRILL_MODEL = str(Path.home() / ".krillm/models/blobs/gemma-4-e2b")
@@ -79,12 +73,7 @@ KRILLM_CLI_STATS_RE = re.compile(
 # column report — and includes resident mmap'd pages with proper apportionment.
 # On non-Darwin platforms we fall back to RSS from `ps`.
 #
-# The KrillLM bridge path is the one exception: mlx-vlm runs in-process and
-# already exposes `GenerationResult.peak_memory` (MLX Metal allocator peak,
-# decimal GB), which is a cleaner number than the benchmark process's own
-# footprint — we keep that there.
-#
-# All values are reported in decimal GB (bytes / 1e9) to match mlx-vlm's basis.
+# All values are reported in decimal GB (bytes / 1e9).
 
 
 def _macos_phys_footprint_bytes(pid: int) -> Optional[int]:
@@ -405,7 +394,6 @@ class _MemoryProbe:
             "interval_ms": round(self.interval_s * 1000),
             "basis": {
                 tree_basis_key: tree_basis_doc,
-                "mlx_metal": "mlx-vlm GenerationResult.peak_memory (MLX Metal allocator peak, decimal GB)",
             },
             "krillm_pids_sampled": sorted(self.observed.get("krillm", set())),
             "ollama_pids_sampled": sorted(self.observed.get("ollama", set())),
@@ -426,6 +414,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--engine", choices=["both", "krillm", "ollama"], default="both")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument(
+        "--num-ctx", type=int, default=None,
+        help="Pin BOTH engines to the same context budget for a spec-equal "
+             "memory comparison: sets Ollama options.num_ctx and is also "
+             "exported to the KrillLM server as KRILL_CONTEXT_LENGTH at boot. "
+             "When unset, each engine uses its own default.")
+    parser.add_argument(
+        "--drop-cold-run", action="store_true",
+        help="Exclude the first measured run from summary stats (it carries "
+             "one-time cold-start cost warmup does not absorb). Recommended "
+             "with >=4 runs for stable short-window metrics like prefill TPS.")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
@@ -437,26 +436,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--krillm-url", help="KrillLM server URL for native-path benchmarking (e.g. http://127.0.0.1:11435).")
     parser.add_argument(
         "--krillm-image-mode",
-        choices=["bridge", "native_cli", "native_server"],
+        choices=["native_cli", "native_server"],
         default="native_cli",
         help=(
-            "How to run KrillLM image (and text) tasks. 'bridge' uses the in-process "
-            "mlx-vlm Python path (legacy). 'native_cli' invokes the krillm CLI binary "
-            "as a subprocess (matches what users run; fastest). 'native_server' sends "
-            "multimodal HTTP requests to --krillm-url. Audio uses the mlx-vlm bridge "
-            "unless native audio is enabled (see --krillm-native-audio)."
+            "How to run KrillLM text/image tasks. 'native_cli' invokes the krillm "
+            "CLI binary as a subprocess (matches what users run; fastest, no server "
+            "needed). 'native_server' sends HTTP requests to --krillm-url. Audio "
+            "follows the same choice (server if --krillm-url, else native CLI). The "
+            "mlx-vlm bridge was removed in WS6 Step 4."
         ),
     )
     parser.add_argument(
         "--krillm-native-audio",
         action="store_true",
-        default=os.environ.get("KRILL_NATIVE_AUDIO") == "1",
+        default=True,
         help=(
-            "Route audio tasks through the native Swift+MLX path "
-            "(native_server) instead of the mlx-vlm bridge. Defaults on when "
-            "KRILL_NATIVE_AUDIO=1 (the same switch the server honors). The "
-            "krillm server must be started with KRILL_NATIVE_AUDIO=1 for this "
-            "to take effect end to end."
+            "Deprecated no-op kept for back-compat: audio is always native "
+            "(the mlx-vlm bridge was removed in WS6 Step 4). Audio runs on "
+            "the server when --krillm-url is set, otherwise the native CLI."
         ),
     )
     parser.add_argument(
@@ -484,8 +481,7 @@ def parse_args() -> argparse.Namespace:
             "Sample peak resident-set memory of each engine's process tree "
             "during timed requests (so the release gate's memory_ratio "
             "populates). 'auto' (default) samples when PIDs can be resolved; "
-            "'off' disables it. The KrillLM bridge path uses mlx-vlm's "
-            "GenerationResult.peak_memory instead of RSS."
+            "'off' disables it."
         ),
     )
     parser.add_argument(
@@ -649,60 +645,6 @@ def quantization_comparison(krill_quant: Optional[dict[str, Any]], ollama_quant:
     }
 
 
-def build_krill_prompt(processor: Any, prompt: str, media_prefix: str = "") -> str:
-    tokenizer = processor.tokenizer
-    bos = tokenizer.decode([2])
-    turn_start = tokenizer.decode([105])
-    turn_end = tokenizer.decode([106])
-    newline = tokenizer.decode([107])
-    return f"{bos}{turn_start}user{newline}{media_prefix}{prompt}{turn_end}{newline}{turn_start}model{newline}"
-
-
-def run_krill_task(
-    model: Any,
-    processor: Any,
-    task: dict[str, Any],
-    temperature: float,
-    top_p: float,
-    measured: bool,
-) -> Optional[dict[str, Any]]:
-    kwargs: dict[str, Any] = {
-        "max_tokens": task["max_tokens"],
-        "temperature": temperature,
-        "top_p": top_p,
-        "verbose": False,
-    }
-    media_prefix = ""
-    if task.get("image"):
-        kwargs["image"] = [task["image"]]
-        media_prefix += "<|image|>"
-    if task.get("audio"):
-        kwargs["audio"] = task["audio"]
-        media_prefix += "<|audio|>"
-
-    prompt = build_krill_prompt(processor, task["prompt"], media_prefix)
-    start = time.perf_counter()
-    result = generate(model, processor, prompt=prompt, **kwargs)
-    wall_s = time.perf_counter() - start
-    if not measured:
-        return None
-
-    text = result.text if hasattr(result, "text") else str(result)
-    # mlx-vlm runs in-process here, so its own MLX Metal allocator peak is a
-    # cleaner figure than the benchmark process's RSS. 0.0 means "not reported".
-    peak_memory_gb = getattr(result, "peak_memory", None) or None
-    return {
-        "wall_time_s": wall_s,
-        "prompt_tokens": getattr(result, "prompt_tokens", None),
-        "generated_tokens": getattr(result, "generation_tokens", None),
-        "prefill_tokens_per_second": getattr(result, "prompt_tps", None),
-        "decode_tokens_per_second": getattr(result, "generation_tps", None),
-        "peak_memory_gb": peak_memory_gb,
-        "peak_memory_basis": "mlx_metal" if peak_memory_gb is not None else None,
-        "output_sha256": sha256_text(text),
-        "output_preview": text[:200],
-    }
-
 
 def run_krill_server_task(
     args: argparse.Namespace,
@@ -713,9 +655,9 @@ def run_krill_server_task(
 
     Supports text, image, and audio. Image is sent as base64 in the Ollama
     `images` array; audio is sent as base64 in the `audio` field with
-    `audio_format`. Audio runs through the server's mlx-vlm bridge, which
-    does not stream — the server emits a single content chunk + final done
-    chunk for compatibility.
+    `audio_format`. The server runs all modalities natively (the mlx-vlm
+    bridge was removed in WS6 Step 4); the native audio path emits a single
+    content chunk + final done chunk rather than streaming.
     """
     import base64 as _b64
 
@@ -730,6 +672,7 @@ def run_krill_server_task(
             "top_p": args.top_p,
             "seed": args.seed,
             "num_predict": task["max_tokens"],
+            **({"num_ctx": args.num_ctx} if args.num_ctx else {}),
         },
     }
     image_path = task.get("image")
@@ -796,13 +739,11 @@ def run_krill_native_cli_task(
     task: dict[str, Any],
     measured: bool,
 ) -> Optional[dict[str, Any]]:
-    """Invoke the krillm CLI binary for a (text or image) task.
+    """Invoke the krillm CLI binary for a text, image, or audio task.
 
-    Audio is not supported by this path and must be handled by the bridge.
+    `krillm run --audio` is native (the mlx-vlm bridge was removed in WS6
+    Step 4), so audio is handled here like image.
     """
-    if task.get("audio"):
-        raise RuntimeError("native_cli path does not support audio tasks")
-
     command: list[str] = [
         args.krillm_bin,
         "run",
@@ -819,6 +760,8 @@ def run_krill_native_cli_task(
     ]
     if task.get("image"):
         command += ["--image", task["image"]]
+    if task.get("audio"):
+        command += ["--audio", task["audio"]]
 
     start = time.perf_counter()
     proc = subprocess.Popen(
@@ -875,9 +818,8 @@ def run_krill_native_server_task(
     """Send a multimodal request to the KrillLM server using the Ollama /api/generate shape.
 
     Image bytes go base64-encoded in `images`; audio bytes in `audio` with
-    `audio_format` set from the file extension. The server must run with
-    KRILL_NATIVE_AUDIO=1 for audio to take the native path (otherwise it
-    handles the request via its own mlx-vlm bridge).
+    `audio_format` set from the file extension. The server runs all
+    modalities natively; the mlx-vlm bridge was removed in WS6 Step 4.
     """
     payload: dict[str, Any] = {
         "model": "gemma-4-e2b",
@@ -888,6 +830,7 @@ def run_krill_native_server_task(
             "top_p": args.top_p,
             "seed": args.seed,
             "num_predict": task["max_tokens"],
+            **({"num_ctx": args.num_ctx} if args.num_ctx else {}),
         },
     }
     if task.get("image"):
@@ -975,6 +918,7 @@ def ollama_chat_payload(args: argparse.Namespace, task: dict[str, Any], stream: 
             "top_p": args.top_p,
             "seed": args.seed,
             "num_predict": task["max_tokens"],
+            **({"num_ctx": args.num_ctx} if args.num_ctx else {}),
         },
     }
 
@@ -1032,7 +976,14 @@ def run_ollama_task(args: argparse.Namespace, task: dict[str, Any], measured: bo
     }
 
 
-def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize(runs: list[dict[str, Any]], drop_first: bool = False) -> dict[str, Any]:
+    # The first *measured* run carries one-time cold-start cost (Metal
+    # pipeline / audio-encoder first use) that warmup does not absorb; it
+    # makes short-window metrics like prefill TPS unrepresentative. When
+    # drop_first is set and there is more than one run, summarise over the
+    # remaining runs and record the omission for transparency.
+    full = list(runs)
+    stat_runs = full[1:] if (drop_first and len(full) > 1) else full
     keys = [
         "wall_time_s",
         "total_s",
@@ -1045,9 +996,12 @@ def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "decode_tokens_per_second",
         "peak_memory_gb",
     ]
-    summary: dict[str, Any] = {"runs": len(runs)}
+    summary: dict[str, Any] = {"runs": len(full)}
+    if drop_first and len(full) > 1:
+        summary["runs_used"] = len(stat_runs)
+        summary["cold_run_dropped"] = True
     for key in keys:
-        values = [run[key] for run in runs if isinstance(run.get(key), (int, float))]
+        values = [run[key] for run in stat_runs if isinstance(run.get(key), (int, float))]
         if values:
             summary[f"{key}_median"] = statistics.median(values)
             summary[f"{key}_min"] = min(values)
@@ -1208,15 +1162,13 @@ def parity_field(
 def krill_path_for_task(args: argparse.Namespace, task: dict[str, Any], use_server: bool) -> str:
     """Decide which KrillLM path to use for a single task.
 
-    Audio uses the mlx-vlm bridge unless native audio is requested
-    (--krillm-native-audio / KRILL_NATIVE_AUDIO=1), in which case it routes
-    through native_server like image/text. Text/image follow the explicit
-    --krillm-image-mode selection, with --krillm-url forcing the server path.
+    The mlx-vlm bridge was removed in WS6 Step 4: all KrillLM modalities
+    (text, image, audio) run natively. Audio — like text/image — uses the
+    server when --krillm-url is given, otherwise the native CLI binary.
+    --krillm-image-mode still selects the non-server text/image path.
     """
     if task.get("audio"):
-        if getattr(args, "krillm_native_audio", False):
-            return "native_server"
-        return "bridge"
+        return "native_server" if use_server else "native_cli"
     if use_server:
         return "native_server"
     return args.krillm_image_mode
@@ -1235,13 +1187,10 @@ def dispatch_krill_task(
     elif path == "native_server":
         result = run_krill_native_server_task(args, task, measured=measured)
     else:
-        if model is None or processor is None:
-            raise RuntimeError(
-                "bridge path requested but mlx-vlm model is not loaded; "
-                "this typically means --krillm-image-mode bridge was selected "
-                "without a local model load — check that mlx-vlm is installed."
-            )
-        result = run_krill_task(model, processor, task, args.temperature, args.top_p, measured=measured)
+        raise RuntimeError(
+            f"unknown KrillLM path '{path}'. The mlx-vlm bridge was removed "
+            "in WS6 Step 4; valid paths are native_cli / native_server."
+        )
     if result is not None:
         result["krillm_path"] = path
     return result
@@ -1295,28 +1244,11 @@ def main() -> int:
     krill_quant = krill_quantization(args.krill_model) if include_krillm else None
     ollama_quant = ollama_show(args.ollama_bin, args.ollama_model, args.timeout) if include_ollama else None
 
-    # Determine if we need the in-process mlx-vlm model (used for bridge path,
-    # which is required for audio in all modes and for text/image when
-    # --krillm-image-mode bridge is selected).
-    audio_task_present = any(t.get("audio") for t in tasks)
-    needs_bridge_model = include_krillm and not use_server and (
-        args.krillm_image_mode == "bridge" or audio_task_present
-    )
-
+    # The in-process mlx-vlm bridge was removed in WS6 Step 4. All KrillLM
+    # paths are native (CLI or server); no Python model load is needed.
     model = None
     processor = None
     krill_load_s = None
-    if needs_bridge_model:
-        if not _MLX_VLM_AVAILABLE:
-            raise SystemExit(
-                "mlx-vlm is required for the bridge path "
-                f"(audio fallback or --krillm-image-mode bridge) but failed to import: "
-                f"{_MLX_VLM_IMPORT_ERROR}. Install mlx-vlm or pick a krillm-image-mode "
-                "that does not include audio."
-            )
-        load_start = time.perf_counter()
-        model, processor = load(args.krill_model)
-        krill_load_s = time.perf_counter() - load_start
     if include_krillm and use_server:
         # Verify server is reachable
         try:
@@ -1330,10 +1262,12 @@ def main() -> int:
     results: dict[str, Any] = {}
     for task in tasks:
         krill_path = krill_path_for_task(args, task, use_server)
-        # Skip warmup for server media tasks (server doesn't handle media yet)
-        skip_krill_task = use_server and (task.get("image") or task.get("audio"))
+        # WS6: KrillLM serves text, image, and audio natively (the mlx-vlm
+        # bridge was removed), so warm up KrillLM media the same as text —
+        # otherwise cold first-use cost leaks into the hard-gated media
+        # wall/prefill metrics.
         for _ in range(args.warmup):
-            if include_krillm and not skip_krill_task:
+            if include_krillm:
                 dispatch_krill_task(args, task, model, processor, krill_path, measured=False)
             if include_ollama:
                 run_ollama_task(args, task, measured=False)
@@ -1359,7 +1293,7 @@ def main() -> int:
                     group, source = apply_cache_mode(valid_runs, args.cache_mode, args.warmup, True)
                     task_results["krillm"] = {
                         "runs": valid_runs,
-                        "summary": summarize(valid_runs),
+                        "summary": summarize(valid_runs, drop_first=args.drop_cold_run),
                         "cache_mode": group,
                         "cache_mode_source": source,
                     }
@@ -1375,7 +1309,7 @@ def main() -> int:
                 group, source = apply_cache_mode(krill_runs, args.cache_mode, args.warmup, is_cache_hitting)
                 task_results["krillm"] = {
                     "runs": krill_runs,
-                    "summary": summarize([run for run in krill_runs if run]),
+                    "summary": summarize([run for run in krill_runs if run], drop_first=args.drop_cold_run),
                     "cache_mode": group,
                     "cache_mode_source": source,
                     "krillm_path": krill_path,
@@ -1386,7 +1320,7 @@ def main() -> int:
             group, source = apply_cache_mode(ollama_runs, args.cache_mode, args.warmup, False)
             task_results["ollama"] = {
                 "runs": ollama_runs,
-                "summary": summarize([run for run in ollama_runs if run]),
+                "summary": summarize([run for run in ollama_runs if run], drop_first=args.drop_cold_run),
                 "cache_mode": group,
                 "cache_mode_source": source,
             }
@@ -1422,9 +1356,11 @@ def main() -> int:
             "krill_model": args.krill_model,
             "ollama_model": args.ollama_model,
             "engine": args.engine,
-            "krillm_mode": "server" if use_server else "mlx-vlm",
+            "krillm_mode": "server" if use_server else "native_cli",
             "krillm_url": args.krillm_url if use_server else None,
             "krillm_image_mode": args.krillm_image_mode,
+            "num_ctx": args.num_ctx,
+            "drop_cold_run": args.drop_cold_run,
             "krillm_bin": args.krillm_bin if args.krillm_image_mode == "native_cli" else None,
             "runs": args.runs,
             "warmup": args.warmup,
@@ -1469,10 +1405,30 @@ def main() -> int:
         report["cache_mode_source"] = "auto"
 
     if use_server:
+        # Derive media routing from the actual per-run krillm_path instead of
+        # hardcoding it. The old constant ("audio": "bridge") predated native
+        # Swift audio (WS6) and silently contradicted reality once native
+        # landed, defeating the runbook's "confirm native, not bridge" check.
+        def _media_route(task_name: str) -> str:
+            task = results.get(task_name, {})
+            kr = task.get("krillm", {}) if isinstance(task, dict) else {}
+            paths = {
+                r.get("krillm_path")
+                for r in kr.get("runs", [])
+                if isinstance(r, dict) and r.get("krillm_path")
+            }
+            if not paths:
+                return "unknown"
+            if paths <= {"native_server", "native_cli"}:
+                return "native"
+            if any(p in ("bridge", "mlx-vlm-bridge") for p in paths):
+                return "bridge"
+            return "mixed:" + ",".join(sorted(p for p in paths if p))
+
         report["server_media"] = {
             "status": "supported",
-            "image": "native",
-            "audio": "bridge",
+            "image": _media_route("image"),
+            "audio": _media_route("audio"),
         }
 
     output = Path(args.output)

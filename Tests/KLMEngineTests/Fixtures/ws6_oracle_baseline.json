@@ -1,0 +1,73 @@
+{
+  "_meta": {
+    "model": "gemma-4-e2b",
+    "mlx_vlm_version": "0.5.0",
+    "note": "Recorded mlx-vlm bridge oracle baseline pinned before bridge retirement (WS6 Step 4). The WS6/smoke tests assert the live native path meets these rubrics; the recorded oracle_output is provenance + a baseline-integrity check.",
+    "captured": "2026-05-19"
+  },
+  "entries": [
+    {
+      "name": "text-quantum",
+      "prompt": "Explain quantum computing in simple terms.",
+      "asset": null,
+      "max_tokens": 96,
+      "expected_any": [
+        "quantum",
+        "qubit",
+        "qubits",
+        "superposition",
+        "entanglement"
+      ],
+      "forbidden": [
+        "i cannot",
+        "i can't help"
+      ],
+      "asset_sha256_16": null,
+      "oracle_output": "Imagine a regular computer, like your laptop or phone. It works with **bits**, which are like tiny light switches. A bit can be either **ON (1)** or **OFF (0)**. This is how regular computers process information\u2014step by step, in a very clear, binary way.\n\n**Quantum computing is a completely different way of thinking about information.** It uses the strange and powerful rules of **quantum mechanics**\u2014the physics that governs the very, very"
+    },
+    {
+      "name": "image-red-box",
+      "prompt": "What is shown in this image? Answer briefly.",
+      "asset": ".build/benchmarks/assets/gemma4-red-box.png",
+      "max_tokens": 48,
+      "expected_any": [
+        "red",
+        "box",
+        "square",
+        "rectangle"
+      ],
+      "forbidden": [
+        "green",
+        "blue",
+        "circle",
+        "triangle"
+      ],
+      "asset_sha256_16": "433c26d949789aa0",
+      "oracle_output": "The image shows a rectangular box with the text \"RED BOX\" written on it, colored in a shade of red."
+    },
+    {
+      "name": "audio-speech-pangram",
+      "prompt": "Transcribe this audio exactly.",
+      "asset": ".build/benchmarks/assets/gemma4-speech-pangram.wav",
+      "max_tokens": 48,
+      "expected_any": [
+        "fox",
+        "dog",
+        "quick",
+        "brown",
+        "jump",
+        "lazy"
+      ],
+      "forbidden": [
+        "cat",
+        "music",
+        "silence",
+        "tone",
+        "bark",
+        "i cannot"
+      ],
+      "asset_sha256_16": "904c039735a6eec4",
+      "oracle_output": "The quick brown fox jumps over the lazy dog."
+    }
+  ]
+}

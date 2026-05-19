@@ -13,8 +13,7 @@ make bench-compare KRILL_MODEL=llama-3.2-1b OLLAMA_MODEL=llama3.2:1b
 krillm serve --model llama-3.2-1b --port 11435 &
 make bench-compare KRILLM_URL=http://127.0.0.1:11435
 
-# Gemma4 multimodal (text/image/audio)
-make setup-mlx-vlm
+# Gemma4 multimodal (text/image/audio — all native, no Python bridge)
 make bench-gemma4-multimodal
 
 # Release gate (pass/fail evaluation)
@@ -63,7 +62,7 @@ Gemma4 text/image/audio comparison.
 - `--engine both|krillm|ollama` — single-engine or comparison
 - `--runs N` / `--warmup N`
 
-**Server mode notes:** image and audio payloads are sent as base64 in the standard Ollama shape. Audio runs through the `mlx-vlm` bridge, so the server needs `mlx-vlm` installed for audio benchmarks (`make setup-mlx-vlm`).
+**Server mode notes:** image and audio payloads are sent as base64 in the standard Ollama shape. Audio runs on the native Swift+MLX USM path — no Python/`mlx-vlm` dependency (the bridge was removed in WS6 Step 4).
 
 ### release_gate.py
 Evaluates benchmark reports against performance thresholds.
@@ -104,8 +103,8 @@ profile is recorded in the gate report so audit trails are unambiguous.
 | image_wall_ratio    | hard | User-visible total latency on image prompts. |
 | image_prefill_ratio | advisory | Vision encoder cache lifts work out of the measured prefill window, so this bucket understates the user win that image_wall already captures. Re-promote once the metric excludes cache mode or is redefined. |
 | memory_ratio        | hard (auto-downgraded to advisory when quantization classes differ) | The benchmark now samples each engine's process-tree memory; the gate hard-gates the ratio so KrillLM cannot quietly regress its footprint. When the comparison crosses quantization classes (e.g. one engine bf16 vs the other Q4_K_M) the metric is dominated by the weight format, not the runtime, so the gate auto-downgrades it to advisory and records the downgrade in `scope.memory_ratio` and the caveats. The canonical Gemma 4 e2b comparison is class-equal (KrillLM affine 4-bit MLX vs Ollama Q4_K_M GGUF, both `4-bit` class), so memory is hard-gated on it. |
-| audio_wall_ratio    | out_of_scope | Audio runs through the mlx-vlm sidecar; native Swift audio is Workstream 1. |
-| audio_prefill_ratio | out_of_scope | Same as audio_wall. |
+| audio_wall_ratio    | hard | WS6: native Swift+MLX audio is the only audio path and benchmarks faster than Ollama (~0.53× wall). |
+| audio_prefill_ratio | hard | WS6: native audio prefill ~2.4× Ollama. |
 
 **Peak memory sampling.** `gemma4_multimodal_benchmark.py` samples each
 engine's process-tree memory from a background thread (default 50 ms poll)
@@ -188,9 +187,8 @@ release-candidate path, not yet a production release.
   class-equal `memory_ratio` (0.32–0.84) hard-pass, plus the hard
   `text_decode_ratio_floor ≥1.0x`. `text_decode_ratio`'s ≥1.5x target is
   advisory (printed as WARN at ~1.19x — **no claim KrillLM hit 1.5x
-  decode**). Voice/audio remains out_of_scope because it runs through the
-  `mlx-vlm` bridge and is slower than Ollama on the accepted report.
-  Prefill is advisory.
+  decode**). Voice/audio is native (WS6) and `hard` in both profiles —
+  faster than Ollama (~0.53× wall, ~2.4× prefill). Prefill is advisory.
 - **`strict` gate** (default) still exits `1`: `text_decode_ratio`
   (hard ≥1.5x, no floor), `text_prefill_ratio`, `image_prefill_ratio`,
   and `audio_wall_ratio` fail. `strict` is the uncompromised reference and
@@ -233,13 +231,12 @@ Key release gaps as of the last reviewed run:
   `--krillm-server-pid` sampling, KrillLM text/image phys_footprint is
   ~2.85–3.0 GB vs Ollama's ~8.2–8.4 GB. Both engines remain 4-bit class
   so the comparison is genuinely hard-gated.
-- Audio benchmarks still run through `mlx-vlm`; native Swift audio is
-  Workstream 1 of the execution plan and `audio_*` is `out_of_scope`
-  under `release_candidate` until that ships. On v6-mm, bridge-backed
-  audio wall time is about 1.53 s for KrillLM vs 0.38 s for Ollama, so it
-  must not be described as production-parity voice performance.
-- Server multimodal benchmarks now exercise real media payloads (image
-  native, audio bridge).
+- Audio benchmarks run on the native Swift+MLX USM path (WS6; the
+  `mlx-vlm` bridge was removed). `audio_*` is `hard` in both profiles:
+  on the WS6 native-audio report KrillLM audio wall ~0.15 s vs Ollama
+  ~0.29 s and prefill ~2.4× Ollama — faster, not at-parity-only.
+- Server multimodal benchmarks exercise real media payloads (image and
+  audio both native).
 - int8 KV cache and the prefix cache compose end-to-end on Gemma 4 (PR
   #11). Reports record `benchmark.kv_cache_dtype` so int8 vs fp16 runs
   are never confused.
@@ -257,7 +254,7 @@ Release criteria must state which `cache_mode` is being compared. At least one c
 
 ## Apples-to-Apples Comparison Rules
 
-- Do not compare text-only placeholder runs against real-media runs. Server-mode multimodal comparisons must send real media payloads to both engines (image via the native Swift SigLIP2 path, audio via the `mlx-vlm` bridge until Workstream 1 lands). Any metric that the harness skips, or that the active gate profile classifies as `out_of_scope`, must be surfaced explicitly in the gate report (`scope_skipped_metrics` with reason) — never silently substituted with text-only numbers.
+- Do not compare text-only placeholder runs against real-media runs. Server-mode multimodal comparisons must send real media payloads to both engines (image via the native Swift SigLIP2 path, audio via the native Swift+MLX USM path). Any metric that the harness skips, or that the active gate profile classifies as `out_of_scope`, must be surfaced explicitly in the gate report (`scope_skipped_metrics` with reason) — never silently substituted with text-only numbers.
 - KrillLM and Ollama runs in the same report must use the same prompts, media assets, max-token budgets, sampling settings, `cache_mode`, and `kv_cache_dtype` (recorded in the report under `benchmark.kv_cache_dtype`).
 
 ## Non-Negotiable Rules
