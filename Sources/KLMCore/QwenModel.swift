@@ -5,8 +5,19 @@ import KLMCache
 
 // MARK: - Qwen Config
 
-/// Configuration for Qwen 2.5 / Qwen 3 model family.
-/// Key difference from Llama: QKV projections have bias.
+/// Configuration for Qwen 2.5 / Qwen 3 dense model family.
+///
+/// Differences this config captures between the two:
+///   - Qwen 2.5: QKV projections have bias; no q_norm / k_norm; no
+///     tied embeddings.
+///   - Qwen 3:   QKV projections have NO bias; per-head RMSNorm on
+///     Q and K before RoPE (`q_norm`, `k_norm`); tied embeddings
+///     (no separate `lm_head.weight`); `head_dim` set explicitly in
+///     config rather than derived from `hidden_size /
+///     num_attention_heads`.
+///
+/// The two variants share the same module hierarchy; flags below
+/// switch the per-module behavior without forcing a duplicate file.
 public struct QwenConfig: ModelConfig, Codable, Sendable {
     public let hiddenSize: Int
     public let intermediateSize: Int
@@ -18,8 +29,29 @@ public struct QwenConfig: ModelConfig, Codable, Sendable {
     public let ropeTheta: Float
     public let maxPositionEmbeddings: Int
     public let quantization: QuantizationConfig?
+    /// Whether Q/K/V projections have a bias term. True for Qwen 2.5,
+    /// false for Qwen 3. Defaults to true so pre-WS4 Qwen 2.5
+    /// configs (which omit `attention_bias`) keep their old behavior.
+    public let attentionBias: Bool
+    /// Whether the attention module applies per-head RMSNorm to Q and
+    /// K before RoPE. True for Qwen 3, false for Qwen 2.5. Detected
+    /// from `model_type == "qwen3"`.
+    public let hasQKNorm: Bool
+    /// When true, the LM head reuses `embed_tokens` (no separate
+    /// `lm_head` weight is loaded). True for Qwen 3, false for Qwen
+    /// 2.5.
+    public let tieWordEmbeddings: Bool
+    /// Explicit head_dim from config. Qwen 3 sets this independently
+    /// of `hidden_size / num_attention_heads`. Qwen 2.5 omits it; we
+    /// fall back to the derived value.
+    public let explicitHeadDim: Int?
+    /// HuggingFace `model_type`. We persist it (rather than deriving
+    /// other flags from it on the fly) so `Codable` synthesis stays
+    /// well-formed: every CodingKey case must map to a stored
+    /// property for encode-side synthesis.
+    public let modelType: String
 
-    public var headDim: Int { hiddenSize / numAttentionHeads }
+    public var headDim: Int { explicitHeadDim ?? (hiddenSize / numAttentionHeads) }
 
     enum CodingKeys: String, CodingKey {
         case hiddenSize = "hidden_size"
@@ -32,6 +64,10 @@ public struct QwenConfig: ModelConfig, Codable, Sendable {
         case ropeTheta = "rope_theta"
         case maxPositionEmbeddings = "max_position_embeddings"
         case quantization
+        case attentionBias = "attention_bias"
+        case modelType = "model_type"
+        case tieWordEmbeddings = "tie_word_embeddings"
+        case explicitHeadDim = "head_dim"
     }
 
     public init(from decoder: Decoder) throws {
@@ -48,6 +84,18 @@ public struct QwenConfig: ModelConfig, Codable, Sendable {
         maxPositionEmbeddings = try c.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings)
             ?? 32768
         quantization = try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantization)
+        modelType = try c.decodeIfPresent(String.self, forKey: .modelType) ?? "qwen2"
+        let isQwen3 = modelType == "qwen3"
+        // Qwen 2.5 omits `attention_bias` and ships QKV biases; Qwen 3
+        // sets it to false explicitly. When the key is present we
+        // honor it; otherwise default to the family's historical
+        // behavior.
+        attentionBias = try c.decodeIfPresent(Bool.self, forKey: .attentionBias)
+            ?? !isQwen3
+        hasQKNorm = isQwen3
+        tieWordEmbeddings = try c.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings)
+            ?? isQwen3
+        explicitHeadDim = try c.decodeIfPresent(Int.self, forKey: .explicitHeadDim)
     }
 }
 
@@ -64,6 +112,12 @@ class QwenAttention: Module {
     @ModuleInfo(key: "v_proj") var vProj: Linear
     @ModuleInfo(key: "o_proj") var oProj: Linear
 
+    // Qwen 3: per-head RMSNorm on Q and K before RoPE. Optional so
+    // Qwen 2.5 checkpoints (which have no q_norm / k_norm weight)
+    // do not gain unused parameters at load time.
+    @ModuleInfo(key: "q_norm") var qNorm: RMSNorm?
+    @ModuleInfo(key: "k_norm") var kNorm: RMSNorm?
+
     let rope: RoPE
 
     init(_ config: QwenConfig) {
@@ -73,15 +127,24 @@ class QwenAttention: Module {
         self.headDim = config.headDim
         self.scale = 1.0 / Float(config.headDim).squareRoot()
 
-        // Qwen uses bias on Q/K/V but not on O
+        let bias = config.attentionBias
         _qProj = ModuleInfo(
-            wrappedValue: Linear(dim, numHeads * headDim, bias: true), key: "q_proj")
+            wrappedValue: Linear(dim, numHeads * headDim, bias: bias), key: "q_proj")
         _kProj = ModuleInfo(
-            wrappedValue: Linear(dim, numKVHeads * headDim, bias: true), key: "k_proj")
+            wrappedValue: Linear(dim, numKVHeads * headDim, bias: bias), key: "k_proj")
         _vProj = ModuleInfo(
-            wrappedValue: Linear(dim, numKVHeads * headDim, bias: true), key: "v_proj")
+            wrappedValue: Linear(dim, numKVHeads * headDim, bias: bias), key: "v_proj")
         _oProj = ModuleInfo(
             wrappedValue: Linear(numHeads * headDim, dim, bias: false), key: "o_proj")
+
+        if config.hasQKNorm {
+            _qNorm = ModuleInfo(
+                wrappedValue: RMSNorm(dimensions: headDim, eps: config.rmsNormEps),
+                key: "q_norm")
+            _kNorm = ModuleInfo(
+                wrappedValue: RMSNorm(dimensions: headDim, eps: config.rmsNormEps),
+                key: "k_norm")
+        }
 
         self.rope = RoPE(
             dimensions: headDim, traditional: false, base: config.ropeTheta)
@@ -91,9 +154,19 @@ class QwenAttention: Module {
         let B = x.dim(0)
         let L = x.dim(1)
 
-        var queries = qProj(x).reshaped(B, L, numHeads, headDim).transposed(0, 2, 1, 3)
-        var keys = kProj(x).reshaped(B, L, numKVHeads, headDim).transposed(0, 2, 1, 3)
+        var queries = qProj(x).reshaped(B, L, numHeads, headDim)
+        var keys = kProj(x).reshaped(B, L, numKVHeads, headDim)
         var values = vProj(x).reshaped(B, L, numKVHeads, headDim).transposed(0, 2, 1, 3)
+
+        // Qwen 3: apply per-head RMSNorm to Q and K *before* RoPE.
+        // The norm operates on the last dimension (headDim) so we
+        // apply it while the tensors are still in [B, L, heads, dim]
+        // layout, then transpose for attention.
+        if let qNorm { queries = qNorm(queries) }
+        if let kNorm { keys = kNorm(keys) }
+
+        queries = queries.transposed(0, 2, 1, 3)
+        keys = keys.transposed(0, 2, 1, 3)
 
         let offset = cache?.sequenceLength ?? 0
         queries = rope(queries, offset: offset)
@@ -182,7 +255,14 @@ class QwenModelInner: Module {
         var x = embedTokens(tokens)
         let seqLen = x.dim(1)
         let cacheLen = caches?.first?.sequenceLength ?? 0
-        let mask = createCachedCausalMask(newLen: seqLen, cacheLen: cacheLen)
+        // Mask must promote to the hidden state's dtype. Qwen 3
+        // checkpoints run inference in bf16 (configs declare
+        // `torch_dtype: "bfloat16"`); Qwen 2.5 4-bit MLX checkpoints
+        // run in fp16. `MLXFast.scaledDotProductAttention` errors if
+        // the mask dtype cannot be promoted, so we source the dtype
+        // from the embedding output itself rather than guessing.
+        let mask = createCachedCausalMask(
+            newLen: seqLen, cacheLen: cacheLen, dtype: x.dtype)
 
         for (i, layer) in layers.enumerated() {
             x = layer(x, mask: mask, cache: caches?[i])
@@ -193,19 +273,31 @@ class QwenModelInner: Module {
 
 public class QwenForCausalLM: Module {
     @ModuleInfo(key: "model") var model: QwenModelInner
-    @ModuleInfo(key: "lm_head") var lmHead: Linear
+    // Optional so Qwen 3 (tied embeddings, no separate `lm_head`
+    // weight in the safetensors) loads cleanly. When nil, the LM
+    // projection reuses `model.embed_tokens` via `asLinear`, matching
+    // the Gemma 4 tied-embedding path.
+    @ModuleInfo(key: "lm_head") var lmHead: Linear?
 
     public let config: QwenConfig
 
     public init(_ config: QwenConfig) {
         self.config = config
         _model = ModuleInfo(wrappedValue: QwenModelInner(config), key: "model")
-        _lmHead = ModuleInfo(
-            wrappedValue: Linear(config.hiddenSize, config.vocabSize, bias: false),
-            key: "lm_head")
+        if !config.tieWordEmbeddings {
+            _lmHead = ModuleInfo(
+                wrappedValue: Linear(config.hiddenSize, config.vocabSize, bias: false),
+                key: "lm_head")
+        }
     }
 
     public func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
-        lmHead(model(tokens, caches: caches))
+        let hidden = model(tokens, caches: caches)
+        if let lmHead {
+            return lmHead(hidden)
+        }
+        // Tied embeddings: reuse embed_tokens. `asLinear` does
+        // matmul(hidden, embed_tokens.weight.T) and respects quantization.
+        return model.embedTokens.asLinear(hidden)
     }
 }

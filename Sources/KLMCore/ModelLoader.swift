@@ -109,7 +109,10 @@ private func loadLlama(configData: Data, directory: URL) throws -> LoadedModel {
 private func loadQwen(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(QwenConfig.self, from: configData)
     let model = QwenForCausalLM(config)
-    try loadWeights(into: model, from: directory, quantization: config.quantization)
+    try loadWeights(
+        into: model, from: directory,
+        quantization: config.quantization,
+        tieWordEmbeddings: config.tieWordEmbeddings)
 
     return LoadedModel(
         module: model,
