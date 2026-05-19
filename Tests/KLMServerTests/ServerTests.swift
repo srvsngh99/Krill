@@ -1212,6 +1212,23 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(qwen.map(\.name), ["a", "b"])
     }
 
+    func testLlamaInjectionRerendersAllHistoryCalls() {
+        // PR #23 round 2: a prior assistant turn with multiple tool calls
+        // must be replayed to the model in full, not just the first.
+        let msgs = [
+            ["role": "user", "content": "do both"],
+            ["role": "assistant",
+             "content": "<tool_call>{\"name\":\"a\",\"arguments\":{\"x\":1}}</tool_call>"
+                 + "<tool_call>{\"name\":\"b\",\"arguments\":{\"y\":2}}</tool_call>"],
+            ["role": "user", "content": "<tool_response>ok</tool_response>"],
+        ]
+        let spec = ServerToolSpec(name: "a", description: "", parametersJSON: "{}")
+        let out = ToolCalling.injectToolSystem(into: msgs, tools: [spec], format: .llama)
+        let asst = out.first { $0["role"] == "assistant" }?["content"] ?? ""
+        XCTAssertTrue(asst.contains("\"name\": \"a\""))
+        XCTAssertTrue(asst.contains("\"name\": \"b\""))
+    }
+
     func testNoToolsTurnNeverExtractsCalls() {
         // PR #23 P2 regression: ordinary JSON output on a no-tools request
         // must NOT be misclassified as a tool call (would surface as an

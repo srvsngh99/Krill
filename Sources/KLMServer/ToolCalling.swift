@@ -165,8 +165,13 @@ internal enum ToolCalling {
             }
             if role == "assistant", content.contains("<tool_call>") {
                 let (calls, rest) = extractHermes(from: content)
-                if let c = calls.first {
-                    let native = "{\"name\": \"\(c.name)\", \"parameters\": \(c.argumentsJSON)}"
+                if !calls.isEmpty {
+                    // Map ALL calls (Ollama's llama3.2 template emits one
+                    // {"name","parameters"} object per ToolCall), matching
+                    // injectGemma4's multi-call handling.
+                    let native = calls.map {
+                        "{\"name\": \"\($0.name)\", \"parameters\": \($0.argumentsJSON)}"
+                    }.joined(separator: "\n")
                     m["content"] = rest.isEmpty ? native : rest + "\n" + native
                 }
             }
