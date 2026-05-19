@@ -5,6 +5,7 @@ import KLMCore
 import KLMCache
 import KLMTokenizer
 import KLMSampler
+import KLMRegistry
 
 /// Orchestrates model loading, tokenization, and the prefill + decode loop.
 ///
@@ -50,21 +51,43 @@ public final class InferenceEngine: @unchecked Sendable {
     /// Returns nil if no model is currently loaded.
     public var modelDirectoryPath: String? { isLoaded ? modelDirectory.path : nil }
 
-    /// Whether the loaded model can natively handle image input via the engine.
-    /// Requires both family == "gemma4" AND a non-nil multimodal forward (i.e.
-    /// the checkpoint actually has `vision_config`); a text-only Gemma 4
-    /// checkpoint cannot inject vision embeddings and must reject image input.
-    public var supportsNativeImage: Bool {
-        loadedModel?.family == "gemma4" && loadedModel?.multimodalForward != nil
+    /// The loaded model's declared capability set. Combines the family's
+    /// static registry entry (`ModelCapabilities.capabilities(for:)`)
+    /// with checkpoint-level facts that only the loader knows (e.g. a
+    /// `gemma4_text` checkpoint declares family=gemma4 but ships no
+    /// `vision_config`, so vision/audio must be revoked).
+    public var capabilities: Set<Capability> {
+        guard let loaded = loadedModel,
+              let family = ModelFamily(rawValue: loaded.family) else {
+            return []
+        }
+        var caps = ModelCapabilities.capabilities(for: family)
+        // Multimodal capabilities also require the checkpoint to carry
+        // the corresponding sub-config: a text-only Gemma 4 dump has
+        // `multimodalForward == nil` and must NOT advertise vision or
+        // audio even though its family does in general. This keeps
+        // server pre-generation media gating honest.
+        if loaded.multimodalForward == nil {
+            caps.remove(.visionInput)
+            caps.remove(.audioInput)
+        }
+        return caps
     }
 
-    /// Whether the loaded model can handle audio input. Requires the same
-    /// multimodal checkpoint as image input. Audio runs exclusively on the
-    /// native Swift+MLX USM path (the mlx-vlm bridge was retired in WS6
-    /// Step 4 after native was validated and benchmarked faster than
-    /// Ollama; see `docs/NATIVE_GEMMA4_AUDIO_PLAN.md`).
+    /// Whether the loaded model can natively handle image input via the
+    /// engine. Sourced from `capabilities.contains(.visionInput)`.
+    public var supportsNativeImage: Bool {
+        capabilities.contains(.visionInput)
+    }
+
+    /// Whether the loaded model can handle audio input. Audio runs
+    /// exclusively on the native Swift+MLX USM path (the mlx-vlm bridge
+    /// was retired in WS6 Step 4 after native was validated and
+    /// benchmarked faster than Ollama; see
+    /// `docs/NATIVE_GEMMA4_AUDIO_PLAN.md`). Sourced from
+    /// `capabilities.contains(.audioInput)`.
     public var supportsAudio: Bool {
-        loadedModel?.family == "gemma4" && loadedModel?.multimodalForward != nil
+        capabilities.contains(.audioInput)
     }
 
     /// True when the loaded model can run audio. Audio is always native now;

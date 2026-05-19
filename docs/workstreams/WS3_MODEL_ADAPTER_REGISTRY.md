@@ -1,6 +1,38 @@
 # WS3: Model Adapter And Capability Registry
 
-Status: planned
+Status: foundational metadata layer landed; full ModelAdapter
+polymorphism deferred.
+Detailed usage: [../MODEL_REGISTRY.md](../MODEL_REGISTRY.md)
+
+## What landed in this PR
+
+- `Capability` enum (textGeneration, visionInput, audioInput,
+  embeddings, tools, structuredOutput, moe, reranker) and
+  `SupportTier` enum (productionNative, compatibleFallback,
+  experimental, unsupported) in `Sources/KLMRegistry/ModelCapabilities.swift`.
+- Per-family capability set + support tier lookups, plus a stable
+  `ollamaTag` mapping so the discovery endpoints emit Ollama-compatible
+  capability identifiers.
+- `InferenceEngine.capabilities` reads from the registry and revokes
+  vision/audio at the engine layer when the loaded checkpoint has no
+  multimodal forward. `supportsNativeImage` / `supportsAudio` now
+  derive from the capability set instead of hardcoded family checks.
+- `OllamaCompat.capabilities(for:)` reads from the registry; `/api/show`
+  payload now exposes a `support_tier` field alongside the capability
+  list.
+- Tests pin the capability set per family and the tools-template
+  helper consistency.
+
+## What this does NOT do
+
+- No runtime `ModelAdapter` polymorphic contract. Adding one in the
+  same PR would force every loader rewrite for an abstraction whose
+  first user is not in tree yet. Once WS5 lands a second native VLM,
+  the template-selection branch is the right place to introduce
+  adapter dispatch.
+- The Server.swift still has a couple of family-keyed branches that
+  are model-mechanics decisions (chat template, audio token IDs)
+  rather than capability decisions, and those stay family-keyed.
 
 ## Goal
 
