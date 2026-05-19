@@ -5,7 +5,7 @@ import Foundation
 /// `Capability` is the declared per-family contract: it answers "should
 /// the server accept this kind of input at all", "is this surface
 /// supported", etc., without forcing every call site to ask "is this
-/// Gemma 4?". Native availability is the orthogonal axis — see
+/// Gemma 4?". Native availability is the orthogonal axis; see
 /// `SupportTier`.
 public enum Capability: String, Sendable, CaseIterable, Codable {
     /// Causal text generation (the universal default for the LM
