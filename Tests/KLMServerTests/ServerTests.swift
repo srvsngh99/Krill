@@ -1180,6 +1180,38 @@ final class ServerTests: XCTestCase {
         XCTAssertTrue(out.first?["content"]?.contains("<tool_call>") ?? false)
     }
 
+    func testToolResultBodyContainingNameEqualsNotTruncated() {
+        // PR #23 round 1 item 2: an unanchored `name=` strip would truncate
+        // a tool result whose own body contains `name=`. With no normalizer
+        // prefix the full result must survive.
+        let msgs = [["role": "user",
+                     "content": "<tool_response>db row: name=Alice age=30</tool_response>"]]
+        let spec = ServerToolSpec(name: "q", description: "", parametersJSON: "{}")
+        let g = ToolCalling.injectToolSystem(into: msgs, tools: [spec], format: .gemma4)
+        XCTAssertTrue(g.contains {
+            $0["role"] == "tool" && $0["content"] == "db row: name=Alice age=30" })
+        let l = ToolCalling.injectToolSystem(into: msgs, tools: [spec], format: .llama)
+        XCTAssertTrue(l.contains {
+            $0["role"] == "ipython" && $0["content"] == "db row: name=Alice age=30" })
+        // The genuine normalizer prefix IS still stripped.
+        let pref = [["role": "user",
+                     "content": "<tool_response>name=add 42</tool_response>"]]
+        let g2 = ToolCalling.injectToolSystem(into: pref, tools: [spec], format: .gemma4)
+        XCTAssertTrue(g2.contains { $0["role"] == "tool" && $0["content"] == "42" })
+    }
+
+    func testLlamaAndQwenCollectAllMultiToolCalls() {
+        // PR #23 round 1 item 3: must not collapse multi-tool responses.
+        let llama = ToolCalling.extractToolCalls(
+            from: "{\"name\":\"a\",\"parameters\":{\"x\":1}} {\"name\":\"b\",\"parameters\":{\"y\":2}}",
+            format: .llama).calls
+        XCTAssertEqual(llama.map(\.name), ["a", "b"])
+        let qwen = ToolCalling.extractToolCalls(
+            from: "noise {\"name\":\"a\",\"arguments\":{\"x\":1}} then {\"name\":\"b\",\"arguments\":{\"y\":2}}",
+            format: .qwen).calls
+        XCTAssertEqual(qwen.map(\.name), ["a", "b"])
+    }
+
     func testNoToolsTurnNeverExtractsCalls() {
         // PR #23 P2 regression: ordinary JSON output on a no-tools request
         // must NOT be misclassified as a tool call (would surface as an

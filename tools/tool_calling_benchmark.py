@@ -245,7 +245,7 @@ def reachable(base: str, timeout: float) -> bool:
             base.rstrip("/") + "/api/version", timeout=min(timeout, 10))
         return True
     except urllib.error.HTTPError:
-        return True  # endpoint exists, just no /api/version — good enough
+        return True  # endpoint exists, just no /api/version - good enough
     except (urllib.error.URLError, OSError):
         return False
 
@@ -321,7 +321,7 @@ def main() -> int:
     if gate:
         print("GATE: PASS (KrillLM >= Ollama)")
         return 0
-    print("GATE: FAIL (KrillLM behind Ollama — expected pre-fix; "
+    print("GATE: FAIL (KrillLM behind Ollama - expected pre-fix; "
           "see docs/NATIVE_TOOL_CALLING_PLAN.md)")
     return 1
 

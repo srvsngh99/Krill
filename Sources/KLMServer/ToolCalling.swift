@@ -159,11 +159,7 @@ internal enum ToolCalling {
             let content = m["content"] ?? ""
             if role == "user",
                let inner = between(content, "<tool_response>", "</tool_response>") {
-                var result = inner
-                if let r = result.range(of: "name="),
-                   let sp = result[r.upperBound...].firstIndex(of: " ") {
-                    result = String(result[result.index(after: sp)...])
-                }
+                let result = stripNormalizerNamePrefix(inner)
                 work.append(["role": "ipython", "content": result])
                 continue
             }
@@ -242,13 +238,7 @@ internal enum ToolCalling {
             // content is exactly `<tool_response>[name=… ]RESULT</tool_response>`.
             if role == "user",
                let inner = between(content, "<tool_response>", "</tool_response>") {
-                var result = inner
-                if let r = result.range(of: "name=") {
-                    // Drop a leading `name=<n> ` prefix the normalizer adds.
-                    if let sp = result[r.upperBound...].firstIndex(of: " ") {
-                        result = String(result[result.index(after: sp)...])
-                    }
-                }
+                let result = stripNormalizerNamePrefix(inner)
                 out.append(["role": "tool", "content": result])
                 continue
             }
@@ -266,6 +256,15 @@ internal enum ToolCalling {
             out.append(m)
         }
         return out
+    }
+
+    /// Drop the `name=<tool> ` prefix that `normalizeToolTurns` prepends to
+    /// a tool-result body. Anchored with `hasPrefix` so a result whose own
+    /// content contains `name=` mid-string is never truncated.
+    private static func stripNormalizerNamePrefix(_ s: String) -> String {
+        guard s.hasPrefix("name="), let sp = s.firstIndex(of: " ")
+        else { return s }
+        return String(s[s.index(after: sp)...])
     }
 
     /// Inner text between the first `open` and the next `close`, or nil.
@@ -319,17 +318,19 @@ internal enum ToolCalling {
     {
         let h = extractHermes(from: text)
         if !h.calls.isEmpty { return h }
-        // Scan every balanced object; accept the first with `name` +
-        // `arguments`, ignoring any leading prose/markers.
+        // Scan every balanced object; collect ALL with `name` +
+        // `arguments`, ignoring leading prose/markers. Collecting all (not
+        // the first) keeps multi-tool responses intact, matching Hermes.
+        var calls: [ParsedToolCall] = []
         var scan = Substring(text)
         while let (json, end) = firstJSONObject(in: scan), !json.isEmpty {
             if json.contains("\"arguments\""), let c = parseCallJSON(json),
                !c.name.isEmpty {
-                return ([c], "")
+                calls.append(c)
             }
             scan = scan[end...]
         }
-        return h
+        return calls.isEmpty ? h : (calls, "")
     }
 
     /// Llama 3.x native parser. The model emits a bare
@@ -348,12 +349,14 @@ internal enum ToolCalling {
         cleaned = cleaned.replacingOccurrences(of: "```json", with: "")
             .replacingOccurrences(of: "```", with: "")
 
-        // Scan every balanced object; the call is the first with a string
-        // `name` + `parameters`/`arguments` that is NOT an echoed schema
-        // (those carry a top-level `type:"function"` or nested `function`).
+        // Collect EVERY balanced object that is a call: a string `name` +
+        // `parameters`/`arguments`, and NOT an echoed schema (those carry a
+        // top-level `type:"function"` or a nested `function`). Collecting
+        // all (not the first) keeps multi-tool responses intact, matching
+        // the Hermes path.
+        var calls: [ParsedToolCall] = []
         var scan = Substring(cleaned)
-        while let (json, end) = firstJSONObject(in: scan),
-              !json.isEmpty {
+        while let (json, end) = firstJSONObject(in: scan), !json.isEmpty {
             if let data = json.data(using: .utf8),
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let name = obj["name"] as? String, !name.isEmpty,
@@ -368,10 +371,11 @@ internal enum ToolCalling {
                 } else {
                     argsString = "{}"
                 }
-                return ([ParsedToolCall(name: name, argumentsJSON: argsString)], "")
+                calls.append(ParsedToolCall(name: name, argumentsJSON: argsString))
             }
             scan = scan[end...]
         }
+        if !calls.isEmpty { return (calls, "") }
         // 1B fallback: it sometimes emits the Hermes sentinel anyway.
         return extractHermes(from: text)
     }
