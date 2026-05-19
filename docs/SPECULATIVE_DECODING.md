@@ -39,7 +39,7 @@ greedy requests. Tests and parity references can disable that opt-in via
 
 ## When the spec path is skipped
 
-The engine falls back to standard decode (silently — no error) when:
+The engine falls back to standard decode (silently, no error) when:
 
 - No draft model is loaded.
 - The request is non-greedy: `temperature > 0`, `top_p < 1`,
@@ -54,7 +54,7 @@ The engine falls back to standard decode (silently — no error) when:
 
 Greedy parity is preserved: enabling spec with a curated draft must
 produce byte-identical output to the same request with no draft model.
-This is the smoke test the WS2 PR shipped against — see "Benchmark
+This is the smoke test the WS2 PR shipped against; see "Benchmark
 result" for the sha256-stable preview.
 
 Two correctness fixes were required to make this hold:
@@ -82,7 +82,7 @@ Two correctness fixes were required to make this hold:
    path allocated empty draft caches per generation and never warmed
    them with the prompt, so draft proposals were generated from a
    one-token context (whatever the first sampled token happened to
-   be) — acceptance rate was bounded by how often "predict from a single
+   be). Acceptance rate was bounded by how often "predict from a single
    token with no prior context" happened to agree with the target's
    prompt-conditioned distribution. The engine now forwards
    `tokensToProcess` through the draft into its own `[KVCache]` before

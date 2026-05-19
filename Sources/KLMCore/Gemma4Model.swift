@@ -455,7 +455,7 @@ class Gemma4TextModel: Module {
         // gets a square (L, L) mask; non-empty cache + multi-token forward
         // (spec-decode verify, partial prefix resume) gets the shifted
         // (L, cacheLen + L) mask. `caches.first` may be a quantized cache
-        // when int8 KV is active — its `sequenceLength` semantics match
+        // when int8 KV is active - its `sequenceLength` semantics match
         // the fp16 path.
         let cacheLen = caches?.first?.sequenceLength ?? 0
         let mask = createCachedCausalMask(

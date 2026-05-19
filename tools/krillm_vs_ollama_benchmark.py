@@ -217,10 +217,18 @@ def parse_krillm_result(stdout: str, wall_s: float, command: list[str]) -> dict[
     if not match:
         raise RuntimeError("KrillLM output did not contain a parseable stats line")
     generated = stdout.split("\n---\n", 1)[0]
+    # Strip operational lines that precede the generated text. `spec:` is
+    # belt-and-braces: today it lives in the stats section after `---`
+    # and never reaches `generated`, but stripping it here means a future
+    # CLI reformat (or the line landing before `---`) cannot cause
+    # output_sha256 to diverge silently between spec-on and spec-off
+    # parity comparisons.
     generated_lines = [
         line for line in generated.splitlines()
-        if line and not line.startswith("Loading model") and not line.startswith("Ready (")
+        if line and not line.startswith("Loading model")
+        and not line.startswith("Ready (")
         and not line.startswith("Speculative decoding enabled")
+        and not line.startswith("spec:")
     ]
     generated_text = "\n".join(generated_lines)
     result: dict[str, Any] = {

@@ -119,8 +119,8 @@ public func createAdditiveCausalMask(_ n: Int, dtype: DType = .float16) -> MLXAr
 /// classic square `(1, 1, newLen, newLen)` causal mask.
 ///
 /// For non-empty-cache multi-token forward (`cacheLen > 0`, `newLen > 1`)
-/// — the case that occurs during speculative-decode verify and after a
-/// partial prefix-cache resume — returns a `(1, 1, newLen, cacheLen + newLen)`
+/// (the case that occurs during speculative-decode verify and after a
+/// partial prefix-cache resume) returns a `(1, 1, newLen, cacheLen + newLen)`
 /// mask. The first `cacheLen` columns are zero (new queries can attend to
 /// every cached position) and the last `newLen` columns are upper-
 /// triangular (row `i` may attend within the new slice only up to its own

@@ -258,7 +258,7 @@ final class SpeculativeDecodingTests: XCTestCase {
     func testRecommendedDraftLookup() {
         XCTAssertEqual(recommendedDraft(for: "llama-3.2-3b"), "llama-3.2-1b")
         XCTAssertEqual(recommendedDraft(for: "qwen2.5-3b"), "qwen2.5-0.5b")
-        // Models without a curated pair return nil — the resolver surfaces
+        // Models without a curated pair return nil. The resolver surfaces
         // this as `DraftResolutionError.noAutoPair` to the CLI.
         XCTAssertNil(recommendedDraft(for: "gemma-4-e2b"))
         XCTAssertNil(recommendedDraft(for: "some-unknown-model"))

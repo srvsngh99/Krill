@@ -255,7 +255,7 @@ public final class InferenceEngine: @unchecked Sendable {
         systemPrompt: String? = nil,
         params: SamplingParams = .greedy,
         maxTokens: Int = 512,
-        useSpeculative: Bool = false,
+        useSpeculative: Bool? = nil,
         usePrefixCache: Bool = true,
         imageData: Data? = nil,
         audioData: Data? = nil,
@@ -280,14 +280,18 @@ public final class InferenceEngine: @unchecked Sendable {
     ///   - messages: Array of `["role": ..., "content": ...]` messages (full chat history)
     ///   - params: Sampling parameters
     ///   - maxTokens: Maximum tokens to generate
-    ///   - useSpeculative: Enable speculative decoding (requires draft model loaded)
+    ///   - useSpeculative: Tri-state spec opt-in. `nil` defers to the engine
+    ///     default (`autoUseSpec`, set by `loadDraftModel`). `false` is an
+    ///     explicit opt-out honored even when a draft is loaded; `true` is
+    ///     an explicit opt-in still subject to greedy / non-int8 / no-penalty
+    ///     guards.
     ///   - usePrefixCache: Enable prefix cache lookup/store
     /// - Returns: AsyncStream of TokenEvents + stats accessor
     public func generate(
         messages: [[String: String]],
         params: SamplingParams = .greedy,
         maxTokens: Int = 512,
-        useSpeculative: Bool = false,
+        useSpeculative: Bool? = nil,
         usePrefixCache: Bool = true,
         imageData: Data? = nil,
         audioData: Data? = nil,
@@ -404,11 +408,16 @@ public final class InferenceEngine: @unchecked Sendable {
         // pure greedy.
         let greedyRequest = params.temperature <= 0 && params.topP >= 1.0
             && params.topK <= 0 && params.minP <= 0
-        // autoUseSpec lets `loadDraftModel(...)` opt the engine in by
-        // default without forcing every call site to thread a flag. Tests
-        // and parity reference paths that need to bypass spec can clear
-        // it via the engine API (`setAutoUseSpec(false)`).
-        let wantsSpec = useSpeculative || autoUseSpec
+        // `useSpeculative` is tri-state:
+        //   nil   -> use the engine's auto opt-in (set true by
+        //            `loadDraftModel`; can be cleared with
+        //            `setAutoUseSpec(false)`),
+        //   false -> explicit opt-out, honored even with a draft loaded,
+        //   true  -> explicit opt-in (still subject to the guards below).
+        // The explicit-false case is what tests and parity reference paths
+        // need: they want to call generate() on the same engine instance
+        // and get the non-spec output for comparison.
+        let wantsSpec = useSpeculative ?? autoUseSpec
         let shouldSpec = wantsSpec && specDecoder != nil && !useInt8KV
             && !params.penaltiesActive && greedyRequest
         let capturedImageData = imageData
@@ -597,17 +606,27 @@ public final class InferenceEngine: @unchecked Sendable {
                     nextToken = nextTokenArr.item(Int.self)
                 }
 
-                // Prefill the draft model on the same prompt BEFORE we start
-                // the decode-time clock. Draft prefill is one-time setup
-                // per generation (analogous to target prefill, already in
-                // `prefillDuration`); attributing it to decode would
-                // inflate per-token decode cost and depress tok/s
+                // Prefill the draft model on the FULL prompt BEFORE we
+                // start the decode-time clock. Draft prefill is one-time
+                // setup per generation (analogous to target prefill,
+                // already in `prefillDuration`); attributing it to decode
+                // would inflate per-token decode cost and depress tok/s
                 // unfairly versus the non-spec baseline.
+                //
+                // Critical: must use `promptTokens`, NOT `inputArray`. On
+                // a prefix-cache hit the target's `tokensToProcess` is
+                // trimmed to the last prompt token (its KV was restored
+                // from snapshot for everything else); the draft has no
+                // such snapshot, so feeding it the trimmed input would
+                // leave its cache covering 1 token vs the target's full
+                // L, collapsing acceptance on every warm-server request.
                 let draftCaches: [KVCache]?
                 if shouldSpec, let specDec = capturedSpecDecoder, let draftModel = specDec.draft {
                     let dCaches = makeKVCaches(numLayers: draftModel.numLayers)
+                    let draftInput = MLXArray(promptTokens.map { Int32($0) })
+                        .reshaped(1, promptTokens.count)
                     let draftPrefillLogits = draftModel.forward(
-                        inputArray, dCaches)
+                        draftInput, dCaches)
                     MLX.eval(draftPrefillLogits)
                     specDec.reset()
                     draftCaches = dCaches

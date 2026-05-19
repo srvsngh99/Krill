@@ -169,7 +169,7 @@ public final class SpeculativeDecoder: @unchecked Sendable {
         // the same trim:
         //   - target wrote K entries during verify; keep `accepted.count`
         //     (= i accepted draft + 1 target replacement, but the
-        //     replacement is itself NOT in the cache — so we keep i+1
+        //     replacement is itself NOT in the cache, so we keep i+1
         //     entries from the K verify writes, which is `accepted.count`).
         //   - draft wrote K entries during its loop; keep the same
         //     `accepted.count` so the draft cache matches "everything
