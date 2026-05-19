@@ -179,9 +179,9 @@ class MemoryProbeTests(unittest.TestCase):
         self.assertTrue(block["enabled"])
         self.assertEqual(block["interval_ms"], 80)
         # The basis dict documents which per-tree metric was actually used
-        # (phys_footprint on macOS, RSS elsewhere) plus the bridge-path basis.
+        # (phys_footprint on macOS, RSS elsewhere). The legacy "mlx_metal"
+        # basis was removed with the mlx-vlm bridge (WS6 Step 4).
         self.assertIn(bm.MemorySampler.basis, block["basis"])
-        self.assertIn("mlx_metal", block["basis"])
         self.assertEqual(block["ollama_pids_sampled"], [42])
         self.assertEqual(block["krillm_pids_sampled"], [])
 
