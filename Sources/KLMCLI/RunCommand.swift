@@ -100,6 +100,14 @@ struct RunCommand: AsyncParsableCommand {
         let loadTime = CFAbsoluteTimeGetCurrent() - loadStart
         print(String(format: "Ready (%.1fs load time)", loadTime))
 
+        // The mlx-vlm bridge was removed (WS6 Step 4). Reject --audio for any
+        // model that cannot process it natively — including text-only Gemma 4
+        // checkpoints — so it is a hard error, never a silent text-only run.
+        if audio != nil && !engine.canUseNativeAudio {
+            print("Error: --audio requires an audio-capable Gemma 4 checkpoint; this model cannot process audio.")
+            throw ExitCode.failure
+        }
+
         let params = SamplingParams(
             temperature: temp,
             topP: topP,

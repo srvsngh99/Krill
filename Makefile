@@ -137,11 +137,16 @@ bench-compare:
 			--output "$(BENCH_OUTPUT)"; \
 	fi
 
-# Gemma 4 text/image/audio comparison against Ollama. Runs modalities separately.
-bench-gemma4-multimodal:
+# Gemma 4 text/image/audio comparison against Ollama. All KrillLM paths are
+# native (the mlx-vlm bridge was removed in WS6 Step 4): native_cli runs the
+# release binary per request — no server or Python deps. Requires `make
+# release` first (uses .build/release/krillm). For server-mode numbers, run
+# the script directly with --krillm-url + --krillm-image-mode native_server.
+bench-gemma4-multimodal: release
 	$(KRILLM_PYTHON) tools/gemma4_multimodal_benchmark.py \
 		--krill-model "$(GEMMA4_KRILL_MODEL)" \
 		--ollama-model "$(GEMMA4_OLLAMA_MODEL)" \
+		--krillm-image-mode native_cli \
 		--runs $(GEMMA4_BENCH_RUNS) \
 		--warmup $(GEMMA4_BENCH_WARMUP) \
 		--output "$(GEMMA4_BENCH_OUTPUT)"

@@ -2,7 +2,7 @@
 
 ## Status and Scope
 
-This build is a release-readiness baseline, not a production release. The HTTP server supports **text generation on every model family** plus **Gemma 4 image and audio input**. Image input runs through the native Swift SigLIP2 vision encoder; audio input is routed to the `mlx-vlm` Python bridge (the same path the CLI uses for `--audio`). When a request supplies both image and audio, the entire request goes through the bridge to match CLI behavior. Non-Gemma 4 models reject image/audio payloads with HTTP 400. See [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for full status.
+This build is a release-readiness baseline, not a production release. The HTTP server supports **text generation on every model family** plus **Gemma 4 image and audio input**. Image input runs through the native Swift SigLIP2 vision encoder; audio input runs through the native Swift+MLX USM path. Combined image+audio requests also run natively. The `mlx-vlm` Python bridge was removed in WS6 Step 4. Non-Gemma 4 models (and text-only Gemma 4 checkpoints, for audio) reject image/audio payloads with HTTP 400. See [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for full status.
 
 **Limits:**
 - 1 image per request maximum (Gemma 4 supports a single image per turn).
@@ -101,7 +101,7 @@ curl http://127.0.0.1:11435/api/generate -d '{
   "images": ["'"$(base64 -i photo.png)"'"]
 }'
 
-# Audio (Gemma 4 only — routed through mlx-vlm bridge)
+# Audio (Gemma 4 only — native Swift+MLX USM path)
 curl http://127.0.0.1:11435/api/generate -d '{
   "model": "gemma-4-e2b",
   "prompt": "Transcribe this clip.",
