@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Benchmark KrillLM Gemma4 via mlx-vlm against Ollama Gemma4.
+"""Benchmark KrillLM Gemma 4 (native Swift+MLX) against Ollama Gemma 4.
+
+KrillLM runs via the native CLI binary or the native HTTP server; the
+mlx-vlm Python bridge was removed in WS6 Step 4.
 
 This benchmark intentionally treats text, image, and audio as separate tasks.
 It records exact quantization metadata and only labels the comparison as
@@ -70,12 +73,7 @@ KRILLM_CLI_STATS_RE = re.compile(
 # column report — and includes resident mmap'd pages with proper apportionment.
 # On non-Darwin platforms we fall back to RSS from `ps`.
 #
-# The KrillLM bridge path is the one exception: mlx-vlm runs in-process and
-# already exposes `GenerationResult.peak_memory` (MLX Metal allocator peak,
-# decimal GB), which is a cleaner number than the benchmark process's own
-# footprint — we keep that there.
-#
-# All values are reported in decimal GB (bytes / 1e9) to match mlx-vlm's basis.
+# All values are reported in decimal GB (bytes / 1e9).
 
 
 def _macos_phys_footprint_bytes(pid: int) -> Optional[int]:
@@ -396,7 +394,6 @@ class _MemoryProbe:
             "interval_ms": round(self.interval_s * 1000),
             "basis": {
                 tree_basis_key: tree_basis_doc,
-                "mlx_metal": "mlx-vlm GenerationResult.peak_memory (MLX Metal allocator peak, decimal GB)",
             },
             "krillm_pids_sampled": sorted(self.observed.get("krillm", set())),
             "ollama_pids_sampled": sorted(self.observed.get("ollama", set())),
@@ -484,8 +481,7 @@ def parse_args() -> argparse.Namespace:
             "Sample peak resident-set memory of each engine's process tree "
             "during timed requests (so the release gate's memory_ratio "
             "populates). 'auto' (default) samples when PIDs can be resolved; "
-            "'off' disables it. The KrillLM bridge path uses mlx-vlm's "
-            "GenerationResult.peak_memory instead of RSS."
+            "'off' disables it."
         ),
     )
     parser.add_argument(
@@ -659,9 +655,9 @@ def run_krill_server_task(
 
     Supports text, image, and audio. Image is sent as base64 in the Ollama
     `images` array; audio is sent as base64 in the `audio` field with
-    `audio_format`. Audio runs through the server's mlx-vlm bridge, which
-    does not stream — the server emits a single content chunk + final done
-    chunk for compatibility.
+    `audio_format`. The server runs all modalities natively (the mlx-vlm
+    bridge was removed in WS6 Step 4); the native audio path emits a single
+    content chunk + final done chunk rather than streaming.
     """
     import base64 as _b64
 
@@ -822,9 +818,8 @@ def run_krill_native_server_task(
     """Send a multimodal request to the KrillLM server using the Ollama /api/generate shape.
 
     Image bytes go base64-encoded in `images`; audio bytes in `audio` with
-    `audio_format` set from the file extension. The server must run with
-    KRILL_NATIVE_AUDIO=1 for audio to take the native path (otherwise it
-    handles the request via its own mlx-vlm bridge).
+    `audio_format` set from the file extension. The server runs all
+    modalities natively; the mlx-vlm bridge was removed in WS6 Step 4.
     """
     payload: dict[str, Any] = {
         "model": "gemma-4-e2b",
