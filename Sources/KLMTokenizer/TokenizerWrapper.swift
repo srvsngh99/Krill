@@ -97,22 +97,44 @@ public final class KLMTokenizer: @unchecked Sendable {
     /// Returns token IDs with correct special token IDs (105, 106, 107)
     /// that would be lost in a text decode→re-encode round-trip.
     ///
-    /// Format: BOS + <|turn|>user\ncontent<turn|>\n<|turn|>model\n
+    /// Format: BOS + <|turn>user\ncontent<turn|>\n … <|turn>model\n
+    ///
+    /// Gemma 4 has only `user` and `model` turn roles. `assistant` maps to
+    /// `model`; `system`/`tool`/`tools` fold into a `user` turn (emitting
+    /// the literal role string for non-Gemma roles is a latent bug fixed
+    /// here). Tool definitions (`tools`) and tool results (`tool`) are
+    /// wrapped in the model's native tool special tokens so function
+    /// calling matches the format Gemma 4 was fine-tuned on.
     public func formatGemma4TokenIds(messages: [[String: String]]) -> [Int] {
-        // BOS=2, <|turn|>=105, <turn|>=106, \n=107
+        // BOS=2, <|turn>=105, <turn|>=106, \n=107,
+        // <|tool>=46, <tool|>=47, <|tool_response>=50, <tool_response|>=51
+        // (added_tokens in this checkpoint's tokenizer.json; emitted as ids
+        // because their text form does not round-trip through encode()).
         var tokens: [Int] = [2]  // BOS
         for msg in messages {
             let role = msg["role"] ?? "user"
             let content = msg["content"] ?? ""
-            tokens.append(105)  // <|turn|>
-            tokens += tokenizer.encode(text: role)
+            let turnRole = (role == "assistant") ? "model" : "user"
+            tokens.append(105)  // <|turn>
+            tokens += tokenizer.encode(text: turnRole)
             tokens.append(107)  // \n
-            tokens += tokenizer.encode(text: content)
+            switch role {
+            case "tools":  // tool definitions block
+                tokens.append(46)
+                tokens += tokenizer.encode(text: content)
+                tokens.append(47)
+            case "tool":   // tool result fed back
+                tokens.append(50)
+                tokens += tokenizer.encode(text: content)
+                tokens.append(51)
+            default:
+                tokens += tokenizer.encode(text: content)
+            }
             tokens.append(106)  // <turn|>
             tokens.append(107)  // \n
         }
         // Add model turn start
-        tokens.append(105)  // <|turn|>
+        tokens.append(105)  // <|turn>
         tokens += tokenizer.encode(text: "model")
         tokens.append(107)  // \n
         return tokens
