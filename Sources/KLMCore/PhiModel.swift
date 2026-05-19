@@ -183,7 +183,8 @@ class PhiModelInner: Module {
     func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
         var x = embedTokens(tokens)
         let seqLen = x.dim(1)
-        let mask: MLXArray? = seqLen > 1 ? createAdditiveCausalMask(seqLen) : nil
+        let cacheLen = caches?.first?.sequenceLength ?? 0
+        let mask = createCachedCausalMask(newLen: seqLen, cacheLen: cacheLen)
 
         for (i, layer) in layers.enumerated() {
             x = layer(x, mask: mask, cache: caches?[i])

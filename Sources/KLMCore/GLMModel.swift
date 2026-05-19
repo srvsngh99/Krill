@@ -227,7 +227,8 @@ class GLMEncoder: Module {
     func callAsFunction(_ x: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
         var hidden = x
         let seqLen = hidden.dim(1)
-        let mask: MLXArray? = seqLen > 1 ? createAdditiveCausalMask(seqLen) : nil
+        let cacheLen = caches?.first?.sequenceLength ?? 0
+        let mask = createCachedCausalMask(newLen: seqLen, cacheLen: cacheLen)
 
         for (i, layer) in layers.enumerated() {
             hidden = layer(hidden, mask: mask, cache: caches?[i])
