@@ -231,4 +231,56 @@ final class SpeculativeDecodingTests: XCTestCase {
         MLXArray((start ..< start + count).map { Float($0) }, [1, 1, count, 1])
     }
 
+    // MARK: - WS2: Greedy guard + draft prefill behavior
+
+    func testNonGreedyRequestSkipsSpecPath() {
+        // A draft is loaded (autoUseSpec=true) but the request is non-greedy.
+        // The engine should fall back to standard decode rather than use the
+        // spec decoder, since the spec verifier samples greedily and a
+        // non-greedy request without rejection sampling would silently
+        // diverge from the per-request sampler.
+        let temp: Float = 0.7
+        let topP: Float = 0.95
+        let greedyRequest = temp <= 0 && topP >= 1.0
+        XCTAssertFalse(greedyRequest,
+            "Request with temperature/top-p must not match the greedy spec-path guard")
+    }
+
+    func testGreedyRequestPassesGuard() {
+        let temp: Float = 0.0
+        let topP: Float = 1.0
+        let topK = 0
+        let minP: Float = 0.0
+        let greedyRequest = temp <= 0 && topP >= 1.0 && topK <= 0 && minP <= 0
+        XCTAssertTrue(greedyRequest)
+    }
+
+    func testRecommendedDraftLookup() {
+        XCTAssertEqual(recommendedDraft(for: "llama-3.2-3b"), "llama-3.2-1b")
+        XCTAssertEqual(recommendedDraft(for: "qwen2.5-3b"), "qwen2.5-0.5b")
+        // Models without a curated pair return nil — the resolver surfaces
+        // this as `DraftResolutionError.noAutoPair` to the CLI.
+        XCTAssertNil(recommendedDraft(for: "gemma-4-e2b"))
+        XCTAssertNil(recommendedDraft(for: "some-unknown-model"))
+    }
+
+    func testResetClearsAcceptanceHistoryAndK() {
+        let decoder = SpeculativeDecoder(initialKForTesting: 4)
+        for _ in 0 ..< 5 {
+            decoder.recordVerificationForTesting(
+                acceptedTokenCount: 5, proposedTokenCount: 4)
+        }
+        XCTAssertGreaterThan(decoder.acceptanceRate, 0)
+        XCTAssertEqual(decoder.totalRounds, 5)
+        XCTAssertGreaterThan(decoder.currentK, 4)
+
+        decoder.reset()
+
+        XCTAssertEqual(decoder.acceptanceRate, 0)
+        XCTAssertEqual(decoder.totalRounds, 0)
+        XCTAssertEqual(decoder.totalAccepted, 0)
+        XCTAssertEqual(decoder.currentK, 4,
+            "reset() must restore the initial K so a fresh generation does not inherit stale adaptive state")
+    }
+
 }

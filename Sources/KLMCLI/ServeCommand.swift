@@ -22,6 +22,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Client compat surface: ollama | openai | both (default both). For an Ollama drop-in also pass --port 11434.")
     var compat: String = "both"
 
+    @Option(name: .long, help: "Draft model for speculative decoding (alias, path, or 'auto'). Also reads KRILL_DRAFT_MODEL.")
+    var draftModel: String?
+
     func run() async throws {
         // Precedence (CLI flag > env > config.toml > default): KrillConfig.load()
         // already folds OLLAMA_HOST/OLLAMA_MODELS (and KRILL_* which win over
@@ -56,6 +59,18 @@ struct ServeCommand: AsyncParsableCommand {
             engine = InferenceEngine(modelDirectory: modelDir)
             try await engine.load()
             print("Model loaded.")
+
+            let draftSpec = self.draftModel
+                ?? ProcessInfo.processInfo.environment["KRILL_DRAFT_MODEL"]
+            if let spec = draftSpec, !spec.isEmpty {
+                do {
+                    try DraftModelResolver.load(
+                        draftSpec: spec, target: model,
+                        registry: registry, engine: engine)
+                } catch {
+                    print("warning: draft model '\(spec)' did not load: \(error). Continuing without speculative decoding.")
+                }
+            }
         } else {
             // Start without a model — callers use POST /v1/models/load to load one.
             // We pick the first installed model's directory as a placeholder base

@@ -31,15 +31,18 @@ class LlamaModelInner: Module {
     ) -> MLXArray {
         var x = embedTokens(tokens)
 
-        // Create causal mask for prefill (sequence length > 1)
+        // Create causal mask. For an empty-cache prefill this is the
+        // classic (seqLen, seqLen) lower-triangular mask. For multi-token
+        // forward against a non-empty cache (e.g. speculative-decode
+        // verify) the mask must extend across the cached prefix too.
         let seqLen = x.dim(1)
+        let cacheLen = caches?.first?.sequenceLength ?? 0
         let effectiveMask: MLXArray?
         if let mask {
             effectiveMask = mask
-        } else if seqLen > 1 {
-            effectiveMask = createAdditiveCausalMask(seqLen)
         } else {
-            effectiveMask = nil
+            effectiveMask = createCachedCausalMask(
+                newLen: seqLen, cacheLen: cacheLen)
         }
 
         for (i, layer) in layers.enumerated() {
@@ -102,5 +105,42 @@ public func createAdditiveCausalMask(_ n: Int, dtype: DType = .float16) -> MLXAr
     // Dtype matches the model's compute type (fp16 for Llama, bf16 for Gemma 4)
     let additive = mask.asType(dtype) * Float(-10000.0)
     // Add batch and head dimensions: [1, 1, N, N]
+    return expandedDimensions(expandedDimensions(additive, axis: 0), axis: 0)
+}
+
+/// Build the right additive causal mask for a forward of `newLen` tokens
+/// against a KV cache that already holds `cacheLen` tokens.
+///
+/// Returns `nil` for the single-token decode case (no mask needed: the one
+/// new query attends freely to all cached positions, and there is nothing
+/// to mask within the new slice).
+///
+/// For empty-cache multi-token prefill (`cacheLen == 0`), returns the
+/// classic square `(1, 1, newLen, newLen)` causal mask.
+///
+/// For non-empty-cache multi-token forward (`cacheLen > 0`, `newLen > 1`)
+/// — the case that occurs during speculative-decode verify and after a
+/// partial prefix-cache resume — returns a `(1, 1, newLen, cacheLen + newLen)`
+/// mask. The first `cacheLen` columns are zero (new queries can attend to
+/// every cached position) and the last `newLen` columns are upper-
+/// triangular (row `i` may attend within the new slice only up to its own
+/// position). Without this shape, the attention softmax tries to broadcast
+/// an `(newLen, newLen)` mask against an `(newLen, cacheLen + newLen)`
+/// score matrix and the runtime errors with a shape mismatch.
+public func createCachedCausalMask(
+    newLen: Int, cacheLen: Int, dtype: DType = .float16
+) -> MLXArray? {
+    if newLen <= 1 { return nil }
+    if cacheLen == 0 {
+        return createAdditiveCausalMask(newLen, dtype: dtype)
+    }
+    let queryIdx = MLXArray(Int32(cacheLen) ..< Int32(cacheLen + newLen))
+    let keyIdx = MLXArray(0 ..< Int32(cacheLen + newLen))
+    // mask[i, j] = true when key position j is in the future of query
+    // position (cacheLen + i). For cached keys j < cacheLen this is
+    // always false; for j >= cacheLen it forms the within-slice causal
+    // upper triangle.
+    let mask = expandedDimensions(queryIdx, axis: 1) .< expandedDimensions(keyIdx, axis: 0)
+    let additive = mask.asType(dtype) * Float(-10000.0)
     return expandedDimensions(expandedDimensions(additive, axis: 0), axis: 0)
 }

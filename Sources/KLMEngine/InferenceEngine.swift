@@ -26,6 +26,16 @@ public final class InferenceEngine: @unchecked Sendable {
     /// Optional speculative decoder (loaded separately via loadDraftModel).
     private var specDecoder: SpeculativeDecoder?
 
+    /// Display name of the loaded draft model (alias or directory name).
+    /// Nil when no draft is loaded.
+    public private(set) var draftModelName: String?
+
+    /// When true, requests default to `useSpeculative: true` once a draft
+    /// model is loaded. Set by `loadDraftModel()`. Generates that explicitly
+    /// pass `useSpeculative: false` still skip the spec path (used by tests
+    /// and by paths that must match a non-spec reference).
+    private var autoUseSpec: Bool = false
+
     /// True while a model swap is in progress. Checked by server to return 503.
     private let _isSwapping = OSAllocatedUnfairLock(initialState: false)
     public var isSwapping: Bool { _isSwapping.withLock { $0 } }
@@ -153,7 +163,10 @@ public final class InferenceEngine: @unchecked Sendable {
         self.loadedAt = Date()
     }
 
-    /// Load a draft model for speculative decoding.
+    /// Load a draft model for speculative decoding. Once loaded, subsequent
+    /// `generate()` calls will use the spec path by default (greedy-only;
+    /// the engine falls back to standard decode for non-greedy / penalized
+    /// requests).
     ///
     /// - Parameter draftDirectory: Path to the draft model weights
     public func loadDraftModel(from draftDirectory: URL) throws {
@@ -165,6 +178,8 @@ public final class InferenceEngine: @unchecked Sendable {
             targetModel: targetModel,
             draftModel: draft
         )
+        self.draftModelName = draftDirectory.lastPathComponent
+        self.autoUseSpec = true
     }
 
     /// Check if the model is loaded and ready.
@@ -176,6 +191,18 @@ public final class InferenceEngine: @unchecked Sendable {
     public var hasSpeculativeDecoding: Bool {
         specDecoder != nil
     }
+
+    /// Toggle the auto-spec opt-in. When false, even with a draft loaded,
+    /// `generate()` will not use spec unless the caller explicitly passes
+    /// `useSpeculative: true`. Used by parity tests that need a non-spec
+    /// reference output from the same engine instance.
+    public func setAutoUseSpec(_ enabled: Bool) {
+        self.autoUseSpec = enabled && specDecoder != nil
+    }
+
+    /// True if the engine will currently take the spec path on a greedy,
+    /// non-penalized, fp16-cache request.
+    public var willUseSpeculativeByDefault: Bool { autoUseSpec }
 
     /// Prepend `<|image|>` and/or `<|audio|>` placeholder runs to the first
     /// user message's content. The vision encoder produces N soft tokens, so
@@ -369,8 +396,21 @@ public final class InferenceEngine: @unchecked Sendable {
         // Penalty/mirostat sampling needs a sequential per-step recent-token
         // window, which the multi-token speculative path cannot honor; fall
         // back to the standard decode loop when penalties are active.
-        let shouldSpec = useSpeculative && specDecoder != nil && !useInt8KV
-            && !params.penaltiesActive
+        //
+        // Spec also requires greedy semantics (the decoder verifies against
+        // its own internal greedy sampler); non-greedy without Leviathan
+        // rejection sampling would silently diverge from the per-request
+        // sampler. Until rejection sampling is implemented, restrict to
+        // pure greedy.
+        let greedyRequest = params.temperature <= 0 && params.topP >= 1.0
+            && params.topK <= 0 && params.minP <= 0
+        // autoUseSpec lets `loadDraftModel(...)` opt the engine in by
+        // default without forcing every call site to thread a flag. Tests
+        // and parity reference paths that need to bypass spec can clear
+        // it via the engine API (`setAutoUseSpec(false)`).
+        let wantsSpec = useSpeculative || autoUseSpec
+        let shouldSpec = wantsSpec && specDecoder != nil && !useInt8KV
+            && !params.penaltiesActive && greedyRequest
         let capturedImageData = imageData
         nonisolated(unsafe) let capturedAudioMel = nativeAudio?.mel
         nonisolated(unsafe) let capturedAudioMask = nativeAudio?.validMask
@@ -557,12 +597,31 @@ public final class InferenceEngine: @unchecked Sendable {
                     nextToken = nextTokenArr.item(Int.self)
                 }
 
+                // Prefill the draft model on the same prompt BEFORE we start
+                // the decode-time clock. Draft prefill is one-time setup
+                // per generation (analogous to target prefill, already in
+                // `prefillDuration`); attributing it to decode would
+                // inflate per-token decode cost and depress tok/s
+                // unfairly versus the non-spec baseline.
+                let draftCaches: [KVCache]?
+                if shouldSpec, let specDec = capturedSpecDecoder, let draftModel = specDec.draft {
+                    let dCaches = makeKVCaches(numLayers: draftModel.numLayers)
+                    let draftPrefillLogits = draftModel.forward(
+                        inputArray, dCaches)
+                    MLX.eval(draftPrefillLogits)
+                    specDec.reset()
+                    draftCaches = dCaches
+                } else {
+                    draftCaches = nil
+                }
+                // Roll draft prefill into the prefill time so decode tok/s
+                // is comparable with the baseline path.
+                prefillDuration = CFAbsoluteTimeGetCurrent() - startTime
+
                 // -- Decode loop --
                 let decodeStart = CFAbsoluteTimeGetCurrent()
 
-                if shouldSpec, let specDec = capturedSpecDecoder {
-                    // === Speculative Decoding Path ===
-                    let draftCaches = makeKVCaches(numLayers: specDec.totalRounds == 0 ? numLayers : numLayers)
+                if shouldSpec, let specDec = capturedSpecDecoder, let draftCaches {
 
                     // Emit the first token sampled from prefill logits — specDec.step
                     // only returns tokens *after* lastToken, so we must yield it here.
@@ -670,11 +729,24 @@ public final class InferenceEngine: @unchecked Sendable {
                         elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
                 }
 
+                let specStats: SpeculativeStats?
+                if shouldSpec, let specDec = capturedSpecDecoder, specDec.totalRounds > 0 {
+                    specStats = SpeculativeStats(
+                        rounds: specDec.totalRounds,
+                        acceptedTokens: specDec.totalAccepted,
+                        finalK: specDec.currentK,
+                        acceptanceRate: specDec.acceptanceRate
+                    )
+                } else {
+                    specStats = nil
+                }
+
                 statsHolder.stats = GenerationStats(
                     promptTokens: promptTokens.count,
                     generatedTokens: generatedCount,
                     prefillTime: prefillDuration,
-                    decodeTime: decodeDuration
+                    decodeTime: decodeDuration,
+                    speculative: specStats
                 )
                 continuation.finish()
             }
@@ -688,6 +760,8 @@ public final class InferenceEngine: @unchecked Sendable {
         loadedModel = nil
         tokenizer = nil
         specDecoder = nil
+        draftModelName = nil
+        autoUseSpec = false
         loadedAt = nil
     }
 }

@@ -1,6 +1,7 @@
 # WS1: Native Gemma 4 Audio
 
-Status: planned
+Status: done (delivered via PR #21 + PR #22; native USM Conformer audio
+default-on, mlx-vlm bridge retired, audio gates hard in release_candidate)
 Detailed plan: [../NATIVE_GEMMA4_AUDIO_PLAN.md](../NATIVE_GEMMA4_AUDIO_PLAN.md)
 
 ## Goal
