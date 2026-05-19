@@ -427,6 +427,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument(
+        "--num-ctx", type=int, default=None,
+        help="Pin BOTH engines to the same context budget for a spec-equal "
+             "memory comparison: sets Ollama options.num_ctx and is also "
+             "exported to the KrillLM server as KRILL_CONTEXT_LENGTH at boot. "
+             "When unset, each engine uses its own default.")
+    parser.add_argument(
         "--drop-cold-run", action="store_true",
         help="Exclude the first measured run from summary stats (it carries "
              "one-time cold-start cost warmup does not absorb). Recommended "
@@ -735,6 +741,7 @@ def run_krill_server_task(
             "top_p": args.top_p,
             "seed": args.seed,
             "num_predict": task["max_tokens"],
+            **({"num_ctx": args.num_ctx} if args.num_ctx else {}),
         },
     }
     image_path = task.get("image")
@@ -893,6 +900,7 @@ def run_krill_native_server_task(
             "top_p": args.top_p,
             "seed": args.seed,
             "num_predict": task["max_tokens"],
+            **({"num_ctx": args.num_ctx} if args.num_ctx else {}),
         },
     }
     if task.get("image"):
@@ -980,6 +988,7 @@ def ollama_chat_payload(args: argparse.Namespace, task: dict[str, Any], stream: 
             "top_p": args.top_p,
             "seed": args.seed,
             "num_predict": task["max_tokens"],
+            **({"num_ctx": args.num_ctx} if args.num_ctx else {}),
         },
     }
 
@@ -1440,6 +1449,8 @@ def main() -> int:
             "krillm_mode": "server" if use_server else "mlx-vlm",
             "krillm_url": args.krillm_url if use_server else None,
             "krillm_image_mode": args.krillm_image_mode,
+            "num_ctx": args.num_ctx,
+            "drop_cold_run": args.drop_cold_run,
             "krillm_bin": args.krillm_bin if args.krillm_image_mode == "native_cli" else None,
             "runs": args.runs,
             "warmup": args.warmup,
