@@ -1267,10 +1267,12 @@ def main() -> int:
     results: dict[str, Any] = {}
     for task in tasks:
         krill_path = krill_path_for_task(args, task, use_server)
-        # Skip warmup for server media tasks (server doesn't handle media yet)
-        skip_krill_task = use_server and (task.get("image") or task.get("audio"))
+        # WS6: KrillLM serves text, image, and audio natively (the mlx-vlm
+        # bridge was removed), so warm up KrillLM media the same as text —
+        # otherwise cold first-use cost leaks into the hard-gated media
+        # wall/prefill metrics.
         for _ in range(args.warmup):
-            if include_krillm and not skip_krill_task:
+            if include_krillm:
                 dispatch_krill_task(args, task, model, processor, krill_path, measured=False)
             if include_ollama:
                 run_ollama_task(args, task, measured=False)
@@ -1359,7 +1361,7 @@ def main() -> int:
             "krill_model": args.krill_model,
             "ollama_model": args.ollama_model,
             "engine": args.engine,
-            "krillm_mode": "server" if use_server else "mlx-vlm",
+            "krillm_mode": "server" if use_server else "native_cli",
             "krillm_url": args.krillm_url if use_server else None,
             "krillm_image_mode": args.krillm_image_mode,
             "num_ctx": args.num_ctx,
