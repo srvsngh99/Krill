@@ -1180,6 +1180,30 @@ final class ServerTests: XCTestCase {
         XCTAssertTrue(out.first?["content"]?.contains("<tool_call>") ?? false)
     }
 
+    func testNoToolsTurnNeverExtractsCalls() {
+        // PR #23 P2 regression: ordinary JSON output on a no-tools request
+        // must NOT be misclassified as a tool call (would surface as an
+        // Anthropic tool_use block with stop_reason "tool_use").
+        let jsonReply = "{\"name\": \"Alice\", \"parameters\": {\"age\": 30}}"
+        for fmt in [ToolCalling.ToolFormat.llama, .qwen, .gemma4, .hermes] {
+            // Sanity: with tools offered, .llama WOULD treat this as a call.
+            if case .llama = fmt {
+                XCTAssertFalse(ToolCalling.extractToolCalls(
+                    from: jsonReply, format: fmt).calls.isEmpty)
+            }
+            // With no tools offered, every format yields zero calls and
+            // returns the text verbatim as content.
+            let r = ToolCalling.extractIfToolsOffered(
+                from: jsonReply, hasTools: false, format: fmt)
+            XCTAssertTrue(r.calls.isEmpty)
+            XCTAssertEqual(r.cleanedText, jsonReply)
+        }
+        // And it still extracts when tools ARE offered.
+        let withTools = ToolCalling.extractIfToolsOffered(
+            from: jsonReply, hasTools: true, format: .llama)
+        XCTAssertEqual(withTools.calls.first?.name, "Alice")
+    }
+
     func testHermesPathUnchangedByDefault() {
         // Default format stays .hermes so non-Gemma families regress-free.
         let spec = ServerToolSpec(name: "t", description: "d", parametersJSON: "{}")

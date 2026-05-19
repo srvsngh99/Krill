@@ -297,6 +297,19 @@ internal enum ToolCalling {
         }
     }
 
+    /// Extract tool calls only when the request actually offered tools.
+    /// The family-aware extractors (esp. `.llama`/`.qwen`) treat a bare
+    /// `{"name","arguments"|"parameters"}` object as a native call, so
+    /// running them on a no-tools turn would misclassify ordinary JSON
+    /// output as a tool call (e.g. an Anthropic `tool_use` block). With no
+    /// tools offered there can be no tool calls by definition.
+    static func extractIfToolsOffered(
+        from text: String, hasTools: Bool, format: ToolFormat
+    ) -> (calls: [ParsedToolCall], cleanedText: String) {
+        guard hasTools else { return ([], text) }
+        return extractToolCalls(from: text, format: format)
+    }
+
     /// Qwen 2.5/3 parser: the Hermes extractor, plus a leading-junk-tolerant
     /// bare-JSON fallback (the model sometimes emits a stray prefix like
     /// `>{…}` or partial `<tool_call` markers before the object). Scoped to
