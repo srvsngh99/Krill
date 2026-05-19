@@ -579,7 +579,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         guard requireModel(context: context) else { return }
         touchKeepAlive(nil)
 
-        var msgs = ToolCalling.injectToolSystem(into: p.messages, tools: p.tools)
+        let toolFormat = ToolCalling.ToolFormat.forFamily(engine.family)
+        var msgs = ToolCalling.injectToolSystem(
+            into: p.messages, tools: p.tools, format: toolFormat)
         if p.thinking {
             msgs = StructuredOutput.injectFormatSystem(into: msgs, format: nil)
             msgs.insert(["role": "system",
@@ -613,7 +615,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 visible.removeSubrange(s.lowerBound ..< e.upperBound)
             }
-            let (calls, cleaned) = ToolCalling.extractToolCalls(from: visible)
+            let (calls, cleaned) = ToolCalling.extractToolCalls(
+                from: visible, format: toolFormat)
             let stats = getStats()
             let inTok = stats?.promptTokens ?? 0
             let outTok = stats?.generatedTokens ?? 0
@@ -684,8 +687,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         media: DecodedMedia?,
         style: ToolChatStyle
     ) {
+        let toolFormat = ToolCalling.ToolFormat.forFamily(engine.family)
         let messages = ToolCalling.injectToolSystem(
-            into: request.messages, tools: request.tools)
+            into: request.messages, tools: request.tools, format: toolFormat)
+        if ProcessInfo.processInfo.environment["KRILL_TOOL_DEBUG"] != nil {
+            FileHandle.standardError.write(Data(
+                "[KRILL_TOOL_DEBUG] family=\(engine.family ?? "nil") fmt=\(toolFormat)\n".utf8))
+        }
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let eng = engine
@@ -715,7 +723,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 if event.isEnd { break }
                 full += event.text
             }
-            let (calls, cleaned) = ToolCalling.extractToolCalls(from: full)
+            if ProcessInfo.processInfo.environment["KRILL_TOOL_DEBUG"] != nil {
+                FileHandle.standardError.write(Data(
+                    "[KRILL_TOOL_DEBUG] raw=<<<\(full)>>>\n".utf8))
+            }
+            let (calls, cleaned) = ToolCalling.extractToolCalls(
+                from: full, format: toolFormat)
             let stats = getStats()
             let totalNs = Int64((CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
 

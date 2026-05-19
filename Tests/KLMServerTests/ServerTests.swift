@@ -1058,6 +1058,137 @@ final class ServerTests: XCTestCase {
         XCTAssertTrue(out[0]["content"]?.contains("<tool_call>") ?? false)
     }
 
+    // MARK: - Native Gemma 4 tool format (WS1-4)
+
+    func testGemma4ExtractCanonicalCall() {
+        let (calls, cleaned) = ToolCalling.extractToolCalls(
+            from: "<|tool_call>call:add{a:12, \"b\":30}<tool_call|>",
+            format: .gemma4)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls[0].name, "add")
+        // Bare key `a` normalized to strict JSON so shapers decode it.
+        let obj = (try? JSONSerialization.jsonObject(
+            with: Data(calls[0].argumentsJSON.utf8)))
+            .flatMap { $0 as? [String: Any] }
+        XCTAssertEqual(obj?["a"] as? Int, 12)
+        XCTAssertEqual(obj?["b"] as? Int, 30)
+        XCTAssertEqual(cleaned, "")
+    }
+
+    func testGemma4ExtractToleratesSloppyShapes() {
+        // Quoted name + `parameters:` label (observed from the 2B model).
+        let a = ToolCalling.extractToolCalls(
+            from: "<|tool_call>call: \"multiply\", \"parameters\": {\"a\": 7, \"b\": 6}<tool_call|>",
+            format: .gemma4).calls
+        XCTAssertEqual(a.first?.name, "multiply")
+        XCTAssertTrue(a.first?.argumentsJSON.contains("\"a\"") ?? false)
+        // Quoted name + colon, and a missing close sentinel.
+        let b = ToolCalling.extractToolCalls(
+            from: "<|tool_call>call: \"add\": {\"a\": 100, \"b\": 23}",
+            format: .gemma4).calls
+        XCTAssertEqual(b.first?.name, "add")
+    }
+
+    func testGemma4ExtractStripsThoughtChannel() {
+        let (calls, cleaned) = ToolCalling.extractToolCalls(
+            from: "<|channel>thought\nI should add.<channel|>Sure!",
+            format: .gemma4)
+        XCTAssertTrue(calls.isEmpty)
+        XCTAssertEqual(cleaned, "Sure!")
+    }
+
+    func testGemma4NormalizeArgsBareKeysAndPythonLiterals() {
+        let j = ToolCalling.normalizeGemma4Args("{a:1, b:'two', c:True, d:None}")
+        let obj = (try? JSONSerialization.jsonObject(with: Data(j.utf8)))
+            .flatMap { $0 as? [String: Any] }
+        XCTAssertEqual(obj?["a"] as? Int, 1)
+        XCTAssertEqual(obj?["b"] as? String, "two")
+        XCTAssertEqual(obj?["c"] as? Bool, true)
+        XCTAssertTrue(obj?["d"] is NSNull)
+    }
+
+    func testGemma4InjectionUsesToolsRoleNotHermesPrompt() {
+        let spec = ServerToolSpec(name: "add", description: "sum",
+                                  parametersJSON: "{\"type\":\"object\"}")
+        let out = ToolCalling.injectToolSystem(
+            into: [["role": "user", "content": "hi"]],
+            tools: [spec], format: .gemma4)
+        XCTAssertEqual(out.first?["role"], "tools")
+        XCTAssertTrue(out.first?["content"]?.contains("\"name\": \"add\"") ?? false)
+        // No foreign Hermes instruction is injected for Gemma 4.
+        XCTAssertFalse(out.contains { ($0["content"] ?? "").contains("<tool_call>") })
+    }
+
+    func testGemma4InjectionConvertsHermesHistoryToNative() {
+        // `normalizeToolTurns` canonical forms -> native roles.
+        let msgs = [
+            ["role": "user", "content": "<tool_response>name=add 42</tool_response>"],
+            ["role": "assistant",
+             "content": "<tool_call>{\"name\": \"add\", \"arguments\": {\"a\":1}}</tool_call>"],
+        ]
+        let spec = ServerToolSpec(name: "add", description: "", parametersJSON: "{}")
+        let out = ToolCalling.injectToolSystem(into: msgs, tools: [spec],
+                                               format: .gemma4)
+        XCTAssertTrue(out.contains { $0["role"] == "tool" && $0["content"] == "42" })
+        XCTAssertTrue(out.contains {
+            $0["role"] == "assistant"
+                && ($0["content"]?.contains("<|tool_call>call:add") ?? false)
+        })
+    }
+
+    func testLlamaInjectionMirrorsOllamaTemplate() {
+        let spec = ServerToolSpec(name: "add", description: "sum",
+                                  parametersJSON: "{\"type\":\"object\"}")
+        let out = ToolCalling.injectToolSystem(
+            into: [["role": "system", "content": "Be nice."],
+                   ["role": "user", "content": "do it"]],
+            tools: [spec], format: .llama)
+        // System guidance is appended (Ollama's llama3.2 tool system msg).
+        XCTAssertEqual(out.first?["role"], "system")
+        XCTAssertTrue(out.first?["content"]?.contains("tool calling capabilities") ?? false)
+        // Tool block is spliced into the LAST user turn, not a new one.
+        let lastUser = out.last { $0["role"] == "user" }
+        XCTAssertTrue(lastUser?["content"]?.contains("Given the following functions") ?? false)
+        XCTAssertTrue(lastUser?["content"]?.hasSuffix("do it") ?? false)
+    }
+
+    func testLlamaExtractNativeAndRejectsEchoedSchema() {
+        let ok = ToolCalling.extractToolCalls(
+            from: "```json\n{\"name\": \"add\", \"parameters\": {\"a\": 1, \"b\": 2}}\n```",
+            format: .llama).calls
+        XCTAssertEqual(ok.first?.name, "add")
+        XCTAssertTrue(ok.first?.argumentsJSON.contains("\"a\"") ?? false)
+        // An echoed tool *schema* must not be mistaken for a call.
+        let echoed = ToolCalling.extractToolCalls(
+            from: "{\"type\": \"function\", \"function\": {\"name\": \"add\"}}",
+            format: .llama).calls
+        XCTAssertTrue(echoed.isEmpty)
+    }
+
+    func testQwenExtractToleratesLeadingJunk() {
+        // The Qwen path must recover a call even with a stray prefix.
+        let calls = ToolCalling.extractToolCalls(
+            from: ">{\"name\": \"add\", \"arguments\": {\"a\": 100, \"b\": 23}}",
+            format: .qwen).calls
+        XCTAssertEqual(calls.first?.name, "add")
+        XCTAssertEqual(calls.count, 1)
+        // Qwen injection reuses the (Qwen-native) Hermes prompt.
+        let out = ToolCalling.injectToolSystem(
+            into: [["role": "user", "content": "hi"]],
+            tools: [ServerToolSpec(name: "t", description: "d", parametersJSON: "{}")],
+            format: .qwen)
+        XCTAssertTrue(out.first?["content"]?.contains("<tool_call>") ?? false)
+    }
+
+    func testHermesPathUnchangedByDefault() {
+        // Default format stays .hermes so non-Gemma families regress-free.
+        let spec = ServerToolSpec(name: "t", description: "d", parametersJSON: "{}")
+        let out = ToolCalling.injectToolSystem(
+            into: [["role": "user", "content": "hi"]], tools: [spec])
+        XCTAssertEqual(out.first?["role"], "system")
+        XCTAssertTrue(out.first?["content"]?.contains("<tool_call>") ?? false)
+    }
+
     func testOpenAIVsOllamaToolCallShapes() {
         let calls = [ToolCalling.ParsedToolCall(name: "f", argumentsJSON: "{\"a\":1}")]
         let oa = ToolCalling.openAIToolCalls(calls)
