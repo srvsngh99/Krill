@@ -86,6 +86,7 @@ let package = Package(
                 "KLMCache",
                 "KLMTokenizer",
                 "KLMSampler",
+                "KLMRegistry",
                 .product(name: "MLX", package: "mlx-swift"),
             ]
         ),

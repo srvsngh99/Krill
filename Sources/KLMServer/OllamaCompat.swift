@@ -62,14 +62,17 @@ public enum OllamaCompat {
         ]
     }
 
-    /// Capability list for `/api/show`. KrillLM does text completion on every
-    /// model; only Gemma-4 currently carries native vision/audio.
+    /// Capability list for `/api/show`. Sourced from the central
+    /// `ModelCapabilities` registry so the same set is used here, by the
+    /// engine's media gating, and by the server's pre-generation
+    /// rejection. `completion` is emitted as the Ollama-compatible
+    /// alias for `textGeneration` (textGeneration's `ollamaTag`).
     public static func capabilities(for m: ModelManifest) -> [String] {
-        var caps = ["completion"]
-        if m.family == .gemma4 {
-            caps.append("vision")
-        }
-        return caps
+        let caps = ModelCapabilities.capabilities(for: m.family)
+        // Emit in a stable order so client tests can golden-match.
+        return Capability.allCases
+            .filter { caps.contains($0) }
+            .map(\.ollamaTag)
     }
 
     /// A pseudo-Modelfile so `ollama show --modelfile` style clients get a
@@ -111,6 +114,7 @@ public enum OllamaCompat {
             "details": details(for: m),
             "model_info": modelInfo,
             "capabilities": capabilities(for: m),
+            "support_tier": ModelCapabilities.supportTier(for: m.family).rawValue,
             "modified_at": ISO8601DateFormatter().string(from: m.pulledAt),
         ]
     }

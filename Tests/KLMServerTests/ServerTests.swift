@@ -928,7 +928,12 @@ final class ServerTests: XCTestCase {
         XCTAssertTrue((payload["modelfile"] as? String)?.contains("FROM") ?? false)
         let details = payload["details"] as? [String: Any]
         XCTAssertEqual(details?["quantization_level"] as? String, "4bit")
-        XCTAssertEqual(payload["capabilities"] as? [String], ["completion"])
+        // The fixture is family=.qwen. Qwen 2.5 carries a native
+        // tool chat template (PR #23), so .tools is declared in
+        // addition to the universal completion entry.
+        XCTAssertEqual(payload["capabilities"] as? [String], ["completion", "tools"])
+        // WS3: support tier is now exposed alongside capabilities.
+        XCTAssertEqual(payload["support_tier"] as? String, "production_native")
     }
 
     // MARK: - Embeddings (WS-B)
