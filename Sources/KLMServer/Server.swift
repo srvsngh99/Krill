@@ -615,8 +615,15 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 visible.removeSubrange(s.lowerBound ..< e.upperBound)
             }
-            let (calls, cleaned) = ToolCalling.extractToolCalls(
-                from: visible, format: toolFormat)
+            // Only parse tool calls when the request actually offered
+            // tools. The family-aware extractors (esp. .llama/.qwen) treat
+            // bare `{"name","arguments"|"parameters"}` JSON as a call, so
+            // running them on a no-tools request would misclassify ordinary
+            // JSON output as an Anthropic tool_use block.
+            let (calls, cleaned): ([ToolCalling.ParsedToolCall], String) =
+                p.tools.isEmpty
+                ? ([], visible)
+                : ToolCalling.extractToolCalls(from: visible, format: toolFormat)
             let stats = getStats()
             let inTok = stats?.promptTokens ?? 0
             let outTok = stats?.generatedTokens ?? 0
