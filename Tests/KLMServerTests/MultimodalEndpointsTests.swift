@@ -381,13 +381,9 @@ final class MultimodalEndpointsTests: XCTestCase {
         throw XCTSkip("Live Gemma 4 server multimodal path is exercised by the multimodal benchmark; this test only verifies prerequisites.")
     }
 
-    func testOllamaGenerateAudioHappyPathRequiresMLXVLM() throws {
+    func testOllamaGenerateAudioHappyPathRequiresGemma4() throws {
         try requireGemma4Env()
-        let availability = PythonFallback.checkAvailability()
-        if !availability.isAvailable {
-            throw XCTSkip("mlx-vlm not available: \(availability.detail)")
-        }
-        throw XCTSkip("Live Gemma 4 audio bridge path is exercised by the multimodal benchmark; this test only verifies prerequisites.")
+        throw XCTSkip("Live Gemma 4 native audio path is exercised by the multimodal benchmark and Gemma4SmokeTests; this test only verifies prerequisites.")
     }
 
     // MARK: - Helpers

@@ -6,23 +6,20 @@ Built on Apple's [MLX](https://github.com/ml-explore/mlx-swift) framework. Ships
 
 ## Release Status
 
-This is not yet a production release. Server multimodal is implemented for Gemma 4 — native image and native audio (WS6: native Swift+MLX USM audio is now default-on, numerically validated against the `mlx-vlm` oracle and benchmarked faster than Ollama on the M4 target; the bridge remains available behind `KRILL_AUDIO_BRIDGE_ONLY=1`) — and shipped with end-to-end tests. The int8 KV cache composes with the prefix cache on Gemma 4 (PR #11), and the release gate now distinguishes hard, advisory, and out_of_scope metrics via `--profile release_candidate` (PR #12). Peak-memory sampling is wired into the benchmark and `memory_ratio` is hard-gated for class-equal comparisons (PR #14). PR #16 capped the MLX Metal buffer pool (`KRILL_MLX_CACHE_LIMIT_MB`), closed the `memory_ratio` hard miss (now 0.32–0.84, passing), and — per an owner-accepted gate proposal (`docs/RELEASE_GATE_DECODE_PROPOSAL.md`) — demoted `text_decode_ratio` to advisory under `release_candidate` with a new **hard `text_decode_ratio_floor ≥1.0x`** (KrillLM must never decode slower than Ollama). **`release_candidate` now exits `0` (GATE: PASS)** on `.build/benchmarks/v6-mm.json`; `strict` still exits `1` (text decode hard ≥1.5x, prefill, audio). The gate makes **no claim** that KrillLM hit 1.5x raw decode — that target is a tracked advisory pending speculative decoding. See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) and [`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](OLLAMA_SPEEDUP_EXECUTION_PLAN.md) for the full status, the per-metric promotion contract, and acceptance criteria.
+This is not yet a production release. Server multimodal is implemented for Gemma 4 — native image and native audio (WS6: native Swift+MLX USM audio, numerically validated against the `mlx-vlm` oracle and benchmarked faster than Ollama on the M4 target; the bridge was then removed in WS6 Step 4) — and shipped with end-to-end tests. The int8 KV cache composes with the prefix cache on Gemma 4 (PR #11), and the release gate now distinguishes hard, advisory, and out_of_scope metrics via `--profile release_candidate` (PR #12). Peak-memory sampling is wired into the benchmark and `memory_ratio` is hard-gated for class-equal comparisons (PR #14). PR #16 capped the MLX Metal buffer pool (`KRILL_MLX_CACHE_LIMIT_MB`), closed the `memory_ratio` hard miss (now 0.32–0.84, passing), and — per an owner-accepted gate proposal (`docs/RELEASE_GATE_DECODE_PROPOSAL.md`) — demoted `text_decode_ratio` to advisory under `release_candidate` with a new **hard `text_decode_ratio_floor ≥1.0x`** (KrillLM must never decode slower than Ollama). **`release_candidate` exits `0` (GATE: PASS)** on the WS6 native-audio multimodal report with audio enforced as hard; `strict` still exits `1` but only on pre-existing non-audio items (text decode ≥1.5x, image prefill) — audio now passes strict. The gate makes **no claim** that KrillLM hit 1.5x raw decode — that target is a tracked advisory pending speculative decoding. See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) and [`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](OLLAMA_SPEEDUP_EXECUTION_PLAN.md) for the full status, the per-metric promotion contract, and acceptance criteria.
 
 ### Support Matrix
 
-The matrix below separates CLI vs Server, native Swift vs Python bridge, and per-modality support.
+The matrix below separates CLI vs Server and per-modality support. Gemma 4 text, image, and audio all run on the native Swift+MLX path; the legacy mlx-vlm Python bridge was removed in WS6 Step 4.
 
 Gemma 4 (`gemma-4-e2b`):
 
 | Path | Text | Image | Audio |
 |------|------|-------|-------|
-| CLI native | Supported | Supported | Supported (native, default) [^native-audio] |
-| CLI bridge | — | — | Available via `KRILL_AUDIO_BRIDGE_ONLY=1` (mlx-vlm) |
-| Server | Supported | Supported (Gemma 4 only) | Supported (native Swift+MLX, default; Gemma 4) [^native-audio] [^audio-bridge] |
+| CLI    | Supported | Supported | Supported (native) [^native-audio] |
+| Server | Supported | Supported (Gemma 4 only) | Supported (native; Gemma 4) [^native-audio] |
 
-[^audio-bridge]: The legacy `mlx-vlm` Python bridge is no longer the default but remains available as a fallback/oracle: set `KRILL_AUDIO_BRIDGE_ONLY=1` (or `KRILL_NATIVE_AUDIO=0`); install with `make setup-mlx-vlm`. It has not yet been removed (bridge retirement is a separate follow-up after a baked release; see `docs/NATIVE_GEMMA4_AUDIO_PLAN.md` WS6 Step 4).
-
-[^native-audio]: The native Swift+MLX Gemma 4 USM Conformer audio path (`Sources/KLMCore/AudioPreprocessor.swift` + `AudioEncoder.swift`) is **default-on as of WS6**. It was numerically validated against the `mlx-vlm` oracle on a real Gemma 4 E2B checkpoint on the M4 target (verbatim-equivalent transcription on a deterministic speech fixture) and benchmarked **faster than Ollama** (audio prefill ~2.4×, audio wall ~0.53×), so the release-gate `audio_*` metrics are promoted from `out_of_scope` to **hard** in both profiles. Set `KRILL_AUDIO_BRIDGE_ONLY=1` or `KRILL_NATIVE_AUDIO=0` to force the bridge. Not yet shipped in a tagged release. See [`docs/NATIVE_GEMMA4_AUDIO_PLAN.md`](docs/NATIVE_GEMMA4_AUDIO_PLAN.md).
+[^native-audio]: The native Swift+MLX Gemma 4 USM Conformer audio path (`Sources/KLMCore/AudioPreprocessor.swift` + `AudioEncoder.swift`) is the **only** audio path as of WS6. It was numerically validated against the (now-removed) `mlx-vlm` oracle on a real Gemma 4 E2B checkpoint on the M4 target (verbatim-equivalent transcription on a deterministic speech fixture) and benchmarked **faster than Ollama** (audio prefill ~2.4×, audio wall ~0.53×), so the release-gate `audio_*` metrics are **hard** in both profiles. The oracle outputs were pinned to `Tests/KLMEngineTests/Fixtures/ws6_oracle_baseline.json` before bridge removal so the parity contract stays testable without the Python dependency. See [`docs/NATIVE_GEMMA4_AUDIO_PLAN.md`](docs/NATIVE_GEMMA4_AUDIO_PLAN.md).
 
 All other model families (Llama, Qwen, Mistral, Gemma 2, Phi, GLM-4) are text-only on both CLI and server.
 
@@ -57,10 +54,9 @@ Prerequisites:
 
 The harness exits `77` and writes an actionable skip report when `ollama`, the Ollama daemon, or either model is missing. `krillm bench <model>` remains available for the native synthetic-token benchmark.
 
-For Gemma 4 text/image/audio comparison, install the Python bridge and run:
+For Gemma 4 text/image/audio comparison (all native — no Python bridge), run:
 
 ```bash
-make setup-mlx-vlm
 make bench-gemma4-multimodal
 ```
 
@@ -204,9 +200,9 @@ krillm pull mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 
 ## Gemma 4 Multimodal Support
 
-Gemma 4 supports text, image, and audio inputs, **all on the native Swift+MLX path** by default (text model + SigLIP2 vision encoder + USM Conformer audio). The legacy `mlx-vlm` Python bridge is available as a fallback via `KRILL_AUDIO_BRIDGE_ONLY=1` (or `KRILL_NATIVE_AUDIO=0`); combined `--image` + `--audio` requests run natively as well.
+Gemma 4 supports text, image, and audio inputs, **all on the native Swift+MLX path** (text model + SigLIP2 vision encoder + USM Conformer audio). The legacy `mlx-vlm` Python bridge was removed in WS6 Step 4; combined `--image` + `--audio` requests run natively as well.
 
-See the [Support Matrix](#support-matrix) above for the full CLI-native / CLI-bridge / Server breakdown. The HTTP server accepts image and audio payloads on Ollama and OpenAI endpoints when a Gemma 4 model is loaded; see [`docs/SERVER_API.md`](docs/SERVER_API.md) for request shapes.
+See the [Support Matrix](#support-matrix) above for the full CLI / Server breakdown. The HTTP server accepts image and audio payloads on Ollama and OpenAI endpoints when a Gemma 4 model is loaded; see [`docs/SERVER_API.md`](docs/SERVER_API.md) for request shapes.
 
 ### Image (native, no Python needed)
 
@@ -218,10 +214,6 @@ krillm run gemma-4-e2b "Describe this image" --image ./photo.png --max-tokens 64
 
 ```bash
 krillm run gemma-4-e2b "Transcribe this audio." --audio ./clip.wav --max-tokens 64
-
-# To force the legacy mlx-vlm bridge instead (e.g. for oracle comparison):
-make setup-mlx-vlm
-KRILL_AUDIO_BRIDGE_ONLY=1 krillm run gemma-4-e2b "What sound is this?" --audio ./clip.wav
 ```
 
 ## API Compatibility

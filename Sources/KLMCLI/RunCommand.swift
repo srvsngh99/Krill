@@ -35,7 +35,7 @@ struct RunCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Image file path for Gemma 4 (native vision)")
     var image: String?
 
-    @Option(name: .long, help: "Audio file path for Gemma 4 (bridge by default; native with KRILL_NATIVE_AUDIO=1)")
+    @Option(name: .long, help: "Audio file path for Gemma 4 (native USM; wav/mp3/flac/ogg/m4a)")
     var audio: String?
 
     @Option(name: .long, help: "Tools JSON file for function calling (not yet supported)")
@@ -78,43 +78,8 @@ struct RunCommand: AsyncParsableCommand {
         if let configData = try? Data(contentsOf: configURL),
            let configJSON = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
            isGemma4Config(configJSON) {
-            if audio != nil && !InferenceEngine.nativeAudioEnabled {
-                // Audio bridge fallback. Native Swift+MLX audio is used
-                // instead when KRILL_NATIVE_AUDIO=1 (and not forced off by
-                // KRILL_AUDIO_BRIDGE_ONLY) — then we fall through to the
-                // native engine path below, which decodes WAV/mp3/flac/ogg/
-                // m4a containers.
-                let availability = PythonFallback.checkAvailability()
-                guard availability.isAvailable else {
-                    print("Error: Gemma 4 audio requires the mlx-vlm Python bridge, or set KRILL_NATIVE_AUDIO=1 for the native encoder.")
-                    print("Install: make setup-mlx-vlm")
-                    throw ExitCode.failure
-                }
-                print("Loading Gemma 4 via mlx-vlm (audio)...")
-                let fallback = PythonFallback(modelPath: modelDir.path)
-                if let prompt {
-                    let output = try await fallback.generate(
-                        prompt: prompt, maxTokens: maxTokens,
-                        imagePath: image, audioPath: audio)
-                    print(output)
-                } else {
-                    print("\nGemma 4 Interactive Mode (mlx-vlm)")
-                    print("Type your message and press Enter. Type /quit to exit.\n")
-                    while true {
-                        print("> ", terminator: "")
-                        fflush(stdout)
-                        guard let line = readLine(), !line.isEmpty else { continue }
-                        if line.trimmingCharacters(in: .whitespaces) == "/quit" { break }
-                        let output = try await fallback.generate(
-                            prompt: line, maxTokens: maxTokens,
-                            imagePath: image, audioPath: audio)
-                        print(output)
-                        print()
-                    }
-                }
-                return
-            }
-            // Gemma 4 text and image: native Swift engine handles both
+            // Gemma 4 text, image, and audio all run on the native Swift
+            // engine below (the mlx-vlm bridge was retired in WS6 Step 4).
         }
 
         // Image/audio only supported for Gemma 4

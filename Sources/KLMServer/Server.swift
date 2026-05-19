@@ -196,14 +196,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return try? Data(contentsOf: URL(fileURLWithPath: path))
     }
 
-    /// Audio routes natively when the model+flag select it. Container decode
-    /// happens in KLMCore before the shared USM preprocessing pipeline, so
-    /// accepted formats are not artificially limited to WAV.
-    func audioRoutesNative(_ media: DecodedMedia?) -> Bool {
-        guard let media, media.audioPath != nil else { return false }
-        return engine.canUseNativeAudio
-    }
-
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let part = unwrapInboundIn(data)
 
@@ -541,17 +533,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         if let media = decodedMedia, media.audioPath != nil,
-           !audioRoutesNative(media) {
-            // Audio -> Python bridge fallback. With KRILL_NATIVE_AUDIO=1 the
-            // native Swift+MLX path handles it inline (see eng.generate).
-            handleBridgeChat(
-                context: context,
-                messages: request.messages,
-                media: media,
-                maxTokens: request.maxTokens,
-                bridgeStyle: .openAI,
-                requestStream: request.stream
-            )
+           !engine.canUseNativeAudio {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Audio input requires an audio-capable Gemma 4 checkpoint"])
             return
         }
 
@@ -879,238 +863,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return DecodedMedia(imagePath: imagePath, audioPath: audioPath)
     }
 
-    /// Distill a chat history into a single prompt + system pair for the
-    /// Python bridge, which doesn't take chat structure today.
-    private func bridgePrompt(from messages: [[String: String]]) -> (prompt: String, system: String?) {
-        var system: String? = nil
-        var userTurns: [String] = []
-        for m in messages {
-            let role = m["role"] ?? "user"
-            let content = m["content"] ?? ""
-            if role == "system" {
-                system = (system.map { $0 + "\n" } ?? "") + content
-            } else if role == "user" {
-                userTurns.append(content)
-            }
-        }
-        return (userTurns.joined(separator: "\n"), system)
-    }
-
-    /// Reply style for the bridge (audio) path.
-    private enum BridgeStyle {
-        case openAI
-        case ollamaChat
-        case ollamaGenerate
-    }
-
-    /// Run a multimodal request through the Python bridge (audio path).
-    private func handleBridgeChat(
-        context: ChannelHandlerContext,
-        messages: [[String: String]],
-        media: DecodedMedia,
-        maxTokens: Int,
-        bridgeStyle: BridgeStyle,
-        requestStream: Bool,
-        promptOverride: String? = nil,
-        systemOverride: String? = nil
-    ) {
-        guard let modelDir = engine.modelDirectoryPath else {
-            sendJSON(context: context, status: .serviceUnavailable,
-                     body: ["error": "No model loaded."])
-            media.cleanup()
-            return
-        }
-        let availability = PythonFallback.checkAvailability()
-        guard availability.isAvailable else {
-            sendJSON(context: context, status: .serviceUnavailable, body: [
-                "error": "Audio input requires the mlx-vlm Python bridge: \(availability.detail). Install via `make setup-mlx-vlm`."
-            ])
-            media.cleanup()
-            return
-        }
-
-        let (composedPrompt, composedSystem) = bridgePrompt(from: messages)
-        let prompt = promptOverride ?? composedPrompt
-        let system = systemOverride ?? composedSystem
-        let modelName = engine.modelName ?? "unknown"
-
-        nonisolated(unsafe) let ctx = context
-        let eventLoop = context.eventLoop
-        let imagePath = media.imagePath
-        let audioPath = media.audioPath
-        let style = bridgeStyle
-
-        // Audio bridge does not stream; if the client asked for streaming we
-        // emit a single payload chunk + final done chunk for compatibility.
-        if requestStream {
-            switch style {
-            case .ollamaChat, .ollamaGenerate:
-                context.write(wrapOutboundOut(.head(ServerResponseHeads.ollamaStreaming(cors: self.corsHeaders()))), promise: nil)
-            case .openAI:
-                context.write(wrapOutboundOut(.head(ServerResponseHeads.openAIStreaming(cors: self.corsHeaders()))), promise: nil)
-            }
-        }
-
-        let requestStart = CFAbsoluteTimeGetCurrent()
-
-        Task {
-            defer { media.cleanup() }
-            do {
-                let fallback = PythonFallback(modelPath: modelDir)
-                let composed: String
-                if let sys = system, !sys.isEmpty {
-                    composed = sys + "\n\n" + prompt
-                } else {
-                    composed = prompt
-                }
-                let output = try await fallback.generate(
-                    prompt: composed,
-                    maxTokens: maxTokens,
-                    imagePath: imagePath,
-                    audioPath: audioPath
-                )
-                let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
-                switch style {
-                case .openAI:
-                    let chatId = "chatcmpl-\(UUID().uuidString.prefix(8))"
-                    if requestStream {
-                        let contentChunk = sseChunk(id: chatId, content: output, finishReason: nil)
-                        var buf1 = ByteBufferAllocator().buffer(capacity: contentChunk.utf8.count)
-                        buf1.writeString(contentChunk)
-                        self.writeOnLoop(ctx, .body(.byteBuffer(buf1)), flush: true)
-                        let stopChunk = sseChunk(id: chatId, content: nil, finishReason: "stop")
-                        var buf2 = ByteBufferAllocator().buffer(capacity: stopChunk.utf8.count)
-                        buf2.writeString(stopChunk)
-                        self.writeOnLoop(ctx, .body(.byteBuffer(buf2)), flush: true)
-                        let done = "data: [DONE]\n\n"
-                        var buf3 = ByteBufferAllocator().buffer(capacity: done.utf8.count)
-                        buf3.writeString(done)
-                        self.writeOnLoop(ctx, .body(.byteBuffer(buf3)), flush: true)
-                        self.writeOnLoop(ctx, .end(nil), flush: true)
-                    } else {
-                        let response: [String: Any] = [
-                            "id": chatId,
-                            "object": "chat.completion",
-                            "created": Int(Date().timeIntervalSince1970),
-                            "choices": [[
-                                "index": 0,
-                                "message": ["role": "assistant", "content": output],
-                                "finish_reason": "stop"
-                            ]],
-                            "usage": [
-                                "prompt_tokens": 0,
-                                "completion_tokens": 0,
-                                "total_tokens": 0
-                            ],
-                            "krillm_path": "mlx-vlm-bridge"
-                        ]
-                        self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
-                    }
-                case .ollamaChat:
-                    if requestStream {
-                        // Single content chunk
-                        let body: [String: Any] = [
-                            "model": modelName,
-                            "message": ["role": "assistant", "content": output],
-                            "done": false
-                        ]
-                        let data1 = try? JSONSerialization.data(withJSONObject: body)
-                        if let data1 {
-                            var buf = ByteBufferAllocator().buffer(capacity: data1.count + 1)
-                            buf.writeBytes(data1)
-                            buf.writeString("\n")
-                            self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
-                        }
-                        let final: [String: Any] = [
-                            "model": modelName,
-                            "message": ["role": "assistant", "content": ""],
-                            "done": true,
-                            "total_duration": totalNs,
-                            "prompt_eval_count": 0,
-                            "prompt_eval_duration": 0,
-                            "eval_count": 0,
-                            "eval_duration": 0,
-                            "krillm_path": "mlx-vlm-bridge"
-                        ]
-                        let data2 = try? JSONSerialization.data(withJSONObject: final)
-                        if let data2 {
-                            var buf = ByteBufferAllocator().buffer(capacity: data2.count + 1)
-                            buf.writeBytes(data2)
-                            buf.writeString("\n")
-                            self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
-                        }
-                        self.writeOnLoop(ctx, .end(nil), flush: true)
-                    } else {
-                        let response: [String: Any] = [
-                            "model": modelName,
-                            "message": ["role": "assistant", "content": output],
-                            "done": true,
-                            "total_duration": totalNs,
-                            "prompt_eval_count": 0,
-                            "prompt_eval_duration": 0,
-                            "eval_count": 0,
-                            "eval_duration": 0,
-                            "krillm_path": "mlx-vlm-bridge"
-                        ]
-                        self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
-                    }
-                case .ollamaGenerate:
-                    if requestStream {
-                        let body: [String: Any] = [
-                            "model": modelName,
-                            "response": output,
-                            "done": false
-                        ]
-                        let data1 = try? JSONSerialization.data(withJSONObject: body)
-                        if let data1 {
-                            var buf = ByteBufferAllocator().buffer(capacity: data1.count + 1)
-                            buf.writeBytes(data1)
-                            buf.writeString("\n")
-                            self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
-                        }
-                        let final: [String: Any] = [
-                            "model": modelName,
-                            "response": "",
-                            "done": true,
-                            "total_duration": totalNs,
-                            "prompt_eval_count": 0,
-                            "prompt_eval_duration": 0,
-                            "eval_count": 0,
-                            "eval_duration": 0,
-                            "krillm_path": "mlx-vlm-bridge"
-                        ]
-                        let data2 = try? JSONSerialization.data(withJSONObject: final)
-                        if let data2 {
-                            var buf = ByteBufferAllocator().buffer(capacity: data2.count + 1)
-                            buf.writeBytes(data2)
-                            buf.writeString("\n")
-                            self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
-                        }
-                        self.writeOnLoop(ctx, .end(nil), flush: true)
-                    } else {
-                        let response: [String: Any] = [
-                            "model": modelName,
-                            "response": output,
-                            "done": true,
-                            "total_duration": totalNs,
-                            "prompt_eval_count": 0,
-                            "prompt_eval_duration": 0,
-                            "eval_count": 0,
-                            "eval_duration": 0,
-                            "krillm_path": "mlx-vlm-bridge"
-                        ]
-                        self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
-                    }
-                }
-            } catch {
-                let msg = String(describing: error).prefix(500)
-                eventLoop.execute {
-                    self.sendJSON(context: ctx, status: .internalServerError,
-                                  body: ["error": "mlx-vlm bridge failed: \(msg)"])
-                }
-            }
-        }
-    }
 
     private func handleStreamingCompletion(
         context: ChannelHandlerContext,
@@ -1432,15 +1184,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         if let media = decodedMedia, media.audioPath != nil,
-           !audioRoutesNative(media) {
-            handleBridgeChat(
-                context: context,
-                messages: request.messages,
-                media: media,
-                maxTokens: request.maxTokens,
-                bridgeStyle: .ollamaChat,
-                requestStream: request.stream
-            )
+           !engine.canUseNativeAudio {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Audio input requires an audio-capable Gemma 4 checkpoint"])
             return
         }
 
@@ -1634,23 +1380,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         if let media = decodedMedia, media.audioPath != nil,
-           !audioRoutesNative(media) {
-            // Audio path: bridge through Python (entire request, even with
-            // image). Native Swift+MLX audio (KRILL_NATIVE_AUDIO=1) instead
-            // falls through to the native generate path below.
-            let messages: [[String: String]] = [
-                ["role": "user", "content": request.prompt]
-            ]
-            handleBridgeChat(
-                context: context,
-                messages: messages,
-                media: media,
-                maxTokens: request.maxTokens,
-                bridgeStyle: .ollamaGenerate,
-                requestStream: request.stream,
-                promptOverride: request.prompt,
-                systemOverride: request.system
-            )
+           !engine.canUseNativeAudio {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Audio input requires an audio-capable Gemma 4 checkpoint"])
             return
         }
 

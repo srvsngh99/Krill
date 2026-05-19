@@ -22,7 +22,7 @@ GEMMA4_BENCH_WARMUP ?= 1
 KRILLM_PYTHON ?= $(HOME)/.krillm/venv/bin/python3
 KRILLM_VENV_PYTHON ?= python3
 
-.PHONY: build release install uninstall clean test bench bench-compare bench-gemma4-multimodal bench-release-gate parity-gate setup-mlx-vlm metallib dist version
+.PHONY: build release install uninstall clean test bench bench-compare bench-gemma4-multimodal bench-release-gate parity-gate metallib dist version
 
 # Debug build (default)
 build:
@@ -179,15 +179,6 @@ PARITY_PROFILE ?= mac_parity
 PARITY_ARGS ?=
 parity-gate: build
 	python3 tools/parity_gate.py --profile $(PARITY_PROFILE) $(PARITY_ARGS)
-
-# Install the Python bridge used by Gemma 4 image/audio support.
-setup-mlx-vlm:
-	@if [ ! -x "$(KRILLM_PYTHON)" ]; then \
-		echo "Creating KrillLM Python venv at $(HOME)/.krillm/venv"; \
-		$(KRILLM_VENV_PYTHON) -m venv "$(HOME)/.krillm/venv"; \
-	fi
-	$(KRILLM_PYTHON) -m pip install -U pip mlx-vlm
-	$(KRILLM_PYTHON) -c "from mlx_vlm import load; print('mlx-vlm available')"
 
 # Clean build artifacts
 clean:

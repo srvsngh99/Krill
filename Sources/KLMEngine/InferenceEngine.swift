@@ -36,7 +36,7 @@ public final class InferenceEngine: @unchecked Sendable {
     /// The loaded model's directory name (useful for display/status).
     public var modelName: String? { isLoaded ? modelDirectory.lastPathComponent : nil }
 
-    /// Filesystem path to the loaded model directory (for multimodal Python bridge).
+    /// Filesystem path to the loaded model directory.
     /// Returns nil if no model is currently loaded.
     public var modelDirectoryPath: String? { isLoaded ? modelDirectory.path : nil }
 
@@ -48,33 +48,19 @@ public final class InferenceEngine: @unchecked Sendable {
         loadedModel?.family == "gemma4" && loadedModel?.multimodalForward != nil
     }
 
-    /// Whether the loaded model can handle audio input (native or bridge).
-    /// Requires the same multimodal checkpoint as image input.
+    /// Whether the loaded model can handle audio input. Requires the same
+    /// multimodal checkpoint as image input. Audio runs exclusively on the
+    /// native Swift+MLX USM path (the mlx-vlm bridge was retired in WS6
+    /// Step 4 after native was validated and benchmarked faster than
+    /// Ollama; see `docs/NATIVE_GEMMA4_AUDIO_PLAN.md`).
     public var supportsAudio: Bool {
         loadedModel?.family == "gemma4" && loadedModel?.multimodalForward != nil
     }
 
-    /// Native Swift+MLX audio is **default-on** as of WS6: it was
-    /// numerically validated against the `mlx-vlm` oracle on a real Gemma 4
-    /// checkpoint (verbatim-equivalent transcription on the deterministic
-    /// speech fixture) and benchmarked faster than Ollama on the M4 target
-    /// (see `docs/NATIVE_GEMMA4_AUDIO_PLAN.md` WS6 Steps 1-2). To force the
-    /// legacy `mlx-vlm` bridge set `KRILL_AUDIO_BRIDGE_ONLY=1` (wins over
-    /// everything) or `KRILL_NATIVE_AUDIO=0`. `KRILL_NATIVE_AUDIO=1` is now
-    /// a no-op kept for back-compat with existing scripts/docs.
-    public static var nativeAudioEnabled: Bool {
-        let env = ProcessInfo.processInfo.environment
-        if env["KRILL_AUDIO_BRIDGE_ONLY"] == "1" { return false }
-        if env["KRILL_NATIVE_AUDIO"] == "0" { return false }
-        return true
-    }
-
-    /// True when the loaded model can run audio through the native Swift
-    /// path right now (capable + flag on). Callers use this to choose
-    /// native vs the `mlx-vlm` bridge.
-    public var canUseNativeAudio: Bool {
-        supportsAudio && Self.nativeAudioEnabled
-    }
+    /// True when the loaded model can run audio. Audio is always native now;
+    /// this is exactly `supportsAudio`. Retained as stable API for the CLI
+    /// and server, which gate audio acceptance on it.
+    public var canUseNativeAudio: Bool { supportsAudio }
 
     /// A generation stream that surfaces a hard pre-generation failure (e.g.
     /// native audio decode error) so it is **never swallowed**. The message
@@ -294,9 +280,7 @@ public final class InferenceEngine: @unchecked Sendable {
         // Native audio: decode the container (WAV/mp3/flac/ogg/m4a) ->
         // log-mel + validity once, up front, so the `<|audio|>` placeholder
         // count matches the encoder frame count.
-        // The native frontend is selected only when the model is
-        // audio-capable and the native flag is on; otherwise audio stays on
-        // the bridge (server level).
+        // Audio is always native when the model is audio-capable.
         let nativeAudioChosen = audioData != nil && canUseNativeAudio
             && loadedModel.family == "gemma4"
         let nativeAudio: AudioPreprocessor.Features?

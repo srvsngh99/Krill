@@ -318,7 +318,7 @@ the same as Ollama). Token-level streaming tool deltas are Phase 4; with
 ## Multimodal Notes
 
 - Image input is supported on all four chat/generate endpoints when a Gemma 4 model is loaded; it is rejected with HTTP 400 for any other model family.
-- Audio input is also Gemma 4 only and is routed through the `mlx-vlm` Python bridge; if `mlx-vlm` is not installed the server returns HTTP 503 with an installation hint (`make setup-mlx-vlm`).
+- Audio input is also Gemma 4 only and runs on the native Swift+MLX USM path (the `mlx-vlm` Python bridge was removed in WS6 Step 4). A non-audio-capable checkpoint rejects audio with HTTP 400.
 - OpenAI `/v1/chat/completions` accepts both string content and the standard content-block array form: `{"type": "text"}`, `{"type": "image_url", "image_url": {"url": "data:..."}}`, and `{"type": "input_audio", "input_audio": {"data": "...", "format": "wav"}}`. Only `data:` URLs are accepted for images (no remote fetching).
 - OpenAI `/v1/completions` remains text-only (parity with the upstream API).
 - Decoded media is written to `FileManager.default.temporaryDirectory` and removed when the request completes.
