@@ -2,7 +2,7 @@
 
 ## Status and Scope
 
-This build is a release-readiness baseline, not a production release. The HTTP server supports **text generation on every model family** plus **Gemma 4 image and audio input**. Image input runs through the native Swift SigLIP2 vision encoder; audio input is routed to the `mlx-vlm` Python bridge (the same path the CLI uses for `--audio`). When a request supplies both image and audio, the entire request goes through the bridge to match CLI behavior. Non-Gemma 4 models reject image/audio payloads with HTTP 400. See [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for full status.
+This build is a release-readiness baseline, not a production release. The HTTP server supports **text generation on every model family** plus **Gemma 4 image and audio input**. Image input runs through the native Swift SigLIP2 vision encoder; audio input runs through the native Swift+MLX USM path. Combined image+audio requests also run natively. The `mlx-vlm` Python bridge was removed in WS6 Step 4. Non-Gemma 4 models (and text-only Gemma 4 checkpoints, for audio) reject image/audio payloads with HTTP 400. See [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for full status.
 
 **Limits:**
 - 1 image per request maximum (Gemma 4 supports a single image per turn).
@@ -101,7 +101,7 @@ curl http://127.0.0.1:11435/api/generate -d '{
   "images": ["'"$(base64 -i photo.png)"'"]
 }'
 
-# Audio (Gemma 4 only — routed through mlx-vlm bridge)
+# Audio (Gemma 4 only — native Swift+MLX USM path)
 curl http://127.0.0.1:11435/api/generate -d '{
   "model": "gemma-4-e2b",
   "prompt": "Transcribe this clip.",
@@ -318,7 +318,7 @@ the same as Ollama). Token-level streaming tool deltas are Phase 4; with
 ## Multimodal Notes
 
 - Image input is supported on all four chat/generate endpoints when a Gemma 4 model is loaded; it is rejected with HTTP 400 for any other model family.
-- Audio input is also Gemma 4 only and is routed through the `mlx-vlm` Python bridge; if `mlx-vlm` is not installed the server returns HTTP 503 with an installation hint (`make setup-mlx-vlm`).
+- Audio input is also Gemma 4 only and runs on the native Swift+MLX USM path (the `mlx-vlm` Python bridge was removed in WS6 Step 4). A non-audio-capable checkpoint rejects audio with HTTP 400.
 - OpenAI `/v1/chat/completions` accepts both string content and the standard content-block array form: `{"type": "text"}`, `{"type": "image_url", "image_url": {"url": "data:..."}}`, and `{"type": "input_audio", "input_audio": {"data": "...", "format": "wav"}}`. Only `data:` URLs are accepted for images (no remote fetching).
 - OpenAI `/v1/completions` remains text-only (parity with the upstream API).
 - Decoded media is written to `FileManager.default.temporaryDirectory` and removed when the request completes.

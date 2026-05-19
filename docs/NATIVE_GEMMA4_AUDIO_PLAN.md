@@ -1,8 +1,13 @@
 # Native Gemma 4 Audio Implementation Plan
 
 Created: 2026-05-17
-Status: WS1-5 implemented (native path behind `KRILL_NATIVE_AUDIO`,
-opt-in); WS6 pending live numerical validation on the M4 target
+Status: COMPLETE. WS1-5 implemented; WS6 Steps 1-4 done on the M4
+target (2026-05-19): native validated vs the mlx-vlm oracle on a
+deterministic speech fixture, benchmarked faster than Ollama,
+default-flipped, release-gate audio promoted to hard, and the
+mlx-vlm bridge removed (oracle pinned to
+`Tests/KLMEngineTests/Fixtures/ws6_oracle_baseline.json`). Pending:
+a tagged release shipping this posture.
 Owner: unassigned
 
 ## Implementation Status (2026-05-17)

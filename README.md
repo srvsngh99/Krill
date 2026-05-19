@@ -6,23 +6,20 @@ Built on Apple's [MLX](https://github.com/ml-explore/mlx-swift) framework. Ships
 
 ## Release Status
 
-This is not yet a production release. Server multimodal is implemented for Gemma 4 — native image, bridge-backed audio — and shipped with end-to-end tests. The int8 KV cache composes with the prefix cache on Gemma 4 (PR #11), and the release gate now distinguishes hard, advisory, and out_of_scope metrics via `--profile release_candidate` (PR #12). Peak-memory sampling is wired into the benchmark and `memory_ratio` is hard-gated for class-equal comparisons (PR #14). PR #16 capped the MLX Metal buffer pool (`KRILL_MLX_CACHE_LIMIT_MB`), closed the `memory_ratio` hard miss (now 0.32–0.84, passing), and — per an owner-accepted gate proposal (`docs/RELEASE_GATE_DECODE_PROPOSAL.md`) — demoted `text_decode_ratio` to advisory under `release_candidate` with a new **hard `text_decode_ratio_floor ≥1.0x`** (KrillLM must never decode slower than Ollama). **`release_candidate` now exits `0` (GATE: PASS)** on `.build/benchmarks/v6-mm.json`; `strict` still exits `1` (text decode hard ≥1.5x, prefill, audio). The gate makes **no claim** that KrillLM hit 1.5x raw decode — that target is a tracked advisory pending speculative decoding. See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) and [`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](OLLAMA_SPEEDUP_EXECUTION_PLAN.md) for the full status, the per-metric promotion contract, and acceptance criteria.
+This is not yet a production release. Server multimodal is implemented for Gemma 4 — native image and native audio (WS6: native Swift+MLX USM audio, numerically validated against the `mlx-vlm` oracle and benchmarked faster than Ollama on the M4 target; the bridge was then removed in WS6 Step 4) — and shipped with end-to-end tests. The int8 KV cache composes with the prefix cache on Gemma 4 (PR #11), and the release gate now distinguishes hard, advisory, and out_of_scope metrics via `--profile release_candidate` (PR #12). Peak-memory sampling is wired into the benchmark and `memory_ratio` is hard-gated for class-equal comparisons (PR #14). PR #16 capped the MLX Metal buffer pool (`KRILL_MLX_CACHE_LIMIT_MB`), closed the `memory_ratio` hard miss (now 0.32–0.84, passing), and — per an owner-accepted gate proposal (`docs/RELEASE_GATE_DECODE_PROPOSAL.md`) — demoted `text_decode_ratio` to advisory under `release_candidate` with a new **hard `text_decode_ratio_floor ≥1.0x`** (KrillLM must never decode slower than Ollama). **`release_candidate` exits `0` (GATE: PASS)** on the WS6 native-audio multimodal report with audio enforced as hard; `strict` still exits `1` but only on pre-existing non-audio items (text decode ≥1.5x, image prefill) — audio now passes strict. The gate makes **no claim** that KrillLM hit 1.5x raw decode — that target is a tracked advisory pending speculative decoding. See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) and [`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](OLLAMA_SPEEDUP_EXECUTION_PLAN.md) for the full status, the per-metric promotion contract, and acceptance criteria.
 
 ### Support Matrix
 
-The matrix below separates CLI vs Server, native Swift vs Python bridge, and per-modality support.
+The matrix below separates CLI vs Server and per-modality support. Gemma 4 text, image, and audio all run on the native Swift+MLX path; the legacy mlx-vlm Python bridge was removed in WS6 Step 4.
 
 Gemma 4 (`gemma-4-e2b`):
 
 | Path | Text | Image | Audio |
 |------|------|-------|-------|
-| CLI native | Supported | Supported | Implemented, opt-in [^native-audio] |
-| CLI bridge | — | — | Supported (mlx-vlm) |
-| Server | Supported | Supported (Gemma 4 only) | Default bridge; native opt-in (Gemma 4) [^audio-bridge] [^native-audio] |
+| CLI    | Supported | Supported | Supported (native) [^native-audio] |
+| Server | Supported | Supported (Gemma 4 only) | Supported (native; Gemma 4) [^native-audio] |
 
-[^audio-bridge]: Server-side audio defaults to the same `mlx-vlm` Python bridge as the CLI; install with `make setup-mlx-vlm`. Image input on the server runs through the native Swift SigLIP2 path.
-
-[^native-audio]: A native Swift+MLX Gemma 4 USM Conformer audio path (`Sources/KLMCore/AudioPreprocessor.swift` + `AudioEncoder.swift`) is implemented and unit/shape-tested. It is **opt-in** via `KRILL_NATIVE_AUDIO=1` (`KRILL_AUDIO_BRIDGE_ONLY=1` forces the bridge) pending live numerical validation against the `mlx-vlm` oracle on the M4 target; until then the bridge remains the default and the `strict` audio metric is unchanged. No production voice claim. See [`docs/NATIVE_GEMMA4_AUDIO_PLAN.md`](docs/NATIVE_GEMMA4_AUDIO_PLAN.md).
+[^native-audio]: The native Swift+MLX Gemma 4 USM Conformer audio path (`Sources/KLMCore/AudioPreprocessor.swift` + `AudioEncoder.swift`) is the **only** audio path as of WS6. It was numerically validated against the (now-removed) `mlx-vlm` oracle on a real Gemma 4 E2B checkpoint on the M4 target (verbatim-equivalent transcription on a deterministic speech fixture) and benchmarked **faster than Ollama** (audio prefill ~2.4×, audio wall ~0.53×), so the release-gate `audio_*` metrics are **hard** in both profiles. The oracle outputs were pinned to `Tests/KLMEngineTests/Fixtures/ws6_oracle_baseline.json` before bridge removal so the parity contract stays testable without the Python dependency. See [`docs/NATIVE_GEMMA4_AUDIO_PLAN.md`](docs/NATIVE_GEMMA4_AUDIO_PLAN.md).
 
 All other model families (Llama, Qwen, Mistral, Gemma 2, Phi, GLM-4) are text-only on both CLI and server.
 
@@ -57,10 +54,9 @@ Prerequisites:
 
 The harness exits `77` and writes an actionable skip report when `ollama`, the Ollama daemon, or either model is missing. `krillm bench <model>` remains available for the native synthetic-token benchmark.
 
-For Gemma 4 text/image/audio comparison, install the Python bridge and run:
+For Gemma 4 text/image/audio comparison (all native — no Python bridge), run:
 
 ```bash
-make setup-mlx-vlm
 make bench-gemma4-multimodal
 ```
 
@@ -92,8 +88,8 @@ make bench-release-gate GATE_INPUT=.build/benchmarks/krillm-vs-ollama.json
 # Sequential comparison (disk-constrained)
 make bench-release-gate GATE_KRILLM=krillm.json GATE_OLLAMA=ollama.json
 
-# release_candidate profile — hard-gates user-visible latency and class-equal
-# memory, marks prefill TPS advisory, scopes audio out until native Swift audio
+# release_candidate profile — hard-gates user-visible latency, class-equal
+# memory, and native audio (WS6); marks prefill TPS advisory
 python3 tools/release_gate.py .build/benchmarks/v6-mm.json \
   --profile release_candidate --allow-dtype-mismatch
 ```
@@ -107,24 +103,24 @@ Apple Silicon in the accepted `v6-mm` multimodal report: text TTFT ~5x,
 text wall-time ~1.57x faster, and native vision/image wall-time ~1.77x
 faster. The same report passes the hard class-equal peak-memory gate
 (KrillLM ~2.85-3.0 GB for text/image vs Ollama ~8.8 GB; PR #16 capped
-the MLX Metal buffer pool). Voice/audio is not part of the production
-claim yet: it still routes through the `mlx-vlm` bridge and is slower
-than Ollama on the accepted report (about 1.53 s vs 0.38 s wall time), so
-audio remains out_of_scope until native Swift audio lands.
+the MLX Metal buffer pool). As of WS6, **native Swift+MLX audio is
+default-on and part of the gated metrics**: on the M4 target it is
+numerically validated against the `mlx-vlm` oracle (verbatim-equivalent
+transcription on a deterministic speech fixture) and benchmarks **faster
+than Ollama** (audio prefill ~2.4×, audio wall ~0.53×), so `audio_*` is
+promoted from `out_of_scope` to **hard** in both profiles and the
+`release_candidate` gate now enforces — and passes — it.
 
-The `strict` benchmark gate (the uncompromised reference) still fails on
-text decode, prefill TPS, and audio wall time. The `release_candidate`
-profile keeps prefill TPS advisory, scopes bridge-backed audio out, and
-uses a hard `text_decode_ratio_floor >= 1.0x`; on
-`.build/benchmarks/v6-mm.json` it **exits `0` (GATE: PASS)**. A
-post-merge text-only sanity run after PR #18 was directionally good on
-decode but failed the release gate on TTFT/wall time and had a prompt-token
-mismatch, so it is not a release artifact. This is a release-readiness
-baseline plus a documented follow-up roadmap, not a production release:
-the next release PR must close the PR #18 rereview issues, rerun the full
-text/vision/audio benchmark, and either keep audio explicitly scoped out
-or ship native audio. No claim states KrillLM decodes 1.5x faster than
-Ollama.
+The `strict` benchmark gate (the uncompromised reference) still fails,
+but only on **pre-existing, owner-accepted, non-audio** items: text
+decode (`text_decode_ratio` ≥1.5×, the tracked advisory pending
+speculative decoding) and image prefill. Audio now **passes strict**.
+The `release_candidate` profile keeps prefill TPS advisory and uses a
+hard `text_decode_ratio_floor >= 1.0x`; on the WS6 native-audio
+multimodal report it **exits `0` (GATE: PASS)** with audio enforced as
+hard. No tagged release has shipped this posture yet (bridge retirement
+is a separate follow-up). No claim states KrillLM decodes 1.5x faster
+than Ollama.
 
 ## Install
 
@@ -180,7 +176,7 @@ krillm pull llama-3.1-8b      # Llama 3.1 8B
 krillm pull qwen2.5-7b        # Qwen 2.5 7B
 krillm pull mistral-7b        # Mistral 7B v0.3
 krillm pull gemma-2-9b        # Gemma 2 9B
-krillm pull gemma-4-e2b       # Gemma 4 E2B (text+image native, audio via mlx-vlm)
+krillm pull gemma-4-e2b       # Gemma 4 E2B (text+image+audio all native)
 krillm pull phi-4-mini         # Phi-4 Mini
 ```
 
@@ -204,9 +200,9 @@ krillm pull mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 
 ## Gemma 4 Multimodal Support
 
-Gemma 4 supports text, image, and audio inputs. Text and image-only use the native Swift path (text model + SigLIP2 vision encoder). Audio requires the Python `mlx-vlm` bridge. When both `--image` and `--audio` are used together, the entire request routes through mlx-vlm because native audio is not implemented.
+Gemma 4 supports text, image, and audio inputs, **all on the native Swift+MLX path** (text model + SigLIP2 vision encoder + USM Conformer audio). The legacy `mlx-vlm` Python bridge was removed in WS6 Step 4; combined `--image` + `--audio` requests run natively as well.
 
-See the [Support Matrix](#support-matrix) above for the full CLI-native / CLI-bridge / Server breakdown. The HTTP server accepts image and audio payloads on Ollama and OpenAI endpoints when a Gemma 4 model is loaded; see [`docs/SERVER_API.md`](docs/SERVER_API.md) for request shapes.
+See the [Support Matrix](#support-matrix) above for the full CLI / Server breakdown. The HTTP server accepts image and audio payloads on Ollama and OpenAI endpoints when a Gemma 4 model is loaded; see [`docs/SERVER_API.md`](docs/SERVER_API.md) for request shapes.
 
 ### Image (native, no Python needed)
 
@@ -214,13 +210,10 @@ See the [Support Matrix](#support-matrix) above for the full CLI-native / CLI-br
 krillm run gemma-4-e2b "Describe this image" --image ./photo.png --max-tokens 64
 ```
 
-### Audio (requires mlx-vlm)
+### Audio (native, no Python needed)
 
 ```bash
-# Install the bridge dependency
-make setup-mlx-vlm
-
-krillm run gemma-4-e2b "What sound is this?" --audio ./clip.wav --max-tokens 64
+krillm run gemma-4-e2b "Transcribe this audio." --audio ./clip.wav --max-tokens 64
 ```
 
 ## API Compatibility

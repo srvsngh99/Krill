@@ -107,9 +107,15 @@ ADVISORY_HARD_FLOORS = {
 #     >= 1.5x with greedy parity, OR (b) the matrix adds a long-output decode
 #     task where decode dominates wall time. Owner-accepted 2026-05-16; see
 #     docs/RELEASE_GATE_DECODE_PROPOSAL.md.
-# Audio metrics are out_of_scope until Workstream 1 (native Swift audio) lands;
-# the audio benchmark currently exercises the mlx-vlm sidecar and the gap to
-# Ollama is a known implementation gap, not a perf tuning target.
+# WS6 landed native Swift+MLX audio (default-on), numerically validated vs
+# the mlx-vlm oracle and benchmarked faster than Ollama on the M4 target.
+# `audio_wall_ratio` is HARD in both profiles (stable end-to-end metric;
+# consistently passes <= 0.67). `audio_prefill_ratio` follows the same
+# pattern as text/image prefill — advisory under release_candidate, hard
+# under strict — because prefill TPS on a short clip is measured over a
+# ~10-30ms window and is dominated by cold-start + Ollama-side jitter
+# (observed 1.29-2.42x run-to-run with identical setup), not a real
+# KrillLM signal. See docs/BENCHMARKING.md "audio prefill measurement".
 GATE_PROFILES: dict[str, dict[str, str]] = {
     "strict": {
         "text_decode_ratio":     "hard",
@@ -132,8 +138,12 @@ GATE_PROFILES: dict[str, dict[str, str]] = {
         "text_prefill_ratio":    "advisory",
         "image_wall_ratio":      "hard",
         "image_prefill_ratio":   "advisory",
-        "audio_wall_ratio":      "out_of_scope",
-        "audio_prefill_ratio":   "out_of_scope",
+        # WS6: audio_wall is the stable end-to-end audio metric (hard).
+        # audio_prefill is advisory here (like text/image prefill): its
+        # short-window measurement is too noisy to hard-gate. Hard under
+        # strict (the uncompromised reference).
+        "audio_wall_ratio":      "hard",
+        "audio_prefill_ratio":   "advisory",
         # memory_ratio is hard now that `gemma4_multimodal_benchmark.py` samples
         # peak RSS for both engines. It is still automatically downgraded to
         # advisory for any comparison whose quantization classes differ (e.g.
@@ -144,12 +154,10 @@ GATE_PROFILES: dict[str, dict[str, str]] = {
 }
 
 # Human-readable reason shown next to each out_of_scope skip in reports.
-SCOPE_REASONS: dict[str, dict[str, str]] = {
-    "release_candidate": {
-        "audio_wall_ratio":    "audio runs through mlx-vlm sidecar; gated by Workstream 1 (native Swift audio).",
-        "audio_prefill_ratio": "audio runs through mlx-vlm sidecar; gated by Workstream 1 (native Swift audio).",
-    },
-}
+# Empty since WS6: audio_* are now hard in both profiles (native Swift
+# audio default-on, validated and faster than Ollama). Kept for any future
+# scoped metric.
+SCOPE_REASONS: dict[str, dict[str, str]] = {}
 
 VALID_METRIC_KINDS = {"hard", "advisory", "out_of_scope"}
 
