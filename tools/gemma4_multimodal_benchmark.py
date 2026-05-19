@@ -1469,10 +1469,30 @@ def main() -> int:
         report["cache_mode_source"] = "auto"
 
     if use_server:
+        # Derive media routing from the actual per-run krillm_path instead of
+        # hardcoding it. The old constant ("audio": "bridge") predated native
+        # Swift audio (WS6) and silently contradicted reality once native
+        # landed, defeating the runbook's "confirm native, not bridge" check.
+        def _media_route(task_name: str) -> str:
+            task = results.get(task_name, {})
+            kr = task.get("krillm", {}) if isinstance(task, dict) else {}
+            paths = {
+                r.get("krillm_path")
+                for r in kr.get("runs", [])
+                if isinstance(r, dict) and r.get("krillm_path")
+            }
+            if not paths:
+                return "unknown"
+            if paths <= {"native_server", "native_cli"}:
+                return "native"
+            if any(p in ("bridge", "mlx-vlm-bridge") for p in paths):
+                return "bridge"
+            return "mixed:" + ",".join(sorted(p for p in paths if p))
+
         report["server_media"] = {
             "status": "supported",
-            "image": "native",
-            "audio": "bridge",
+            "image": _media_route("image"),
+            "audio": _media_route("audio"),
         }
 
     output = Path(args.output)

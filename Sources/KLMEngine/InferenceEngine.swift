@@ -54,14 +54,19 @@ public final class InferenceEngine: @unchecked Sendable {
         loadedModel?.family == "gemma4" && loadedModel?.multimodalForward != nil
     }
 
-    /// Native Swift+MLX audio is opt-in until numerically validated against
-    /// the `mlx-vlm` oracle on a real Gemma 4 checkpoint (see
-    /// `docs/NATIVE_GEMMA4_AUDIO_PLAN.md` WS5/WS6). `KRILL_NATIVE_AUDIO=1`
-    /// enables it; `KRILL_AUDIO_BRIDGE_ONLY=1` force-disables it (wins).
+    /// Native Swift+MLX audio is **default-on** as of WS6: it was
+    /// numerically validated against the `mlx-vlm` oracle on a real Gemma 4
+    /// checkpoint (verbatim-equivalent transcription on the deterministic
+    /// speech fixture) and benchmarked faster than Ollama on the M4 target
+    /// (see `docs/NATIVE_GEMMA4_AUDIO_PLAN.md` WS6 Steps 1-2). To force the
+    /// legacy `mlx-vlm` bridge set `KRILL_AUDIO_BRIDGE_ONLY=1` (wins over
+    /// everything) or `KRILL_NATIVE_AUDIO=0`. `KRILL_NATIVE_AUDIO=1` is now
+    /// a no-op kept for back-compat with existing scripts/docs.
     public static var nativeAudioEnabled: Bool {
         let env = ProcessInfo.processInfo.environment
         if env["KRILL_AUDIO_BRIDGE_ONLY"] == "1" { return false }
-        return env["KRILL_NATIVE_AUDIO"] == "1"
+        if env["KRILL_NATIVE_AUDIO"] == "0" { return false }
+        return true
     }
 
     /// True when the loaded model can run audio through the native Swift
@@ -93,6 +98,27 @@ public final class InferenceEngine: @unchecked Sendable {
 
     /// Model identifier for cache keying.
     private var modelId: String { modelDirectory.lastPathComponent }
+
+    /// The set of token ids that terminate generation. Reads
+    /// `generation_config.json`'s `eos_token_id` (scalar or array) from the
+    /// model directory and unions it with the tokenizer's single EOS so
+    /// multi-stop models (e.g. Gemma 4: `[1, 106, 50]`) halt correctly
+    /// instead of leaking `<end_of_turn>`. Falls back to just the tokenizer
+    /// EOS if the file is absent or unparseable.
+    static func stopTokenIds(modelDirectory: URL, tokenizerEOS: Int) -> Set<Int> {
+        var ids: Set<Int> = [tokenizerEOS]
+        let url = modelDirectory.appendingPathComponent("generation_config.json")
+        if let data = try? Data(contentsOf: url),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let eos = obj["eos_token_id"] {
+            if let single = eos as? Int {
+                ids.insert(single)
+            } else if let many = eos as? [Int] {
+                ids.formUnion(many)
+            }
+        }
+        return ids
+    }
 
     /// Timestamp when the model was loaded (nil if not loaded).
     public private(set) var loadedAt: Date?
@@ -323,6 +349,14 @@ public final class InferenceEngine: @unchecked Sendable {
 
         let sampler = Sampler(params: params)
         let eosId = tokenizer.eosTokenId
+        // Stop on ANY of the model's declared end tokens, not just the
+        // tokenizer's single `eos_token`. Gemma 4's generation_config.json
+        // declares `eos_token_id: [1, 106, 50]` — the model emits 106
+        // (`<end_of_turn>`) to end a turn, not `<eos>` (1). Checking only
+        // `eosId` let `<turn|>` leak into native output; the mlx-vlm oracle
+        // stops correctly because it honors the full list.
+        let stopIds = Self.stopTokenIds(
+            modelDirectory: modelDirectory, tokenizerEOS: eosId)
         let numLayers = loadedModel.numLayers
         let forwardFn = loadedModel.forward
         let multimodalFn = loadedModel.multimodalForward
@@ -548,7 +582,7 @@ public final class InferenceEngine: @unchecked Sendable {
 
                     // Emit the first token sampled from prefill logits — specDec.step
                     // only returns tokens *after* lastToken, so we must yield it here.
-                    if nextToken == eosId {
+                    if stopIds.contains(nextToken) {
                         continuation.yield(TokenEvent(
                             tokenId: nextToken, text: "",
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -560,7 +594,7 @@ public final class InferenceEngine: @unchecked Sendable {
                         generatedCount += 1
                     }
 
-                    while generatedCount < maxTokens && nextToken != eosId {
+                    while generatedCount < maxTokens && !stopIds.contains(nextToken) {
                         // Speculative step: get multiple tokens at once.
                         // Spec path requires fp16 caches; shouldSpec already excludes int8.
                         let accepted = specDec.step(
@@ -570,7 +604,7 @@ public final class InferenceEngine: @unchecked Sendable {
                         )
 
                         for token in accepted {
-                            if token == eosId {
+                            if stopIds.contains(token) {
                                 continuation.yield(TokenEvent(
                                     tokenId: token, text: "",
                                     elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -587,7 +621,7 @@ public final class InferenceEngine: @unchecked Sendable {
                         }
 
                         nextToken = accepted.last ?? eosId
-                        if nextToken == eosId || generatedCount >= maxTokens { break }
+                        if stopIds.contains(nextToken) || generatedCount >= maxTokens { break }
                     }
                 } else {
                     // === Standard Decode Path ===
@@ -606,7 +640,7 @@ public final class InferenceEngine: @unchecked Sendable {
                     // forward N+1, so kernel launch and host string work overlap
                     // with kernel execution.
                     while generatedCount < maxTokens {
-                        if nextToken == eosId {
+                        if stopIds.contains(nextToken) {
                             continuation.yield(TokenEvent(
                                 tokenId: nextToken, text: "",
                                 elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))

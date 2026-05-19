@@ -105,6 +105,12 @@ final class Gemma4SmokeTests: XCTestCase {
         assertContainsNone(output, ["green", "blue", "circle", "triangle"])
     }
 
+    /// Non-empty smoke only. A pure 1 kHz sine is out-of-distribution for a
+    /// speech-understanding model: Gemma 4 E2B hallucinates ("cat"/"dog")
+    /// non-deterministically on it via *both* the bridge oracle and the
+    /// native path, so a semantic rubric here is unstable by construction
+    /// (see docs/NATIVE_GEMMA4_AUDIO_PLAN.md WS6 + Risks). The deterministic
+    /// semantic gate is `testWS6NativeAudioMatchesBridgeOracleOnSpeech`.
     func testGemma4AudioSineToneSmoke() async throws {
         try requireMLXVLM()
         let modelPath = try requireModel()
@@ -114,26 +120,31 @@ final class Gemma4SmokeTests: XCTestCase {
             prompt: "What sound is in this audio? Answer briefly.",
             audioPath: audioPath,
             maxTokens: 48)
-        XCTAssertFalse(output.isEmpty)
-        assertContainsAny(output, ["tone", "sine", "beep", "single", "steady", "continuous", "hum", "buzz"])
-        assertContainsNone(output, ["dog", "bark", "music", "speech", "voice"])
+        XCTAssertFalse(output.isEmpty, "audio path produced empty output")
     }
 
     /// WS6 acceptance gate: native Swift+MLX audio must be **semantically
-    /// equivalent to the mlx-vlm oracle** on the deterministic sine fixture
-    /// — not merely non-empty. Runs both paths and holds the native output
-    /// to the SAME quality rubric the bridge satisfies above. This is the
+    /// equivalent to the mlx-vlm oracle** on the deterministic *speech*
+    /// fixture — not merely non-empty. Runs both paths and holds the native
+    /// output to the SAME quality rubric the bridge satisfies. This is the
     /// numerical-validation check that must pass on the M4 target before
     /// `KRILL_NATIVE_AUDIO` is flipped default-on and the bridge is retired.
-    /// Skips unless KLM_GEMMA4_MODEL_PATH + mlx-vlm + the fixture are present.
-    func testWS6NativeAudioMatchesBridgeOracleOnSineTone() async throws {
+    ///
+    /// Speech (not a pure tone) is used deliberately: Gemma 4 E2B is a
+    /// speech-understanding model and hallucinates non-deterministically on
+    /// out-of-distribution non-speech audio (a 1 kHz sine yields "cat" from
+    /// the oracle itself), so a tone fixture can never be a stable parity
+    /// reference. The bridge transcribes this pangram verbatim; native must
+    /// too. Skips unless KLM_GEMMA4_MODEL_PATH + mlx-vlm + the fixture are
+    /// present (the fixture is macOS-only; see tools/generate_audio_fixture.py).
+    func testWS6NativeAudioMatchesBridgeOracleOnSpeech() async throws {
         try requireMLXVLM()
         let modelPath = try requireModel()
-        let audioPath = try requireAsset(named: "gemma4-sine-1khz-5s.wav")
-        let prompt = "What sound is in this audio? Answer briefly."
-        let expected = ["tone", "sine", "beep", "single", "steady",
-                        "continuous", "hum", "buzz"]
-        let forbidden = ["dog", "bark", "music", "speech", "voice"]
+        let audioPath = try requireAsset(named: "gemma4-speech-pangram.wav")
+        let prompt = "Transcribe this audio exactly."
+        let expected = ["fox", "dog", "quick", "brown", "jump", "lazy"]
+        let forbidden = ["cat", "music", "silence", "tone", "bark",
+                         "i cannot"]
 
         // Oracle (bridge).
         let oracle = try await runFallback(

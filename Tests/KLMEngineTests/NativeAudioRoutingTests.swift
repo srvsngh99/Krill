@@ -17,15 +17,26 @@ final class NativeAudioRoutingTests: XCTestCase {
         body()
     }
 
-    func testNativeAudioFlagDefaultsOff() {
+    /// WS6: native audio is default-ON (no env required). Validated vs the
+    /// mlx-vlm oracle and benchmarked faster than Ollama on the M4 target.
+    func testNativeAudioFlagDefaultsOn() {
         withEnv(["KRILL_NATIVE_AUDIO": nil, "KRILL_AUDIO_BRIDGE_ONLY": nil]) {
-            XCTAssertFalse(InferenceEngine.nativeAudioEnabled)
+            XCTAssertTrue(InferenceEngine.nativeAudioEnabled,
+                          "native audio must be default-on after WS6")
         }
     }
 
     func testNativeAudioFlagEnabled() {
+        // KRILL_NATIVE_AUDIO=1 is now a back-compat no-op (still enabled).
         withEnv(["KRILL_NATIVE_AUDIO": "1", "KRILL_AUDIO_BRIDGE_ONLY": nil]) {
             XCTAssertTrue(InferenceEngine.nativeAudioEnabled)
+        }
+    }
+
+    func testNativeAudioDisabledByExplicitZero() {
+        withEnv(["KRILL_NATIVE_AUDIO": "0", "KRILL_AUDIO_BRIDGE_ONLY": nil]) {
+            XCTAssertFalse(InferenceEngine.nativeAudioEnabled,
+                           "KRILL_NATIVE_AUDIO=0 must force the bridge")
         }
     }
 
