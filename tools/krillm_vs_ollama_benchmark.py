@@ -56,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--krillm-url", help="KrillLM server URL (e.g. http://127.0.0.1:11435). When set, benchmarks against a running KrillLM server instead of CLI subprocess.")
     parser.add_argument("--ollama-host", default="http://127.0.0.1:11434", help="Ollama API host.")
     parser.add_argument("--timeout", type=float, default=600.0, help="Per-run timeout in seconds.")
+    parser.add_argument("--krillm-draft-model", default=None, help="Enable speculative decoding by loading this draft model (alias, path, or 'auto'). KrillLM only.")
     parser.add_argument(
         "--output",
         default=".build/benchmarks/krillm-vs-ollama.json",
@@ -186,7 +187,7 @@ def environment(krillm_bin: Optional[str], ollama_bin: str) -> dict[str, Any]:
 
 
 def krillm_command(args: argparse.Namespace, krillm_bin: str, prompt: str) -> list[str]:
-    return [
+    cmd = [
         krillm_bin,
         "run",
         args.krill_model,
@@ -200,6 +201,15 @@ def krillm_command(args: argparse.Namespace, krillm_bin: str, prompt: str) -> li
         "--seed",
         str(args.seed),
     ]
+    if args.krillm_draft_model:
+        cmd += ["--draft-model", args.krillm_draft_model]
+    return cmd
+
+
+SPEC_RE = re.compile(
+    r"spec:\s+rounds=(?P<rounds>\d+),\s+accepted=(?P<accepted>\d+),"
+    r"\s+final_k=(?P<final_k>\d+),\s+acceptance=(?P<acceptance>[0-9.]+)"
+)
 
 
 def parse_krillm_result(stdout: str, wall_s: float, command: list[str]) -> dict[str, Any]:
@@ -207,12 +217,21 @@ def parse_krillm_result(stdout: str, wall_s: float, command: list[str]) -> dict[
     if not match:
         raise RuntimeError("KrillLM output did not contain a parseable stats line")
     generated = stdout.split("\n---\n", 1)[0]
+    # Strip operational lines that precede the generated text. `spec:` is
+    # belt-and-braces: today it lives in the stats section after `---`
+    # and never reaches `generated`, but stripping it here means a future
+    # CLI reformat (or the line landing before `---`) cannot cause
+    # output_sha256 to diverge silently between spec-on and spec-off
+    # parity comparisons.
     generated_lines = [
         line for line in generated.splitlines()
-        if line and not line.startswith("Loading model") and not line.startswith("Ready (")
+        if line and not line.startswith("Loading model")
+        and not line.startswith("Ready (")
+        and not line.startswith("Speculative decoding enabled")
+        and not line.startswith("spec:")
     ]
     generated_text = "\n".join(generated_lines)
-    return {
+    result: dict[str, Any] = {
         "command": command,
         "prompt_tokens": int(match.group("prompt_tokens")),
         "generated_tokens": int(match.group("generated_tokens")),
@@ -224,6 +243,15 @@ def parse_krillm_result(stdout: str, wall_s: float, command: list[str]) -> dict[
         "output_sha256": sha256_text(generated_text),
         "output_preview": generated_text[:200],
     }
+    spec_match = SPEC_RE.search(stdout)
+    if spec_match:
+        result["speculative"] = {
+            "rounds": int(spec_match.group("rounds")),
+            "accepted_tokens": int(spec_match.group("accepted")),
+            "final_k": int(spec_match.group("final_k")),
+            "acceptance_rate": float(spec_match.group("acceptance")),
+        }
+    return result
 
 
 def run_krillm(args: argparse.Namespace, krillm_bin: str, prompt: str, measured: bool) -> Optional[dict[str, Any]]:

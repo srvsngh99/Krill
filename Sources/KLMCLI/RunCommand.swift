@@ -41,6 +41,9 @@ struct RunCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Tools JSON file for function calling (not yet supported)")
     var tools: String?
 
+    @Option(name: .long, help: "Draft model for speculative decoding. Pass an alias, a path, or 'auto' to use the curated pair from draftPairs.")
+    var draftModel: String?
+
     func run() async throws {
         let modelDir: URL
 
@@ -99,6 +102,12 @@ struct RunCommand: AsyncParsableCommand {
         try await engine.load()
         let loadTime = CFAbsoluteTimeGetCurrent() - loadStart
         print(String(format: "Ready (%.1fs load time)", loadTime))
+
+        if let draftSpec = draftModel {
+            try DraftModelResolver.load(
+                draftSpec: draftSpec, target: modelPath,
+                registry: registry, engine: engine)
+        }
 
         // The mlx-vlm bridge was removed (WS6 Step 4). Reject --audio for any
         // model that cannot process it natively — including text-only Gemma 4
@@ -238,4 +247,9 @@ private func printStats(_ stats: GenerationStats) {
     decode: \(stats.generatedTokens) tokens at \(decodeTps) tok/s, \
     TTFT: \(ttft)ms, total: \(total)s
     """)
+
+    if let spec = stats.speculative {
+        let rate = String(format: "%.2f", spec.acceptanceRate)
+        print("spec: rounds=\(spec.rounds), accepted=\(spec.acceptedTokens), final_k=\(spec.finalK), acceptance=\(rate)")
+    }
 }

@@ -451,8 +451,15 @@ class Gemma4TextModel: Module {
             MLX.eval(h, combinedPLE)
         }
 
-        // Causal mask
-        let mask: MLXArray? = L > 1 ? createAdditiveCausalMask(L, dtype: .bfloat16) : nil
+        // Causal mask. Same shape rules as the dense models: empty cache
+        // gets a square (L, L) mask; non-empty cache + multi-token forward
+        // (spec-decode verify, partial prefix resume) gets the shifted
+        // (L, cacheLen + L) mask. `caches.first` may be a quantized cache
+        // when int8 KV is active - its `sequenceLength` semantics match
+        // the fp16 path.
+        let cacheLen = caches?.first?.sequenceLength ?? 0
+        let mask = createCachedCausalMask(
+            newLen: L, cacheLen: cacheLen, dtype: .bfloat16)
         let maskMode: MLXFast.ScaledDotProductAttentionMaskMode = mask != nil ? .array(mask!) : .none
 
         // KV sharing donor indices (pre-computed at init)
