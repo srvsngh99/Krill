@@ -89,6 +89,17 @@ public final class Qwen25VLEngine: @unchecked Sendable {
         public let completionTokens: Int
     }
 
+    /// Convenience wrapper for callers that have a single user
+    /// prompt string. Equivalent to
+    /// `generate(messages: [{role: user, content: prompt}], ...)`.
+    public func generate(
+        prompt: String, imagePath: String?, maxTokens: Int = 256
+    ) throws -> GenerateResult {
+        try generate(
+            messages: [["role": "user", "content": prompt]],
+            imagePath: imagePath, maxTokens: maxTokens)
+    }
+
     /// Spawn the sidecar and wait for its `{"ready": true}` ack.
     public func load(directory: URL) async throws {
         if isLoaded(directory: directory) { return }
@@ -132,11 +143,15 @@ public final class Qwen25VLEngine: @unchecked Sendable {
         }
     }
 
-    /// Send one (prompt, image) request and read until `done`.
+    /// Send one (messages, image) request and read until `done`.
     /// Serialized via `generateLock` so concurrent callers do not
     /// interleave writes to the sidecar's half-duplex stdin/stdout.
+    /// `messages` carries the full role-tagged chat history; the
+    /// bridge renders it through Qwen 2.5-VL's chat template
+    /// (system / user / assistant turns preserved).
     public func generate(
-        prompt: String, imagePath: String?, maxTokens: Int = 256
+        messages: [[String: String]],
+        imagePath: String?, maxTokens: Int = 256
     ) throws -> GenerateResult {
         generateLock.lock()
         defer { generateLock.unlock() }
@@ -150,7 +165,7 @@ public final class Qwen25VLEngine: @unchecked Sendable {
         lock.unlock()
 
         var req: [String: Any] = [
-            "id": id, "prompt": prompt, "max_tokens": maxTokens,
+            "id": id, "messages": messages, "max_tokens": maxTokens,
         ]
         if let imagePath {
             req["image_path"] = imagePath

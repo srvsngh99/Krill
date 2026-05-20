@@ -8,8 +8,12 @@ KrillLM spawns the bridge once per session, feeds it (text, image)
 requests over stdin, and reads streamed token text from stdout.
 
 Protocol (one JSON object per line):
-    request:  { "id": <int>, "prompt": str, "image_path": str|null,
-                "max_tokens": int }
+    request:  { "id": <int>, "image_path": str|null,
+                "max_tokens": int,
+                "messages": [ {"role": "system|user|assistant",
+                               "content": str}, ... ] }
+        (the legacy `prompt: str` form is still accepted as a
+         shorthand for `messages: [{"role": "user", "content": prompt}]`)
     response: { "id": <int>, "token": str }    (streamed)
                 { "id": <int>, "done": true,
                   "prompt_tokens": int, "completion_tokens": int }
@@ -42,21 +46,43 @@ def emit(obj: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
-def build_prompt(text: str, has_image: bool) -> str:
-    """Construct the Qwen 2.5-VL chat template manually.
+def build_prompt(messages: list[dict[str, str]], has_image: bool) -> str:
+    """Construct the Qwen 2.5-VL chat template manually for a
+    full multi-turn message history.
 
     The version of mlx-vlm we ship against (0.5.0) has a Jinja
     template bug for content-list prompts; we sidestep it by
     writing the raw chat sequence using the official Qwen 2.5-VL
     special tokens. This is the same shape `mlx_vlm.prompt_utils`
     constructs internally when the template works.
+
+    Multi-turn handling: every message in `messages` is rendered
+    as its own `<|im_start|>{role}\\n...{content}...<|im_end|>`
+    block, preserving system / user / assistant turns. The image
+    placeholder (if present) is attached to the FIRST user turn,
+    matching Qwen 2.5-VL's reference template. A trailing
+    `<|im_start|>assistant\\n` opens the model's reply.
+
+    A default system message is prepended only if the caller
+    did not supply one (matches Qwen's behavior).
     """
-    parts = ["<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"]
-    parts.append("<|im_start|>user\n")
-    if has_image:
-        parts.append("<|vision_start|><|image_pad|><|vision_end|>")
-    parts.append(text)
-    parts.append("<|im_end|>\n<|im_start|>assistant\n")
+    has_system = any(m.get("role") == "system" for m in messages)
+    parts: list[str] = []
+    if not has_system:
+        parts.append("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n")
+
+    image_attached = False
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        parts.append(f"<|im_start|>{role}\n")
+        if role == "user" and has_image and not image_attached:
+            parts.append("<|vision_start|><|image_pad|><|vision_end|>")
+            image_attached = True
+        parts.append(content)
+        parts.append("<|im_end|>\n")
+
+    parts.append("<|im_start|>assistant\n")
     return "".join(parts)
 
 
@@ -90,7 +116,12 @@ def main() -> int:
         try:
             req = json.loads(line)
             req_id = req.get("id", 0)
-            text = req.get("prompt", "")
+            messages = req.get("messages")
+            if not messages:
+                # Backwards-compatible fallback for the original
+                # `prompt: str` single-turn protocol.
+                text = req.get("prompt", "")
+                messages = [{"role": "user", "content": text}]
             image_path = req.get("image_path")
             max_tokens = int(req.get("max_tokens", 256))
         except Exception as e:
@@ -98,7 +129,7 @@ def main() -> int:
             continue
 
         try:
-            prompt = build_prompt(text, has_image=bool(image_path))
+            prompt = build_prompt(messages, has_image=bool(image_path))
             kwargs: dict[str, Any] = {"max_tokens": max_tokens, "verbose": False}
             if image_path:
                 kwargs["image"] = [image_path]

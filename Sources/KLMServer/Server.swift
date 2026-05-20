@@ -507,13 +507,25 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         // Route Qwen 2.5-VL (and any future bridge-backed
-        // multimodal family) through the dedicated VLM handler.
-        // The check runs BEFORE the InferenceEngine model-loaded
-        // gate so a VL request does not get refused for "no model
-        // loaded" - the bridge has its own load step.
+        // multimodal family) through the dedicated VLM handler -
+        // but ONLY when the request actually carries an image.
+        // Text-only requests against a VL manifest are refused
+        // here: spinning up a 3GB Python sidecar for a text-only
+        // turn is a sharp performance trap, and the user can
+        // always pick a text-only Qwen 2.5 alias for that. The
+        // explicit error gives them the right next step.
         if let model = request.requestedModel,
            let manifest = registry.getModel(model),
            manifest.family == .qwen25vl {
+            if request.media.images.isEmpty {
+                sendJSON(context: context, status: .badRequest, body: [
+                    "error":
+                        "Qwen 2.5-VL requires an image in the request. For text-only "
+                        + "workflows use a Qwen 2.5 text-only model (e.g. qwen2.5-3b) "
+                        + "or include an image attachment."
+                ])
+                return
+            }
             handleVLMChat(
                 context: context, request: request,
                 manifest: manifest, style: .openAI)
@@ -1213,6 +1225,15 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         if let model = request.requestedModel,
            let manifest = registry.getModel(model),
            manifest.family == .qwen25vl {
+            if request.media.images.isEmpty {
+                sendJSON(context: context, status: .badRequest, body: [
+                    "error":
+                        "Qwen 2.5-VL requires an image in the request. For text-only "
+                        + "workflows use a Qwen 2.5 text-only model (e.g. qwen2.5-3b) "
+                        + "or include an image attachment."
+                ])
+                return
+            }
             handleVLMChat(
                 context: context, request: request,
                 manifest: manifest, style: .ollama)
@@ -1687,11 +1708,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             }
         }
 
-        // Flatten the chat to a single user-side prompt string. The
-        // bridge prepends the system prompt + chat template
-        // tokens itself (Qwen 2.5-VL has a fixed system message
-        // shape; we splice user content into a single user turn).
-        let promptText = vlmPromptText(from: request.messages)
+        // Forward the full role-tagged message history to the
+        // bridge. The bridge renders Qwen 2.5-VL's chat template
+        // over `messages` and preserves system / user / assistant
+        // turns - multi-turn VL chats round-trip without
+        // losing context.
+        let messagesForBridge = request.messages
 
         let dir = registry.modelPath(manifest.name)
         let eventLoop = context.eventLoop
@@ -1701,6 +1723,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let maxTokens = request.maxTokens
         let wantStream = request.stream
         let mediaCopy = decoded
+        // Snapshot CORS headers BEFORE the Task starts.
+        // `corsHeaders()` reads `self.currentOrigin`, which is
+        // mutated by channelRead on subsequent requests; reading
+        // it from the detached Task is racy. Capture once here
+        // so the streaming branch can echo the right Origin.
+        let snapshotCORS = corsHeaders()
 
         let started = CFAbsoluteTimeGetCurrent()
         Task {
@@ -1710,7 +1738,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             do {
                 try await vlm.load(directory: dir)
                 let result = try vlm.generate(
-                    prompt: promptText,
+                    messages: messagesForBridge,
                     imagePath: decoded?.imagePath,
                     maxTokens: maxTokens)
                 let totalNs = Int64(
@@ -1721,7 +1749,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         text: result.text, style: style,
                         promptTokens: result.promptTokens,
                         completionTokens: result.completionTokens,
-                        totalNs: totalNs)
+                        totalNs: totalNs,
+                        corsHeaders: snapshotCORS)
                 } else {
                     let response: [String: Any]
                     switch style {
@@ -1794,21 +1823,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return DecodedMedia(imagePath: imagePath, audioPath: nil)
     }
 
-    /// Flatten a chat history into a single prompt string the bridge
-    /// can splice into Qwen 2.5-VL's user turn. We strip system /
-    /// assistant turns - the bridge prepends its own system message
-    /// (matches what mlx-vlm itself does with apply_chat_template).
-    /// Multi-turn conversations collapse to the last user message
-    /// concatenated with prior user turns, which is the same
-    /// degradation `mlx-vlm` shows when chat templates are
-    /// bypassed.
-    private func vlmPromptText(from messages: [[String: String]]) -> String {
-        let userTurns = messages
-            .filter { $0["role"] == "user" }
-            .compactMap { $0["content"] }
-        return userTurns.joined(separator: "\n")
-    }
-
     /// Emit a chat-completion stream consisting of a single content
     /// chunk plus a terminating chunk, in the shape selected by
     /// `style`. mlx-vlm 0.5.0 does not expose a token-streaming
@@ -1824,7 +1838,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private func emitVLMStream(
         ctx: ChannelHandlerContext, modelName: String, text: String,
         style: VLMResponseStyle,
-        promptTokens: Int, completionTokens: Int, totalNs: Int64
+        promptTokens: Int, completionTokens: Int, totalNs: Int64,
+        corsHeaders: [(String, String)]
     ) {
         switch style {
         case .openAI:
@@ -1832,7 +1847,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             headers.add(name: "Content-Type", value: "text/event-stream")
             headers.add(name: "Cache-Control", value: "no-cache")
             headers.add(name: "Connection", value: "keep-alive")
-            for (k, v) in corsHeaders() { headers.add(name: k, value: v) }
+            for (k, v) in corsHeaders { headers.add(name: k, value: v) }
             writeOnLoop(ctx, .head(HTTPResponseHead(
                 version: .http1_1, status: .ok, headers: headers)))
             let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
@@ -1866,7 +1881,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             headers.add(name: "Content-Type", value: "application/x-ndjson")
             headers.add(name: "Cache-Control", value: "no-cache")
             headers.add(name: "Connection", value: "keep-alive")
-            for (k, v) in corsHeaders() { headers.add(name: k, value: v) }
+            for (k, v) in corsHeaders { headers.add(name: k, value: v) }
             writeOnLoop(ctx, .head(HTTPResponseHead(
                 version: .http1_1, status: .ok, headers: headers)))
             let createdAt = ISO8601DateFormatter().string(from: Date())
