@@ -93,14 +93,16 @@ public enum ModelCapabilities {
         case .bert:
             return [.embeddings]
         case .qwen25vl:
-            // WS5 foundation: the family DECLARES textGeneration and
-            // visionInput so /api/show clients see the intended
-            // contract, but the loader currently refuses to
-            // instantiate the model (see `loadQwen25VL` in
-            // ModelLoader.swift). Promoting from .experimental to
-            // .productionNative is gated on the native vision
-            // tower, patch merger, mRoPE, and image preprocessing
-            // landing in follow-up WS5 PRs.
+            // Qwen 2.5-VL runs via the Python sidecar
+            // (Qwen25VLEngine -> mlx-vlm). The family DECLARES
+            // textGeneration + visionInput so /api/show clients
+            // see the intended contract; the support tier is
+            // .compatibleFallback (not .productionNative) so
+            // /api/show clients also see that this is the
+            // bridge path, not a native Swift+MLX runtime.
+            // Native promotion is gated on the vision tower,
+            // patch merger, mRoPE, and image preprocessing
+            // landing in a follow-up.
             return [.textGeneration, .visionInput, .tools]
         case .moe:
             // WS6 foundation: the family DECLARES textGeneration +
@@ -131,16 +133,13 @@ public enum ModelCapabilities {
             // report against Ollama or a reference.
             return .productionNative
         case .qwen25vl:
-            // WS5 foundation: family detection + capability metadata
-            // + clear rejection path exists, but the vision tower
-            // and multimodal forward are not yet implemented.
-            // Loading currently throws an explicit
-            // `unsupportedArchitecture` error pointing at the
-            // workstream doc; this remains experimental until those
-            // land. Promotion to productionNative requires the full
-            // load+image+text path plus a fixture-changes-output
-            // smoke and an Ollama / reference benchmark.
-            return .experimental
+            // Bridge-backed (Python sidecar / mlx-vlm), not native
+            // Swift+MLX. Per the workstream's tier definitions,
+            // bridge paths are `compatibleFallback` - not a
+            // performance claim, but a working runtime. Promotion
+            // to productionNative requires the native vision
+            // tower, patch merger, mRoPE, and image preprocessing.
+            return .compatibleFallback
         case .moe:
             // WS6 foundation: same shape as the WS5 stance. Family
             // detection + capability metadata + clear rejection

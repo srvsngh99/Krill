@@ -35,10 +35,10 @@ final class Qwen25VLLoaderRejectionTests: XCTestCase {
             }
             XCTAssertTrue(msg.contains("Qwen 2.5-VL"),
                 "Error must name the family for users debugging the rejection")
-            XCTAssertTrue(msg.contains("WS5"),
-                "Error must point at the workstream doc for the tracking PR")
-            XCTAssertTrue(msg.contains("qwen2.5") || msg.contains("text-only"),
-                "Error must suggest a working text-only alternative")
+            XCTAssertTrue(msg.contains("multimodal bridge"),
+                "Error must redirect users to the bridge runtime instead of saying support is missing")
+            XCTAssertTrue(msg.contains("/api/chat") || msg.contains("/v1/chat"),
+                "Error must point at the chat-completion endpoints that handle VL routing")
         }
     }
 
