@@ -1,6 +1,70 @@
 # WS4: New Dense Text Families
 
-Status: planned
+Status: Qwen 3 dense landed (qwen3-0.6b through qwen3-14b aliases).
+
+## What landed in this PR
+
+Native MLX/Metal support for the Qwen 3 dense family inside the
+existing Qwen loader. The architectural deltas vs Qwen 2.5 are switched
+on by flags carried through `QwenConfig`, so a single
+`QwenForCausalLM` covers both variants:
+
+- `attention_bias: false` (Qwen 3) vs the historical Qwen 2.5
+  `bias: true` on QKV projections.
+- Per-head RMSNorm on Q and K before RoPE (Qwen 3's `q_norm` /
+  `k_norm`). Optional modules so Qwen 2.5 checkpoints continue to
+  load with zero unused parameters.
+- Tied embeddings (`tie_word_embeddings: true`): `lm_head` is now an
+  Optional module; when tied, the LM projection reuses
+  `model.embed_tokens.asLinear(hidden)`, the same path Gemma 4 uses.
+  `WeightLoader.loadWeights` learned a `tieWordEmbeddings: Bool`
+  parameter so the embed_tokens -> lm_head key duplication step does
+  not run on models without an `lm_head` property.
+- Explicit `head_dim` in config (Qwen 3 sets it, Qwen 2.5 derives it).
+- Mask dtype is now sourced from the embedding output dtype, so the
+  Qwen 3 bf16 inference path no longer crashes with
+  `[scaled_dot_product_attention] Mask type must promote to output
+  type bfloat16`.
+
+Aliases:
+
+```text
+qwen3-0.6b  mlx-community/Qwen3-0.6B-4bit
+qwen3-1.7b  mlx-community/Qwen3-1.7B-4bit
+qwen3-4b    mlx-community/Qwen3-4B-4bit
+qwen3-8b    mlx-community/Qwen3-8B-4bit
+qwen3-14b   mlx-community/Qwen3-14B-4bit
+```
+
+All inherit the qwen family's WS3 capability set
+(`textGeneration`, `tools`) and `production_native` support tier.
+
+## Benchmark vs Ollama
+
+Qwen 3 1.7B, max 64 tokens, 3 runs / 1 warmup, M-series:
+
+- KrillLM: 144.0 tok/s
+- Ollama:  135.1 tok/s
+
+KrillLM is 1.07x faster than Ollama on this pair. Plain decode; no
+speculative decoding.
+
+## Acceptance status
+
+- `krillm pull <alias>` resolves to the new entries.
+- `krillm run qwen3-1.7b "..."` loads and produces coherent output
+  including Qwen 3's `<think>` chain-of-thought trace.
+- Server `/api/generate`, `/api/chat`, OpenAI chat paths inherit the
+  Qwen family handling without further changes.
+- Tool calling behavior tracked by the existing qwen tool template
+  (PR #23 native parity); structured output is family-agnostic via
+  the structured sampler.
+- Bench report against Ollama attached above.
+
+## Non-goals
+
+- Qwen 3 MoE variants (defer to WS6).
+- Qwen 3 VL (multimodal) variants (defer to WS5).
 
 ## Goal
 
