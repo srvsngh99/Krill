@@ -104,15 +104,54 @@ final class MoEFoundationTests: XCTestCase {
         return dir
     }
 
-    func testNativeDispatchSupportedForQwen3MoE() throws {
+    /// Scoped env-var setter so the test process restores the prior
+    /// value after the assertion block, even on failure.
+    private func withEnv(_ key: String, _ value: String?, _ body: () throws -> Void) rethrows {
+        let prior = ProcessInfo.processInfo.environment[key]
+        if let value {
+            setenv(key, value, 1)
+        } else {
+            unsetenv(key)
+        }
+        defer {
+            if let prior {
+                setenv(key, prior, 1)
+            } else {
+                unsetenv(key)
+            }
+        }
+        try body()
+    }
+
+    func testNativeDispatchSupportedForQwen3MoEWhenOptedIn() throws {
         let dir = try writeConfig([
             "architectures": ["Qwen3MoeForCausalLM"],
             "model_type": "qwen3_moe",
         ])
         defer { try? FileManager.default.removeItem(at: dir) }
-        XCTAssertTrue(nativeMoEDispatchSupported(at: dir),
-            "Qwen 3 MoE has a native runtime in this build and must "
-            + "skip the bridge dispatch")
+        try withEnv("KRILL_NATIVE_MOE", "1") {
+            XCTAssertTrue(nativeMoEDispatchSupported(at: dir),
+                "Qwen 3 MoE has a native runtime in this build; with "
+                + "KRILL_NATIVE_MOE=1 the helper must claim native support")
+        }
+    }
+
+    func testNativeDispatchOptInGateIsHonored() throws {
+        // Without the opt-in env var, the helper returns false
+        // even for Qwen 3 MoE so the server keeps routing to the
+        // bridge by default. Pins the gate so the default cannot
+        // silently flip.
+        let dir = try writeConfig([
+            "architectures": ["Qwen3MoeForCausalLM"],
+            "model_type": "qwen3_moe",
+        ])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try withEnv("KRILL_NATIVE_MOE", nil) {
+            XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
+                "Default (no KRILL_NATIVE_MOE) must route MoE through "
+                + "the bridge; native dispatch is opt-in until the "
+                + "scatter optimization lands")
+        }
     }
 
     func testNativeDispatchNotSupportedForMixtral() throws {
@@ -121,8 +160,11 @@ final class MoEFoundationTests: XCTestCase {
             "model_type": "mixtral",
         ])
         defer { try? FileManager.default.removeItem(at: dir) }
-        XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
-            "Mixtral has no native runtime yet; must use the bridge")
+        try withEnv("KRILL_NATIVE_MOE", "1") {
+            XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
+                "Mixtral has no native runtime yet; must use the bridge "
+                + "even with the opt-in flag set")
+        }
     }
 
     func testNativeDispatchNotSupportedForOLMoE() throws {
@@ -131,8 +173,10 @@ final class MoEFoundationTests: XCTestCase {
             "model_type": "olmoe",
         ])
         defer { try? FileManager.default.removeItem(at: dir) }
-        XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
-            "OLMoE has no native runtime yet; must use the bridge")
+        try withEnv("KRILL_NATIVE_MOE", "1") {
+            XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
+                "OLMoE has no native runtime yet; must use the bridge")
+        }
     }
 
     func testNativeDispatchReturnsFalseForMissingConfig() {

@@ -99,14 +99,26 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
     } else if arch.contains("chatglm") || arch.contains("glm") || modelType == "chatglm" {
         return try loadGLM(configData: configData, directory: directory)
     } else if arch.contains("qwen3moe") || modelType == "qwen3_moe" {
-        // Qwen 3 MoE: native Swift+MLX runtime. Router + expert
-        // dispatch handled in `Qwen3MoESparseMLP` (see
-        // `Qwen3MoEModel.swift`). The native path replaces the WS6
-        // foundation's bridge-only fallback for this specific MoE
-        // family. Other MoE architectures (Mixtral, Qwen2-MoE,
-        // OLMoE, DeepSeek-V3) keep the bridge fallback below until
-        // native ports land.
-        return try loadQwen3MoE(configData: configData, directory: directory)
+        // Qwen 3 MoE: native Swift+MLX runtime exists, but the
+        // forward currently evaluates ALL experts on ALL tokens
+        // (correctness-first; the scatter dispatch that runs only
+        // the assigned experts per token is the follow-up). For
+        // Qwen3-30B-A3B (128 experts, top-8) that is 16x more FFN
+        // compute per layer than mlx-lm. Until the scatter
+        // dispatch lands and a benchmark confirms parity, the
+        // native path is OPT-IN via `KRILL_NATIVE_MOE=1`. Default
+        // routes through the Python bridge so existing users keep
+        // mlx-lm throughput.
+        if ProcessInfo.processInfo.environment["KRILL_NATIVE_MOE"] == "1" {
+            return try loadQwen3MoE(configData: configData, directory: directory)
+        }
+        throw ModelLoadError.unsupportedArchitecture(
+            "Qwen 3 MoE native Swift+MLX runtime is opt-in until the "
+            + "scatter-dispatch optimization lands. Set KRILL_NATIVE_MOE=1 "
+            + "to enable; default routes through the MoE bridge "
+            + "(compatible_fallback tier via mlx-lm). Use POST /api/chat "
+            + "or /v1/chat/completions - the server routes MoE manifests "
+            + "to MoEEngine. Detected arch=\(arch), model_type=\(modelType).")
     } else if arch.contains("mixtral") || arch.contains("qwen2moe")
         || arch.contains("olmoe")
         || modelType == "mixtral" || modelType == "qwen2_moe"
@@ -338,10 +350,17 @@ private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedMode
         quantization: config.quantization,
         tieWordEmbeddings: config.tieWordEmbeddings)
 
+    // `family` returned here must round-trip through
+    // `ModelFamily(rawValue:)` so that `InferenceEngine.capabilities`
+    // can look up the declared capability set, and so that the tool
+    // template selector picks the right format. We return "moe" so
+    // the capability lookup hits `.moe` cleanly; the tool format
+    // adapter maps `.moe` to `.qwen` (the only native MoE today is
+    // Qwen 3 MoE, which uses the Qwen chat / tool template).
     return LoadedModel(
         module: model,
         numLayers: config.numHiddenLayers,
-        family: "qwen3_moe",
+        family: "moe",
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
         multimodalForward: nil,
         vocabSize: config.vocabSize

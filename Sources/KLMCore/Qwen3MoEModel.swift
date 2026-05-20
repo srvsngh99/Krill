@@ -145,12 +145,15 @@ public struct Qwen3MoEConfig: ModelConfig, Codable, Sendable {
     /// the shared `QwenAttention` / `RMSNorm` modules. The MoE
     /// fields (numExperts etc.) drop away because they're irrelevant
     /// to attention. `attention_bias` is forced false (Qwen 3 MoE
-    /// matches dense Qwen 3 here); `hasQKNorm` is forced true.
+    /// matches dense Qwen 3 here); `hasQKNorm` is forced true via
+    /// the synthesized `model_type: qwen3`.
+    ///
+    /// The decode through `QwenConfig.init(from:)` is fallible in
+    /// principle. If a future `QwenConfig` field becomes required
+    /// without a matching entry in the dict below, we abort with an
+    /// explicit message that names the failure surface rather than
+    /// the opaque trap `try!` would produce.
     var qwenAttentionConfig: QwenConfig {
-        // Build a JSON dict and decode rather than synthesizing a
-        // QwenConfig via Codable manually, so any future QwenConfig
-        // field additions are picked up automatically without
-        // touching the MoE projection path.
         let dict: [String: Any] = [
             "hidden_size": hiddenSize,
             "intermediate_size": intermediateSize,
@@ -166,8 +169,16 @@ public struct Qwen3MoEConfig: ModelConfig, Codable, Sendable {
             "tie_word_embeddings": tieWordEmbeddings,
             "head_dim": explicitHeadDim ?? (hiddenSize / numAttentionHeads),
         ]
-        let data = try! JSONSerialization.data(withJSONObject: dict)
-        return try! JSONDecoder().decode(QwenConfig.self, from: data)
+        do {
+            let data = try JSONSerialization.data(withJSONObject: dict)
+            return try JSONDecoder().decode(QwenConfig.self, from: data)
+        } catch {
+            fatalError(
+                "Qwen3MoE to QwenConfig projection failed: \(error). "
+                + "A required QwenConfig field was added without a "
+                + "corresponding entry in Qwen3MoEConfig.qwenAttentionConfig. "
+                + "Update the dict above.")
+        }
     }
 }
 
@@ -317,13 +328,25 @@ class Qwen3MoESparseMLP: Module {
 /// at the dense `intermediate_size`.
 class Qwen3MoETransformerBlock: Module {
     @ModuleInfo(key: "self_attn") var selfAttn: QwenAttention
-    // Exactly one of these is wired up per layer; the other is nil.
-    // Both are serialized under the `mlp` key — checkpoint either
-    // has `mlp.gate + mlp.experts.*` (sparse) or `mlp.gate_proj +
-    // mlp.up_proj + mlp.down_proj` (dense). The Optional shape lets
-    // the safetensors -> module mapping skip the absent branch.
-    @ModuleInfo(key: "mlp") var sparseMLP: Qwen3MoESparseMLP?
-    @ModuleInfo(key: "mlp") var denseMLP: QwenMLP?
+    /// Block-local MLP. Holds either a `Qwen3MoESparseMLP` (router +
+    /// experts) for sparse layers, or a `QwenMLP` (gate/up/down) for
+    /// dense fallback layers. Typed as the base `Module` so MLX-swift
+    /// stores ONE entry under the `mlp` key in its parameter cache.
+    ///
+    /// An earlier draft declared two parallel `@ModuleInfo(key:
+    /// "mlp")` properties (one Optional sparse, one Optional dense).
+    /// That was a real bug: Module.buildCaches walks the Mirror and
+    /// writes `items["mlp"] = value` for each property, so the
+    /// second property's nil overwrote the first property's real
+    /// Module entry. `model.update(parameters:)` then never assigned
+    /// the sparse MLP's router / expert weights (passed verify: []
+    /// so the missed assignment was silent), leaving them at random
+    /// init on every load. Forward worked (it dereferenced the Swift
+    /// property directly), so a synthetic random-weight forward test
+    /// could not catch it. The single-property + downcast pattern
+    /// here avoids the collision while preserving the dense-layer
+    /// fallback path (`mlp_only_layers`).
+    @ModuleInfo(key: "mlp") var mlp: Module
     @ModuleInfo(key: "input_layernorm") var inputLayernorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayernorm: RMSNorm
 
@@ -334,15 +357,13 @@ class Qwen3MoETransformerBlock: Module {
         _selfAttn = ModuleInfo(
             wrappedValue: QwenAttention(attnConfig), key: "self_attn")
         self.isSparse = config.isSparseLayer(layerIndex)
+        let mlpModule: Module
         if isSparse {
-            _sparseMLP = ModuleInfo(
-                wrappedValue: Qwen3MoESparseMLP(config), key: "mlp")
-            _denseMLP = ModuleInfo(wrappedValue: nil, key: "mlp")
+            mlpModule = Qwen3MoESparseMLP(config)
         } else {
-            _sparseMLP = ModuleInfo(wrappedValue: nil, key: "mlp")
-            _denseMLP = ModuleInfo(
-                wrappedValue: QwenMLP(attnConfig), key: "mlp")
+            mlpModule = QwenMLP(attnConfig)
         }
+        _mlp = ModuleInfo(wrappedValue: mlpModule, key: "mlp")
         _inputLayernorm = ModuleInfo(
             wrappedValue: RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps),
             key: "input_layernorm")
@@ -354,14 +375,18 @@ class Qwen3MoETransformerBlock: Module {
     func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil) -> MLXArray {
         let h = x + selfAttn(inputLayernorm(x), mask: mask, cache: cache)
         let postAttn = postAttentionLayernorm(h)
-        if isSparse, let sparse = sparseMLP {
-            return h + sparse(postAttn)
+        let mlpOut: MLXArray
+        if let sparse = mlp as? Qwen3MoESparseMLP {
+            mlpOut = sparse(postAttn)
+        } else if let dense = mlp as? QwenMLP {
+            mlpOut = dense(postAttn)
+        } else {
+            // Init guarantees one of the two concrete types; this
+            // arm exists only to keep the type system happy.
+            fatalError("Qwen3MoETransformerBlock.mlp must be either "
+                + "Qwen3MoESparseMLP or QwenMLP")
         }
-        if let dense = denseMLP {
-            return h + dense(postAttn)
-        }
-        // Should not happen: init guarantees exactly one MLP is set.
-        return h
+        return h + mlpOut
     }
 }
 
