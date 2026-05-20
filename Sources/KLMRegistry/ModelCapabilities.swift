@@ -92,6 +92,16 @@ public enum ModelCapabilities {
             return [.textGeneration, .visionInput, .audioInput, .tools]
         case .bert:
             return [.embeddings]
+        case .qwen25vl:
+            // WS5 foundation: the family DECLARES textGeneration and
+            // visionInput so /api/show clients see the intended
+            // contract, but the loader currently refuses to
+            // instantiate the model (see `loadQwen25VL` in
+            // ModelLoader.swift). Promoting from .experimental to
+            // .productionNative is gated on the native vision
+            // tower, patch merger, mRoPE, and image preprocessing
+            // landing in follow-up WS5 PRs.
+            return [.textGeneration, .visionInput, .tools]
         }
     }
 
@@ -100,13 +110,21 @@ public enum ModelCapabilities {
         switch family {
         case .llama, .qwen, .mistral, .gemma, .phi, .glm, .deepseek,
              .gemma4, .bert:
-            // All current families ship as production-native: native
-            // Swift + MLX/Metal load+run path, deterministic smoke
-            // tests, and a benchmark report against Ollama or a
-            // reference. Adding a new family at a lower tier means
-            // adding the SupportTier case here and a `case .x` in this
-            // switch.
+            // Production-native: native Swift + MLX/Metal load+run
+            // path, deterministic smoke tests, and a benchmark
+            // report against Ollama or a reference.
             return .productionNative
+        case .qwen25vl:
+            // WS5 foundation: family detection + capability metadata
+            // + clear rejection path exists, but the vision tower
+            // and multimodal forward are not yet implemented.
+            // Loading currently throws an explicit
+            // `unsupportedArchitecture` error pointing at the
+            // workstream doc; this remains experimental until those
+            // land. Promotion to productionNative requires the full
+            // load+image+text path plus a fixture-changes-output
+            // smoke and an Ollama / reference benchmark.
+            return .experimental
         }
     }
 

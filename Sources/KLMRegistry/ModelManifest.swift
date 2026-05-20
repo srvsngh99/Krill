@@ -123,6 +123,16 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     /// Dedicated sentence-embedding encoder (BERT/RoBERTa/MiniLM/BGE/E5).
     /// Not a causal LM - served only via the embeddings endpoints.
     case bert
+    /// Qwen2.5-VL vision-language family. Architectural deltas vs the
+    /// Qwen 2.5 text family: a SigLIP/ViT-style vision tower with
+    /// window attention, a patch merger, and 3D mRoPE (temporal +
+    /// height + width axes with the rope_scaling `mrope_section`
+    /// split). Foundation only in this build: load + family
+    /// detection + capability metadata + clear rejection at the
+    /// inference boundary. The native vision tower, patch merger,
+    /// mRoPE, and image preprocessing land in follow-up PRs (see
+    /// docs/workstreams/WS5_SECOND_NATIVE_VISION_FAMILY.md).
+    case qwen25vl = "qwen2_5_vl"
 
     /// Detect model family from HuggingFace config.json's `architectures` field.
     public static func detect(from configJSON: [String: Any]) -> ModelFamily? {
@@ -136,13 +146,17 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         }
 
         let archLower = arch.lowercased()
-        // Order matters: check specific before generic
+        // Order matters: check specific before generic. Qwen 2.5-VL
+        // (`Qwen2_5_VLForConditionalGeneration`) must be matched
+        // BEFORE the generic `qwen` arm so it routes to the
+        // multimodal family rather than the dense text loader.
         if archLower.contains("bert") || archLower.contains("roberta") { return .bert }
         if archLower.contains("gemma4") { return .gemma4 }
         if archLower.contains("gemma") { return .gemma }
         if archLower.contains("chatglm") || archLower.contains("glm") { return .glm }
         if archLower.contains("deepseek") { return .deepseek }
         if archLower.contains("llama") { return .llama }
+        if archLower.contains("qwen2_5_vl") || archLower.contains("qwen2vl") { return .qwen25vl }
         if archLower.contains("qwen") { return .qwen }
         if archLower.contains("mistral") { return .mistral }
         if archLower.contains("phi") { return .phi }
@@ -156,6 +170,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         case "mistral": return .mistral
         case "gemma", "gemma2", "gemma3": return .gemma
         case "gemma4", "gemma4_text": return .gemma4
+        case "qwen2_5_vl", "qwen2_vl": return .qwen25vl
         case "phi", "phi3": return .phi
         case "chatglm", "glm", "glm4_moe": return .glm
         case "deepseek_v3": return .deepseek

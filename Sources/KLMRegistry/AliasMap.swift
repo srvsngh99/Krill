@@ -104,6 +104,19 @@ private let aliases: [String: ResolvedModel] = [
         repo: "mlx-community/Qwen3-14B-4bit",
         name: "qwen3-14b", family: .qwen, params: "14B", quant: "4bit", context: 40960),
 
+    // Qwen 2.5-VL vision-language (WS5 foundation tier: family
+    // detection + clear rejection only; native vision tower lands
+    // in follow-up PRs).
+    "qwen2.5-vl-3b": ResolvedModel(
+        repo: "mlx-community/Qwen2.5-VL-3B-Instruct-4bit",
+        name: "qwen2.5-vl-3b", family: .qwen25vl, params: "3B", quant: "4bit", context: 128000),
+    "qwen2.5-vl-7b": ResolvedModel(
+        repo: "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+        name: "qwen2.5-vl-7b", family: .qwen25vl, params: "7B", quant: "4bit", context: 128000),
+    "qwen2.5-vl-32b": ResolvedModel(
+        repo: "mlx-community/Qwen2.5-VL-32B-Instruct-4bit",
+        name: "qwen2.5-vl-32b", family: .qwen25vl, params: "32B", quant: "4bit", context: 128000),
+
     // Mistral
     "mistral-7b": ResolvedModel(
         repo: "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
