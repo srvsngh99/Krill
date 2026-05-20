@@ -44,11 +44,19 @@ public func loadWeightArrays(from directory: URL) throws -> [String: MLXArray] {
 ///
 /// - Parameter keyPrefix: Optional prefix to strip from weight keys (e.g., "language_model."
 ///   for Gemma 4 which nests text weights under that prefix).
+/// - Parameter tieWordEmbeddings: When true, the consumer model has NO
+///   separate `lm_head` module (it reuses `embed_tokens` via
+///   `asLinear`). The loader will skip the embed_tokens -> lm_head
+///   key duplication that historically handled Llama 3.2 1B and
+///   similar tied checkpoints, so we do not try to assign weights
+///   into a property that does not exist. Defaults to false to keep
+///   prior callers unchanged.
 public func loadWeights(
     into model: Module,
     from directory: URL,
     quantization: QuantizationConfig? = nil,
-    keyPrefix: String? = nil
+    keyPrefix: String? = nil,
+    tieWordEmbeddings: Bool = false
 ) throws {
     // Quantize the model if needed (converts Linear -> QuantizedLinear)
     if let q = quantization {
@@ -75,9 +83,13 @@ public func loadWeights(
         }
     }
 
-    // Handle tied embeddings: copy embed_tokens weights to lm_head if missing
+    // Handle tied embeddings: copy embed_tokens weights to lm_head if
+    // missing. Skipped when the consumer model declared
+    // `tieWordEmbeddings` -> it has no `lm_head` property, and
+    // assigning the duplicated weights into a nonexistent Optional
+    // module errors with "none not compatible with ...".
     let hasLmHead = flatWeights.keys.contains { $0.hasPrefix("lm_head.") }
-    if !hasLmHead {
+    if !hasLmHead && !tieWordEmbeddings {
         // Copy all embed_tokens keys to lm_head (handles weight, scales, biases)
         let embedKeys = flatWeights.keys.filter { $0.hasPrefix("model.embed_tokens.") }
         for key in embedKeys {

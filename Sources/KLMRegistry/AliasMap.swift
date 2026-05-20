@@ -84,6 +84,26 @@ private let aliases: [String: ResolvedModel] = [
         repo: "mlx-community/Qwen2.5-14B-Instruct-4bit",
         name: "qwen2.5-14b", family: .qwen, params: "14B", quant: "4bit", context: 131072),
 
+    // Qwen 3 (dense variants; MoE variants tracked under WS6)
+    // Architecture delta vs Qwen 2.5: no QKV bias, per-head q_norm/k_norm
+    // before RoPE, tied embeddings, explicit head_dim. Same Qwen family
+    // dispatch + the QwenConfig flags detected from `model_type: qwen3`.
+    "qwen3-0.6b": ResolvedModel(
+        repo: "mlx-community/Qwen3-0.6B-4bit",
+        name: "qwen3-0.6b", family: .qwen, params: "0.6B", quant: "4bit", context: 40960),
+    "qwen3-1.7b": ResolvedModel(
+        repo: "mlx-community/Qwen3-1.7B-4bit",
+        name: "qwen3-1.7b", family: .qwen, params: "1.7B", quant: "4bit", context: 40960),
+    "qwen3-4b": ResolvedModel(
+        repo: "mlx-community/Qwen3-4B-4bit",
+        name: "qwen3-4b", family: .qwen, params: "4B", quant: "4bit", context: 40960),
+    "qwen3-8b": ResolvedModel(
+        repo: "mlx-community/Qwen3-8B-4bit",
+        name: "qwen3-8b", family: .qwen, params: "8B", quant: "4bit", context: 40960),
+    "qwen3-14b": ResolvedModel(
+        repo: "mlx-community/Qwen3-14B-4bit",
+        name: "qwen3-14b", family: .qwen, params: "14B", quant: "4bit", context: 40960),
+
     // Mistral
     "mistral-7b": ResolvedModel(
         repo: "mlx-community/Mistral-7B-Instruct-v0.3-4bit",
