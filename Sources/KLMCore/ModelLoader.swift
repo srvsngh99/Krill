@@ -81,11 +81,27 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
         return try loadGemma4(configData: configData, directory: directory)
     } else if arch.contains("chatglm") || arch.contains("glm") || modelType == "chatglm" {
         return try loadGLM(configData: configData, directory: directory)
-    } else if arch.contains("deepseek") || modelType == "deepseek_v3" {
-        // Full DeepSeek V3 MoE - not yet supported, suggest distill variants
+    } else if arch.contains("mixtral") || arch.contains("qwen3moe") || arch.contains("qwen2moe")
+        || modelType == "mixtral" || modelType == "qwen3_moe" || modelType == "qwen2_moe"
+        || arch.contains("deepseek") || modelType == "deepseek_v3"
+    {
+        // WS6 foundation: family detection only. Router + top-K
+        // expert selection + per-token expert FFN dispatch are not
+        // yet implemented. Failing loudly before any weight load
+        // prevents a dense text loader from silently consuming the
+        // router/expert keys. Registry tier is `experimental`.
+        let suggestion: String
+        if arch.contains("deepseek") || modelType == "deepseek_v3" {
+            suggestion = "Use DeepSeek-R1-Distill variants instead: krillm pull deepseek-r1-7b"
+        } else if arch.contains("mixtral") || modelType == "mixtral" {
+            suggestion = "Use a dense Mistral variant instead: krillm pull mistral-7b"
+        } else {
+            suggestion = "Use the dense qwen3-* variants instead: krillm pull qwen3-1.7b"
+        }
         throw ModelLoadError.unsupportedArchitecture(
-            "DeepSeek V3 MoE (671B) requires MoE support (coming soon). "
-            + "Use DeepSeek-R1-Distill variants instead: krillm pull deepseek-r1-7b")
+            "Mixture-of-experts runtime is in progress (WS6 foundation only). "
+            + suggestion + ". Follow docs/workstreams/WS6_MOE_RUNTIME_SUPPORT.md "
+            + "for the tracking PR. Detected arch=\(arch), model_type=\(modelType).")
     } else if arch.contains("llama") || modelType == "llama" {
         return try loadLlama(configData: configData, directory: directory)
     } else if arch.contains("qwen") || modelType.hasPrefix("qwen") {

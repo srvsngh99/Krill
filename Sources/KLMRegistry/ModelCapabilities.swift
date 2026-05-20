@@ -102,6 +102,13 @@ public enum ModelCapabilities {
             // tower, patch merger, mRoPE, and image preprocessing
             // landing in follow-up WS5 PRs.
             return [.textGeneration, .visionInput, .tools]
+        case .moe:
+            // WS6 foundation: the family DECLARES textGeneration +
+            // moe + tools (the initial targets - Mixtral, Qwen 3
+            // MoE - both inherit the qwen/mistral tool template).
+            // The loader rejects instantiation until the router +
+            // expert dispatch lands in follow-up PRs.
+            return [.textGeneration, .moe, .tools]
         }
     }
 
@@ -124,6 +131,15 @@ public enum ModelCapabilities {
             // land. Promotion to productionNative requires the full
             // load+image+text path plus a fixture-changes-output
             // smoke and an Ollama / reference benchmark.
+            return .experimental
+        case .moe:
+            // WS6 foundation: same shape as the WS5 stance. Family
+            // detection + capability metadata + clear rejection
+            // exist; the router + top-K expert selection + expert
+            // FFN loading + Metal dispatch are pending. Tier
+            // promotes to productionNative once the runtime lands
+            // AND the active/loaded-expert + memory metadata is
+            // present in the benchmark report.
             return .experimental
         }
     }
