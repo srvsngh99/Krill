@@ -1,5 +1,6 @@
 import XCTest
 @testable import KLMCore
+import KLMRegistry
 
 /// WS7 foundation: cross-encoder reranker configs are recognized by
 /// the loader AND refused (no silent fallback to the embedding
@@ -63,32 +64,46 @@ final class RerankerLoaderRejectionTests: XCTestCase {
     }
 
     func testPlainBertEmbeddingDoesNotRouteToRerankerArm() throws {
-        // Plain BertModel architecture must reach the embedding
-        // family path; the reranker arm must NOT swallow it. We
-        // cannot fully instantiate without weights, so the
-        // discriminator is the error class.
-        let dir = try writeConfig([
+        // The reranker arm uses loose substring matches
+        // ("forsequenceclassification", "crossencoder"). Plain
+        // BertModel must NOT match those. Discriminator: the
+        // family-detection step alone (no weight-loader stages
+        // involved) returns .bert. We test detection rather than
+        // a full loadModel because:
+        //   - loadModel currently has no dedicated .bert dispatch
+        //     arm (BertModel falls through to the Llama catch-all
+        //     in `ModelLoader.swift`, which then fails on the
+        //     missing safetensors); the error class from that
+        //     fallthrough is not a stable contract.
+        //   - The capability we are pinning here is detection,
+        //     not dispatch.
+        // Once a dedicated `loadBert` arm lands, the assertion
+        // below stays valid and a second assertion can be added
+        // that the dispatched arm is the embedding loader.
+        let configFromArch: [String: Any] = [
             "architectures": ["BertModel"],
             "model_type": "bert",
-            "hidden_size": 384,
-            "vocab_size": 30522,
-        ], slug: "bert-embed")
-        defer { try? FileManager.default.removeItem(at: dir) }
+        ]
+        XCTAssertEqual(
+            ModelFamily.detect(from: configFromArch),
+            .bert,
+            "Plain BertModel must route to .bert, NOT .reranker (no for-sequence-classification substring)")
+    }
 
-        do {
-            _ = try loadModel(from: dir)
-            XCTFail("Expected failure due to missing weights")
-        } catch let error as ModelLoadError {
-            if case .unsupportedArchitecture(let msg) = error {
-                XCTAssertFalse(msg.contains("WS7"),
-                    "Plain BertModel must NOT route through the WS7 reranker rejection arm")
-            }
-            // Any other ModelLoadError is fine - means the family
-            // dispatched and a downstream loader stage failed.
-        } catch {
-            // Non-ModelLoadError (e.g. WeightLoadError) is the
-            // expected path: family routed to .bert, then weight
-            // load failed because the temp dir has no safetensors.
-        }
+    func testAmbiguousBackboneWithoutArchitecturesFallsBackToBert() throws {
+        // If a config ships model_type=xlm-roberta but no
+        // architectures key (rare, but defensive), there is no
+        // way to know whether it is an embedding model or a
+        // reranker. The detector returns .bert as the safe
+        // default; the loader's reranker arm only fires on the
+        // architectures substring, so this config would attempt
+        // the embedding path. Documenting this as expected.
+        let configMissingArch: [String: Any] = [
+            "model_type": "xlm-roberta",
+        ]
+        XCTAssertEqual(
+            ModelFamily.detect(from: configMissingArch),
+            .bert,
+            "When architectures is missing, ambiguous backbones default to .bert (documented behavior)")
     }
 }

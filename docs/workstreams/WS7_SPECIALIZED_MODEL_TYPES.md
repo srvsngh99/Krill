@@ -48,9 +48,16 @@ What landed:
   scoring head and would either crash on the classifier weights
   or silently run with no head).
 - Capability: ONLY `reranker`. No `textGeneration`, no `embeddings`.
-  The server's existing capability checks therefore refuse
-  `/api/generate`, `/v1/chat`, `/v1/embeddings`, `/api/embed` on
-  these models BEFORE the engine is touched.
+  Pre-engine refusal today:
+  - `/api/embed`, `/v1/embeddings`: family-checked at the
+    endpoint handler (rejects with a clear error pointing at
+    `bge-small-en`).
+  - `/api/generate`, `/api/chat`, `/v1/chat/completions`:
+    refused at `loadModel` time via the
+    `unsupportedArchitecture` thrown from `ModelLoader.swift`.
+    The capability declaration is what the follow-up runtime PR
+    will lift to a symmetric pre-engine gate; today the loader
+    rejection is the gate.
 - Tier: `experimental`.
 - Aliases: `bge-reranker-base`, `bge-reranker-large`, `bge-reranker-v2-m3`.
 - `ModelLoader.swift` rejects with an explicit
