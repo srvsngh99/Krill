@@ -48,15 +48,24 @@ the break-even framework that maps the observed gap to per-round
 overhead (beta > 1 in the model) rather than insufficient
 acceptance.
 
+Cost model fit to the 8B / 1B K=5 acceptance-0.73 run gives
+`alpha ~ 1/8`, `beta ~ 0.78`. Asymptotic ceiling at infinite K and
+100% acceptance is `1 / (alpha + beta) ~ 1.10x`. Strict 1.5x requires
+`alpha + beta < 0.67`, which the current engine + model pair cannot
+reach. See `docs/SPECULATIVE_DECODING.md` for the derivation.
+
 Three credible unlocks (all out of scope for this PR and the
 WS2 follow-ups that landed):
 
-1. Reduce per-round overhead (eval syncs, Python-Swift boundary).
-   Probably worth ~20%; would not alone clear strict.
+1. Drive beta lower (eval syncs, MLX kernel-launch overhead).
+   beta ~ 0.55 at high K and acceptance would lift the ceiling to
+   ~1.47x; would not alone clear strict.
 2. A ~70B target paired with a 1B draft (RAM-infeasible on
    M-series at 4-bit, ~40 GB just for the target).
-3. Tree attention / Medusa-style multi-branch verify - several
-   weeks of work, custom attention masks, separate workstream.
+3. Tree attention / Medusa-style multi-branch verify - lifts the
+   effective r above the K+1 single-sequence ceiling. Cleanest path
+   to >= 1.5x at the current alpha/beta. Several weeks of work,
+   custom attention masks, separate workstream.
 
 Strict gate stays advisory; release_candidate `>= 1.0x` hard floor is
 unaffected (KrillLM no-spec is 1.087-1.10x faster than Ollama on both

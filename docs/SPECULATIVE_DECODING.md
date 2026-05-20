@@ -183,54 +183,79 @@ that the gap is in the per-round overhead, not in acceptance.
 The WS2 `text_decode_ratio >= 1.5x` strict gate cannot be unblocked
 on M-series with the model pairs currently available in mlx-community
 **on any prompt or K setting tested**, including the high-acceptance
-0.73 run above. The pattern across all measured configurations:
-verify forward at K=2-5 costs ~1.0-1.2x of K serial single-token
-forwards in this engine, so net-positive spec needs an effective
-acceptance higher than that ratio. The technical-prompt run hits
-0.73 with K=5 (so 0.73 * 5 = 3.65 expected accepted drafts + 1
-target token = 4.65 tokens / round vs 5 verify positions); on the
-assumption that verify scales linearly in positions, that should
-break even or slightly win, but it loses in practice by ~12%. That
-extra cost is likely per-round MLX eval-sync and Python-side bookkeeping
-overhead, NOT the matmul cost; a microbenchmark of
-`target.forward(K)` at varying K (not in this PR) would substantiate
-that claim more rigorously.
+0.73 run above. Below we fit a cost model to the measured numbers
+and show that even at infinite K and 100% acceptance, the achievable
+spec speedup on this engine on this hardware is bounded at roughly
+1.28x - well short of 1.5x.
 
-Break-even framework (per round, all in "cost-per-target-token" units):
+Break-even framework (per round, all costs in "cost-per-target-token"
+units):
 
-  Let r = expected accepted tokens per round (including the bonus
-  token on full accept).
-  Let alpha = draft per-token cost / target per-token cost (~= 1/8
-  for llama-3.1-8b / llama-3.2-1b at 4-bit).
-  Let beta = verify(K+1) cost / (K+1) per-position cost. beta = 1.0
-  for ideal linear scaling; beta > 1 captures per-round fixed
-  overhead (eval syncs, kernel launch, slice ops).
+```text
+r     = expected accepted tokens per round (= acceptance * K + 1
+        on full accept; less on rejection).
+alpha = draft per-token cost / target per-token cost. For
+        llama-3.1-8b / llama-3.2-1b at 4-bit MLX, alpha ~ 1/8.
+beta  = verify(K+1) cost / ((K+1) * target per-token cost).
+        beta = 1.0 means verify scales perfectly linearly in
+        positions; beta < 1.0 means verify is sublinear (the
+        usual case for batched forwards); beta > 1.0 means
+        per-round fixed overhead dominates.
 
-  Spec wins iff:
-    r > beta * (K + 1) + alpha * K
+Throughput ratio (spec tok/s / baseline tok/s):
+   ratio = r / (alpha * K + beta * (K + 1))
+```
 
-The numeric example for 8B / 1B at K=5, alpha=1/8, assuming beta=1.0:
-spec needs r > 5 * 1 + 5 * 1/8 = 5.625. Measured r = 0.73 * 5 + 1 = 4.65.
-Spec loses by ~17%, matching the observed 12% throughput regression.
-Raising K further does not help: r grows at most linearly in K with the
-same slope (acceptance), while the right-hand side grows faster.
+Plugging in the measured 8B / 1B K=5 acceptance-0.73 run:
+- `r = 0.73 * 5 + 1 = 4.65`
+- alpha = 1/8 = 0.125
+- Observed ratio = 44.1 / 50.2 = 0.879
+- Solve for beta: `0.879 = 4.65 / (0.125 * 5 + beta * 6)`, so
+  `beta = (4.65 / 0.879 - 0.625) / 6 = 0.78`.
+
+So verify IS sublinear in this engine (beta < 1.0), just not enough.
+That number is a single-point fit; a microbenchmark of
+`target.forward(K)` at varying K (not in this PR) would tighten the
+estimate and is the natural next investigation.
+
+With beta = 0.78 fixed, the throughput ratio as K -> infinity and
+r -> K+1 (100% acceptance, impossible in practice) asymptotes at:
+
+```text
+ratio_max = lim_{K -> inf} (K + 1) / (alpha * K + beta * (K + 1))
+          = 1 / (alpha + beta)
+          = 1 / (0.125 + 0.78)
+          ~ 1.10
+```
+
+So even at infinite acceptance with K -> inf, this configuration
+caps at ~1.10x. Strict 1.5x requires `alpha + beta < 1 / 1.5 = 0.67`.
+At alpha = 0.125 that means beta <= 0.55 - a 30% improvement on the
+current beta - AND r close to its K+1 ceiling. Neither is reachable
+with the available model pair / engine configuration without an
+algorithmic change.
 
 Three credible unlocks (all out of scope for this PR and the WS2
 follow-ups that landed):
 
-1. **Reduce per-round overhead (beta closer to 1.0).** Concretely:
-   fewer eval syncs (fold target verify + bonus into one forward;
-   tried off-branch, did not materially help), tighter Python-Swift
-   boundary, batched draft loop. Could yield up to ~20% improvement.
+1. **Reduce per-round overhead (drive beta lower).** Concretely:
+   fewer eval syncs (folding target verify + bonus into one forward
+   was tried off-branch; did not materially help on the K=5 8B run),
+   tighter Python-Swift boundary, batched draft loop. Bringing beta
+   from ~0.78 to ~0.55 would let `1 / (alpha + beta) ~ 1.47` at the
+   r -> K+1 limit; this is the only path that does not require new
+   hardware or a different algorithm, and would need an MLX-level
+   investigation (not just KrillLM-level code).
 2. **Target / draft size ratio jumps an order of magnitude
    (alpha << 1/8).** A 70B target with a 1B draft on M-series is
    RAM-infeasible at 4-bit (~40 GB just for the target). Smaller-
    than-1B drafts for Llama 3.x do not exist in mlx-community today.
 3. **Tree attention / Medusa-style multi-branch verify.** Each verify
    forward proposes a small tree of continuation paths rather than a
-   single sequence, raising effective r per verify. Requires custom
-   attention masks and a different verification algorithm; multi-week
-   work, separate workstream.
+   single sequence, lifting effective r above the single-sequence
+   K+1 ceiling. This is the cleanest path to >=1.5x at the current
+   alpha/beta. Multi-week work, custom attention masks, separate
+   workstream.
 
 The release_candidate gate's `text_decode_ratio_floor >= 1.0x` (hard)
 remains green and unaffected: KrillLM no-spec is 1.087-1.10x faster
