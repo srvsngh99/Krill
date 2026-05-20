@@ -95,17 +95,19 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        // VLM sidecar (Qwen 2.5-VL bridge). Lazy-loaded on first
-        // VL chat request; we instantiate the engine up front so a
-        // signal handler can shut it down on SIGINT (otherwise the
-        // Python child process becomes orphaned, holding the GPU
-        // and the model weights resident).
+        // Bridge-backed sidecars (VLM + MoE). Both are lazy-loaded
+        // on first request; instantiated up front so a signal
+        // handler can shut them down on SIGINT (otherwise Python
+        // children become orphans on Ctrl+C, holding the GPU
+        // and the loaded model weights resident).
         let vlmEngine = Qwen25VLEngine()
-        installVLMSidecarSignalHandler(vlmEngine)
+        let moeEngine = MoEEngine()
+        installVLMSidecarSignalHandler(vlmEngine, moeEngine)
 
         let server = KLMServer(host: host, port: port, compat: compatMode,
                                engine: engine, registry: registry,
                                vlmEngine: vlmEngine,
+                               moeEngine: moeEngine,
                                corsOrigins: config.origins,
                                keepAliveDefaultSeconds:
                                 KeepAliveParse.duration(config.keepAlive) ?? 300,
@@ -130,9 +132,12 @@ struct ServeCommand: AsyncParsableCommand {
 /// is preserved via `exit(0)` after shutdown.
 private nonisolated(unsafe) var vlmShutdownHandler: (() -> Void)?
 
-private func installVLMSidecarSignalHandler(_ vlm: Qwen25VLEngine) {
-    vlmShutdownHandler = { [weak vlm] in
+private func installVLMSidecarSignalHandler(
+    _ vlm: Qwen25VLEngine, _ moe: MoEEngine
+) {
+    vlmShutdownHandler = { [weak vlm, weak moe] in
         try? vlm?.shutdown()
+        try? moe?.shutdown()
     }
     for sig in [SIGINT, SIGTERM] {
         signal(sig, SIG_IGN)
