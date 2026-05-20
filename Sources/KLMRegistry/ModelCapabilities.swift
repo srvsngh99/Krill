@@ -109,6 +109,15 @@ public enum ModelCapabilities {
             // The loader rejects instantiation until the router +
             // expert dispatch lands in follow-up PRs.
             return [.textGeneration, .moe, .tools]
+        case .reranker:
+            // WS7 foundation: cross-encoder rerankers expose ONLY
+            // the reranker capability - they are not causal LMs,
+            // not embedding encoders (they take a (query, document)
+            // pair and produce a single relevance score), and the
+            // existing /api/generate / /v1/chat surfaces must
+            // refuse them. The `/v1/rerank` endpoint that consumes
+            // this capability ships in the follow-up runtime PR.
+            return [.reranker]
         }
     }
 
@@ -140,6 +149,15 @@ public enum ModelCapabilities {
             // promotes to productionNative once the runtime lands
             // AND the active/loaded-expert + memory metadata is
             // present in the benchmark report.
+            return .experimental
+        case .reranker:
+            // WS7 foundation: same shape as WS5/WS6. Family
+            // detection + capability + alias entries + clear
+            // rejection exist; the cross-encoder scoring head +
+            // `/v1/rerank` endpoint + reference-score parity smoke
+            // are pending. Tier promotes once the scoring runtime
+            // lands and the parity smoke matches a reference model
+            // within tolerance.
             return .experimental
         }
     }

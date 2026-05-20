@@ -143,6 +143,16 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     /// The router + expert dispatch lands in follow-up PRs (see
     /// docs/workstreams/WS6_MOE_RUNTIME_SUPPORT.md).
     case moe
+    /// Cross-encoder reranker (e.g. BGE Reranker, Cohere Rerank).
+    /// Architecturally close to the `bert` embedding family but
+    /// with a sequence-classification head that produces a single
+    /// relevance score per (query, document) pair, NOT pooled
+    /// embeddings. Foundation only in this build: family detection
+    /// + capability metadata + clear rejection at the inference
+    /// boundary. The cross-encoder scoring runtime + `/v1/rerank`
+    /// endpoint land in follow-up PRs (see
+    /// docs/workstreams/WS7_SPECIALIZED_MODEL_TYPES.md).
+    case reranker
 
     /// Detect model family from HuggingFace config.json's `architectures` field.
     public static func detect(from configJSON: [String: Any]) -> ModelFamily? {
@@ -160,6 +170,16 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         // (`Qwen2_5_VLForConditionalGeneration`) must be matched
         // BEFORE the generic `qwen` arm so it routes to the
         // multimodal family rather than the dense text loader.
+        // Reranker arms are matched BEFORE the bert / roberta arm
+        // because they share the same backbone architecture but
+        // ship a sequence-classification head that the embedding
+        // loader cannot consume. Without this ordering, a
+        // `XLMRobertaForSequenceClassification` (BGE Reranker)
+        // checkpoint would route to .bert and the loader would
+        // either crash on the classifier weights or run with no
+        // scoring head at all.
+        if archLower.contains("forsequenceclassification") { return .reranker }
+        if archLower.contains("crossencoder") { return .reranker }
         if archLower.contains("bert") || archLower.contains("roberta") { return .bert }
         if archLower.contains("gemma4") { return .gemma4 }
         if archLower.contains("gemma") { return .gemma }
