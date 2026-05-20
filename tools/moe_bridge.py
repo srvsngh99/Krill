@@ -83,18 +83,35 @@ def main() -> int:
             continue
 
         try:
-            # Most MoE chat tunes ship a working chat template;
-            # apply it via the tokenizer. Falls back to a plain
-            # join when the tokenizer has no chat template
-            # configured.
+            # Most MoE chat tunes ship a working chat template
+            # in tokenizer_config.json; apply it via the
+            # tokenizer. If the tokenizer raises
+            # (template missing / malformed), we emit an error
+            # frame instead of silently falling back to a
+            # plain `role: content` join. That fallback masks
+            # quality regressions: a chat-tuned MoE model
+            # produces substantially worse output when its
+            # template's role markers / system message are
+            # dropped.
             try:
                 prompt = tokenizer.apply_chat_template(
                     messages, add_generation_prompt=True, tokenize=False)
-            except Exception:
-                prompt = "\n".join(
-                    f"{m.get('role', 'user')}: {m.get('content', '')}"
-                    for m in messages)
-                prompt += "\nassistant:"
+            except Exception as tmpl_err:
+                emit({
+                    "id": req_id,
+                    "error": (
+                        f"chat template apply failed: {tmpl_err}. "
+                        "This checkpoint's tokenizer_config.json does not "
+                        "expose a usable chat_template. Re-pull the "
+                        "official Instruct variant of this MoE, or open "
+                        "an issue requesting an explicit template "
+                        "override. KrillLM refuses to silently degrade "
+                        "to a plain role/content join because that path "
+                        "produces measurably worse output from chat-"
+                        "tuned MoE models."
+                    ),
+                })
+                continue
             text_out = generate(
                 model, tokenizer, prompt=prompt,
                 max_tokens=max_tokens, verbose=False)
