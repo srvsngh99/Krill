@@ -8,6 +8,12 @@ import Tokenizers
 public final class KLMTokenizer: @unchecked Sendable {
     private let tokenizer: Tokenizer
     public let eosTokenId: Int
+    /// Lowercased value of `tokenizer.json`'s `model.type` field
+    /// (e.g. `"unigram"`, `"wordpiece"`, `"bpe"`). Captured at
+    /// load time so callers can disambiguate behavior without
+    /// guessing from the encoded special-token ids. Empty when
+    /// the file is missing or unparseable.
+    public let tokenizerModelKind: String
 
     /// Load tokenizer from a model directory containing tokenizer.json.
     public init(from directory: URL) async throws {
@@ -55,6 +61,23 @@ public final class KLMTokenizer: @unchecked Sendable {
             // Llama 3 default EOS
             self.eosTokenId = 128001
         }
+
+        // Capture tokenizer.json's `model.type` (e.g. "Unigram",
+        // "WordPiece", "BPE") so callers can disambiguate
+        // behavior without guessing from token IDs. Best-effort:
+        // empty string when the file is missing or unreadable.
+        self.tokenizerModelKind = Self.readModelKind(directory: directory)
+    }
+
+    private static func readModelKind(directory: URL) -> String {
+        let url = directory.appendingPathComponent("tokenizer.json")
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let model = obj["model"] as? [String: Any],
+              let type = model["type"] as? String else {
+            return ""
+        }
+        return type.lowercased()
     }
 
     /// Stage a shadow directory containing tokenizer.json from the
@@ -198,21 +221,9 @@ public final class KLMTokenizer: @unchecked Sendable {
         // fallback would return Llama's BOS. Reading the first
         // and last tokens of an actual encode is the source of
         // truth.
-        guard let firstQ = qIds.first, let lastQ = qIds.last,
-              let firstD = dIds.first, let lastD = dIds.last else {
+        guard let bos = qIds.first, let eos = qIds.last else {
             return qIds + dIds
         }
-        // Common cross-encoder shape: bos at index 0, eos at last
-        // index, with both halves wrapped the same way.
-        // - XLM-Roberta: bos=<s>=0, eos=</s>=2 (distinct).
-        // - Bert: cls=[CLS]=101 == "bos", sep=[SEP]=102 == "eos"
-        //   (both are non-overlapping special-token IDs).
-        // We treat firstQ as the prepended BOS and lastQ as the
-        // appended EOS purely structurally.
-        let bos = firstQ
-        let eos = lastQ
-        let _ = firstD // (referenced via dTail strip below)
-        let _ = lastD
 
         // Drop the trailing EOS on the query side (we will re-add
         // a tailored separator below). Keep the leading BOS.
@@ -228,15 +239,31 @@ public final class KLMTokenizer: @unchecked Sendable {
             dTail.removeFirst()
         }
 
-        // XLMRoberta uses `</s></s>` between halves; Bert uses a
-        // single `[SEP]`. Distinguish by whether BOS == EOS - in
-        // Bert-class tokenizers they are different IDs but both
-        // are non-zero specials; in XLM-Roberta bos and eos are
-        // also different. So we use a more reliable heuristic:
-        // XLM-Roberta uses very small special-token ids (0/2),
-        // while Bert uses larger ids (101/102).
-        let isXLMRoberta = bos < 10 && eos < 10
-        let separator: [Int] = isXLMRoberta ? [eos, eos] : [eos]
+        // Pair separator shape:
+        //   - XLM-Roberta (Unigram tokenizer) -> `</s></s>` (two
+        //     EOS tokens), matching HuggingFace
+        //     `tokenizer(query, document)`.
+        //   - Bert / DistilBert / sentence-bert cross-encoders
+        //     (WordPiece tokenizer) -> single `[SEP]`.
+        //   - BPE-class cross-encoders (rare today; e.g. some
+        //     Cohere reranker variants) -> single EOS.
+        //
+        // `tokenizerModelKind` is captured at load time from
+        // `tokenizer.json`'s `model.type` field, so we dispatch
+        // on the actual tokenizer algorithm rather than guessing
+        // from special-token id magnitudes.
+        let separator: [Int]
+        switch tokenizerModelKind {
+        case "unigram":
+            separator = [eos, eos]
+        case "wordpiece", "bpe":
+            separator = [eos]
+        default:
+            // Unknown / missing tokenizer.json: fall back to the
+            // historical id-magnitude heuristic (XLM-R-class
+            // specials are small ids; Bert-class are larger).
+            separator = (bos < 10 && eos < 10) ? [eos, eos] : [eos]
+        }
 
         return qHead + separator + dTail
     }

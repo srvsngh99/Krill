@@ -84,8 +84,16 @@ public final class RerankEngine: @unchecked Sendable {
 
     public struct RerankResult: Sendable {
         /// One entry per input document, in the SAME order as the
-        /// input. Sort by `score` descending for the ranking.
+        /// input. Sigmoid-normalized to [0, 1] so the values are
+        /// directly comparable to Cohere's `/v1/rerank` response
+        /// and to thresholds used by LangChain / llama-index
+        /// reranker clients. Sort by `score` descending for the
+        /// ranking.
         public let scores: [Double]
+        /// Raw pre-sigmoid logits, in the same order as `scores`.
+        /// Exposed for callers (e.g. parity tests) that need to
+        /// compare against an upstream model's raw output.
+        public let logits: [Double]
         /// Total tokens forwarded (sum across all (query, doc)
         /// pairs). Useful for cost tracking.
         public let totalTokens: Int
@@ -104,43 +112,72 @@ public final class RerankEngine: @unchecked Sendable {
             throw RerankError.notLoaded
         }
 
-        var scores: [Double] = []
-        scores.reserveCapacity(documents.count)
+        var logits: [Double] = []
+        logits.reserveCapacity(documents.count)
         var totalTokens = 0
 
         for doc in documents {
             // Cross-encoder input is the (query, document) pair
             // joined with the model's pair separator. BGE / XLMR
-            // expects `</s></s>` between the two; SentenceBERT /
-            // Bert use `[SEP]`. We let the tokenizer's pair
-            // template handle this by manually constructing the
-            // standard `<s> query </s></s> doc </s>` shape.
+            // expects `<s> q </s></s> d </s>`; SentenceBERT / Bert
+            // use `[CLS] q [SEP] d [SEP]`.
             //
-            // KLMTokenizer.encode(_:) on a single string adds the
-            // model-default leading/trailing specials; we cannot
-            // assume it supports a pair template, so we encode the
-            // two sides separately and stitch with the right
-            // specials sourced from tokenizer_config.
-            let pairIds = tokenizer.encodePair(query: query, document: doc)
-            let ids: [Int]
-            if pairIds.count > cap {
-                // Truncate the document side, keep the query
-                // intact (standard cross-encoder behavior).
-                ids = Array(pairIds.prefix(cap))
+            // Truncation policy: keep the query intact, truncate
+            // the document if the joined pair exceeds the model's
+            // max_position_embeddings. This matches the standard
+            // sentence-transformers / HuggingFace
+            // `truncation="only_second"` behavior used by every
+            // cross-encoder reranker we ship. A blunt
+            // `prefix(cap)` on the joined pair would risk
+            // dropping the trailing EOS (so attention sees a
+            // sequence the post-processor never produces) or, for
+            // a long query, deleting the document entirely.
+            let queryIds = tokenizer.encode(query)
+            // Reserve budget for the query side and the
+            // separators (`</s></s>` for XLMR is 2 tokens; `[SEP]`
+            // for Bert is 1; conservatively reserve 4 to cover
+            // both plus the trailing EOS).
+            let queryReserved = min(queryIds.count, max(0, cap - 4))
+            let docBudget = max(8, cap - queryReserved - 4)
+            let trimmedDoc: String
+            if doc.count > docBudget * 4 {
+                // Cheap character-level pre-cap to keep the
+                // tokenizer from doing huge work on a doc we will
+                // truncate anyway. 4 chars/token is a soft upper
+                // bound for SentencePiece.
+                trimmedDoc = String(doc.prefix(docBudget * 4))
             } else {
-                ids = pairIds
+                trimmedDoc = doc
             }
+            var pairIds = tokenizer.encodePair(
+                query: query, document: trimmedDoc)
+            if pairIds.count > cap {
+                // Final cap. Preserve the trailing EOS by reading
+                // it off the end before truncating, then
+                // re-appending after.
+                let trailing = pairIds.last
+                pairIds = Array(pairIds.prefix(cap - 1))
+                if let t = trailing { pairIds.append(t) }
+            }
+            let ids = pairIds
             totalTokens += ids.count
 
             let tokens = MLXArray(ids.map { Int32($0) }).reshaped(1, ids.count)
-            let logits = model(tokens)
+            let out = model(tokens)
             // [1, 1] -> single Float
-            MLX.eval(logits)
-            let arr = logits.asArray(Float.self)
-            scores.append(Double(arr.first ?? 0))
+            MLX.eval(out)
+            let arr = out.asArray(Float.self)
+            logits.append(Double(arr.first ?? 0))
         }
 
-        return RerankResult(scores: scores, totalTokens: totalTokens)
+        // Sigmoid-normalize each logit so callers get a [0, 1]
+        // probability directly comparable to Cohere's API and to
+        // thresholds in LangChain / llama-index reranker clients.
+        // Logits are still exposed via `RerankResult.logits` for
+        // parity tests that compare against an upstream raw score.
+        let scores = logits.map { 1.0 / (1.0 + exp(-$0)) }
+        return RerankResult(
+            scores: scores, logits: logits, totalTokens: totalTokens)
     }
 }
 

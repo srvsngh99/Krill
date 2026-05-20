@@ -62,20 +62,51 @@ final class RerankEngineTests: XCTestCase {
             "Tangential Paris doc must outrank unrelated Hello doc")
     }
 
-    func testScoreMagnitudeMatchesReferenceWithinTolerance() async throws {
+    func testScoreIsSigmoidNormalizedInRange() async throws {
         try requireMLX()
         let dir = try liveModelDir()
         let engine = RerankEngine()
         try await engine.load(directory: dir)
 
-        // Reference scores measured against the same model loaded via
-        // sentence-transformers CrossEncoder (Python). These are raw
-        // pre-sigmoid logits; sigmoid(8.5) ~= 0.9998 (the "1.0"
-        // sentence-transformers reports). Tolerance allows for minor
-        // numerical differences between the MLX bf16/fp16 forward and
-        // the Python float32 reference; 1.0 logit corresponds to
-        // ~0.05 sigmoid difference at the saturated end and is more
-        // than enough.
+        let result = try engine.score(
+            query: "What is the capital of France?",
+            documents: [
+                "Paris is the capital of France.",
+                "Apples are red.",
+                "The Eiffel Tower is in Paris.",
+            ])
+        // Sigmoid-normalized scores are in (0, 1) and the
+        // capital-of-France doc should be in the high-confidence
+        // band (>= 0.95 against the Python reference 0.9998).
+        for s in result.scores {
+            XCTAssertGreaterThan(s, 0.0)
+            XCTAssertLessThan(s, 1.0)
+        }
+        XCTAssertGreaterThan(result.scores[0], 0.95,
+            "High-relevance pair must yield sigmoid >= 0.95")
+        XCTAssertLessThan(result.scores[1], 0.05,
+            "Irrelevant pair must yield sigmoid <= 0.05")
+        // Logits are exposed separately for parity testing; they
+        // are NOT in [0, 1].
+        XCTAssertEqual(result.logits.count, 3)
+        XCTAssertGreaterThan(result.logits[0], 0.0,
+            "High-relevance pair logit is positive")
+    }
+
+    func testLogitsMatchReferenceWithinTolerance() async throws {
+        try requireMLX()
+        let dir = try liveModelDir()
+        let engine = RerankEngine()
+        try await engine.load(directory: dir)
+
+        // Reference logits measured against the same model loaded
+        // via sentence-transformers CrossEncoder (Python). These
+        // are raw pre-sigmoid scores; the sentence-transformers
+        // 0.9998 "probability" corresponds to logit ~= +8.5.
+        // Tolerance allows for minor numerical differences
+        // between the MLX bf16/fp16 forward and the Python
+        // float32 reference; 1.0 logit corresponds to ~0.05
+        // sigmoid difference at the saturated end.
         let pairs: [(String, String, Double)] = [
             ("What is the capital of France?",
              "Paris is the capital of France.",
@@ -89,9 +120,9 @@ final class RerankEngineTests: XCTestCase {
         ]
         for (q, d, ref) in pairs {
             let result = try engine.score(query: q, documents: [d])
-            let got = result.scores[0]
+            let got = result.logits[0]
             XCTAssertEqual(got, ref, accuracy: 1.0,
-                "(q=\(q), d=\(d)) got=\(got) ref=\(ref)")
+                "(q=\(q), d=\(d)) logit got=\(got) ref=\(ref)")
         }
     }
 }

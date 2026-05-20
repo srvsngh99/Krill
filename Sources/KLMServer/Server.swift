@@ -1609,11 +1609,17 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     ///   "return_documents": false         (optional; defaults to false)
     /// }
     /// ```
-    /// Response: `{ "results": [ { "index": 0, "relevance_score": 0.93,
-    /// "document": "..." }, ... ], "model": "...", "usage": { ... } }`
-    /// sorted by `relevance_score` descending. `index` is the original
-    /// position in the input `documents` array so clients can reorder
-    /// their own copy without `return_documents`.
+    /// Response: `{ "results": [ { "index": 0, "relevance_score": 0.9998,
+    /// "logit": 8.78, "document": {...} }, ... ], "model": "...",
+    /// "usage": { ... } }` sorted by `relevance_score` descending.
+    ///
+    /// `relevance_score` is sigmoid-normalized to `[0, 1]` so clients
+    /// can threshold consistently (matches Cohere `/v1/rerank`).
+    /// `logit` is the raw pre-sigmoid output for callers (e.g. parity
+    /// tests) that need to compare against an upstream model's raw
+    /// score. `index` is the original position in the input
+    /// `documents` array so clients can reorder their own copy without
+    /// `return_documents`.
     private func handleRerank(context: ChannelHandlerContext, body: ByteBuffer) {
         guard let json = parseJSON(body) else {
             sendJSON(context: context, status: .badRequest,
@@ -1678,6 +1684,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     var entry: [String: Any] = [
                         "index": i,
                         "relevance_score": score,
+                        "logit": result.logits[i],
                     ]
                     if returnDocs {
                         entry["document"] = ["text": documents[i]]
