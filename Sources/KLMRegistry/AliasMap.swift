@@ -193,4 +193,17 @@ private let aliases: [String: ResolvedModel] = [
     "bge-base-en": ResolvedModel(
         repo: "BAAI/bge-base-en-v1.5",
         name: "bge-base-en", family: .bert, params: "109M", quant: "fp32", context: 512),
+
+    // Cross-encoder rerankers (WS7 foundation tier: family
+    // detection + clear rejection only; cross-encoder scoring
+    // runtime + /v1/rerank endpoint land in follow-up PRs).
+    "bge-reranker-base": ResolvedModel(
+        repo: "BAAI/bge-reranker-base",
+        name: "bge-reranker-base", family: .reranker, params: "278M", quant: "fp32", context: 512),
+    "bge-reranker-large": ResolvedModel(
+        repo: "BAAI/bge-reranker-large",
+        name: "bge-reranker-large", family: .reranker, params: "560M", quant: "fp32", context: 512),
+    "bge-reranker-v2-m3": ResolvedModel(
+        repo: "BAAI/bge-reranker-v2-m3",
+        name: "bge-reranker-v2-m3", family: .reranker, params: "568M", quant: "fp32", context: 8192),
 ]

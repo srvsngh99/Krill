@@ -77,6 +77,19 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
             + "Use the qwen2.5 text-only family for text workflows, or follow "
             + "docs/workstreams/WS5_SECOND_NATIVE_VISION_FAMILY.md for the "
             + "tracking PR. Detected arch=\(arch), model_type=\(modelType).")
+    } else if arch.contains("forsequenceclassification") || arch.contains("crossencoder") {
+        // WS7 foundation: cross-encoder rerankers (BGE Reranker,
+        // Cohere Rerank, etc.) share the BERT/Roberta backbone but
+        // ship a single-label classification head that the
+        // existing embedding loader cannot consume. Fail loudly
+        // before any weight load; the cross-encoder scoring
+        // runtime + /v1/rerank endpoint ship in follow-up PRs.
+        throw ModelLoadError.unsupportedArchitecture(
+            "Cross-encoder reranker runtime is in progress (WS7 foundation only). "
+            + "Use an embedding model + dot-product re-ranking as a stand-in for now: "
+            + "krillm pull bge-small-en. Follow "
+            + "docs/workstreams/WS7_SPECIALIZED_MODEL_TYPES.md for the tracking PR. "
+            + "Detected arch=\(arch), model_type=\(modelType).")
     } else if arch.contains("gemma4") || modelType == "gemma4_text" || modelType == "gemma4" {
         return try loadGemma4(configData: configData, directory: directory)
     } else if arch.contains("chatglm") || arch.contains("glm") || modelType == "chatglm" {

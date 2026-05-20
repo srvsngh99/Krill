@@ -33,11 +33,35 @@ incorrect semantics or bad performance.
 Likely closest to existing embedding support, but still needs a scoring head
 and ranking API.
 
+Status: foundation only (family detection + capability metadata +
+explicit loader rejection). Cross-encoder scoring runtime + `/v1/rerank`
+endpoint land in follow-up PRs.
+
+What landed:
+
+- `ModelFamily.reranker` (rawValue `"reranker"`). Detection from
+  architectures matching `*ForSequenceClassification` or
+  `*CrossEncoder*` (covers BGE Reranker `XLMRobertaForSequenceClassification`,
+  Cohere-style cross-encoders, BERT classification heads). Matched
+  BEFORE the generic bert/roberta arm so a reranker checkpoint
+  never silently routes to the embedding loader (which has no
+  scoring head and would either crash on the classifier weights
+  or silently run with no head).
+- Capability: ONLY `reranker`. No `textGeneration`, no `embeddings`.
+  The server's existing capability checks therefore refuse
+  `/api/generate`, `/v1/chat`, `/v1/embeddings`, `/api/embed` on
+  these models BEFORE the engine is touched.
+- Tier: `experimental`.
+- Aliases: `bge-reranker-base`, `bge-reranker-large`, `bge-reranker-v2-m3`.
+- `ModelLoader.swift` rejects with an explicit
+  `unsupportedArchitecture` pointing at this workstream doc and
+  suggesting the `bge-small-en` embedding-plus-dot-product stand-in.
+
 Acceptance:
 
-- Pair/list scoring works.
-- `/v1/rerank` or documented local API exists.
-- Scores match a reference model within tolerance.
+- Pair/list scoring works. **PENDING** (follow-up PR).
+- `/v1/rerank` or documented local API exists. **PENDING**.
+- Scores match a reference model within tolerance. **PENDING**.
 
 ### ASR
 
