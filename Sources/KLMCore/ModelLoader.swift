@@ -98,28 +98,49 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
         return try loadGemma4(configData: configData, directory: directory)
     } else if arch.contains("chatglm") || arch.contains("glm") || modelType == "chatglm" {
         return try loadGLM(configData: configData, directory: directory)
-    } else if arch.contains("mixtral") || arch.contains("qwen3moe") || arch.contains("qwen2moe")
+    } else if arch.contains("qwen3moe") || modelType == "qwen3_moe" {
+        // Qwen 3 MoE: native Swift+MLX runtime exists, but the
+        // forward currently evaluates ALL experts on ALL tokens
+        // (correctness-first; the scatter dispatch that runs only
+        // the assigned experts per token is the follow-up). For
+        // Qwen3-30B-A3B (128 experts, top-8) that is 16x more FFN
+        // compute per layer than mlx-lm. Until the scatter
+        // dispatch lands and a benchmark confirms parity, the
+        // native path is OPT-IN via `KRILL_NATIVE_MOE=1`. Default
+        // routes through the Python bridge so existing users keep
+        // mlx-lm throughput.
+        if ProcessInfo.processInfo.environment["KRILL_NATIVE_MOE"] == "1" {
+            return try loadQwen3MoE(configData: configData, directory: directory)
+        }
+        throw ModelLoadError.unsupportedArchitecture(
+            "Qwen 3 MoE native Swift+MLX runtime is opt-in until the "
+            + "scatter-dispatch optimization lands. Set KRILL_NATIVE_MOE=1 "
+            + "to enable; default routes through the MoE bridge "
+            + "(compatible_fallback tier via mlx-lm). Use POST /api/chat "
+            + "or /v1/chat/completions - the server routes MoE manifests "
+            + "to MoEEngine. Detected arch=\(arch), model_type=\(modelType).")
+    } else if arch.contains("mixtral") || arch.contains("qwen2moe")
         || arch.contains("olmoe")
-        || modelType == "mixtral" || modelType == "qwen3_moe" || modelType == "qwen2_moe"
+        || modelType == "mixtral" || modelType == "qwen2_moe"
         || modelType == "olmoe"
         || arch.contains("deepseek") || modelType == "deepseek_v3"
     {
-        // MoE family runs through `MoEEngine` (Python sidecar /
-        // mlx-lm), not through the native causal-LM dispatcher
-        // here. `loadModel` is the entry point for native
-        // Swift+MLX runtimes only. Refuse to instantiate MoE as a
-        // dense causal LM so callers that hit /api/generate or
-        // /v1/chat on an MoE manifest get a clear redirect
-        // instead of a garbage forward pass through the dense
-        // text loader (which would either crash on the
-        // router/expert keys or silently run with random MLP
-        // weights).
+        // Remaining MoE families run through `MoEEngine` (Python
+        // sidecar / mlx-lm), not the native causal-LM dispatcher.
+        // `loadModel` is the entry point for native Swift+MLX
+        // runtimes only. Refuse to instantiate these as a dense
+        // causal LM so callers that hit /api/generate or
+        // /v1/chat on a non-Qwen3-MoE MoE manifest get a clear
+        // redirect instead of a garbage forward pass through the
+        // dense text loader. Qwen 3 MoE is handled by the
+        // dedicated arm above.
         throw ModelLoadError.unsupportedArchitecture(
             "Mixture-of-experts models run through the MoE bridge "
             + "(compatible_fallback tier). Use POST /api/chat or "
             + "/v1/chat/completions - the server routes MoE manifests to "
-            + "MoEEngine. Native Swift+MLX router + expert dispatch are a "
-            + "follow-up WS6 PR. Detected arch=\(arch), model_type=\(modelType).")
+            + "MoEEngine. Native Swift+MLX router + expert dispatch landed "
+            + "for Qwen 3 MoE in WS6; other MoE families are follow-ups. "
+            + "Detected arch=\(arch), model_type=\(modelType).")
     } else if arch.contains("llama") || modelType == "llama" {
         return try loadLlama(configData: configData, directory: directory)
     } else if arch.contains("qwen") || modelType.hasPrefix("qwen") {
@@ -316,6 +337,31 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
         numLayers: config.numHiddenLayers,
         family: "gemma4",
         forward: { tokens, caches in model(tokens, caches: caches) },
+        multimodalForward: nil,
+        vocabSize: config.vocabSize
+    )
+}
+
+private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(Qwen3MoEConfig.self, from: configData)
+    let model = Qwen3MoEForCausalLM(config)
+    try loadWeights(
+        into: model, from: directory,
+        quantization: config.quantization,
+        tieWordEmbeddings: config.tieWordEmbeddings)
+
+    // `family` returned here must round-trip through
+    // `ModelFamily(rawValue:)` so that `InferenceEngine.capabilities`
+    // can look up the declared capability set, and so that the tool
+    // template selector picks the right format. We return "moe" so
+    // the capability lookup hits `.moe` cleanly; the tool format
+    // adapter maps `.moe` to `.qwen` (the only native MoE today is
+    // Qwen 3 MoE, which uses the Qwen chat / tool template).
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "moe",
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )

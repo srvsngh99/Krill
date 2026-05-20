@@ -45,11 +45,19 @@ internal enum ToolCalling {
 
         /// Resolve the adapter from the loaded model family
         /// (`InferenceEngine.family`).
+        ///
+        /// `.moe` maps to `.qwen` because the only native MoE
+        /// runtime today (WS6) is Qwen 3 MoE, which uses the Qwen
+        /// chat / tool-call template verbatim. If a future native
+        /// MoE family (Mixtral, OLMoE) needs a different template,
+        /// promote the family string carried in `LoadedModel.family`
+        /// to a more specific identifier and add a case here.
         static func forFamily(_ family: String?) -> ToolFormat {
             switch family {
             case "gemma4": return .gemma4
             case "llama": return .llama
             case "qwen": return .qwen
+            case "moe": return .qwen
             default: return .hermes
             }
         }
