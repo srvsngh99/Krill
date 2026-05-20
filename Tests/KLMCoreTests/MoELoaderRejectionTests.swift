@@ -42,15 +42,68 @@ final class MoELoaderRejectionTests: XCTestCase {
         }
     }
 
-    func testQwen3MoEIsRejectedWithDocumentedError() throws {
+    func testQwen3MoEIsNotRejectedAfterNativeRuntime() throws {
+        // WS6 native runtime: Qwen 3 MoE
+        // (`Qwen3MoeForCausalLM` / `model_type: qwen3_moe`) loads
+        // through the dedicated native arm (`loadQwen3MoE`),
+        // NOT through the generic MoE bridge rejection. The
+        // config-only invocation here will fail at weight loading
+        // (no safetensors in the temp dir), which is expected —
+        // the discriminator is that the error must NOT be the
+        // "MoE bridge" redirect, because that would mean we still
+        // route Qwen 3 MoE through the sidecar.
         let dir = try writeConfig([
             "architectures": ["Qwen3MoeForCausalLM"],
             "model_type": "qwen3_moe",
             "hidden_size": 2048,
+            "intermediate_size": 6144,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 4,
+            "num_hidden_layers": 48,
             "vocab_size": 151936,
+            "head_dim": 128,
             "num_experts": 128,
             "num_experts_per_tok": 8,
+            "moe_intermediate_size": 768,
+            "decoder_sparse_step": 1,
+            "mlp_only_layers": [],
+            "norm_topk_prob": true,
+            "tie_word_embeddings": false,
         ], dirSlug: "qwen3moe")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        do {
+            _ = try loadModel(from: dir)
+            XCTFail("Expected weight-load failure for empty config dir")
+        } catch let error as ModelLoadError {
+            if case .unsupportedArchitecture(let msg) = error {
+                XCTAssertFalse(msg.contains("MoE bridge"),
+                    "Qwen 3 MoE must NOT route through the MoE bridge "
+                    + "rejection arm after the native runtime landed")
+            }
+            // Any other ModelLoadError (e.g. invalid config) is
+            // acceptable — it means the family routed to the
+            // native arm.
+        } catch {
+            // Non-ModelLoadError = the weight loader failed because
+            // there are no safetensors. That is the expected outcome
+            // here and confirms the family reached the native arm.
+        }
+    }
+
+    func testMixtralStillRoutesToBridge() throws {
+        // Mixtral (and other non-Qwen3 MoE families) keeps the
+        // bridge fallback until its native port lands. This pins
+        // the contract so the WS6 native PR cannot silently drop
+        // the bridge rejection for unmigrated MoE families.
+        let dir = try writeConfig([
+            "architectures": ["MixtralForCausalLM"],
+            "model_type": "mixtral",
+            "hidden_size": 4096,
+            "vocab_size": 32000,
+            "num_local_experts": 8,
+            "num_experts_per_tok": 2,
+        ], dirSlug: "mixtral-still-bridge")
         defer { try? FileManager.default.removeItem(at: dir) }
 
         XCTAssertThrowsError(try loadModel(from: dir)) { error in
@@ -60,7 +113,8 @@ final class MoELoaderRejectionTests: XCTestCase {
                 return
             }
             XCTAssertTrue(msg.contains("MoE bridge"),
-                "Qwen 3 MoE rejection should redirect to the MoE bridge runtime")
+                "Mixtral must still route through the MoE bridge "
+                + "(no native runtime yet)")
         }
     }
 

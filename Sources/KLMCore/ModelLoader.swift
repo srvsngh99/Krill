@@ -98,28 +98,37 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
         return try loadGemma4(configData: configData, directory: directory)
     } else if arch.contains("chatglm") || arch.contains("glm") || modelType == "chatglm" {
         return try loadGLM(configData: configData, directory: directory)
-    } else if arch.contains("mixtral") || arch.contains("qwen3moe") || arch.contains("qwen2moe")
+    } else if arch.contains("qwen3moe") || modelType == "qwen3_moe" {
+        // Qwen 3 MoE: native Swift+MLX runtime. Router + expert
+        // dispatch handled in `Qwen3MoESparseMLP` (see
+        // `Qwen3MoEModel.swift`). The native path replaces the WS6
+        // foundation's bridge-only fallback for this specific MoE
+        // family. Other MoE architectures (Mixtral, Qwen2-MoE,
+        // OLMoE, DeepSeek-V3) keep the bridge fallback below until
+        // native ports land.
+        return try loadQwen3MoE(configData: configData, directory: directory)
+    } else if arch.contains("mixtral") || arch.contains("qwen2moe")
         || arch.contains("olmoe")
-        || modelType == "mixtral" || modelType == "qwen3_moe" || modelType == "qwen2_moe"
+        || modelType == "mixtral" || modelType == "qwen2_moe"
         || modelType == "olmoe"
         || arch.contains("deepseek") || modelType == "deepseek_v3"
     {
-        // MoE family runs through `MoEEngine` (Python sidecar /
-        // mlx-lm), not through the native causal-LM dispatcher
-        // here. `loadModel` is the entry point for native
-        // Swift+MLX runtimes only. Refuse to instantiate MoE as a
-        // dense causal LM so callers that hit /api/generate or
-        // /v1/chat on an MoE manifest get a clear redirect
-        // instead of a garbage forward pass through the dense
-        // text loader (which would either crash on the
-        // router/expert keys or silently run with random MLP
-        // weights).
+        // Remaining MoE families run through `MoEEngine` (Python
+        // sidecar / mlx-lm), not the native causal-LM dispatcher.
+        // `loadModel` is the entry point for native Swift+MLX
+        // runtimes only. Refuse to instantiate these as a dense
+        // causal LM so callers that hit /api/generate or
+        // /v1/chat on a non-Qwen3-MoE MoE manifest get a clear
+        // redirect instead of a garbage forward pass through the
+        // dense text loader. Qwen 3 MoE is handled by the
+        // dedicated arm above.
         throw ModelLoadError.unsupportedArchitecture(
             "Mixture-of-experts models run through the MoE bridge "
             + "(compatible_fallback tier). Use POST /api/chat or "
             + "/v1/chat/completions - the server routes MoE manifests to "
-            + "MoEEngine. Native Swift+MLX router + expert dispatch are a "
-            + "follow-up WS6 PR. Detected arch=\(arch), model_type=\(modelType).")
+            + "MoEEngine. Native Swift+MLX router + expert dispatch landed "
+            + "for Qwen 3 MoE in WS6; other MoE families are follow-ups. "
+            + "Detected arch=\(arch), model_type=\(modelType).")
     } else if arch.contains("llama") || modelType == "llama" {
         return try loadLlama(configData: configData, directory: directory)
     } else if arch.contains("qwen") || modelType.hasPrefix("qwen") {
@@ -316,6 +325,24 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
         numLayers: config.numHiddenLayers,
         family: "gemma4",
         forward: { tokens, caches in model(tokens, caches: caches) },
+        multimodalForward: nil,
+        vocabSize: config.vocabSize
+    )
+}
+
+private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(Qwen3MoEConfig.self, from: configData)
+    let model = Qwen3MoEForCausalLM(config)
+    try loadWeights(
+        into: model, from: directory,
+        quantization: config.quantization,
+        tieWordEmbeddings: config.tieWordEmbeddings)
+
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "qwen3_moe",
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )

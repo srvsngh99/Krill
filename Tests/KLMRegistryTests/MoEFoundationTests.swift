@@ -85,4 +85,63 @@ final class MoEFoundationTests: XCTestCase {
         // clients can pin it.
         XCTAssertEqual(ModelFamily.moe.rawValue, "moe")
     }
+
+    // MARK: - Native MoE dispatch helper (WS6 runtime)
+
+    /// `nativeMoEDispatchSupported(at:)` decides at request time
+    /// whether an MoE manifest can go through the native
+    /// Swift+MLX runtime or must use the Python sidecar bridge.
+    /// The server's MoE dispatch uses this; the tests pin the
+    /// contract so the bridge-fallback path cannot silently take
+    /// over for Qwen 3 MoE, and the native path cannot silently
+    /// claim Mixtral.
+    private func writeConfig(_ json: [String: Any]) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-moe-native-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(withJSONObject: json)
+        try data.write(to: dir.appendingPathComponent("config.json"))
+        return dir
+    }
+
+    func testNativeDispatchSupportedForQwen3MoE() throws {
+        let dir = try writeConfig([
+            "architectures": ["Qwen3MoeForCausalLM"],
+            "model_type": "qwen3_moe",
+        ])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertTrue(nativeMoEDispatchSupported(at: dir),
+            "Qwen 3 MoE has a native runtime in this build and must "
+            + "skip the bridge dispatch")
+    }
+
+    func testNativeDispatchNotSupportedForMixtral() throws {
+        let dir = try writeConfig([
+            "architectures": ["MixtralForCausalLM"],
+            "model_type": "mixtral",
+        ])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
+            "Mixtral has no native runtime yet; must use the bridge")
+    }
+
+    func testNativeDispatchNotSupportedForOLMoE() throws {
+        let dir = try writeConfig([
+            "architectures": ["OlmoeForCausalLM"],
+            "model_type": "olmoe",
+        ])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
+            "OLMoE has no native runtime yet; must use the bridge")
+    }
+
+    func testNativeDispatchReturnsFalseForMissingConfig() {
+        // A directory with no config.json must NOT claim native
+        // support — the caller (server) will fall back to the
+        // bridge, which emits a clearer error than a dense loader
+        // crashing on missing safetensors.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-moe-missing-\(UUID().uuidString)")
+        XCTAssertFalse(nativeMoEDispatchSupported(at: dir))
+    }
 }
