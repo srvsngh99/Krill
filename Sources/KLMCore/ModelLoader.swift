@@ -67,16 +67,19 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
     if arch.contains("qwen2_5_vl") || arch.contains("qwen2vl")
         || modelType == "qwen2_5_vl" || modelType == "qwen2_vl"
     {
-        // WS5 foundation: family detection only. The native vision
-        // tower, patch merger, mRoPE, and image preprocessing for
-        // Qwen 2.5-VL ship in follow-up PRs. Failing loudly here
-        // before any inference is the documented behavior; the
-        // registry tier is `experimental`.
+        // Qwen 2.5-VL routes through `Qwen25VLEngine` (Python
+        // sidecar / mlx-vlm bridge), not through the causal-LM
+        // dispatcher. `loadModel` is the entry point for native
+        // Swift+MLX causal LMs only. Refuse to instantiate the
+        // VL family as a causal LM so a chat-completion caller
+        // gets a clear redirect to the multimodal bridge instead
+        // of a garbage forward pass through the text-only path.
         throw ModelLoadError.unsupportedArchitecture(
-            "Qwen 2.5-VL native runtime is in progress (WS5 foundation only). "
-            + "Use the qwen2.5 text-only family for text workflows, or follow "
-            + "docs/workstreams/WS5_SECOND_NATIVE_VISION_FAMILY.md for the "
-            + "tracking PR. Detected arch=\(arch), model_type=\(modelType).")
+            "Qwen 2.5-VL runs through the multimodal bridge (compatible_fallback "
+            + "tier). Use POST /api/chat or /v1/chat/completions with an image "
+            + "attachment - the server routes VL manifests to Qwen25VLEngine. "
+            + "Native Swift+MLX vision tower / mRoPE / patch merger are a "
+            + "follow-up WS5 PR. Detected arch=\(arch), model_type=\(modelType).")
     } else if arch.contains("forsequenceclassification") || arch.contains("crossencoder") {
         // Cross-encoder rerankers (BGE Reranker, Cohere Rerank,
         // etc.) are loaded through the dedicated `RerankEngine`,
