@@ -23,6 +23,7 @@ public final class KLMServer: Sendable {
     private let registry: Registry
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
+    private let rerankEngine: RerankEngine
     private let logger = Logger(label: "krillm.server")
 
     private let corsOrigins: [String]
@@ -34,6 +35,7 @@ public final class KLMServer: Sendable {
                 compat: CompatMode = .both,
                 engine: InferenceEngine, registry: Registry,
                 embedEngine: EmbeddingEngine = EmbeddingEngine(),
+                rerankEngine: RerankEngine = RerankEngine(),
                 corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
                 keepAliveDefaultSeconds: Int = 300,
                 defaultContextLimit: Int? = nil,
@@ -45,6 +47,7 @@ public final class KLMServer: Sendable {
         self.engine = engine
         self.registry = registry
         self.embedEngine = embedEngine
+        self.rerankEngine = rerankEngine
         self.keepAlive = KeepAliveController(defaultSeconds: keepAliveDefaultSeconds)
         self.defaultContextLimit = defaultContextLimit
         self.genQueue = GenerationQueue(numParallel: numParallel, maxQueue: maxQueue)
@@ -55,10 +58,12 @@ public final class KLMServer: Sendable {
         registry: Registry,
         compat: CompatMode = .both,
         embedEngine: EmbeddingEngine = EmbeddingEngine(),
+        rerankEngine: RerankEngine = RerankEngine(),
         maxBodySizeOverride: Int? = nil
     ) -> any ChannelHandler & Sendable {
         HTTPHandler(engine: engine, registry: registry, compat: compat,
                     embedEngine: embedEngine,
+                    rerankEngine: rerankEngine,
                     keepAlive: KeepAliveController(defaultSeconds: 300),
                     genQueue: GenerationQueue(numParallel: 1, maxQueue: 512),
                     maxBodySizeOverride: maxBodySizeOverride)
@@ -76,6 +81,7 @@ public final class KLMServer: Sendable {
                     channel.pipeline.addHandler(
                         HTTPHandler(engine: self.engine, registry: self.registry,
                                     compat: self.compat, embedEngine: self.embedEngine,
+                                    rerankEngine: self.rerankEngine,
                                     keepAlive: self.keepAlive,
                                     corsOrigins: self.corsOrigins,
                                     defaultContextLimit: self.defaultContextLimit,
@@ -131,6 +137,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let registry: Registry
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
+    private let rerankEngine: RerankEngine
     private let logger = Logger(label: "krillm.http")
     private let startedAt = Date()
 
@@ -147,6 +154,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     init(engine: InferenceEngine, registry: Registry,
          compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
+         rerankEngine: RerankEngine = RerankEngine(),
          keepAlive: KeepAliveController = KeepAliveController(defaultSeconds: 300),
          corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
          defaultContextLimit: Int? = nil,
@@ -156,6 +164,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         self.registry = registry
         self.compat = compat
         self.embedEngine = embedEngine
+        self.rerankEngine = rerankEngine
         self.keepAlive = keepAlive
         self.corsOrigins = corsOrigins
         self.defaultContextLimit = defaultContextLimit
@@ -260,6 +269,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         case (.GET, "/v1/models"):
             guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleModels(context: context)
+        case (.POST, "/v1/rerank"):
+            guard compat.openAIEnabled else {
+                sendJSON(context: context, status: .notFound,
+                         body: ["error": "Not found"])
+                return
+            }
+            handleRerank(context: context, body: body)
         case (.POST, "/v1/embeddings"):
             guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleEmbeddings(context: context, body: body, style: .openAI)
@@ -1580,6 +1596,121 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             ]
         }
         sendJSON(context: context, status: .ok, body: ["models": models])
+    }
+
+    // MARK: - Reranking: POST /v1/rerank
+
+    /// Cohere-/Voyage-style cross-encoder rerank endpoint. Request:
+    /// ```
+    /// { "model": "bge-reranker-v2-m3",
+    ///   "query": "...",
+    ///   "documents": ["doc 1", "doc 2", ...],
+    ///   "top_n": 3,                       (optional; defaults to all)
+    ///   "return_documents": false         (optional; defaults to false)
+    /// }
+    /// ```
+    /// Response: `{ "results": [ { "index": 0, "relevance_score": 0.9998,
+    /// "logit": 8.78, "document": {...} }, ... ], "model": "...",
+    /// "usage": { ... } }` sorted by `relevance_score` descending.
+    ///
+    /// `relevance_score` is sigmoid-normalized to `[0, 1]` so clients
+    /// can threshold consistently (matches Cohere `/v1/rerank`).
+    /// `logit` is the raw pre-sigmoid output for callers (e.g. parity
+    /// tests) that need to compare against an upstream model's raw
+    /// score. `index` is the original position in the input
+    /// `documents` array so clients can reorder their own copy without
+    /// `return_documents`.
+    private func handleRerank(context: ChannelHandlerContext, body: ByteBuffer) {
+        guard let json = parseJSON(body) else {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Invalid JSON"])
+            return
+        }
+        guard let name = ollamaModelName(json) else {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Missing 'model' field"])
+            return
+        }
+        guard let query = json["query"] as? String, !query.isEmpty else {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Missing 'query' (string)"])
+            return
+        }
+        guard let documents = json["documents"] as? [String], !documents.isEmpty else {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "Missing 'documents' (non-empty array of strings)"])
+            return
+        }
+        guard let manifest = registry.getModel(name) else {
+            sendJSON(context: context, status: .notFound, body: [
+                "error": "reranker model '\(name)' not found. Install with: krillm pull \(name)"
+            ])
+            return
+        }
+        guard manifest.family == .reranker else {
+            sendJSON(context: context, status: .badRequest, body: [
+                "error": "'\(name)' (family \(manifest.family.rawValue)) is not a reranker. Use a dedicated cross-encoder reranker, e.g. krillm pull bge-reranker-v2-m3"
+            ])
+            return
+        }
+
+        let topN = (json["top_n"] as? Int) ?? documents.count
+        let returnDocs = (json["return_documents"] as? Bool) ?? false
+        let dir = registry.modelPath(name)
+        let eventLoop = context.eventLoop
+        nonisolated(unsafe) let ctx = context
+        let rerank = rerankEngine
+        let modelName = manifest.name
+
+        let started = CFAbsoluteTimeGetCurrent()
+        Task {
+            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+            defer { self.leaveQueue() }
+            do {
+                try await rerank.load(directory: dir)
+                let result = try rerank.score(
+                    query: query, documents: documents)
+                let totalNs = Int64(
+                    (CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
+
+                // Sort by relevance score descending, keeping the
+                // original index so clients can reorder their own
+                // copy without `return_documents`.
+                let pairs = result.scores.enumerated().sorted {
+                    $0.element > $1.element
+                }
+                let kept = pairs.prefix(max(0, min(topN, pairs.count)))
+                let results: [[String: Any]] = kept.map { (i, score) in
+                    var entry: [String: Any] = [
+                        "index": i,
+                        "relevance_score": score,
+                        "logit": result.logits[i],
+                    ]
+                    if returnDocs {
+                        entry["document"] = ["text": documents[i]]
+                    }
+                    return entry
+                }
+                let response: [String: Any] = [
+                    "model": modelName,
+                    "results": results,
+                    "usage": [
+                        "prompt_tokens": result.totalTokens,
+                        "total_tokens": result.totalTokens,
+                    ],
+                    "total_duration": totalNs,
+                ]
+                self.sendJSONOnLoop(
+                    context: ctx, eventLoop: eventLoop,
+                    status: .ok, body: response)
+            } catch {
+                let msg = String(describing: error).prefix(300)
+                self.sendJSONOnLoop(
+                    context: ctx, eventLoop: eventLoop,
+                    status: .internalServerError,
+                    body: ["error": "rerank failed: \(msg)"])
+            }
+        }
     }
 
     // MARK: - Embeddings: /api/embed, /api/embeddings, /v1/embeddings
