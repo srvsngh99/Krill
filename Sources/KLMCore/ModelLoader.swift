@@ -64,7 +64,20 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
     let arch = architectures.first?.lowercased() ?? ""
 
     // Order matters: check specific patterns before generic ones
-    if arch.contains("gemma4") || modelType == "gemma4_text" || modelType == "gemma4" {
+    if arch.contains("qwen2_5_vl") || arch.contains("qwen2vl")
+        || modelType == "qwen2_5_vl" || modelType == "qwen2_vl"
+    {
+        // WS5 foundation: family detection only. The native vision
+        // tower, patch merger, mRoPE, and image preprocessing for
+        // Qwen 2.5-VL ship in follow-up PRs. Failing loudly here
+        // before any inference is the documented behavior; the
+        // registry tier is `experimental`.
+        throw ModelLoadError.unsupportedArchitecture(
+            "Qwen 2.5-VL native runtime is in progress (WS5 foundation only). "
+            + "Use the qwen2.5 text-only family for text workflows, or follow "
+            + "docs/workstreams/WS5_SECOND_NATIVE_VISION_FAMILY.md for the "
+            + "tracking PR. Detected arch=\(arch), model_type=\(modelType).")
+    } else if arch.contains("gemma4") || modelType == "gemma4_text" || modelType == "gemma4" {
         return try loadGemma4(configData: configData, directory: directory)
     } else if arch.contains("chatglm") || arch.contains("glm") || modelType == "chatglm" {
         return try loadGLM(configData: configData, directory: directory)
