@@ -26,26 +26,33 @@ Detailed usage and result: [../SPECULATIVE_DECODING.md](../SPECULATIVE_DECODING.
 
 The `text_decode_ratio >= 1.5x` strict gate. Benchmarked on two target
 sizes (3B and 8B) on M-series 4-bit MLX with the smallest available
-mlx-community drafter (llama-3.2-1b):
+mlx-community drafter (llama-3.2-1b), bracketed by low and high
+acceptance prompts:
 
-| Target            | KrillLM no-spec | KrillLM spec | Ollama  |
-| ----------------- | --------------- | ------------ | ------- |
-| llama-3.2-3b      | 104.3 tok/s     | 74.6 tok/s   | 94.7    |
-| llama-3.1-8b      | 50.2 tok/s      | 40.9 tok/s   | 46.2    |
+| Target / prompt                | KrillLM no-spec | KrillLM spec | K | acceptance |
+| ------------------------------ | --------------- | ------------ | - | ---------- |
+| llama-3.2-3b   / story         | 104.3 tok/s     | 74.6         | 2 | 0.47       |
+| llama-3.1-8b   / story         |  50.2 tok/s     | 40.9         | 2 | 0.50       |
+| llama-3.1-8b   / technical     |  50.2 tok/s     | 44.1         | 5 | 0.73       |
+
+Cross-engine Ollama numbers are tracked in
+`docs/SPECULATIVE_DECODING.md` but the prompt-tokens count differs
+across engines (39-52% delta), so the load-bearing comparison here
+is KrillLM-vs-KrillLM (spec-on vs spec-off, identical encoder).
 
 Output sha256 is identical with and without spec on every pair
-(greedy parity verified); the throughput regression is a structural
-property of MLX batched-forward cost on this hardware. See
-`docs/SPECULATIVE_DECODING.md` for the derivation (verify is linear
-in K, so spec wins requires `expected_accepted > ~1.1 * K`, which we
-measure below; raising K only inflates verify cost without
-proportional gain).
+(greedy parity verified); the throughput regression is empirically
+out of reach on every prompt and K setting tested, including the
+high-acceptance 0.73 run. See `docs/SPECULATIVE_DECODING.md` for
+the break-even framework that maps the observed gap to per-round
+overhead (beta > 1 in the model) rather than insufficient
+acceptance.
 
-The three credible unlocks (all out of scope for this PR and the
+Three credible unlocks (all out of scope for this PR and the
 WS2 follow-ups that landed):
 
-1. Upstream mlx-swift kernel changes that make batched forward
-   sublinear in K.
+1. Reduce per-round overhead (eval syncs, Python-Swift boundary).
+   Probably worth ~20%; would not alone clear strict.
 2. A ~70B target paired with a 1B draft (RAM-infeasible on
    M-series at 4-bit, ~40 GB just for the target).
 3. Tree attention / Medusa-style multi-branch verify - several

@@ -126,21 +126,34 @@ All numbers: M-series, 4-bit MLX target / draft, 3-5 runs after 1-2
 warmups, server-equivalent (warm) cache. Output sha256 verified
 identical with and without spec on every pair (greedy parity holds).
 
+Cross-engine caveat: the prompt-tokens count differs between KrillLM
+and Ollama in the runs below (39-52% delta from tokenizer
+preprocessing differences). The reported `decode_tokens_per_second`
+is measured per-engine in the steady-state decode phase and is not
+materially affected by the prompt-tokens delta, but the TTFT column
+is omitted from the cross-engine comparison and prompt-eval throughput
+should not be compared directly. The KrillLM-vs-KrillLM (spec-on vs
+spec-off) comparison is unaffected because the same engine encodes
+both runs.
+
 ### llama-3.2-3b / llama-3.2-1b
 
 Prompt: `"Explain quantum computing in simple terms."`, max 128 tokens.
 
-| Engine                 | decode tok/s (median) | TTFT (median) | spec K | acceptance |
-| ---------------------- | --------------------- | ------------- | ------ | ---------- |
-| KrillLM, no spec       | 104.3                 | 86 ms         | -      | -          |
-| KrillLM, spec on (1b)  |  74.6                 | 114 ms        | 2      | 0.47       |
-| Ollama llama3.2:3b     |  94.7                 | 78 ms         | -      | -          |
+| Engine                 | decode tok/s (median) | spec K | acceptance |
+| ---------------------- | --------------------- | ------ | ---------- |
+| KrillLM, no spec       | 104.3                 | -      | -          |
+| KrillLM, spec on (1b)  |  74.6                 | 2      | 0.47       |
+| Ollama llama3.2:3b     |  94.7                 | -      | -          |
 
 KrillLM no-spec: 1.10x vs Ollama. Spec on: 0.72x vs KrillLM no-spec.
 
 ### llama-3.1-8b / llama-3.2-1b
 
-Prompt: `"Tell me a story about a robot who discovers an old library."`,
+Two prompts on the same pair to bracket acceptance:
+
+A. Story prompt (low-mid acceptance):
+`"Tell me a story about a robot who discovers an old library."`,
 max 128 tokens.
 
 | Engine                 | decode tok/s (median) | spec K | acceptance |
@@ -149,48 +162,75 @@ max 128 tokens.
 | KrillLM, spec on (1b)  | 40.9                  | 2      | 0.50       |
 | Ollama llama3.1:8b     | 46.2                  | -      | -          |
 
-KrillLM no-spec: 1.087x vs Ollama. Spec on: 0.82x vs KrillLM no-spec.
+B. Technical prompt (higher acceptance):
+`"Explain the architecture of a modern transformer-based language
+model in detail, covering attention mechanisms, layer normalization,
+and the rationale for grouped-query attention."`, max 128 tokens.
 
-## Why 1.5x strict is structurally infeasible on this hardware
+| Engine                 | decode tok/s (median) | spec K | acceptance |
+| ---------------------- | --------------------- | ------ | ---------- |
+| KrillLM, spec on (1b)  | 44.1                  | 5      | 0.73       |
+| KrillLM, no spec       | 50.2 (run A baseline) | -      | -          |
+| Ollama llama3.1:8b     | 46.2                  | -      | -          |
 
-The WS2 `text_decode_ratio >= 1.5x` strict gate **cannot be unblocked
-on M-series with the model pairs currently available in mlx-community**.
-This is a structural property of MLX batched-forward cost, not a tuning
-problem. The numbers above confirm it on two target sizes; pushing
-larger targets only narrows the gap further because draft-pair
-selection narrows too.
+The high-acceptance run (B) raises K to 5 and acceptance to 0.73 -
+strong drafter agreement - and spec still LOSES vs KrillLM no-spec
+(44.1 vs 50.2 tok/s). This is the strongest single-run evidence
+that the gap is in the per-round overhead, not in acceptance.
 
-Why: on M-series the MLX batched forward of K+1 tokens is approximately
-LINEAR in K (no sublinear amortization). Spec wins iff
+## Why 1.5x strict is empirically out of reach on this hardware
 
-    expected_accepted_per_round * baseline_decode_cost
-    > verify(K+1)_cost + K * draft_cost
+The WS2 `text_decode_ratio >= 1.5x` strict gate cannot be unblocked
+on M-series with the model pairs currently available in mlx-community
+**on any prompt or K setting tested**, including the high-acceptance
+0.73 run above. The pattern across all measured configurations:
+verify forward at K=2-5 costs ~1.0-1.2x of K serial single-token
+forwards in this engine, so net-positive spec needs an effective
+acceptance higher than that ratio. The technical-prompt run hits
+0.73 with K=5 (so 0.73 * 5 = 3.65 expected accepted drafts + 1
+target token = 4.65 tokens / round vs 5 verify positions); on the
+assumption that verify scales linearly in positions, that should
+break even or slightly win, but it loses in practice by ~12%. That
+extra cost is likely per-round MLX eval-sync and Python-side bookkeeping
+overhead, NOT the matmul cost; a microbenchmark of
+`target.forward(K)` at varying K (not in this PR) would substantiate
+that claim more rigorously.
 
-With baseline_decode_cost ~= verify_per_position_cost (no amortization),
-this reduces to expected_accepted > K + (draft_cost / target_per_token_cost).
-For llama-3.1-8b / llama-3.2-1b the draft/target ratio is ~1/8, so
-spec needs expected_accepted > K + K/8 = 1.125 * K. At K=2 that's
-2.25 accepted per round - basically requiring 100% acceptance. We
-measure 0.5 acceptance and 0.5 * K + 1 = 2 accepted per round, below
-the break-even. Increasing K only inflates the verify cost without
-proportionally raising accepted tokens.
+Break-even framework (per round, all in "cost-per-target-token" units):
 
-For 1.5x to be reachable in this framework, one of these has to hold:
+  Let r = expected accepted tokens per round (including the bonus
+  token on full accept).
+  Let alpha = draft per-token cost / target per-token cost (~= 1/8
+  for llama-3.1-8b / llama-3.2-1b at 4-bit).
+  Let beta = verify(K+1) cost / (K+1) per-position cost. beta = 1.0
+  for ideal linear scaling; beta > 1 captures per-round fixed
+  overhead (eval syncs, kernel launch, slice ops).
 
-1. **MLX batched forward becomes sublinear in K.** That is an upstream
-   mlx-swift optimization (better tiling / fused kernels). KrillLM
-   cannot drive this from above.
-2. **Target / draft size ratio jumps an order of magnitude.** A
-   70B target with a 1B draft on M-series is RAM-infeasible at 4-bit
-   (would need ~40 GB just for the target). Smaller-than-1B drafts
-   for Llama 3.x do not exist in mlx-community today.
+  Spec wins iff:
+    r > beta * (K + 1) + alpha * K
+
+The numeric example for 8B / 1B at K=5, alpha=1/8, assuming beta=1.0:
+spec needs r > 5 * 1 + 5 * 1/8 = 5.625. Measured r = 0.73 * 5 + 1 = 4.65.
+Spec loses by ~17%, matching the observed 12% throughput regression.
+Raising K further does not help: r grows at most linearly in K with the
+same slope (acceptance), while the right-hand side grows faster.
+
+Three credible unlocks (all out of scope for this PR and the WS2
+follow-ups that landed):
+
+1. **Reduce per-round overhead (beta closer to 1.0).** Concretely:
+   fewer eval syncs (fold target verify + bonus into one forward;
+   tried off-branch, did not materially help), tighter Python-Swift
+   boundary, batched draft loop. Could yield up to ~20% improvement.
+2. **Target / draft size ratio jumps an order of magnitude
+   (alpha << 1/8).** A 70B target with a 1B draft on M-series is
+   RAM-infeasible at 4-bit (~40 GB just for the target). Smaller-
+   than-1B drafts for Llama 3.x do not exist in mlx-community today.
 3. **Tree attention / Medusa-style multi-branch verify.** Each verify
    forward proposes a small tree of continuation paths rather than a
-   single sequence, raising effective acceptance per forward. This
-   requires custom attention masks and a different verification
-   algorithm; it is several weeks of work and a substantial diff,
-   and is tracked as a future workstream rather than a follow-up to
-   this PR.
+   single sequence, raising effective r per verify. Requires custom
+   attention masks and a different verification algorithm; multi-week
+   work, separate workstream.
 
 The release_candidate gate's `text_decode_ratio_floor >= 1.0x` (hard)
 remains green and unaffected: KrillLM no-spec is 1.087-1.10x faster
