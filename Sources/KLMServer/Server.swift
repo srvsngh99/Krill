@@ -606,15 +606,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             var full = ""
             for await ev in tokenStream { if ev.isEnd { break }; full += ev.text }
 
-            // Split out <thinking> if present.
-            var thinking: String? = nil
-            var visible = full
-            if let s = full.range(of: "<thinking>"),
-               let e = full.range(of: "</thinking>") {
-                thinking = String(full[s.upperBound ..< e.lowerBound])
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                visible.removeSubrange(s.lowerBound ..< e.upperBound)
-            }
+            // Split out <thinking> / <think> reasoning blocks before
+            // any further processing. Anthropic clients carry the
+            // captured text through the `thinking` field; Ollama and
+            // OpenAI surfaces discard it.
+            let (visible, thinking) = ReasoningParser.strip(full)
             // Only parse tool calls when the request actually offered tools
             // (no-tools turns must not misclassify ordinary JSON output as
             // an Anthropic tool_use block - see extractIfToolsOffered).
@@ -730,8 +726,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 FileHandle.standardError.write(Data(
                     "[KRILL_TOOL_DEBUG] raw=<<<\(full)>>>\n".utf8))
             }
+            // Strip reasoning blocks (<thinking> / <think>) before
+            // tool-call extraction so a model that wraps its tool
+            // call in a reasoning preamble still yields the call.
+            let (postReasoning, _) = ReasoningParser.strip(full)
             let (calls, cleaned) = ToolCalling.extractToolCalls(
-                from: full, format: toolFormat)
+                from: postReasoning, format: toolFormat)
             let stats = getStats()
             let totalNs = Int64((CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
 
@@ -982,6 +982,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 if event.isEnd { break }
                 fullContent += event.text
             }
+            // Strip reasoning before structured-output coercion so
+            // schema validators do not choke on `<think>` blocks.
+            fullContent = ReasoningParser.strip(fullContent).visible
             fullContent = StructuredOutput.coerce(fullContent, format: responseFormat)
 
             let stats = getStats()
@@ -1053,6 +1056,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 if event.isEnd { break }
                 fullText += event.text
             }
+            // /v1/completions has no thinking field; just drop the block.
+            fullText = ReasoningParser.strip(fullText).visible
 
             let stats = getStats()
             let response: [String: Any] = [
@@ -1308,6 +1313,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     if event.isEnd { break }
                     fullContent += event.text
                 }
+                // Strip <think>/<thinking> before structured-output
+                // coercion so Qwen 3 (which opens a reasoning block
+                // by default) does not poison schema validation.
+                fullContent = ReasoningParser.strip(fullContent).visible
                 fullContent = StructuredOutput.coerce(fullContent, format: respFormat)
 
                 let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
@@ -1497,6 +1506,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     if event.isEnd { break }
                     fullResponse += event.text
                 }
+                // Strip <think>/<thinking> before structured-output
+                // coercion (mirrors the /api/chat path).
+                fullResponse = ReasoningParser.strip(fullResponse).visible
                 fullResponse = StructuredOutput.coerce(fullResponse, format: respFormat)
 
                 let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
