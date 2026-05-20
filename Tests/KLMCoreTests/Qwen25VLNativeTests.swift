@@ -216,11 +216,12 @@ final class Qwen25VLNativeTests: XCTestCase {
             return
         }
         let tower = Qwen25VLVisionTower(visionCfg)
-        // Image input: 56x56 image -> 4x4 patch grid -> 16 patches.
-        // After spatial_merge_size=2 -> 4 output tokens.
-        // Conv3d input shape: [N=1, T=2, H=56, W=56, C=3].
-        let image = MLXArray.ones([1, 2, 56, 56, 3]).asType(.float32) * Float(0.01)
-        let out = tower(image)
+        // Per-patch batched input: 56x56 image -> 4x4 patch grid
+        // -> 16 patches in merge-block row-major order. Each
+        // patch is [T=2, ph=14, pw=14, C=3]. After
+        // spatial_merge_size=2 -> 4 output tokens of out_hidden=64.
+        let patches = MLXArray.ones([16, 2, 14, 14, 3]).asType(.float32) * Float(0.01)
+        let out = tower(patches)
         XCTAssertEqual(out.shape, [4, 64])
         eval(out)
     }
@@ -313,21 +314,80 @@ final class Qwen25VLNativeTests: XCTestCase {
             "R channel normalization should center on CLIP mean")
     }
 
-    func testToConv3DInputProducesExpectedShape() {
-        // 28x28 image with temporal_patch_size=2 -> [1, 2, 28, 28, 3].
+    func testToConv3DInputProducesPerPatchBatchedShape() {
+        // 28x28 image, patch=14, merge=2, temporal=2:
+        //   grid = 2x2 = 4 patches
+        //   per-patch tensor: [T=2, ph=14, pw=14, C=3]
+        // Output shape: [4, 2, 14, 14, 3].
         let pixels = MLXArray.ones([28, 28, 3]).asType(.float32)
         let inputTensor = Qwen25VLImagePreprocessor.toConv3DInput(
-            pixels, patchSize: 14, temporalPatchSize: 2)
-        XCTAssertEqual(inputTensor.shape, [1, 2, 28, 28, 3])
+            pixels, patchSize: 14, temporalPatchSize: 2, spatialMergeSize: 2)
+        XCTAssertEqual(inputTensor.shape, [4, 2, 14, 14, 3])
         eval(inputTensor)
     }
 
     func testToConv3DInputSingleFrame() {
-        // temporal_patch_size=1 -> [1, 1, H, W, C].
-        let pixels = MLXArray.ones([14, 14, 3]).asType(.float32)
+        // Smallest valid: 28x28 image (patch_size * spatial_merge_size
+        // = 14*2 = 28), single temporal frame.
+        let pixels = MLXArray.ones([28, 28, 3]).asType(.float32)
         let inputTensor = Qwen25VLImagePreprocessor.toConv3DInput(
-            pixels, patchSize: 14, temporalPatchSize: 1)
-        XCTAssertEqual(inputTensor.shape, [1, 1, 14, 14, 3])
+            pixels, patchSize: 14, temporalPatchSize: 1, spatialMergeSize: 2)
+        XCTAssertEqual(inputTensor.shape, [4, 1, 14, 14, 3])
+    }
+
+    func testToConv3DInputMergeBlockOrdering() {
+        // Verify the patch ordering is merge-block row-major: a
+        // patch's identity (which 2D location it came from) must
+        // group the four patches of one 2x2 block consecutively.
+        //
+        // We use a 56x56 (4x4 patch grid, 4 merge blocks of 2x2).
+        // Encode each patch's location as a unique constant by
+        // multiplying its row index across pixels: row i of the
+        // image carries value i. After preprocessing in
+        // merge-block order, patches 0-3 must all have come from
+        // block (0,0), patches 4-7 from block (0,1), etc.
+        //
+        // For a 56x56 image, patch_size=14, spatial_merge_size=2:
+        //   - 4x4 patch grid (4 merge blocks).
+        //   - Merge block (0,0) covers rows 0-27, cols 0-27.
+        //     Its four patches each have row range subsets;
+        //     they all sit in rows 0-27.
+        //   - Merge block (1,0) covers rows 28-55.
+        // We populate row i with a value `i // 28` (0 for
+        // blocks at out_h=0, 1 for blocks at out_h=1) and assert
+        // patch batches 0..7 carry value 0, patches 8..15 carry
+        // value 1.
+        let H = 56, W = 56, C = 3
+        var pixels = MLXArray.zeros([H, W, C]).asType(.float32)
+        // Build a column of values per-row: [H, 1, 1] then
+        // broadcast to [H, W, C].
+        let rowValues = MLXArray((0 ..< H).map { Float($0 / 28) })
+            .reshaped(H, 1, 1)
+        pixels = pixels + rowValues  // broadcasts to [H, W, C]
+        let batched = Qwen25VLImagePreprocessor.toConv3DInput(
+            pixels, patchSize: 14, temporalPatchSize: 1, spatialMergeSize: 2)
+        XCTAssertEqual(batched.shape, [16, 1, 14, 14, 3])
+        eval(batched)
+        // Patches 0..7 should be from merge blocks where
+        // out_h=0 (rows 0-27 -> rowValue 0).
+        // Patches 8..15 from out_h=1 (rows 28-55 -> rowValue 1).
+        // Sample one pixel per patch to verify.
+        let arr = batched.asArray(Float.self)
+        // patches[i, t, ph, pw, c] flattened layout:
+        let stride = 1 * 14 * 14 * 3
+        for i in 0 ..< 8 {
+            // First pixel of patch i, channel 0.
+            let v = arr[i * stride]
+            XCTAssertEqual(v, 0.0, accuracy: 1e-6,
+                "Patches 0..7 must come from out_h=0 (rows 0-27); "
+                + "patch \(i) carried value \(v)")
+        }
+        for i in 8 ..< 16 {
+            let v = arr[i * stride]
+            XCTAssertEqual(v, 1.0, accuracy: 1e-6,
+                "Patches 8..15 must come from out_h=1 (rows 28-55); "
+                + "patch \(i) carried value \(v)")
+        }
     }
 
     // MARK: - End-to-end vision tower with preprocessor
@@ -360,15 +420,17 @@ final class Qwen25VLNativeTests: XCTestCase {
         }
         let tower = Qwen25VLVisionTower(visionCfg)
 
-        // 28x28 image. The preprocessor produces [1, 2, 28, 28, 3];
-        // the tower yields (28/14)^2 / (2*2) = 1 merged token.
+        // 28x28 image. Preprocessor returns per-patch batched
+        // [4, 2, 14, 14, 3] (one 2x2 merge block). Tower yields
+        // 1 merged token.
         let pixels = MLXArray.ones([28, 28, 3]).asType(.float32) * Float(0.5)
         let normalized = Qwen25VLImagePreprocessor.normalize(pixels)
         let conv3DInput = Qwen25VLImagePreprocessor.toConv3DInput(
             normalized,
             patchSize: visionCfg.patchSize,
-            temporalPatchSize: visionCfg.temporalPatchSize)
-        XCTAssertEqual(conv3DInput.shape, [1, 2, 28, 28, 3])
+            temporalPatchSize: visionCfg.temporalPatchSize,
+            spatialMergeSize: visionCfg.spatialMergeSize)
+        XCTAssertEqual(conv3DInput.shape, [4, 2, 14, 14, 3])
         let out = tower(conv3DInput)
         XCTAssertEqual(out.shape, [1, 32])
         eval(out)
@@ -520,13 +582,16 @@ final class Qwen25VLLoaderTests: XCTestCase {
         }
     }
 
-    func testConfigDecodesEndToEndAtLoader() throws {
-        // The loader's qwen2_5_vl arm always decodes the config
-        // (even in the rejection path) so a malformed config
-        // surfaces at load time, not in the future runtime PR.
-        // A config that omits required vision_config fields
-        // still decodes because the VisionConfig decoder defaults
-        // every key.
+    func testConfigDecoderHandlesMinimalConfig() throws {
+        // The Qwen25VLConfig decoder accepts a minimal config
+        // (no vision_config sub-object, no rope_scaling) by
+        // defaulting the optional fields to the Qwen2.5-VL-3B
+        // reference shape. This is the contract callers rely on
+        // when working with partial configs in tests and tooling.
+        // We exercise the decoder DIRECTLY rather than through
+        // the loader (the loader's rejection arm currently does
+        // not decode in this PR; the runtime PR moves the decode
+        // inside the opt-in branch).
         let cfg: [String: Any] = [
             "architectures": ["Qwen2_5_VLForConditionalGeneration"],
             "model_type": "qwen2_5_vl",
@@ -536,18 +601,17 @@ final class Qwen25VLLoaderTests: XCTestCase {
             "num_hidden_layers": 36,
             "vocab_size": 151_936,
         ]
-        let dir = try writeConfig(cfg, dirSlug: "minimal")
-        defer { try? FileManager.default.removeItem(at: dir) }
-        XCTAssertThrowsError(try loadModel(from: dir)) { error in
-            // Either bridge redirect (default) or foundation
-            // message (opt-in); both indicate the config decoded.
-            guard let modelError = error as? ModelLoadError,
-                  case .unsupportedArchitecture = modelError else {
-                XCTFail("Expected ModelLoadError.unsupportedArchitecture, "
-                    + "got \(error). The config decode succeeded only if "
-                    + "the loader reached the rejection arm.")
-                return
-            }
-        }
+        let data = try JSONSerialization.data(withJSONObject: cfg)
+        let parsed = try JSONDecoder().decode(Qwen25VLConfig.self, from: data)
+        XCTAssertEqual(parsed.hiddenSize, 2048)
+        XCTAssertEqual(parsed.vision.depth, 32,
+            "Minimal config defaults vision.depth to the "
+            + "Qwen2.5-VL-3B reference value")
+        XCTAssertEqual(parsed.mropeSection, [16, 24, 24],
+            "Minimal config defaults mrope_section to the "
+            + "Qwen2.5-VL-3B reference split")
+        XCTAssertEqual(parsed.imageTokenId, 151_655,
+            "Minimal config defaults image_token_id to the "
+            + "Qwen 2.5-VL tokenizer's <|image_pad|> id")
     }
 }

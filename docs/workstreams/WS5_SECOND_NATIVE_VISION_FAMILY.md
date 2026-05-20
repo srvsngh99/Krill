@@ -1,7 +1,7 @@
 # WS5: Second Native Vision Family
 
-Status: native foundation shipped — config parser, 3D mRoPE,
-window-attention vision blocks, patch merger, image preprocessing.
+Status: native foundation shipped (config parser, 3D mRoPE,
+window-attention vision blocks, patch merger, image preprocessing).
 End-to-end multimodal forward (vision token injection, language-
 side mRoPE wiring, retiring the Python sidecar) is the follow-up.
 The bridge (`Qwen25VLEngine` -> mlx-vlm) stays the default until
@@ -27,7 +27,9 @@ the runtime PR lands.
   - `Qwen25VLPatchMerger` collapses each `spatial_merge_size^2`
     block of patches into one language-side token via RMSNorm +
     Linear -> GELU -> Linear. Matches the `merger.{ln_q, mlp.0,
-    mlp.1}` weight keys.
+    mlp.2}` weight keys (GELU at index 1 has no parameters; its
+    array slot keeps the second Linear at index 2 to match the
+    shipped checkpoint exactly).
   - `Qwen25VLPatchEmbed`, `Qwen25VLVisionAttention`,
     `Qwen25VLVisionMLP`, `Qwen25VLVisionBlock` build the
     32-layer SigLIP-style vision tower. The block index check
