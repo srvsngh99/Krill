@@ -25,14 +25,23 @@ final class ReasoningParserTests: XCTestCase {
         XCTAssertNil(thinking)
     }
 
-    func testUnbalancedOpenTagIsLeftIntact() {
-        // Half-tag must not be silently truncated: clients see the
-        // raw output (and can complain) instead of an invisibly
-        // mangled payload.
+    func testUnbalancedOpenTagDropsTailAsReasoning() {
+        // max_tokens-truncated reasoning: model opened <think> but
+        // never reached </think> before the token budget ran out.
+        // The whole open-to-end span is reasoning and must not be
+        // shown to the client. The pre-tag prefix (typically empty
+        // for Qwen 3) is preserved.
         let raw = "<think>incomplete reasoning with no close..."
         let (visible, thinking) = ReasoningParser.strip(raw)
-        XCTAssertEqual(visible, raw)
-        XCTAssertNil(thinking)
+        XCTAssertEqual(visible, "")
+        XCTAssertEqual(thinking, "incomplete reasoning with no close...")
+    }
+
+    func testUnbalancedOpenTagPreservesPretagPrefix() {
+        let raw = "preamble text <think>truncated reasoning..."
+        let (visible, thinking) = ReasoningParser.strip(raw)
+        XCTAssertEqual(visible, "preamble text")
+        XCTAssertEqual(thinking, "truncated reasoning...")
     }
 
     func testThinkingTagTakesPrecedenceOverThink() {
@@ -51,5 +60,56 @@ final class ReasoningParserTests: XCTestCase {
         let (visible, thinking) = ReasoningParser.strip(raw)
         XCTAssertEqual(visible, "just text")
         XCTAssertNil(thinking, "Empty captured content must not leak as an empty `thinking` field")
+    }
+
+    // MARK: - Streaming filter
+
+    func testStreamingFilterEmitsOnlyPostReasoningTokens() {
+        let f = StreamingReasoningFilter()
+        var out = ""
+        for chunk in ["<think>", "let me reason", "</think>", "\n\n", "The answer ", "is 42."] {
+            out += f.consume(chunk)
+        }
+        out += f.finish()
+        XCTAssertEqual(out, "The answer is 42.",
+            "Reasoning chunks must not reach the streamed output")
+    }
+
+    func testStreamingFilterHoldsAmbiguousPrefixUntilDisambiguated() {
+        let f = StreamingReasoningFilter()
+        // `<` alone could be the start of a tag. The filter must
+        // hold it, NOT emit it immediately.
+        XCTAssertEqual(f.consume("<"), "")
+        XCTAssertEqual(f.consume("hello>"), "<hello>",
+            "Disambiguated to literal text once it cannot be an open tag")
+        XCTAssertEqual(f.consume(" world"), " world")
+        XCTAssertEqual(f.finish(), "")
+    }
+
+    func testStreamingFilterDropsTruncatedReasoning() {
+        // Mid-reasoning stream end: no </think> ever arrives.
+        // finish() must drop the partial reasoning rather than
+        // flushing it.
+        let f = StreamingReasoningFilter()
+        XCTAssertEqual(f.consume("<think>"), "")
+        XCTAssertEqual(f.consume("partial reasoning that never closed"), "")
+        XCTAssertEqual(f.finish(), "")
+    }
+
+    func testStreamingFilterPassesThroughWhenNoTagEverAppears() {
+        let f = StreamingReasoningFilter()
+        var out = ""
+        for chunk in ["Plain ", "answer", " streamed ", "in pieces."] {
+            out += f.consume(chunk)
+        }
+        out += f.finish()
+        XCTAssertEqual(out, "Plain answer streamed in pieces.")
+    }
+
+    func testStreamingFilterHandlesClosingTagSplitAcrossChunks() {
+        let f = StreamingReasoningFilter()
+        XCTAssertEqual(f.consume("<think>reasoning</thi"), "")
+        XCTAssertEqual(f.consume("nk>visible"), "visible")
+        XCTAssertEqual(f.finish(), "")
     }
 }

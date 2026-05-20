@@ -926,9 +926,20 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 contextLimit: contextLimit)
 
             let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
+            // Strip <think>/<thinking> from streamed chunks. Holds
+            // tokens only while an opening tag prefix is ambiguous;
+            // pure passthrough once outside any reasoning block.
+            let reasoningFilter = StreamingReasoningFilter()
 
             for await event in tokenStream {
                 if event.isEnd {
+                    let tail = reasoningFilter.finish()
+                    if !tail.isEmpty {
+                        let chunk = sseChunk(id: id, content: tail, finishReason: nil)
+                        var buf = ByteBufferAllocator().buffer(capacity: chunk.utf8.count)
+                        buf.writeString(chunk)
+                        self.writeOnLoop(ctx, .body(.byteBuffer(buf)))
+                    }
                     let chunk = sseChunk(id: id, content: nil, finishReason: "stop")
                     var buf = ByteBufferAllocator().buffer(capacity: chunk.utf8.count)
                     buf.writeString(chunk)
@@ -942,7 +953,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     break
                 }
 
-                let chunk = sseChunk(id: id, content: event.text, finishReason: nil)
+                let emit = reasoningFilter.consume(event.text)
+                if emit.isEmpty { continue }
+                let chunk = sseChunk(id: id, content: emit, finishReason: nil)
                 var buf = ByteBufferAllocator().buffer(capacity: chunk.utf8.count)
                 buf.writeString(chunk)
                 self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
@@ -1265,6 +1278,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             if request.stream {
                 var firstTokenTime: Double?
                 var generatedCount = 0
+                let reasoningFilter = StreamingReasoningFilter()
                 for await event in tokenStream {
                     if !event.isEnd && firstTokenTime == nil {
                         firstTokenTime = CFAbsoluteTimeGetCurrent()
@@ -1272,6 +1286,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     if !event.isEnd { generatedCount += 1 }
 
                     if event.isEnd {
+                        let tail = reasoningFilter.finish()
+                        if !tail.isEmpty {
+                            let escaped = escapeJSON(tail)
+                            let line = "{\"model\":\"\(modelName)\",\"message\":{\"role\":\"assistant\",\"content\":\"\(escaped)\"},\"done\":false}\n"
+                            var tbuf = ByteBufferAllocator().buffer(capacity: line.utf8.count)
+                            tbuf.writeString(line)
+                            self.writeOnLoop(ctx, .body(.byteBuffer(tbuf)), flush: true)
+                        }
                         let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
                         let stats = getStats()
                         let prefillNs = Int64((stats?.prefillTime ?? 0) * 1_000_000_000)
@@ -1298,8 +1320,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         break
                     }
 
+                    let emit = reasoningFilter.consume(event.text)
+                    if emit.isEmpty { continue }
                     // Fast path: build JSON string directly instead of JSONSerialization
-                    let escaped = escapeJSON(event.text)
+                    let escaped = escapeJSON(emit)
                     let line = "{\"model\":\"\(modelName)\",\"message\":{\"role\":\"assistant\",\"content\":\"\(escaped)\"},\"done\":false}\n"
                     var buf = ByteBufferAllocator().buffer(capacity: line.utf8.count)
                     buf.writeString(line)
@@ -1458,6 +1482,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             if request.stream {
                 var firstTokenTime: Double?
                 var generatedCount = 0
+                let reasoningFilter = StreamingReasoningFilter()
                 for await event in tokenStream {
                     if !event.isEnd && firstTokenTime == nil {
                         firstTokenTime = CFAbsoluteTimeGetCurrent()
@@ -1465,6 +1490,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     if !event.isEnd { generatedCount += 1 }
 
                     if event.isEnd {
+                        let tail = reasoningFilter.finish()
+                        if !tail.isEmpty {
+                            let escaped = escapeJSON(tail)
+                            let line = "{\"model\":\"\(modelName)\",\"response\":\"\(escaped)\",\"done\":false}\n"
+                            var tbuf = ByteBufferAllocator().buffer(capacity: line.utf8.count)
+                            tbuf.writeString(line)
+                            self.writeOnLoop(ctx, .body(.byteBuffer(tbuf)), flush: true)
+                        }
                         // Final chunk with Ollama-compatible timing fields
                         let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
                         let stats = getStats()
@@ -1492,8 +1525,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         break
                     }
 
+                    let emit = reasoningFilter.consume(event.text)
+                    if emit.isEmpty { continue }
                     // Fast path: build JSON string directly instead of JSONSerialization
-                    let escaped = escapeJSON(event.text)
+                    let escaped = escapeJSON(emit)
                     let line = "{\"model\":\"\(modelName)\",\"response\":\"\(escaped)\",\"done\":false}\n"
                     var buf = ByteBufferAllocator().buffer(capacity: line.utf8.count)
                     buf.writeString(line)
