@@ -117,6 +117,16 @@ private let aliases: [String: ResolvedModel] = [
         repo: "mlx-community/Qwen2.5-VL-32B-Instruct-4bit",
         name: "qwen2.5-vl-32b", family: .qwen25vl, params: "32B", quant: "4bit", context: 128000),
 
+    // Mixture-of-experts (WS6 foundation tier: family detection +
+    // clear rejection only; router + expert dispatch lands in
+    // follow-up PRs).
+    "mixtral-8x7b": ResolvedModel(
+        repo: "mlx-community/Mixtral-8x7B-Instruct-v0.1-4bit",
+        name: "mixtral-8x7b", family: .moe, params: "8x7B", quant: "4bit", context: 32768),
+    "qwen3-30b-a3b": ResolvedModel(
+        repo: "mlx-community/Qwen3-30B-A3B-4bit",
+        name: "qwen3-30b-a3b", family: .moe, params: "30B-A3B", quant: "4bit", context: 40960),
+
     // Mistral
     "mistral-7b": ResolvedModel(
         repo: "mlx-community/Mistral-7B-Instruct-v0.3-4bit",

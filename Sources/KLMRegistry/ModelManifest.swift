@@ -133,6 +133,16 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     /// mRoPE, and image preprocessing land in follow-up PRs (see
     /// docs/workstreams/WS5_SECOND_NATIVE_VISION_FAMILY.md).
     case qwen25vl = "qwen2_5_vl"
+    /// Mixture-of-experts text LMs. Architectural deltas vs the
+    /// dense families: each transformer block's MLP is replaced by
+    /// a router + N expert FFNs, where the router picks the top-K
+    /// experts per token. Initial members: Mixtral (`mixtral`,
+    /// `MixtralForCausalLM`) and Qwen 3 MoE (`qwen3_moe`,
+    /// `Qwen3MoeForCausalLM`). Foundation only in this build: the
+    /// loader rejects with a clear error before any weight load.
+    /// The router + expert dispatch lands in follow-up PRs (see
+    /// docs/workstreams/WS6_MOE_RUNTIME_SUPPORT.md).
+    case moe
 
     /// Detect model family from HuggingFace config.json's `architectures` field.
     public static func detect(from configJSON: [String: Any]) -> ModelFamily? {
@@ -156,6 +166,13 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         if archLower.contains("chatglm") || archLower.contains("glm") { return .glm }
         if archLower.contains("deepseek") { return .deepseek }
         if archLower.contains("llama") { return .llama }
+        // MoE arms are matched BEFORE the generic qwen / mistral
+        // arms so a Qwen 3 MoE or Mixtral checkpoint never silently
+        // routes to a dense text loader (which would either crash
+        // on the extra router/expert keys or run with garbage MLP
+        // weights). Order: specific-then-generic.
+        if archLower.contains("mixtral") { return .moe }
+        if archLower.contains("qwen3moe") || archLower.contains("qwen2moe") { return .moe }
         if archLower.contains("qwen2_5_vl") || archLower.contains("qwen2vl") { return .qwen25vl }
         if archLower.contains("qwen") { return .qwen }
         if archLower.contains("mistral") { return .mistral }
@@ -171,6 +188,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         case "gemma", "gemma2", "gemma3": return .gemma
         case "gemma4", "gemma4_text": return .gemma4
         case "qwen2_5_vl", "qwen2_vl": return .qwen25vl
+        case "mixtral", "qwen3_moe", "qwen2_moe": return .moe
         case "phi", "phi3": return .phi
         case "chatglm", "glm", "glm4_moe": return .glm
         case "deepseek_v3": return .deepseek
