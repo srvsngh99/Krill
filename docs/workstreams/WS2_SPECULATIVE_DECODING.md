@@ -24,17 +24,36 @@ Detailed usage and result: [../SPECULATIVE_DECODING.md](../SPECULATIVE_DECODING.
 
 ## What still does not pass
 
-The `text_decode_ratio >= 1.5x` strict gate. On the only target/draft
-pair available on the current build host (`llama-3.2-3b` /
-`llama-3.2-1b`, both 4-bit MLX), spec **regresses** decode tok/s versus
-the no-spec baseline (74.6 vs 104.3 tok/s, acceptance 0.47, K=2). Output
-sha256 is identical with and without spec, so the correctness contract
-is held; the throughput target is gated on larger target models and
-better-matched drafters. See `docs/SPECULATIVE_DECODING.md` for the
-table and the unlock plan.
+The `text_decode_ratio >= 1.5x` strict gate. Benchmarked on two target
+sizes (3B and 8B) on M-series 4-bit MLX with the smallest available
+mlx-community drafter (llama-3.2-1b):
 
-Strict gate stays advisory; release_candidate (>= 1.0x hard floor) is
-unchanged.
+| Target            | KrillLM no-spec | KrillLM spec | Ollama  |
+| ----------------- | --------------- | ------------ | ------- |
+| llama-3.2-3b      | 104.3 tok/s     | 74.6 tok/s   | 94.7    |
+| llama-3.1-8b      | 50.2 tok/s      | 40.9 tok/s   | 46.2    |
+
+Output sha256 is identical with and without spec on every pair
+(greedy parity verified); the throughput regression is a structural
+property of MLX batched-forward cost on this hardware. See
+`docs/SPECULATIVE_DECODING.md` for the derivation (verify is linear
+in K, so spec wins requires `expected_accepted > ~1.1 * K`, which we
+measure below; raising K only inflates verify cost without
+proportional gain).
+
+The three credible unlocks (all out of scope for this PR and the
+WS2 follow-ups that landed):
+
+1. Upstream mlx-swift kernel changes that make batched forward
+   sublinear in K.
+2. A ~70B target paired with a 1B draft (RAM-infeasible on
+   M-series at 4-bit, ~40 GB just for the target).
+3. Tree attention / Medusa-style multi-branch verify - several
+   weeks of work, custom attention masks, separate workstream.
+
+Strict gate stays advisory; release_candidate `>= 1.0x` hard floor is
+unaffected (KrillLM no-spec is 1.087-1.10x faster than Ollama on both
+3b and 8b targets).
 
 ## Goal
 
