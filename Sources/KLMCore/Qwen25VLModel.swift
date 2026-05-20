@@ -603,14 +603,19 @@ public class Qwen25VLVisionTower: Module {
 // MARK: - Image preprocessing
 
 /// Convert a normalized RGB pixel tensor `[H, W, 3]` (values in
-/// `[0, 1]`) into the `[1, T, H, W, C]` channels-last input shape
-/// that the Conv3d-based patch embedding consumes. The temporal
-/// axis is duplicated to `temporal_patch_size` so a single image
-/// drives the same code path as a video. Resizing to a multiple
-/// of (`patch_size * spatial_merge_size`) is the caller's
-/// responsibility. The helper expects a pre-resized image so the
-/// caller can choose its own resize backend (CoreGraphics on Mac,
-/// stb_image on Linux).
+/// `[0, 1]`) into the per-patch batched
+/// `[N_patches, T, patch_size, patch_size, C]` channels-last
+/// input shape that the Conv3d-based patch embedding consumes
+/// (per-patch batching matches the HF / mlx-vlm reference). The
+/// temporal axis is duplicated to `temporal_patch_size` so a
+/// single image drives the same code path as a video. Patches
+/// are produced in merge-block row-major order so the downstream
+/// merger fuses `spatial_merge_size^2` consecutive patches as a
+/// true 2D spatial block. Resizing to a multiple of (`patch_size
+/// * spatial_merge_size`) is the caller's responsibility. The
+/// helper expects a pre-resized image so the caller can choose
+/// its own resize backend (CoreGraphics on Mac, stb_image on
+/// Linux).
 public enum Qwen25VLImagePreprocessor {
     /// Mean for the Qwen 2.5-VL image normalization (CLIP defaults).
     public static let imageMean: [Float] = [0.48145466, 0.4578275, 0.40821073]

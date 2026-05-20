@@ -255,7 +255,7 @@ final class Qwen25VLNativeTests: XCTestCase {
         // Patch embedding (Conv3d): weight shape is the rank-5
         // `[embed_dim, T, ph, pw, in_chans]` layout that the
         // shipped mlx-community checkpoint uses. The shape is
-        // load-bearing — a Linear here would be rank 2 and would
+        // load-bearing: a Linear here would be rank 2 and would
         // not accept the checkpoint weight at safetensors load
         // time. Pin both the key and the shape.
         XCTAssertTrue(names.contains("patch_embed.proj.weight"),
