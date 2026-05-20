@@ -17,8 +17,36 @@ public final class KLMTokenizer: @unchecked Sendable {
             throw TokenizerError.missingFile("tokenizer.json", directory)
         }
 
-        // Load via swift-transformers AutoTokenizer
-        self.tokenizer = try await AutoTokenizer.from(modelFolder: directory)
+        // Load via swift-transformers AutoTokenizer. Some
+        // tokenizer_class values (e.g. XLMRobertaTokenizer used by
+        // BGE Reranker v2-m3) are not in swift-transformers'
+        // `knownTokenizers` registry; AutoTokenizer will throw
+        // `unsupportedTokenizer`. For these, fall back to the
+        // generic `PreTrainedTokenizer` which can drive the
+        // tokenizer.json directly: the tokenizer.json file is the
+        // universal HuggingFace format, so the BPE / SentencePiece
+        // models and pre/post processors it declares are enough to
+        // tokenize correctly without a model-specific wrapper.
+        do {
+            self.tokenizer = try await AutoTokenizer.from(modelFolder: directory)
+        } catch {
+            // swift-transformers' TokenizerError is an enum without
+            // a public Sendable error code; we cannot pattern-match
+            // its associated value cleanly, so dispatch on the
+            // error description. Any tokenizer that the
+            // `knownTokenizers` registry rejects (e.g.
+            // XLMRobertaTokenizer for BGE Reranker) falls into the
+            // generic PreTrainedTokenizer path.
+            let desc = String(describing: error)
+            if desc.contains("unsupportedTokenizer")
+                || desc.contains("missingTokenizerClassInConfig")
+            {
+                self.tokenizer = try await Self.loadAsPreTrainedTokenizer(
+                    directory: directory)
+            } else {
+                throw error
+            }
+        }
 
         // Resolve EOS token ID
         if let eosId = self.tokenizer.eosTokenId {
@@ -29,6 +57,104 @@ public final class KLMTokenizer: @unchecked Sendable {
         }
     }
 
+    /// Stage a shadow directory containing tokenizer.json from the
+    /// real model dir plus a tokenizer_config.json whose
+    /// `tokenizer_class` field has been overridden to a value
+    /// swift-transformers' `knownTokenizers` registry recognizes
+    /// (`PreTrainedTokenizer`, backed by BPETokenizer). Loads
+    /// AutoTokenizer from the shadow dir, which then reads the
+    /// override and dispatches to the generic path.
+    ///
+    /// The override is safe for cross-encoder rerankers
+    /// (XLMRobertaTokenizer) because the actual tokenization
+    /// algorithm is fully described by the embedded
+    /// `tokenizer.json` model + pre/post processors; the
+    /// `tokenizer_class` field is just a dispatch hint, not a
+    /// behavior specifier.
+    private static func loadAsPreTrainedTokenizer(
+        directory: URL
+    ) async throws -> Tokenizer {
+        let dataURL = directory.appendingPathComponent("tokenizer.json")
+        guard FileManager.default.fileExists(atPath: dataURL.path) else {
+            throw TokenizerError.missingFile("tokenizer.json", directory)
+        }
+        // Stage a temp directory we can drop in place of the real
+        // model dir. AutoTokenizer reads tokenizer_config.json and
+        // tokenizer.json from a single directory; we link
+        // tokenizer.json (huge file) and write a modified
+        // tokenizer_config.json next to it.
+        let stagingDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-tokenizer-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: stagingDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: stagingDir)
+        }
+
+        // Symlink tokenizer.json so we do not duplicate a 17MB+ file.
+        let stagedData = stagingDir.appendingPathComponent("tokenizer.json")
+        try FileManager.default.createSymbolicLink(
+            at: stagedData, withDestinationURL: dataURL)
+
+        // Copy + override tokenizer_config.json. If the original is
+        // missing entirely we write a minimal config with just the
+        // overridden class.
+        let realCfg = directory.appendingPathComponent("tokenizer_config.json")
+        var configDict: [String: Any] = [:]
+        if FileManager.default.fileExists(atPath: realCfg.path),
+           let cfgData = try? Data(contentsOf: realCfg),
+           let parsed = try? JSONSerialization.jsonObject(with: cfgData) as? [String: Any] {
+            configDict = parsed
+        }
+        // Pick the override based on tokenizer.json's `model.type`.
+        // swift-transformers' `knownTokenizers` registry maps:
+        //   - `PreTrainedTokenizer` -> BPETokenizer
+        //     (XLM-RoBERTa is NOT BPE, so this would crash with
+        //     "requires merges").
+        //   - `T5Tokenizer` -> UnigramTokenizer
+        //     (XLM-RoBERTa, BGE Reranker, all SentencePiece Unigram
+        //     models).
+        //   - `BertTokenizer` -> BertTokenizer (WordPiece).
+        let dataData = try Data(contentsOf: dataURL)
+        var modelKind: String? = nil
+        if let dataDict = try? JSONSerialization.jsonObject(
+            with: dataData) as? [String: Any],
+           let model = dataDict["model"] as? [String: Any] {
+            modelKind = model["type"] as? String
+        }
+        let overrideClass: String
+        switch modelKind {
+        case "Unigram":
+            overrideClass = "T5Tokenizer"
+        case "WordPiece":
+            overrideClass = "BertTokenizer"
+        case "BPE":
+            overrideClass = "PreTrainedTokenizer"
+        default:
+            overrideClass = "PreTrainedTokenizer"
+        }
+        configDict["tokenizer_class"] = overrideClass
+        let outData = try JSONSerialization.data(
+            withJSONObject: configDict, options: [])
+        try outData.write(
+            to: stagingDir.appendingPathComponent("tokenizer_config.json"))
+
+        // Symlink the rest of the side files AutoTokenizer may
+        // read (special_tokens_map.json, config.json - the latter
+        // is consulted for fallback BOS/EOS/PAD ids when the
+        // tokenizer config does not declare them).
+        for sideFile in ["special_tokens_map.json", "config.json"] {
+            let src = directory.appendingPathComponent(sideFile)
+            if FileManager.default.fileExists(atPath: src.path) {
+                try FileManager.default.createSymbolicLink(
+                    at: stagingDir.appendingPathComponent(sideFile),
+                    withDestinationURL: src)
+            }
+        }
+
+        return try await AutoTokenizer.from(modelFolder: stagingDir)
+    }
+
     /// The BOS token ID (beginning of sequence).
     public var bosTokenId: Int {
         tokenizer.bosTokenId ?? 128000
@@ -37,6 +163,82 @@ public final class KLMTokenizer: @unchecked Sendable {
     /// Encode a string to token IDs.
     public func encode(_ text: String) -> [Int] {
         tokenizer.encode(text: text)
+    }
+
+    /// Encode a (query, document) pair for a cross-encoder reranker.
+    ///
+    /// Cross-encoders consume the two strings as a single sequence with
+    /// special-token separators between them. Two layouts cover all
+    /// rerankers KrillLM currently ships:
+    ///
+    /// - XLMRoberta-class (BGE Reranker, etc.):
+    ///   `<s> query </s></s> document </s>`
+    /// - Bert-class:
+    ///   `[CLS] query [SEP] document [SEP]`
+    ///
+    /// The tokenizer's `applyChatTemplate` does NOT apply here (rerankers
+    /// have no chat template); the tokenizer's per-string `encode` adds
+    /// its model-default leading/trailing specials. We use that as a
+    /// building block: encode each side separately, strip the trailing
+    /// special added to the LEFT side (it would land between the two
+    /// halves), insert the pair separator, and let the RIGHT side carry
+    /// the final special. The result matches the HuggingFace
+    /// `tokenizer(query, document)` pair-encoding shape.
+    public func encodePair(query: String, document: String) -> [Int] {
+        // Per-side encodes carry the model's BOS and EOS specials.
+        let qIds = tokenizer.encode(text: query)
+        let dIds = tokenizer.encode(text: document)
+
+        // Infer the bos/eos ids from what the tokenizer ACTUALLY
+        // emitted. Asking the wrapper's `tokenizer.bosTokenId` is
+        // unreliable for cross-encoder rerankers: the swift-
+        // transformers AutoTokenizer dispatch sometimes loads them
+        // through a path that does not expose BOS (e.g. T5
+        // override for XLM-Roberta Unigram models), and our own
+        // fallback would return Llama's BOS. Reading the first
+        // and last tokens of an actual encode is the source of
+        // truth.
+        guard let firstQ = qIds.first, let lastQ = qIds.last,
+              let firstD = dIds.first, let lastD = dIds.last else {
+            return qIds + dIds
+        }
+        // Common cross-encoder shape: bos at index 0, eos at last
+        // index, with both halves wrapped the same way.
+        // - XLM-Roberta: bos=<s>=0, eos=</s>=2 (distinct).
+        // - Bert: cls=[CLS]=101 == "bos", sep=[SEP]=102 == "eos"
+        //   (both are non-overlapping special-token IDs).
+        // We treat firstQ as the prepended BOS and lastQ as the
+        // appended EOS purely structurally.
+        let bos = firstQ
+        let eos = lastQ
+        let _ = firstD // (referenced via dTail strip below)
+        let _ = lastD
+
+        // Drop the trailing EOS on the query side (we will re-add
+        // a tailored separator below). Keep the leading BOS.
+        var qHead = qIds
+        if qHead.last == eos {
+            qHead.removeLast()
+        }
+
+        // Drop the leading BOS on the document side (it would
+        // appear mid-sequence after the separator).
+        var dTail = dIds
+        if dTail.first == bos {
+            dTail.removeFirst()
+        }
+
+        // XLMRoberta uses `</s></s>` between halves; Bert uses a
+        // single `[SEP]`. Distinguish by whether BOS == EOS - in
+        // Bert-class tokenizers they are different IDs but both
+        // are non-zero specials; in XLM-Roberta bos and eos are
+        // also different. So we use a more reliable heuristic:
+        // XLM-Roberta uses very small special-token ids (0/2),
+        // while Bert uses larger ids (101/102).
+        let isXLMRoberta = bos < 10 && eos < 10
+        let separator: [Int] = isXLMRoberta ? [eos, eos] : [eos]
+
+        return qHead + separator + dTail
     }
 
     /// Encode text that already includes special tokens (e.g., chat template output).
