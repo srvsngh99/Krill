@@ -45,7 +45,7 @@ Output sha256 is identical with and without spec on every pair
 out of reach on every prompt and K setting tested, including the
 high-acceptance 0.73 run. See `docs/SPECULATIVE_DECODING.md` for
 the break-even framework that maps the observed gap to per-round
-overhead (beta > 1 in the model) rather than insufficient
+overhead (alpha + beta > 0.67 in the model, with the fitted beta ~ 0.78 and alpha ~ 0.125) rather than insufficient
 acceptance.
 
 Cost model fit to the 8B / 1B K=5 acceptance-0.73 run gives

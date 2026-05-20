@@ -186,7 +186,7 @@ on M-series with the model pairs currently available in mlx-community
 0.73 run above. Below we fit a cost model to the measured numbers
 and show that even at infinite K and 100% acceptance, the achievable
 spec speedup on this engine on this hardware is bounded at roughly
-1.28x - well short of 1.5x.
+1.10x - well short of 1.5x.
 
 Break-even framework (per round, all costs in "cost-per-target-token"
 units):
