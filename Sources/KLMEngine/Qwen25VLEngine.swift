@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// Compatible-fallback runtime for Qwen 2.5-VL. Spawns a long-lived
 /// Python sidecar (`tools/qwen25vl_bridge.py` running under
@@ -51,6 +56,14 @@ public final class Qwen25VLEngine: @unchecked Sendable {
     private var loadedDir: URL?
     private var nextRequestId: Int = 1
     private let lock = NSLock()
+    /// Held for the entire duration of a `generate` call (write
+    /// request + read response). The sidecar's stdin/stdout are a
+    /// single half-duplex pipe; interleaving two concurrent
+    /// requests would corrupt both. KLMServer's `genQueue` also
+    /// serializes at the HTTP layer, but defending here too lets
+    /// other callers (tests, CLI) be safe without re-implementing
+    /// that queue.
+    private let generateLock = NSLock()
 
     public init() {}
 
@@ -120,9 +133,13 @@ public final class Qwen25VLEngine: @unchecked Sendable {
     }
 
     /// Send one (prompt, image) request and read until `done`.
+    /// Serialized via `generateLock` so concurrent callers do not
+    /// interleave writes to the sidecar's half-duplex stdin/stdout.
     public func generate(
         prompt: String, imagePath: String?, maxTokens: Int = 256
     ) throws -> GenerateResult {
+        generateLock.lock()
+        defer { generateLock.unlock() }
         lock.lock()
         guard let stdin = self.stdin, let reader = self.stdoutReader else {
             lock.unlock()
@@ -218,10 +235,10 @@ public enum VLMError: Error, CustomStringConvertible {
     }
 }
 
-/// Minimal line-buffered reader over a `FileHandle`. The
-/// `FileHandle.read(upToCount:)` API blocks indefinitely; we hold
-/// a small in-memory buffer and slice newline-delimited frames
-/// out of it.
+/// Minimal line-buffered reader over a `FileHandle`. Uses
+/// `poll(2)` to enforce a per-call deadline so an alive-but-silent
+/// bridge (e.g. an mlx-vlm deadlock) does not hang the server's
+/// generation queue indefinitely.
 final class LineReader {
     private let handle: FileHandle
     private var buffer: Data = Data()
@@ -230,17 +247,38 @@ final class LineReader {
         self.handle = handle
     }
 
-    /// Read one `\n`-terminated line. Returns nil on EOF. The
-    /// `timeout` is best-effort: we issue blocking reads and let
-    /// the caller's overall deadline drive cancellation. A real
-    /// timeout would need POSIX `poll(2)` or a select loop and is
-    /// not needed today because the bridge is fail-fast.
+    /// Read one `\n`-terminated line. Returns nil on EOF.
+    /// Throws `VLMError.bridgeCrashed` if no newline arrives
+    /// within `timeout` seconds (the bridge is alive but silent).
     func readLine(timeout: TimeInterval) throws -> String? {
+        let deadline = Date().addingTimeInterval(timeout)
         while true {
             if let nlIdx = buffer.firstIndex(of: 0x0a) {
                 let lineData = buffer[..<nlIdx]
                 buffer.removeSubrange(0 ..< (nlIdx + 1))
                 return String(data: Data(lineData), encoding: .utf8) ?? ""
+            }
+            // Block until the fd is readable OR the deadline
+            // expires. `poll(2)` is preferred over `select(2)`
+            // (no fd_set size cap) and is available on macOS.
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining <= 0 {
+                throw VLMError.bridgeCrashed(
+                    "bridge produced no output within \(Int(timeout))s")
+            }
+            var pfd = pollfd(
+                fd: handle.fileDescriptor,
+                events: Int16(POLLIN), revents: 0)
+            let timeoutMs = Int32(min(remaining * 1000, Double(Int32.max)))
+            let rc = poll(&pfd, 1, timeoutMs)
+            if rc == 0 {
+                throw VLMError.bridgeCrashed(
+                    "bridge produced no output within \(Int(timeout))s")
+            }
+            if rc < 0 {
+                if errno == EINTR { continue }
+                throw VLMError.bridgeCrashed(
+                    "poll(2) on bridge stdout failed: errno=\(errno)")
             }
             let chunk = handle.availableData
             if chunk.isEmpty {

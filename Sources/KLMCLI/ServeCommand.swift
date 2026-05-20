@@ -95,8 +95,17 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        // VLM sidecar (Qwen 2.5-VL bridge). Lazy-loaded on first
+        // VL chat request; we instantiate the engine up front so a
+        // signal handler can shut it down on SIGINT (otherwise the
+        // Python child process becomes orphaned, holding the GPU
+        // and the model weights resident).
+        let vlmEngine = Qwen25VLEngine()
+        installVLMSidecarSignalHandler(vlmEngine)
+
         let server = KLMServer(host: host, port: port, compat: compatMode,
                                engine: engine, registry: registry,
+                               vlmEngine: vlmEngine,
                                corsOrigins: config.origins,
                                keepAliveDefaultSeconds:
                                 KeepAliveParse.duration(config.keepAlive) ?? 300,
@@ -105,4 +114,47 @@ struct ServeCommand: AsyncParsableCommand {
                                maxQueue: config.maxQueue)
         try await server.start()
     }
+}
+
+/// Hook SIGINT / SIGTERM so the VLM Python sidecar (if any) is
+/// terminated before the krillm process exits. Without this the
+/// child Python process becomes an orphan on Ctrl+C, holding the
+/// GPU and the mlx-vlm-loaded model in memory until manually
+/// killed. The sidecar's own stdin EOF would also tear it down,
+/// but only AFTER mlx-vlm's blocking generate returns - which can
+/// be many seconds for a large prompt.
+///
+/// Uses DispatchSource so the handler runs on a dedicated queue
+/// (signal handlers cannot acquire NSLock safely from the signal
+/// context). The default SIGINT behavior (terminate the process)
+/// is preserved via `exit(0)` after shutdown.
+private nonisolated(unsafe) var vlmShutdownHandler: (() -> Void)?
+
+private func installVLMSidecarSignalHandler(_ vlm: Qwen25VLEngine) {
+    vlmShutdownHandler = { [weak vlm] in
+        try? vlm?.shutdown()
+    }
+    for sig in [SIGINT, SIGTERM] {
+        signal(sig, SIG_IGN)
+        let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+        src.setEventHandler {
+            vlmShutdownHandler?()
+            exit(0)
+        }
+        src.resume()
+        // Hold the source for the lifetime of the process via a
+        // singleton box; otherwise DispatchSource cancels itself
+        // when the local goes out of scope.
+        VLMSignalSourceBox.shared.sources.append(src)
+    }
+}
+
+/// Singleton box that retains the DispatchSource instances for the
+/// lifetime of the process. DispatchSource cancels itself when
+/// released, so we cannot let the locals fall out of scope at the
+/// end of `installVLMSidecarSignalHandler`.
+private final class VLMSignalSourceBox: @unchecked Sendable {
+    static let shared = VLMSignalSourceBox()
+    var sources: [DispatchSourceSignal] = []
+    private init() {}
 }

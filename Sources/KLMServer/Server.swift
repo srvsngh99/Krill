@@ -514,8 +514,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         if let model = request.requestedModel,
            let manifest = registry.getModel(model),
            manifest.family == .qwen25vl {
-            handleVLMChatOpenAI(
-                context: context, request: request, manifest: manifest)
+            handleVLMChat(
+                context: context, request: request,
+                manifest: manifest, style: .openAI)
             return
         }
 
@@ -1212,8 +1213,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         if let model = request.requestedModel,
            let manifest = registry.getModel(model),
            manifest.family == .qwen25vl {
-            handleVLMChatOpenAI(
-                context: context, request: request, manifest: manifest)
+            handleVLMChat(
+                context: context, request: request,
+                manifest: manifest, style: .ollama)
             return
         }
 
@@ -1634,10 +1636,17 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     // MARK: - VLM: bridge-backed multimodal chat (Qwen 2.5-VL)
 
-    /// Handle an OpenAI-style chat completion against a Qwen 2.5-VL
-    /// manifest by routing through the Python sidecar
-    /// (`Qwen25VLEngine`). This is the compatible-fallback runtime;
-    /// the native Swift+MLX vision tower is a follow-up.
+    /// Response shape selector for VLM chat completions.
+    private enum VLMResponseStyle {
+        case openAI  // OpenAI /v1/chat/completions: `{id, object, choices, ...}`
+        case ollama  // Ollama /api/chat: `{model, message:{role,content}, done, ...}`
+    }
+
+    /// Handle a chat completion against a Qwen 2.5-VL manifest by
+    /// routing through the Python sidecar (`Qwen25VLEngine`). The
+    /// `style` parameter selects which response shape to emit so
+    /// /v1/chat/completions clients see OpenAI shape and /api/chat
+    /// clients see Ollama shape (NDJSON for streaming).
     ///
     /// The request flow is intentionally narrower than the standard
     /// chat completion path:
@@ -1647,14 +1656,15 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     /// - Sampling parameters (temperature / top-p / penalties) are
     ///   ignored - the bridge runs whatever its mlx-vlm `generate`
     ///   default is. Documented in the workstream doc.
-    /// - Streaming (`request.stream == true`) is supported but
-    ///   degenerates to a single content chunk plus the `[DONE]`
-    ///   sentinel, because the underlying mlx-vlm 0.5.0 generate
-    ///   API is not token-streaming today.
-    private func handleVLMChatOpenAI(
+    /// - Streaming (`request.stream == true`) degenerates to a
+    ///   single content chunk plus a terminating chunk, because
+    ///   the underlying mlx-vlm 0.5.0 generate API is not
+    ///   token-streaming today.
+    private func handleVLMChat(
         context: ChannelHandlerContext,
         request: ServerChatRequest,
-        manifest: ModelManifest
+        manifest: ModelManifest,
+        style: VLMResponseStyle
     ) {
         // Decode the optional image attachment to a temp file the
         // bridge can `open()` directly.
@@ -1703,34 +1713,55 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     prompt: promptText,
                     imagePath: decoded?.imagePath,
                     maxTokens: maxTokens)
+                let totalNs = Int64(
+                    (CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
                 if wantStream {
-                    self.emitVLMStreamOpenAI(
-                        ctx: ctx, modelName: modelName, text: result.text)
+                    self.emitVLMStream(
+                        ctx: ctx, modelName: modelName,
+                        text: result.text, style: style,
+                        promptTokens: result.promptTokens,
+                        completionTokens: result.completionTokens,
+                        totalNs: totalNs)
                 } else {
-                    let totalNs = Int64(
-                        (CFAbsoluteTimeGetCurrent() - started)
-                            * 1_000_000_000)
-                    let response: [String: Any] = [
-                        "id": "chatcmpl-\(UUID().uuidString.prefix(8))",
-                        "object": "chat.completion",
-                        "created": Int(Date().timeIntervalSince1970),
-                        "model": modelName,
-                        "choices": [[
-                            "index": 0,
+                    let response: [String: Any]
+                    switch style {
+                    case .openAI:
+                        response = [
+                            "id": "chatcmpl-\(UUID().uuidString.prefix(8))",
+                            "object": "chat.completion",
+                            "created": Int(Date().timeIntervalSince1970),
+                            "model": modelName,
+                            "choices": [[
+                                "index": 0,
+                                "message": [
+                                    "role": "assistant",
+                                    "content": result.text,
+                                ],
+                                "finish_reason": "stop",
+                            ]],
+                            "usage": [
+                                "prompt_tokens": result.promptTokens,
+                                "completion_tokens": result.completionTokens,
+                                "total_tokens": result.promptTokens
+                                    + result.completionTokens,
+                            ],
+                            "total_duration": totalNs,
+                        ]
+                    case .ollama:
+                        response = [
+                            "model": modelName,
+                            "created_at": ISO8601DateFormatter().string(
+                                from: Date()),
                             "message": [
                                 "role": "assistant",
                                 "content": result.text,
                             ],
-                            "finish_reason": "stop",
-                        ]],
-                        "usage": [
-                            "prompt_tokens": result.promptTokens,
-                            "completion_tokens": result.completionTokens,
-                            "total_tokens": result.promptTokens
-                                + result.completionTokens,
-                        ],
-                        "total_duration": totalNs,
-                    ]
+                            "done": true,
+                            "total_duration": totalNs,
+                            "prompt_eval_count": result.promptTokens,
+                            "eval_count": result.completionTokens,
+                        ]
+                    }
                     self.sendJSONOnLoop(
                         context: ctx, eventLoop: eventLoop,
                         status: .ok, body: response)
@@ -1778,49 +1809,89 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return userTurns.joined(separator: "\n")
     }
 
-    /// Emit a chat-completion-shaped SSE stream consisting of a
-    /// single content chunk plus `[DONE]`. mlx-vlm 0.5.0 does not
-    /// expose a token-streaming API we can drive from a sidecar
-    /// without re-implementing its decode loop in Python; degenerate
-    /// streaming is the simplest forward-compatible shape.
-    private func emitVLMStreamOpenAI(
-        ctx: ChannelHandlerContext, modelName: String, text: String
+    /// Emit a chat-completion stream consisting of a single content
+    /// chunk plus a terminating chunk, in the shape selected by
+    /// `style`. mlx-vlm 0.5.0 does not expose a token-streaming
+    /// API the sidecar can drive without re-implementing the
+    /// decode loop in Python; degenerate streaming is the
+    /// simplest forward-compatible shape.
+    ///
+    /// - OpenAI: SSE `data: <json>\n\n` framing with
+    ///   `chat.completion.chunk` objects ending in `data: [DONE]`.
+    /// - Ollama: newline-delimited JSON (`<json>\n` per frame),
+    ///   `{model, message:{role,content}, done}` objects with
+    ///   `done: true` and timing fields on the final frame.
+    private func emitVLMStream(
+        ctx: ChannelHandlerContext, modelName: String, text: String,
+        style: VLMResponseStyle,
+        promptTokens: Int, completionTokens: Int, totalNs: Int64
     ) {
-        var headers = HTTPHeaders()
-        headers.add(name: "Content-Type", value: "text/event-stream")
-        headers.add(name: "Cache-Control", value: "no-cache")
-        headers.add(name: "Connection", value: "keep-alive")
-        for (k, v) in corsHeaders() { headers.add(name: k, value: v) }
-        let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
-        writeOnLoop(ctx, .head(head))
-
-        let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
-        let contentChunk: [String: Any] = [
-            "id": id,
-            "object": "chat.completion.chunk",
-            "created": Int(Date().timeIntervalSince1970),
-            "model": modelName,
-            "choices": [[
-                "index": 0,
-                "delta": ["role": "assistant", "content": text],
-            ]],
-        ]
-        writeSSEJSON(ctx, contentChunk)
-
-        let finalChunk: [String: Any] = [
-            "id": id,
-            "object": "chat.completion.chunk",
-            "created": Int(Date().timeIntervalSince1970),
-            "model": modelName,
-            "choices": [[
-                "index": 0,
-                "delta": [String: Any](),
-                "finish_reason": "stop",
-            ]],
-        ]
-        writeSSEJSON(ctx, finalChunk)
-        writeRaw(ctx, "data: [DONE]\n\n")
-        writeOnLoop(ctx, .end(nil), flush: true)
+        switch style {
+        case .openAI:
+            var headers = HTTPHeaders()
+            headers.add(name: "Content-Type", value: "text/event-stream")
+            headers.add(name: "Cache-Control", value: "no-cache")
+            headers.add(name: "Connection", value: "keep-alive")
+            for (k, v) in corsHeaders() { headers.add(name: k, value: v) }
+            writeOnLoop(ctx, .head(HTTPResponseHead(
+                version: .http1_1, status: .ok, headers: headers)))
+            let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
+            let contentChunk: [String: Any] = [
+                "id": id,
+                "object": "chat.completion.chunk",
+                "created": Int(Date().timeIntervalSince1970),
+                "model": modelName,
+                "choices": [[
+                    "index": 0,
+                    "delta": ["role": "assistant", "content": text],
+                ]],
+            ]
+            writeSSEJSON(ctx, contentChunk)
+            let finalChunk: [String: Any] = [
+                "id": id,
+                "object": "chat.completion.chunk",
+                "created": Int(Date().timeIntervalSince1970),
+                "model": modelName,
+                "choices": [[
+                    "index": 0,
+                    "delta": [String: Any](),
+                    "finish_reason": "stop",
+                ]],
+            ]
+            writeSSEJSON(ctx, finalChunk)
+            writeRaw(ctx, "data: [DONE]\n\n")
+            writeOnLoop(ctx, .end(nil), flush: true)
+        case .ollama:
+            var headers = HTTPHeaders()
+            headers.add(name: "Content-Type", value: "application/x-ndjson")
+            headers.add(name: "Cache-Control", value: "no-cache")
+            headers.add(name: "Connection", value: "keep-alive")
+            for (k, v) in corsHeaders() { headers.add(name: k, value: v) }
+            writeOnLoop(ctx, .head(HTTPResponseHead(
+                version: .http1_1, status: .ok, headers: headers)))
+            let createdAt = ISO8601DateFormatter().string(from: Date())
+            let contentChunk: [String: Any] = [
+                "model": modelName,
+                "created_at": createdAt,
+                "message": [
+                    "role": "assistant",
+                    "content": text,
+                ],
+                "done": false,
+            ]
+            writeNDJSON(ctx, contentChunk)
+            let finalChunk: [String: Any] = [
+                "model": modelName,
+                "created_at": ISO8601DateFormatter().string(from: Date()),
+                "message": ["role": "assistant", "content": ""],
+                "done": true,
+                "total_duration": totalNs,
+                "prompt_eval_count": promptTokens,
+                "eval_count": completionTokens,
+            ]
+            writeNDJSON(ctx, finalChunk)
+            writeOnLoop(ctx, .end(nil), flush: true)
+        }
     }
 
     // MARK: - Reranking: POST /v1/rerank
