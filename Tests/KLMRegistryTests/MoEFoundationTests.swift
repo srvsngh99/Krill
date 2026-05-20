@@ -85,4 +85,107 @@ final class MoEFoundationTests: XCTestCase {
         // clients can pin it.
         XCTAssertEqual(ModelFamily.moe.rawValue, "moe")
     }
+
+    // MARK: - Native MoE dispatch helper (WS6 runtime)
+
+    /// `nativeMoEDispatchSupported(at:)` decides at request time
+    /// whether an MoE manifest can go through the native
+    /// Swift+MLX runtime or must use the Python sidecar bridge.
+    /// The server's MoE dispatch uses this; the tests pin the
+    /// contract so the bridge-fallback path cannot silently take
+    /// over for Qwen 3 MoE, and the native path cannot silently
+    /// claim Mixtral.
+    private func writeConfig(_ json: [String: Any]) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-moe-native-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(withJSONObject: json)
+        try data.write(to: dir.appendingPathComponent("config.json"))
+        return dir
+    }
+
+    /// Scoped env-var setter so the test process restores the prior
+    /// value after the assertion block, even on failure.
+    private func withEnv(_ key: String, _ value: String?, _ body: () throws -> Void) rethrows {
+        let prior = ProcessInfo.processInfo.environment[key]
+        if let value {
+            setenv(key, value, 1)
+        } else {
+            unsetenv(key)
+        }
+        defer {
+            if let prior {
+                setenv(key, prior, 1)
+            } else {
+                unsetenv(key)
+            }
+        }
+        try body()
+    }
+
+    func testNativeDispatchSupportedForQwen3MoEWhenOptedIn() throws {
+        let dir = try writeConfig([
+            "architectures": ["Qwen3MoeForCausalLM"],
+            "model_type": "qwen3_moe",
+        ])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try withEnv("KRILL_NATIVE_MOE", "1") {
+            XCTAssertTrue(nativeMoEDispatchSupported(at: dir),
+                "Qwen 3 MoE has a native runtime in this build; with "
+                + "KRILL_NATIVE_MOE=1 the helper must claim native support")
+        }
+    }
+
+    func testNativeDispatchOptInGateIsHonored() throws {
+        // Without the opt-in env var, the helper returns false
+        // even for Qwen 3 MoE so the server keeps routing to the
+        // bridge by default. Pins the gate so the default cannot
+        // silently flip.
+        let dir = try writeConfig([
+            "architectures": ["Qwen3MoeForCausalLM"],
+            "model_type": "qwen3_moe",
+        ])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try withEnv("KRILL_NATIVE_MOE", nil) {
+            XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
+                "Default (no KRILL_NATIVE_MOE) must route MoE through "
+                + "the bridge; native dispatch is opt-in until the "
+                + "scatter optimization lands")
+        }
+    }
+
+    func testNativeDispatchNotSupportedForMixtral() throws {
+        let dir = try writeConfig([
+            "architectures": ["MixtralForCausalLM"],
+            "model_type": "mixtral",
+        ])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try withEnv("KRILL_NATIVE_MOE", "1") {
+            XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
+                "Mixtral has no native runtime yet; must use the bridge "
+                + "even with the opt-in flag set")
+        }
+    }
+
+    func testNativeDispatchNotSupportedForOLMoE() throws {
+        let dir = try writeConfig([
+            "architectures": ["OlmoeForCausalLM"],
+            "model_type": "olmoe",
+        ])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try withEnv("KRILL_NATIVE_MOE", "1") {
+            XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
+                "OLMoE has no native runtime yet; must use the bridge")
+        }
+    }
+
+    func testNativeDispatchReturnsFalseForMissingConfig() {
+        // A directory with no config.json must NOT claim native
+        // support — the caller (server) will fall back to the
+        // bridge, which emits a clearer error than a dense loader
+        // crashing on missing safetensors.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-moe-missing-\(UUID().uuidString)")
+        XCTAssertFalse(nativeMoEDispatchSupported(at: dir))
+    }
 }

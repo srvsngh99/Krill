@@ -541,9 +541,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        // Route MoE family through the dedicated MoE handler
-        // (compatible_fallback tier via mlx-lm). MoE manifests
-        // refuse images: the bridge is text-only.
+        // Route MoE family through the dedicated MoE bridge handler
+        // (compatible_fallback tier via mlx-lm) UNLESS the underlying
+        // checkpoint has a native Swift+MLX runtime in this build
+        // (today: Qwen 3 MoE). Native MoE manifests fall through to
+        // the dense `engine.generate` path below. MoE manifests
+        // refuse images either way: MoE is text-only.
         if let model = request.requestedModel,
            let manifest = registry.getModel(model),
            manifest.family == .moe {
@@ -554,10 +557,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 ])
                 return
             }
-            handleMoEChat(
-                context: context, request: request,
-                manifest: manifest, style: .openAI)
-            return
+            let dir = registry.modelPath(manifest.name)
+            if !nativeMoEDispatchSupported(at: dir) {
+                handleMoEChat(
+                    context: context, request: request,
+                    manifest: manifest, style: .openAI)
+                return
+            }
+            // Native MoE: fall through to normal dense engine flow.
         }
 
         // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
@@ -1277,10 +1284,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 ])
                 return
             }
-            handleMoEChat(
-                context: context, request: request,
-                manifest: manifest, style: .ollama)
-            return
+            let dir = registry.modelPath(manifest.name)
+            if !nativeMoEDispatchSupported(at: dir) {
+                handleMoEChat(
+                    context: context, request: request,
+                    manifest: manifest, style: .ollama)
+                return
+            }
+            // Native MoE: fall through to normal dense engine flow.
         }
 
         // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.

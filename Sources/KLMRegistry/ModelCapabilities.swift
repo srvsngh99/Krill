@@ -173,6 +173,46 @@ public enum ModelCapabilities {
     }
 }
 
+/// Inspect a model directory's config.json to decide whether the
+/// MoE family has a native Swift+MLX runtime in this build, or
+/// must route through the Python sidecar bridge.
+///
+/// The native MoE runtime currently supports Qwen 3 MoE
+/// (`Qwen3MoeForCausalLM` / `model_type: qwen3_moe`). Mixtral,
+/// Qwen2-MoE, OLMoE, and DeepSeek-V3 remain on the bridge until
+/// their native ports land in follow-up WS6 PRs.
+///
+/// Native dispatch is gated behind the `KRILL_NATIVE_MOE=1`
+/// environment variable for the WS6 runtime PR: the native
+/// forward is correctness-first and evaluates every expert on
+/// every token (16x the necessary compute on Qwen3-30B-A3B's
+/// 128-expert / top-8 shape). Until the scatter dispatch lands,
+/// the default routes through the Python bridge so existing users
+/// keep mlx-lm throughput. Setting `KRILL_NATIVE_MOE=1` opts in.
+///
+/// Returns false (route through bridge) when the directory has no
+/// readable config.json — the dense loader would fail anyway, and
+/// the bridge handler emits a clearer error for that case.
+public func nativeMoEDispatchSupported(at directory: URL) -> Bool {
+    guard ProcessInfo.processInfo.environment["KRILL_NATIVE_MOE"] == "1" else {
+        return false
+    }
+    let configURL = directory.appendingPathComponent("config.json")
+    guard let data = try? Data(contentsOf: configURL),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+        return false
+    }
+    let modelType = (json["model_type"] as? String)?.lowercased() ?? ""
+    if modelType == "qwen3_moe" { return true }
+    let architectures = (json["architectures"] as? [String]) ?? []
+    for arch in architectures {
+        let a = arch.lowercased()
+        if a.contains("qwen3moe") || a.contains("qwen3_moe") { return true }
+    }
+    return false
+}
+
 /// String IDs used in Ollama-compatible payloads (`/api/show`
 /// `capabilities` array, `/api/tags` `details.capabilities`).
 ///
