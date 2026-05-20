@@ -25,6 +25,7 @@ public final class KLMServer: Sendable {
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
     private let vlmEngine: Qwen25VLEngine
+    private let moeEngine: MoEEngine
     private let logger = Logger(label: "krillm.server")
 
     private let corsOrigins: [String]
@@ -38,6 +39,7 @@ public final class KLMServer: Sendable {
                 embedEngine: EmbeddingEngine = EmbeddingEngine(),
                 rerankEngine: RerankEngine = RerankEngine(),
                 vlmEngine: Qwen25VLEngine = Qwen25VLEngine(),
+                moeEngine: MoEEngine = MoEEngine(),
                 corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
                 keepAliveDefaultSeconds: Int = 300,
                 defaultContextLimit: Int? = nil,
@@ -51,6 +53,7 @@ public final class KLMServer: Sendable {
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
         self.vlmEngine = vlmEngine
+        self.moeEngine = moeEngine
         self.keepAlive = KeepAliveController(defaultSeconds: keepAliveDefaultSeconds)
         self.defaultContextLimit = defaultContextLimit
         self.genQueue = GenerationQueue(numParallel: numParallel, maxQueue: maxQueue)
@@ -63,12 +66,14 @@ public final class KLMServer: Sendable {
         embedEngine: EmbeddingEngine = EmbeddingEngine(),
         rerankEngine: RerankEngine = RerankEngine(),
         vlmEngine: Qwen25VLEngine = Qwen25VLEngine(),
+        moeEngine: MoEEngine = MoEEngine(),
         maxBodySizeOverride: Int? = nil
     ) -> any ChannelHandler & Sendable {
         HTTPHandler(engine: engine, registry: registry, compat: compat,
                     embedEngine: embedEngine,
                     rerankEngine: rerankEngine,
                     vlmEngine: vlmEngine,
+                    moeEngine: moeEngine,
                     keepAlive: KeepAliveController(defaultSeconds: 300),
                     genQueue: GenerationQueue(numParallel: 1, maxQueue: 512),
                     maxBodySizeOverride: maxBodySizeOverride)
@@ -88,6 +93,7 @@ public final class KLMServer: Sendable {
                                     compat: self.compat, embedEngine: self.embedEngine,
                                     rerankEngine: self.rerankEngine,
                                     vlmEngine: self.vlmEngine,
+                                    moeEngine: self.moeEngine,
                                     keepAlive: self.keepAlive,
                                     corsOrigins: self.corsOrigins,
                                     defaultContextLimit: self.defaultContextLimit,
@@ -145,6 +151,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
     private let vlmEngine: Qwen25VLEngine
+    private let moeEngine: MoEEngine
     private let logger = Logger(label: "krillm.http")
     private let startedAt = Date()
 
@@ -163,6 +170,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
          compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
          rerankEngine: RerankEngine = RerankEngine(),
          vlmEngine: Qwen25VLEngine = Qwen25VLEngine(),
+         moeEngine: MoEEngine = MoEEngine(),
          keepAlive: KeepAliveController = KeepAliveController(defaultSeconds: 300),
          corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
          defaultContextLimit: Int? = nil,
@@ -174,6 +182,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
         self.vlmEngine = vlmEngine
+        self.moeEngine = moeEngine
         self.keepAlive = keepAlive
         self.corsOrigins = corsOrigins
         self.defaultContextLimit = defaultContextLimit
@@ -527,6 +536,25 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 return
             }
             handleVLMChat(
+                context: context, request: request,
+                manifest: manifest, style: .openAI)
+            return
+        }
+
+        // Route MoE family through the dedicated MoE handler
+        // (compatible_fallback tier via mlx-lm). MoE manifests
+        // refuse images: the bridge is text-only.
+        if let model = request.requestedModel,
+           let manifest = registry.getModel(model),
+           manifest.family == .moe {
+            if !request.media.images.isEmpty {
+                sendJSON(context: context, status: .badRequest, body: [
+                    "error": "MoE models do not accept image input. Use a multimodal "
+                        + "checkpoint (e.g. qwen2.5-vl-3b) instead."
+                ])
+                return
+            }
+            handleMoEChat(
                 context: context, request: request,
                 manifest: manifest, style: .openAI)
             return
@@ -1239,6 +1267,21 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 manifest: manifest, style: .ollama)
             return
         }
+        if let model = request.requestedModel,
+           let manifest = registry.getModel(model),
+           manifest.family == .moe {
+            if !request.media.images.isEmpty {
+                sendJSON(context: context, status: .badRequest, body: [
+                    "error": "MoE models do not accept image input. Use a multimodal "
+                        + "checkpoint (e.g. qwen2.5-vl-3b) instead."
+                ])
+                return
+            }
+            handleMoEChat(
+                context: context, request: request,
+                manifest: manifest, style: .ollama)
+            return
+        }
 
         // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
         if let requestedModel = request.requestedModel,
@@ -1906,6 +1949,107 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             ]
             writeNDJSON(ctx, finalChunk)
             writeOnLoop(ctx, .end(nil), flush: true)
+        }
+    }
+
+    // MARK: - MoE: bridge-backed text chat (Mixtral, Qwen3-MoE, ...)
+
+    /// Handle a chat completion against an MoE manifest by routing
+    /// through the Python sidecar (`MoEEngine` -> mlx-lm). Same
+    /// shape rules as `handleVLMChat`:
+    /// - `style: .openAI` emits OpenAI-shape JSON;
+    ///   `style: .ollama` emits Ollama-shape NDJSON.
+    /// - Streaming degenerates to a single content chunk plus a
+    ///   terminating chunk (mlx-lm's generate is non-streaming
+    ///   today; token-streaming would require driving
+    ///   `stream_generate` over the sidecar).
+    /// - Sampling parameters are ignored (the bridge runs
+    ///   mlx-lm's defaults).
+    private func handleMoEChat(
+        context: ChannelHandlerContext,
+        request: ServerChatRequest,
+        manifest: ModelManifest,
+        style: VLMResponseStyle
+    ) {
+        let messagesForBridge = request.messages
+        let dir = registry.modelPath(manifest.name)
+        let eventLoop = context.eventLoop
+        nonisolated(unsafe) let ctx = context
+        let moe = moeEngine
+        let modelName = manifest.name
+        let maxTokens = request.maxTokens
+        let wantStream = request.stream
+        let snapshotCORS = corsHeaders()
+        let started = CFAbsoluteTimeGetCurrent()
+        Task {
+            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+            defer { self.leaveQueue() }
+            do {
+                try await moe.load(directory: dir)
+                let result = try moe.generate(
+                    messages: messagesForBridge,
+                    maxTokens: maxTokens)
+                let totalNs = Int64(
+                    (CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
+                if wantStream {
+                    self.emitVLMStream(
+                        ctx: ctx, modelName: modelName,
+                        text: result.text, style: style,
+                        promptTokens: result.promptTokens,
+                        completionTokens: result.completionTokens,
+                        totalNs: totalNs,
+                        corsHeaders: snapshotCORS)
+                } else {
+                    let response: [String: Any]
+                    switch style {
+                    case .openAI:
+                        response = [
+                            "id": "chatcmpl-\(UUID().uuidString.prefix(8))",
+                            "object": "chat.completion",
+                            "created": Int(Date().timeIntervalSince1970),
+                            "model": modelName,
+                            "choices": [[
+                                "index": 0,
+                                "message": [
+                                    "role": "assistant",
+                                    "content": result.text,
+                                ],
+                                "finish_reason": "stop",
+                            ]],
+                            "usage": [
+                                "prompt_tokens": result.promptTokens,
+                                "completion_tokens": result.completionTokens,
+                                "total_tokens": result.promptTokens
+                                    + result.completionTokens,
+                            ],
+                            "total_duration": totalNs,
+                        ]
+                    case .ollama:
+                        response = [
+                            "model": modelName,
+                            "created_at": ISO8601DateFormatter().string(
+                                from: Date()),
+                            "message": [
+                                "role": "assistant",
+                                "content": result.text,
+                            ],
+                            "done": true,
+                            "total_duration": totalNs,
+                            "prompt_eval_count": result.promptTokens,
+                            "eval_count": result.completionTokens,
+                        ]
+                    }
+                    self.sendJSONOnLoop(
+                        context: ctx, eventLoop: eventLoop,
+                        status: .ok, body: response)
+                }
+            } catch {
+                let msg = String(describing: error).prefix(300)
+                self.sendJSONOnLoop(
+                    context: ctx, eventLoop: eventLoop,
+                    status: .internalServerError,
+                    body: ["error": "MoE bridge failed: \(msg)"])
+            }
         }
     }
 

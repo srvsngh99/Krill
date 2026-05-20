@@ -33,11 +33,12 @@ final class MoELoaderRejectionTests: XCTestCase {
                 XCTFail("Expected unsupportedArchitecture, got \(error)")
                 return
             }
-            XCTAssertTrue(msg.contains("WS6"),
-                "Error must point at the WS6 workstream doc")
-            XCTAssertTrue(msg.contains("mixture-of-experts") || msg.contains("Mixture-of-experts"))
-            XCTAssertTrue(msg.contains("mistral-7b"),
-                "Mixtral rejection should suggest the dense Mistral fallback")
+            XCTAssertTrue(msg.contains("MoE bridge"),
+                "Error must redirect users to the MoE bridge runtime")
+            XCTAssertTrue(msg.lowercased().contains("mixture-of-experts"),
+                "Error must name the family for users debugging the rejection")
+            XCTAssertTrue(msg.contains("/api/chat") || msg.contains("/v1/chat"),
+                "Error must point at the chat-completion endpoints that handle MoE routing")
         }
     }
 
@@ -58,17 +59,15 @@ final class MoELoaderRejectionTests: XCTestCase {
                 XCTFail("Expected unsupportedArchitecture, got \(error)")
                 return
             }
-            XCTAssertTrue(msg.contains("WS6"))
-            XCTAssertTrue(msg.contains("qwen3-1.7b") || msg.contains("dense qwen3"),
-                "Qwen 3 MoE rejection should suggest the dense Qwen 3 fallback")
+            XCTAssertTrue(msg.contains("MoE bridge"),
+                "Qwen 3 MoE rejection should redirect to the MoE bridge runtime")
         }
     }
 
     func testDeepSeekV3IsRejectedWithMoEMessage() throws {
-        // DeepSeek V3 already had a custom error before WS6. The
-        // unified MoE rejection covers it too; this test pins the
-        // continuing behavior so the message still suggests the
-        // distill variants.
+        // DeepSeek V3 was migrated into the unified MoE
+        // rejection in WS6 foundation; the WS6 runtime PR keeps
+        // it on the same redirect path.
         let dir = try writeConfig([
             "architectures": ["DeepseekV3ForCausalLM"],
             "model_type": "deepseek_v3",
@@ -83,8 +82,8 @@ final class MoELoaderRejectionTests: XCTestCase {
                 XCTFail("Expected unsupportedArchitecture, got \(error)")
                 return
             }
-            XCTAssertTrue(msg.contains("deepseek-r1-7b"),
-                "DeepSeek V3 rejection should still suggest the R1-Distill variants")
+            XCTAssertTrue(msg.contains("MoE bridge"),
+                "DeepSeek V3 should route through the unified MoE bridge redirect")
         }
     }
 
@@ -117,7 +116,7 @@ final class MoELoaderRejectionTests: XCTestCase {
             XCTFail("Expected weight-load failure for empty config dir")
         } catch let error as ModelLoadError {
             if case .unsupportedArchitecture(let msg) = error {
-                XCTAssertFalse(msg.contains("WS6"),
+                XCTAssertFalse(msg.contains("MoE bridge"),
                     "Dense Qwen 3 must NOT route through the MoE rejection arm")
             }
             // Any other ModelLoadError is fine (e.g. invalid config

@@ -99,26 +99,27 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
     } else if arch.contains("chatglm") || arch.contains("glm") || modelType == "chatglm" {
         return try loadGLM(configData: configData, directory: directory)
     } else if arch.contains("mixtral") || arch.contains("qwen3moe") || arch.contains("qwen2moe")
+        || arch.contains("olmoe")
         || modelType == "mixtral" || modelType == "qwen3_moe" || modelType == "qwen2_moe"
+        || modelType == "olmoe"
         || arch.contains("deepseek") || modelType == "deepseek_v3"
     {
-        // WS6 foundation: family detection only. Router + top-K
-        // expert selection + per-token expert FFN dispatch are not
-        // yet implemented. Failing loudly before any weight load
-        // prevents a dense text loader from silently consuming the
-        // router/expert keys. Registry tier is `experimental`.
-        let suggestion: String
-        if arch.contains("deepseek") || modelType == "deepseek_v3" {
-            suggestion = "Use DeepSeek-R1-Distill variants instead: krillm pull deepseek-r1-7b"
-        } else if arch.contains("mixtral") || modelType == "mixtral" {
-            suggestion = "Use a dense Mistral variant instead: krillm pull mistral-7b"
-        } else {
-            suggestion = "Use the dense qwen3-* variants instead: krillm pull qwen3-1.7b"
-        }
+        // MoE family runs through `MoEEngine` (Python sidecar /
+        // mlx-lm), not through the native causal-LM dispatcher
+        // here. `loadModel` is the entry point for native
+        // Swift+MLX runtimes only. Refuse to instantiate MoE as a
+        // dense causal LM so callers that hit /api/generate or
+        // /v1/chat on an MoE manifest get a clear redirect
+        // instead of a garbage forward pass through the dense
+        // text loader (which would either crash on the
+        // router/expert keys or silently run with random MLP
+        // weights).
         throw ModelLoadError.unsupportedArchitecture(
-            "Mixture-of-experts runtime is in progress (WS6 foundation only). "
-            + suggestion + ". Follow docs/workstreams/WS6_MOE_RUNTIME_SUPPORT.md "
-            + "for the tracking PR. Detected arch=\(arch), model_type=\(modelType).")
+            "Mixture-of-experts models run through the MoE bridge "
+            + "(compatible_fallback tier). Use POST /api/chat or "
+            + "/v1/chat/completions - the server routes MoE manifests to "
+            + "MoEEngine. Native Swift+MLX router + expert dispatch are a "
+            + "follow-up WS6 PR. Detected arch=\(arch), model_type=\(modelType).")
     } else if arch.contains("llama") || modelType == "llama" {
         return try loadLlama(configData: configData, directory: directory)
     } else if arch.contains("qwen") || modelType.hasPrefix("qwen") {

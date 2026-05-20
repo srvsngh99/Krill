@@ -67,8 +67,14 @@ final class MoEFoundationTests: XCTestCase {
 
     // MARK: - Support tier
 
-    func testMoEIsExperimental() {
-        XCTAssertEqual(ModelCapabilities.supportTier(for: .moe), .experimental)
+    func testMoEIsCompatibleFallback() {
+        // The WS6 runtime PR ships the Python sidecar / mlx-lm
+        // path. Promotion from compatibleFallback to
+        // productionNative requires native Swift+MLX router +
+        // expert FFN dispatch.
+        XCTAssertEqual(
+            ModelCapabilities.supportTier(for: .moe),
+            .compatibleFallback)
     }
 
     // MARK: - Stable raw value
