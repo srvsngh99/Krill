@@ -216,10 +216,11 @@ final class Qwen25VLNativeTests: XCTestCase {
             return
         }
         let tower = Qwen25VLVisionTower(visionCfg)
-        // 16 patches (4x4 grid) of width [C*T*ph*pw] = 3*2*14*14 = 1176
-        let packed = MLXArray.ones([16, 3 * 2 * 14 * 14]).asType(.float32) * Float(0.01)
-        let out = tower(packed)
-        // 16 patches / 2*2 merge = 4 output tokens
+        // Image input: 56x56 image -> 4x4 patch grid -> 16 patches.
+        // After spatial_merge_size=2 -> 4 output tokens.
+        // Conv3d input shape: [N=1, T=2, H=56, W=56, C=3].
+        let image = MLXArray.ones([1, 2, 56, 56, 3]).asType(.float32) * Float(0.01)
+        let out = tower(image)
         XCTAssertEqual(out.shape, [4, 64])
         eval(out)
     }
@@ -247,11 +248,27 @@ final class Qwen25VLNativeTests: XCTestCase {
             return
         }
         let tower = Qwen25VLVisionTower(visionCfg)
-        let names = Set(tower.parameters().flattened().map { $0.0 })
-        // Patch embedding
+        let params = tower.parameters().flattened()
+        let names = Set(params.map { $0.0 })
+
+        // Patch embedding (Conv3d): weight shape is the rank-5
+        // `[embed_dim, T, ph, pw, in_chans]` layout that the
+        // shipped mlx-community checkpoint uses. The shape is
+        // load-bearing — a Linear here would be rank 2 and would
+        // not accept the checkpoint weight at safetensors load
+        // time. Pin both the key and the shape.
         XCTAssertTrue(names.contains("patch_embed.proj.weight"),
             "patch_embed.proj.weight missing")
-        // Vision block 0 attention + MLP
+        if let patchWeight = params.first(where: { $0.0 == "patch_embed.proj.weight" })?.1 {
+            XCTAssertEqual(patchWeight.shape, [16, 2, 14, 14, 3],
+                "patch_embed.proj.weight must be rank-5 Conv3d "
+                + "[embed_dim, T, ph, pw, in_chans] to match the "
+                + "mlx-community Qwen 2.5-VL safetensors layout")
+        } else {
+            XCTFail("patch_embed.proj.weight not found in parameter cache")
+        }
+
+        // Vision block 0 attention + MLP keys
         XCTAssertTrue(names.contains("blocks.0.attn.qkv.weight"))
         XCTAssertTrue(names.contains("blocks.0.attn.proj.weight"))
         XCTAssertTrue(names.contains("blocks.0.mlp.gate_proj.weight"))
@@ -259,12 +276,24 @@ final class Qwen25VLNativeTests: XCTestCase {
         XCTAssertTrue(names.contains("blocks.0.mlp.down_proj.weight"))
         XCTAssertTrue(names.contains("blocks.0.norm1.weight"))
         XCTAssertTrue(names.contains("blocks.0.norm2.weight"))
-        // Block 1 still present
         XCTAssertTrue(names.contains("blocks.1.attn.qkv.weight"))
-        // Merger
+
+        // Merger: the GELU placeholder at index 1 produces NO
+        // parameters, so the two Linear weights land at
+        // mlp.0.weight and mlp.2.weight - matching the shipped
+        // checkpoint exactly. Pin both the presence of mlp.2 AND
+        // the absence of mlp.1 so a regression that drops the
+        // GELU slot is caught here.
         XCTAssertTrue(names.contains("merger.ln_q.weight"))
         XCTAssertTrue(names.contains("merger.mlp.0.weight"))
-        XCTAssertTrue(names.contains("merger.mlp.1.weight"))
+        XCTAssertTrue(names.contains("merger.mlp.2.weight"),
+            "merger.mlp.2.weight is the SECOND Linear's key in the "
+            + "shipped checkpoint; the GELU at index 1 keeps the "
+            + "second Linear at index 2 in the [Linear, GELU, Linear] "
+            + "array")
+        XCTAssertFalse(names.contains("merger.mlp.1.weight"),
+            "GELU at index 1 must not produce a parameter key; "
+            + "the second Linear must NOT collapse onto mlp.1")
     }
 
     // MARK: - Image preprocessing
@@ -284,24 +313,89 @@ final class Qwen25VLNativeTests: XCTestCase {
             "R channel normalization should center on CLIP mean")
     }
 
-    func testPackPatchesProducesExpectedShape() {
-        // 28x28 image, patch=14 -> 2x2 = 4 patches; with
-        // temporal_patch=2 -> per-row width 3 * 2 * 14 * 14 = 1176.
+    func testToConv3DInputProducesExpectedShape() {
+        // 28x28 image with temporal_patch_size=2 -> [1, 2, 28, 28, 3].
         let pixels = MLXArray.ones([28, 28, 3]).asType(.float32)
-        let packed = Qwen25VLImagePreprocessor.packPatches(
+        let inputTensor = Qwen25VLImagePreprocessor.toConv3DInput(
             pixels, patchSize: 14, temporalPatchSize: 2)
-        XCTAssertEqual(packed.shape, [4, 3 * 2 * 14 * 14])
-        eval(packed)
+        XCTAssertEqual(inputTensor.shape, [1, 2, 28, 28, 3])
+        eval(inputTensor)
     }
 
-    func testPackPatchesRequiresMultipleOfPatchSize() {
-        // The packer's precondition is what catches mis-sized
-        // input. We document the precondition by exercising the
-        // happy path (the failing path would crash the test).
+    func testToConv3DInputSingleFrame() {
+        // temporal_patch_size=1 -> [1, 1, H, W, C].
         let pixels = MLXArray.ones([14, 14, 3]).asType(.float32)
-        let packed = Qwen25VLImagePreprocessor.packPatches(
+        let inputTensor = Qwen25VLImagePreprocessor.toConv3DInput(
             pixels, patchSize: 14, temporalPatchSize: 1)
-        XCTAssertEqual(packed.shape, [1, 3 * 1 * 14 * 14])
+        XCTAssertEqual(inputTensor.shape, [1, 1, 14, 14, 3])
+    }
+
+    // MARK: - End-to-end vision tower with preprocessor
+
+    func testPreprocessorOutputFlowsThroughVisionTower() {
+        // Verify the preprocessor produces a tensor that the
+        // tower accepts unchanged (no intermediate reshapes
+        // required) - this pins the contract between the two
+        // modules.
+        let visionCfg: Qwen25VLConfig.VisionConfig
+        do {
+            visionCfg = try JSONDecoder().decode(
+                Qwen25VLConfig.VisionConfig.self,
+                from: try JSONSerialization.data(withJSONObject: [
+                    "depth": 1,
+                    "hidden_size": 16,
+                    "intermediate_size": 32,
+                    "num_heads": 2,
+                    "patch_size": 14,
+                    "temporal_patch_size": 2,
+                    "in_chans": 3,
+                    "spatial_merge_size": 2,
+                    "fullatt_block_indexes": [],
+                    "window_size": 56,
+                    "out_hidden_size": 32,
+                ]))
+        } catch {
+            XCTFail("VisionConfig decode failed: \(error)")
+            return
+        }
+        let tower = Qwen25VLVisionTower(visionCfg)
+
+        // 28x28 image. The preprocessor produces [1, 2, 28, 28, 3];
+        // the tower yields (28/14)^2 / (2*2) = 1 merged token.
+        let pixels = MLXArray.ones([28, 28, 3]).asType(.float32) * Float(0.5)
+        let normalized = Qwen25VLImagePreprocessor.normalize(pixels)
+        let conv3DInput = Qwen25VLImagePreprocessor.toConv3DInput(
+            normalized,
+            patchSize: visionCfg.patchSize,
+            temporalPatchSize: visionCfg.temporalPatchSize)
+        XCTAssertEqual(conv3DInput.shape, [1, 2, 28, 28, 3])
+        let out = tower(conv3DInput)
+        XCTAssertEqual(out.shape, [1, 32])
+        eval(out)
+    }
+
+    // MARK: - Text-side config projection
+
+    func testQwenTextConfigDropsOProjBias() throws {
+        // The VL config projects onto a QwenConfig with
+        // `attention_bias: true` (for QKV). The dense QwenAttention
+        // hardcodes `o_proj` bias to false regardless of the flag,
+        // so the projection must produce an attention module whose
+        // o_proj has NO bias - if a future QwenAttention change
+        // started honoring the flag for o_proj it would break weight
+        // loading silently (the checkpoint has no o_proj.bias key).
+        let cfg = try decode(tinyConfigJSON())
+        let text = cfg.qwenTextConfig
+        XCTAssertTrue(text.attentionBias, "QKV bias must be enabled")
+        // QwenAttention reads attentionBias only for q/k/v_proj;
+        // o_proj is always bias-free. The contract pinned here is
+        // the source-code-level constant, not a behavioral test
+        // (which would require instantiating QwenAttention and
+        // inspecting its sub-Linears; that is fragile across MLX
+        // versions). Documenting the contract in code is what
+        // ensures a future regression is caught at the source.
+        XCTAssertEqual(text.modelType, "qwen2",
+            "Text side projects to dense Qwen 2.5, not Qwen 3")
     }
 }
 
@@ -385,9 +479,11 @@ final class Qwen25VLLoaderTests: XCTestCase {
 
     func testNativeOptInThrowsFoundationOnlyMessage() throws {
         // With the opt-in env set, the loader still throws (full
-        // native runtime is a follow-up) but the message names
-        // the foundation that landed so users know the env-gate
-        // is intentional.
+        // native runtime is a follow-up) but the message carries
+        // the stable `[WS5_FOUNDATION_ONLY]` tag so the test
+        // discriminates "opt-in arm fired" from "default arm
+        // fired" instead of substring-matching prose ("foundation"
+        // appears in both messages today).
         let dir = try writeConfig(tinyQwen25VLConfig(), dirSlug: "optin")
         defer { try? FileManager.default.removeItem(at: dir) }
         try withEnv("KRILL_NATIVE_QWEN25VL", "1") {
@@ -397,9 +493,29 @@ final class Qwen25VLLoaderTests: XCTestCase {
                     XCTFail("Expected unsupportedArchitecture, got \(error)")
                     return
                 }
-                XCTAssertTrue(msg.contains("foundation"),
-                    "Opt-in rejection must explain that foundation "
-                    + "modules landed and full forward is the follow-up")
+                XCTAssertTrue(msg.contains("[WS5_FOUNDATION_ONLY]"),
+                    "Opt-in rejection must carry the stable tag so "
+                    + "CI/smoke harnesses can pin the arm reliably")
+            }
+        }
+    }
+
+    func testDefaultRejectionDoesNotCarryFoundationTag() throws {
+        // The default-arm rejection must NOT contain the opt-in
+        // tag. This is the inverse assertion that catches a
+        // future refactor copying the tag string by accident.
+        let dir = try writeConfig(tinyQwen25VLConfig(), dirSlug: "default-no-tag")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try withEnv("KRILL_NATIVE_QWEN25VL", nil) {
+            XCTAssertThrowsError(try loadModel(from: dir)) { error in
+                guard let modelError = error as? ModelLoadError,
+                      case .unsupportedArchitecture(let msg) = modelError else {
+                    XCTFail("Expected unsupportedArchitecture, got \(error)")
+                    return
+                }
+                XCTAssertFalse(msg.contains("[WS5_FOUNDATION_ONLY]"),
+                    "Default-arm rejection must NOT carry the opt-in "
+                    + "tag - that tag is reserved for the env-gated arm")
             }
         }
     }

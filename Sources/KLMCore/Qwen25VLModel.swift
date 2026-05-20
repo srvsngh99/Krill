@@ -333,10 +333,20 @@ public struct Qwen25VLMRoPE {
 /// Spatial patch merger: concatenates a `spatial_merge_size`
 /// square block of vision tokens into a single language-side
 /// token, then projects through a small MLP to the LM hidden
-/// dimension. Weight keys at `visual.merger.{ln_q, mlp.0, mlp.2}`.
+/// dimension. Weight keys at `visual.merger.{ln_q, mlp.0, mlp.2}`
+/// in the shipped `mlx-community/Qwen2.5-VL-*-Instruct-4bit`
+/// checkpoints — the GELU activation occupies index 1 and has no
+/// trainable parameters, but its slot in the `mlp` array is what
+/// makes the indices line up. Declaring the array as
+/// `[Linear, GELU, Linear]` rather than `[Linear, Linear]` is
+/// what binds `mlp.0.weight` -> `Linear[0]` and
+/// `mlp.2.weight` -> `Linear[2]` at safetensors load time;
+/// without the GELU placeholder the second Linear lands at
+/// `mlp.1.weight` and the actual `mlp.2.*` keys are never
+/// assigned to a module.
 class Qwen25VLPatchMerger: Module {
     @ModuleInfo(key: "ln_q") var lnQ: RMSNorm
-    @ModuleInfo(key: "mlp") var mlp: [Linear]
+    @ModuleInfo(key: "mlp") var mlp: [UnaryLayer]
 
     let mergeSize: Int
     let inputDim: Int
@@ -352,6 +362,7 @@ class Qwen25VLPatchMerger: Module {
         _mlp = ModuleInfo(
             wrappedValue: [
                 Linear(inputDim, inputDim, bias: true),
+                GELU(),
                 Linear(inputDim, outHidden, bias: true),
             ],
             key: "mlp")
@@ -368,10 +379,14 @@ class Qwen25VLPatchMerger: Module {
         //    reshape suffices here.
         let nGroups = normed.dim(0) / (mergeSize * mergeSize)
         let merged = normed.reshaped(nGroups, inputDim)
-        // 3) MLP: linear -> GELU -> linear
-        var h = mlp[0](merged)
-        h = gelu(h)
-        h = mlp[1](h)
+        // 3) Sequentially apply Linear -> GELU -> Linear via the
+        //    array. The indices match the checkpoint keys
+        //    (`mlp.0.*` and `mlp.2.*`); the GELU at index 1
+        //    contributes no parameters.
+        var h = merged
+        for layer in mlp {
+            h = layer(h)
+        }
         return h
     }
 }
@@ -460,8 +475,16 @@ class Qwen25VLVisionBlock: Module {
 
 // MARK: - Patch Embedding
 
+/// Patch embedding for Qwen 2.5-VL. The checkpoint ships
+/// `patch_embed.proj.weight` as a rank-5 Conv3d weight tensor of
+/// shape `[embed_dim, temporal_patch_size, patch_size, patch_size,
+/// in_channels]` (MLX channels-last `NDHWC` layout). The reference
+/// (HF / mlx-vlm) is `nn.Conv3d(in_channels, embed_dim,
+/// kernel=[T, ph, pw], stride=[T, ph, pw], bias=False)`. We mirror
+/// that exactly so the shipped weights are assignable without any
+/// load-time reshape.
 class Qwen25VLPatchEmbed: Module {
-    @ModuleInfo(key: "proj") var proj: Linear
+    @ModuleInfo(key: "proj") var proj: Conv3d
 
     let patchSize: Int
     let temporalPatchSize: Int
@@ -473,18 +496,28 @@ class Qwen25VLPatchEmbed: Module {
         self.temporalPatchSize = visionConfig.temporalPatchSize
         self.inChannels = visionConfig.inChannels
         self.embedDim = visionConfig.hiddenSize
-        // Patch embed flattens [C, T, ph, pw] -> embed_dim. The
-        // reference uses a Conv3d, but for prepacked patches the
-        // equivalent is a Linear over the flat patch vector.
-        let inputDim = inChannels * temporalPatchSize * patchSize * patchSize
         _proj = ModuleInfo(
-            wrappedValue: Linear(inputDim, embedDim, bias: false),
+            wrappedValue: Conv3d(
+                inputChannels: inChannels,
+                outputChannels: embedDim,
+                kernelSize: .init((temporalPatchSize, patchSize, patchSize)),
+                stride: .init((temporalPatchSize, patchSize, patchSize)),
+                bias: false),
             key: "proj")
     }
 
+    /// Input: `[N=1, T, H, W, C]` (channels-last `NDHWC` layout
+    /// as required by MLX Conv3d). Output: `[n_patches, embed_dim]`
+    /// where `n_patches = (T/Tk) * (H/ph) * (W/pw)` with kernel
+    /// equal to stride (no overlap).
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        // x: [N_patches, C * T * ph * pw]
-        proj(x)
+        // [1, T, H, W, C] -> [1, n_t, n_h, n_w, embed_dim]
+        let y = proj(x)
+        let nt = y.dim(1)
+        let nh = y.dim(2)
+        let nw = y.dim(3)
+        let embed = y.dim(4)
+        return y.reshaped(nt * nh * nw, embed)
     }
 }
 
@@ -527,29 +560,33 @@ public class Qwen25VLVisionTower: Module {
             key: "merger")
     }
 
-    /// Run the vision tower over a packed patch tensor and return
-    /// language-aligned vision embeddings. `packedPatches` has
-    /// shape `[N_patches, C * T * ph * pw]` (flat per-patch
-    /// vector); the merger collapses each `spatial_merge_size^2`
-    /// block into one output token.
-    public func callAsFunction(_ packedPatches: MLXArray) -> MLXArray {
-        var h = patchEmbed(packedPatches)  // [N_patches, vision_hidden]
-        // Vision attention runs over the patch sequence. The
-        // window mask depends on the input image's grid shape, so
-        // for the foundation PR we run with mask=nil (full
-        // attention everywhere). The window-mask helper exists
-        // separately for the runtime PR that wires the real
-        // image-grid metadata through.
+    /// Run the vision tower over a single image and return
+    /// language-aligned vision embeddings.
+    ///
+    /// Input: `[1, T, H, W, C]` channels-last image tensor. The
+    /// temporal axis must equal `temporal_patch_size` (a single
+    /// image is fed as `T = 2` duplicated frames so the same
+    /// Conv3d kernel handles images and videos uniformly). Both
+    /// `H` and `W` must be multiples of `patch_size`; the caller
+    /// is responsible for resizing.
+    ///
+    /// Output: `[N_merged_tokens, out_hidden]` where
+    /// `N_merged_tokens = (H / patch_size / spatial_merge_size) *
+    /// (W / patch_size / spatial_merge_size)`.
+    ///
+    /// Window-attention masking depends on the per-image grid
+    /// shape (h_patches, w_patches); the foundation runs all
+    /// blocks with mask=nil (full attention) so the modules are
+    /// exercised end-to-end. The runtime PR wires per-image
+    /// window masks through `fullAttnLayers` without changing
+    /// the iteration shape here. (Issue tracked in WS5 follow-up.)
+    public func callAsFunction(_ image: MLXArray) -> MLXArray {
+        var h = patchEmbed(image)  // [N_patches, vision_hidden]
         h = h.expandedDimensions(axis: 0)  // [1, N_patches, hidden]
         for (i, block) in blocks.enumerated() {
-            // Tag fullAttn / windowed via mask choice; with
-            // mask=nil today both behave identically. The flag is
-            // here so a follow-up can attach the real window mask
-            // without touching the block iteration.
             _ = fullAttnLayers.contains(i)
             h = block(h, mask: nil)
         }
-        // Drop the batch dim before merging.
         let merged = merger(h.squeezed(axis: 0))
         return merged  // [N_merged_tokens, out_hidden]
     }
@@ -558,16 +595,14 @@ public class Qwen25VLVisionTower: Module {
 // MARK: - Image preprocessing
 
 /// Convert a normalized RGB pixel tensor `[H, W, 3]` (values in
-/// `[0, 1]`) to the packed-patch shape `[N_patches, C * T * ph *
-/// pw]` that the vision tower's patch_embed consumes. Resizing to
-/// a multiple of (patch_size * spatial_merge_size) is the caller's
-/// responsibility - the helper expects a pre-resized image so the
+/// `[0, 1]`) into the `[1, T, H, W, C]` channels-last input shape
+/// that the Conv3d-based patch embedding consumes. The temporal
+/// axis is duplicated to `temporal_patch_size` so a single image
+/// drives the same code path as a video. Resizing to a multiple
+/// of (`patch_size * spatial_merge_size`) is the caller's
+/// responsibility — the helper expects a pre-resized image so the
 /// caller can choose its own resize backend (CoreGraphics on Mac,
 /// stb_image on Linux).
-///
-/// The temporal axis is filled with `temporal_patch_size` copies
-/// of the same frame so a single image trains the same code path
-/// as a video.
 public enum Qwen25VLImagePreprocessor {
     /// Mean for the Qwen 2.5-VL image normalization (CLIP defaults).
     public static let imageMean: [Float] = [0.48145466, 0.4578275, 0.40821073]
@@ -581,33 +616,35 @@ public enum Qwen25VLImagePreprocessor {
         return (pixels - mean) / std
     }
 
-    /// Pack a `[H, W, 3]` normalized tensor into per-patch rows.
-    /// `H` and `W` must both be multiples of `patch_size`. Output
-    /// rows are ordered (h_patch, w_patch) row-major. The
-    /// temporal axis is duplicated to `temporal_patch_size`.
-    public static func packPatches(
+    /// Shape `[H, W, 3]` normalized pixels into the Conv3d-ready
+    /// `[1, T, H, W, C]` layout. Replicates the single frame
+    /// `temporal_patch_size` times along the new temporal axis,
+    /// matching the reference (HF / mlx-vlm) which feeds a still
+    /// image as `T = 2` duplicated frames so the Conv3d temporal
+    /// kernel processes images and videos through the same path.
+    public static func toConv3DInput(
         _ pixels: MLXArray,
         patchSize: Int,
         temporalPatchSize: Int
     ) -> MLXArray {
         let H = pixels.dim(0)
         let W = pixels.dim(1)
-        let C = pixels.dim(2)
         precondition(H % patchSize == 0 && W % patchSize == 0,
             "Image height/width must be multiples of patch_size")
-        let nH = H / patchSize
-        let nW = W / patchSize
-        // [H, W, C] -> [nH, ph, nW, pw, C] -> [nH, nW, C, ph, pw]
-        let reshaped = pixels.reshaped(nH, patchSize, nW, patchSize, C)
-        let perPatch = reshaped.transposed(0, 2, 4, 1, 3)
-            .reshaped(nH * nW, C * patchSize * patchSize)
-        // Tile across temporal axis: [N, C * T * ph * pw]. The
-        // reference duplicates the frame, so we tile by
-        // concatenation rather than by introducing a real time
-        // axis.
-        var tiled = perPatch
-        for _ in 1 ..< temporalPatchSize {
-            tiled = MLX.concatenated([tiled, perPatch], axis: -1)
+        // [H, W, C] -> [1, H, W, C]
+        let withBatch = pixels.expandedDimensions(axis: 0)
+        // Insert a temporal axis at position 1: [1, 1, H, W, C].
+        let withTime = withBatch.expandedDimensions(axis: 1)
+        // Repeat along the new temporal axis to T frames.
+        let tiled: MLXArray
+        if temporalPatchSize <= 1 {
+            tiled = withTime
+        } else {
+            var frames: [MLXArray] = []
+            for _ in 0 ..< temporalPatchSize {
+                frames.append(withTime)
+            }
+            tiled = MLX.concatenated(frames, axis: 1)
         }
         return tiled
     }

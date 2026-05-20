@@ -87,12 +87,17 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
         // The runtime PR moves the decode inside the opt-in
         // branch where the parsed config is actually consumed.
         if ProcessInfo.processInfo.environment["KRILL_NATIVE_QWEN25VL"] == "1" {
+            // Stable tag `[WS5_FOUNDATION_ONLY]` lets callers (CI,
+            // smoke harness) discriminate "feature gated and only
+            // the foundation has landed" from "feature does not
+            // exist" via substring match, instead of prose
+            // collisions with the default-arm rejection.
             throw ModelLoadError.unsupportedArchitecture(
-                "Qwen 2.5-VL native runtime: foundation modules "
-                + "(config parser, 3D mRoPE, vision tower, patch merger, "
-                + "image preprocessor) shipped in this PR. Full multimodal "
-                + "forward + vision token injection are the follow-up. Use "
-                + "POST /api/chat without KRILL_NATIVE_QWEN25VL set for the "
+                "[WS5_FOUNDATION_ONLY] Qwen 2.5-VL native runtime: foundation "
+                + "modules (config parser, 3D mRoPE, Conv3d patch embedding, "
+                + "patch merger, image preprocessor) are wired and tested. "
+                + "Full multimodal forward + vision-token injection is the "
+                + "runtime PR. Unset KRILL_NATIVE_QWEN25VL to use the "
                 + "compatible_fallback bridge path. Detected arch=\(arch), "
                 + "model_type=\(modelType).")
         }
@@ -100,9 +105,9 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
             "Qwen 2.5-VL runs through the multimodal bridge (compatible_fallback "
             + "tier). Use POST /api/chat or /v1/chat/completions with an image "
             + "attachment - the server routes VL manifests to Qwen25VLEngine. "
-            + "Native Swift+MLX vision tower / mRoPE / patch merger foundation "
-            + "landed in WS5; full multimodal forward is the follow-up. "
-            + "Detected arch=\(arch), model_type=\(modelType).")
+            + "Native Swift+MLX vision tower / mRoPE / patch merger landed in "
+            + "WS5; full multimodal forward is the follow-up. Detected "
+            + "arch=\(arch), model_type=\(modelType).")
     } else if arch.contains("forsequenceclassification") || arch.contains("crossencoder") {
         // Cross-encoder rerankers (BGE Reranker, Cohere Rerank,
         // etc.) are loaded through the dedicated `RerankEngine`,
