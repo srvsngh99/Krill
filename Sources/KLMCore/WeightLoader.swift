@@ -69,17 +69,29 @@ public func loadWeights(
 
     var flatWeights = try loadWeightArrays(from: directory)
 
-    // Strip key prefix if specified (e.g., "language_model." for Gemma 4)
+    // Strip key prefix if specified (e.g., "language_model." for
+    // Gemma 4, "roberta." for BGE Reranker). Keys that DO start
+    // with the prefix are renamed (prefix removed); keys that do
+    // NOT start with the prefix are preserved unchanged. The
+    // preservation matters for cross-encoder rerankers: the
+    // backbone weights are under `roberta.*` but the
+    // classification head lives at top-level `classifier.*` and
+    // would otherwise be silently dropped, leaving the classifier
+    // at its random initialization (cause of past bug where
+    // reranker scores converged near zero).
     if let prefix = keyPrefix {
-        var stripped: [String: MLXArray] = [:]
+        var rebuilt: [String: MLXArray] = [:]
+        var anyStripped = false
         for (key, value) in flatWeights {
             if key.hasPrefix(prefix) {
-                stripped[String(key.dropFirst(prefix.count))] = value
+                rebuilt[String(key.dropFirst(prefix.count))] = value
+                anyStripped = true
+            } else {
+                rebuilt[key] = value
             }
-            // Also keep non-prefixed keys (e.g., if some weights are at top level)
         }
-        if !stripped.isEmpty {
-            flatWeights = stripped
+        if anyStripped {
+            flatWeights = rebuilt
         }
     }
 

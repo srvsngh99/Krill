@@ -33,9 +33,27 @@ incorrect semantics or bad performance.
 Likely closest to existing embedding support, but still needs a scoring head
 and ranking API.
 
-Status: foundation only (family detection + capability metadata +
-explicit loader rejection). Cross-encoder scoring runtime + `/v1/rerank`
-endpoint land in follow-up PRs.
+Status: native runtime + `/v1/rerank` endpoint shipped. Score parity
+against the sentence-transformers `CrossEncoder` reference verified
+on BGE Reranker v2-m3 within tolerance.
+
+## Performance vs reference
+
+Benchmark on M-series, 8 (query, document) pairs, BGE Reranker v2-m3:
+
+| Engine                              | Median latency |
+| ----------------------------------- | -------------- |
+| KrillLM `/v1/rerank` (per-pair, batch=1) | 104 ms |
+| sentence-transformers `CrossEncoder` (Python, batched) | 34 ms |
+
+Ollama does not natively ship cross-encoder rerankers; the reference
+here is the upstream Python implementation. KrillLM is currently
+slower because it forwards each pair independently (batch = 1). A
+batched-forward follow-up would close the gap; tracked as a
+future-work item rather than a blocker for this PR. Quality is at
+parity (the live `testScoreMagnitudeMatchesReferenceWithinTolerance`
+asserts `±1.0` logit vs the Python reference, and ordering matches
+on all test pairs).
 
 What landed:
 
@@ -66,9 +84,13 @@ What landed:
 
 Acceptance:
 
-- Pair/list scoring works. **PENDING** (follow-up PR).
-- `/v1/rerank` or documented local API exists. **PENDING**.
-- Scores match a reference model within tolerance. **PENDING**.
+- Pair/list scoring works. **DONE** (RerankEngine.score, BGE Reranker
+  v2-m3 verified).
+- `/v1/rerank` or documented local API exists. **DONE** (Cohere-style
+  endpoint with `query`, `documents`, `top_n`, `return_documents`).
+- Scores match a reference model within tolerance. **DONE** (live
+  parity test asserts ±1.0 logit vs sentence-transformers reference;
+  ranking order matches on all test pairs).
 
 ### ASR
 
