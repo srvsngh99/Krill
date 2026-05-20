@@ -56,11 +56,17 @@ final class Qwen25VLFoundationTests: XCTestCase {
 
     // MARK: - Support tier
 
-    func testQwen25VLIsExperimental() {
-        // The vision tower + multimodal forward have not landed yet.
-        // Tier MUST be experimental until the follow-up PR ships
-        // them and adds a fixture-changes-output smoke + benchmark.
-        XCTAssertEqual(ModelCapabilities.supportTier(for: .qwen25vl), .experimental)
+    func testQwen25VLIsCompatibleFallback() {
+        // Native Swift+MLX vision tower / mRoPE / patch merger
+        // are NOT in tree yet; the runtime path is the Python
+        // sidecar (Qwen25VLEngine). The workstream's tier
+        // definitions reserve `productionNative` for the native
+        // path and `compatibleFallback` for bridge-backed
+        // runtimes. Promotion to productionNative requires the
+        // native modules.
+        XCTAssertEqual(
+            ModelCapabilities.supportTier(for: .qwen25vl),
+            .compatibleFallback)
     }
 
     // MARK: - Raw value stability (used by /api/tags, /api/show)

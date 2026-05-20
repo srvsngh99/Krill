@@ -24,6 +24,7 @@ public final class KLMServer: Sendable {
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
+    private let vlmEngine: Qwen25VLEngine
     private let logger = Logger(label: "krillm.server")
 
     private let corsOrigins: [String]
@@ -36,6 +37,7 @@ public final class KLMServer: Sendable {
                 engine: InferenceEngine, registry: Registry,
                 embedEngine: EmbeddingEngine = EmbeddingEngine(),
                 rerankEngine: RerankEngine = RerankEngine(),
+                vlmEngine: Qwen25VLEngine = Qwen25VLEngine(),
                 corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
                 keepAliveDefaultSeconds: Int = 300,
                 defaultContextLimit: Int? = nil,
@@ -48,6 +50,7 @@ public final class KLMServer: Sendable {
         self.registry = registry
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
+        self.vlmEngine = vlmEngine
         self.keepAlive = KeepAliveController(defaultSeconds: keepAliveDefaultSeconds)
         self.defaultContextLimit = defaultContextLimit
         self.genQueue = GenerationQueue(numParallel: numParallel, maxQueue: maxQueue)
@@ -59,11 +62,13 @@ public final class KLMServer: Sendable {
         compat: CompatMode = .both,
         embedEngine: EmbeddingEngine = EmbeddingEngine(),
         rerankEngine: RerankEngine = RerankEngine(),
+        vlmEngine: Qwen25VLEngine = Qwen25VLEngine(),
         maxBodySizeOverride: Int? = nil
     ) -> any ChannelHandler & Sendable {
         HTTPHandler(engine: engine, registry: registry, compat: compat,
                     embedEngine: embedEngine,
                     rerankEngine: rerankEngine,
+                    vlmEngine: vlmEngine,
                     keepAlive: KeepAliveController(defaultSeconds: 300),
                     genQueue: GenerationQueue(numParallel: 1, maxQueue: 512),
                     maxBodySizeOverride: maxBodySizeOverride)
@@ -82,6 +87,7 @@ public final class KLMServer: Sendable {
                         HTTPHandler(engine: self.engine, registry: self.registry,
                                     compat: self.compat, embedEngine: self.embedEngine,
                                     rerankEngine: self.rerankEngine,
+                                    vlmEngine: self.vlmEngine,
                                     keepAlive: self.keepAlive,
                                     corsOrigins: self.corsOrigins,
                                     defaultContextLimit: self.defaultContextLimit,
@@ -138,6 +144,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
+    private let vlmEngine: Qwen25VLEngine
     private let logger = Logger(label: "krillm.http")
     private let startedAt = Date()
 
@@ -155,6 +162,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     init(engine: InferenceEngine, registry: Registry,
          compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
          rerankEngine: RerankEngine = RerankEngine(),
+         vlmEngine: Qwen25VLEngine = Qwen25VLEngine(),
          keepAlive: KeepAliveController = KeepAliveController(defaultSeconds: 300),
          corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
          defaultContextLimit: Int? = nil,
@@ -165,6 +173,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         self.compat = compat
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
+        self.vlmEngine = vlmEngine
         self.keepAlive = keepAlive
         self.corsOrigins = corsOrigins
         self.defaultContextLimit = defaultContextLimit
@@ -494,6 +503,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         } catch {
             sendJSON(context: context, status: .badRequest, body: ["error": "Invalid request"])
+            return
+        }
+
+        // Route Qwen 2.5-VL (and any future bridge-backed
+        // multimodal family) through the dedicated VLM handler.
+        // The check runs BEFORE the InferenceEngine model-loaded
+        // gate so a VL request does not get refused for "no model
+        // loaded" - the bridge has its own load step.
+        if let model = request.requestedModel,
+           let manifest = registry.getModel(model),
+           manifest.family == .qwen25vl {
+            handleVLMChatOpenAI(
+                context: context, request: request, manifest: manifest)
             return
         }
 
@@ -1183,6 +1205,18 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
+        // Route Qwen 2.5-VL through the multimodal bridge (mirror
+        // of the dispatch in `handleChatCompletions`). Runs BEFORE
+        // the InferenceEngine model-loaded gate so a VL request
+        // does not get refused for "no model loaded".
+        if let model = request.requestedModel,
+           let manifest = registry.getModel(model),
+           manifest.family == .qwen25vl {
+            handleVLMChatOpenAI(
+                context: context, request: request, manifest: manifest)
+            return
+        }
+
         // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
         if let requestedModel = request.requestedModel,
            requestedModel != "unknown",
@@ -1596,6 +1630,197 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             ]
         }
         sendJSON(context: context, status: .ok, body: ["models": models])
+    }
+
+    // MARK: - VLM: bridge-backed multimodal chat (Qwen 2.5-VL)
+
+    /// Handle an OpenAI-style chat completion against a Qwen 2.5-VL
+    /// manifest by routing through the Python sidecar
+    /// (`Qwen25VLEngine`). This is the compatible-fallback runtime;
+    /// the native Swift+MLX vision tower is a follow-up.
+    ///
+    /// The request flow is intentionally narrower than the standard
+    /// chat completion path:
+    /// - The bridge accepts ONE image per request (the first image
+    ///   in `request.media.images`). Multi-image requests are
+    ///   rejected at the `validateMediaShape` step earlier.
+    /// - Sampling parameters (temperature / top-p / penalties) are
+    ///   ignored - the bridge runs whatever its mlx-vlm `generate`
+    ///   default is. Documented in the workstream doc.
+    /// - Streaming (`request.stream == true`) is supported but
+    ///   degenerates to a single content chunk plus the `[DONE]`
+    ///   sentinel, because the underlying mlx-vlm 0.5.0 generate
+    ///   API is not token-streaming today.
+    private func handleVLMChatOpenAI(
+        context: ChannelHandlerContext,
+        request: ServerChatRequest,
+        manifest: ModelManifest
+    ) {
+        // Decode the optional image attachment to a temp file the
+        // bridge can `open()` directly.
+        let decoded: DecodedMedia?
+        if request.media.isEmpty {
+            decoded = nil
+        } else {
+            do {
+                decoded = try decodeMediaForRequestVLM(request.media)
+            } catch let error as MediaDecodeError {
+                sendJSON(
+                    context: context,
+                    status: HTTPResponseStatus(statusCode: error.httpStatus),
+                    body: ["error": error.message])
+                return
+            } catch {
+                sendJSON(context: context, status: .internalServerError,
+                         body: ["error": "Failed to decode VLM media payload"])
+                return
+            }
+        }
+
+        // Flatten the chat to a single user-side prompt string. The
+        // bridge prepends the system prompt + chat template
+        // tokens itself (Qwen 2.5-VL has a fixed system message
+        // shape; we splice user content into a single user turn).
+        let promptText = vlmPromptText(from: request.messages)
+
+        let dir = registry.modelPath(manifest.name)
+        let eventLoop = context.eventLoop
+        nonisolated(unsafe) let ctx = context
+        let vlm = vlmEngine
+        let modelName = manifest.name
+        let maxTokens = request.maxTokens
+        let wantStream = request.stream
+        let mediaCopy = decoded
+
+        let started = CFAbsoluteTimeGetCurrent()
+        Task {
+            defer { mediaCopy?.cleanup() }
+            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+            defer { self.leaveQueue() }
+            do {
+                try await vlm.load(directory: dir)
+                let result = try vlm.generate(
+                    prompt: promptText,
+                    imagePath: decoded?.imagePath,
+                    maxTokens: maxTokens)
+                if wantStream {
+                    self.emitVLMStreamOpenAI(
+                        ctx: ctx, modelName: modelName, text: result.text)
+                } else {
+                    let totalNs = Int64(
+                        (CFAbsoluteTimeGetCurrent() - started)
+                            * 1_000_000_000)
+                    let response: [String: Any] = [
+                        "id": "chatcmpl-\(UUID().uuidString.prefix(8))",
+                        "object": "chat.completion",
+                        "created": Int(Date().timeIntervalSince1970),
+                        "model": modelName,
+                        "choices": [[
+                            "index": 0,
+                            "message": [
+                                "role": "assistant",
+                                "content": result.text,
+                            ],
+                            "finish_reason": "stop",
+                        ]],
+                        "usage": [
+                            "prompt_tokens": result.promptTokens,
+                            "completion_tokens": result.completionTokens,
+                            "total_tokens": result.promptTokens
+                                + result.completionTokens,
+                        ],
+                        "total_duration": totalNs,
+                    ]
+                    self.sendJSONOnLoop(
+                        context: ctx, eventLoop: eventLoop,
+                        status: .ok, body: response)
+                }
+            } catch {
+                let msg = String(describing: error).prefix(300)
+                self.sendJSONOnLoop(
+                    context: ctx, eventLoop: eventLoop,
+                    status: .internalServerError,
+                    body: ["error": "VLM bridge failed: \(msg)"])
+            }
+        }
+    }
+
+    /// VLM-specific media decode: requires an image (audio is
+    /// rejected because the .qwen25vl capability set declares no
+    /// audioInput).
+    private func decodeMediaForRequestVLM(_ payload: ServerMediaPayload) throws -> DecodedMedia {
+        try validateMediaShape(payload)
+        if payload.audio != nil {
+            throw MediaDecodeError.mediaNotSupported(
+                reason: "Qwen 2.5-VL does not accept audio input. Use a Gemma 4 audio-capable checkpoint."
+            )
+        }
+        var imagePath: String? = nil
+        if let img = payload.images.first {
+            imagePath = try ServerMultimodal.decodeAndWrite(
+                base64: img, field: "images", sniffImage: true)
+        }
+        return DecodedMedia(imagePath: imagePath, audioPath: nil)
+    }
+
+    /// Flatten a chat history into a single prompt string the bridge
+    /// can splice into Qwen 2.5-VL's user turn. We strip system /
+    /// assistant turns - the bridge prepends its own system message
+    /// (matches what mlx-vlm itself does with apply_chat_template).
+    /// Multi-turn conversations collapse to the last user message
+    /// concatenated with prior user turns, which is the same
+    /// degradation `mlx-vlm` shows when chat templates are
+    /// bypassed.
+    private func vlmPromptText(from messages: [[String: String]]) -> String {
+        let userTurns = messages
+            .filter { $0["role"] == "user" }
+            .compactMap { $0["content"] }
+        return userTurns.joined(separator: "\n")
+    }
+
+    /// Emit a chat-completion-shaped SSE stream consisting of a
+    /// single content chunk plus `[DONE]`. mlx-vlm 0.5.0 does not
+    /// expose a token-streaming API we can drive from a sidecar
+    /// without re-implementing its decode loop in Python; degenerate
+    /// streaming is the simplest forward-compatible shape.
+    private func emitVLMStreamOpenAI(
+        ctx: ChannelHandlerContext, modelName: String, text: String
+    ) {
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: "text/event-stream")
+        headers.add(name: "Cache-Control", value: "no-cache")
+        headers.add(name: "Connection", value: "keep-alive")
+        for (k, v) in corsHeaders() { headers.add(name: k, value: v) }
+        let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
+        writeOnLoop(ctx, .head(head))
+
+        let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
+        let contentChunk: [String: Any] = [
+            "id": id,
+            "object": "chat.completion.chunk",
+            "created": Int(Date().timeIntervalSince1970),
+            "model": modelName,
+            "choices": [[
+                "index": 0,
+                "delta": ["role": "assistant", "content": text],
+            ]],
+        ]
+        writeSSEJSON(ctx, contentChunk)
+
+        let finalChunk: [String: Any] = [
+            "id": id,
+            "object": "chat.completion.chunk",
+            "created": Int(Date().timeIntervalSince1970),
+            "model": modelName,
+            "choices": [[
+                "index": 0,
+                "delta": [String: Any](),
+                "finish_reason": "stop",
+            ]],
+        ]
+        writeSSEJSON(ctx, finalChunk)
+        writeRaw(ctx, "data: [DONE]\n\n")
+        writeOnLoop(ctx, .end(nil), flush: true)
     }
 
     // MARK: - Reranking: POST /v1/rerank
