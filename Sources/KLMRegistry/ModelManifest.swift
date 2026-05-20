@@ -193,6 +193,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         // weights). Order: specific-then-generic.
         if archLower.contains("mixtral") { return .moe }
         if archLower.contains("qwen3moe") || archLower.contains("qwen2moe") { return .moe }
+        if archLower.contains("olmoe") { return .moe }
         if archLower.contains("qwen2_5_vl") || archLower.contains("qwen2vl") { return .qwen25vl }
         if archLower.contains("qwen") { return .qwen }
         if archLower.contains("mistral") { return .mistral }
@@ -208,7 +209,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         case "gemma", "gemma2", "gemma3": return .gemma
         case "gemma4", "gemma4_text": return .gemma4
         case "qwen2_5_vl", "qwen2_vl": return .qwen25vl
-        case "mixtral", "qwen3_moe", "qwen2_moe": return .moe
+        case "mixtral", "qwen3_moe", "qwen2_moe", "olmoe": return .moe
         case "phi", "phi3": return .phi
         case "chatglm", "glm", "glm4_moe": return .glm
         case "deepseek_v3": return .deepseek

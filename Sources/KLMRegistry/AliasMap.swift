@@ -126,6 +126,9 @@ private let aliases: [String: ResolvedModel] = [
     "qwen3-30b-a3b": ResolvedModel(
         repo: "mlx-community/Qwen3-30B-A3B-4bit",
         name: "qwen3-30b-a3b", family: .moe, params: "30B-A3B", quant: "4bit", context: 40960),
+    "olmoe-1b-7b": ResolvedModel(
+        repo: "mlx-community/OLMoE-1B-7B-0924-Instruct-4bit",
+        name: "olmoe-1b-7b", family: .moe, params: "1B-7B", quant: "4bit", context: 4096),
 
     // Mistral
     "mistral-7b": ResolvedModel(

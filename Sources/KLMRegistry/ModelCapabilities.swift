@@ -141,14 +141,17 @@ public enum ModelCapabilities {
             // tower, patch merger, mRoPE, and image preprocessing.
             return .compatibleFallback
         case .moe:
-            // WS6 foundation: same shape as the WS5 stance. Family
-            // detection + capability metadata + clear rejection
-            // exist; the router + top-K expert selection + expert
-            // FFN loading + Metal dispatch are pending. Tier
-            // promotes to productionNative once the runtime lands
-            // AND the active/loaded-expert + memory metadata is
-            // present in the benchmark report.
-            return .experimental
+            // Bridge-backed (Python sidecar / mlx-lm). Per the
+            // workstream's tier definitions, bridge paths are
+            // `compatibleFallback` - not a native performance
+            // claim, but a working runtime that mlx-lm drives
+            // natively (router + expert dispatch happen in MLX
+            // kernels, just orchestrated from Python).
+            // Promotion to productionNative requires the native
+            // Swift+MLX router + top-K expert selection + expert
+            // FFN dispatch + memory policy + active/loaded-expert
+            // benchmark metadata.
+            return .compatibleFallback
         case .reranker:
             // WS7 foundation: same shape as WS5/WS6. Family
             // detection + capability + alias entries + clear
