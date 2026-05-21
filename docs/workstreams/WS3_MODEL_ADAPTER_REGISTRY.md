@@ -39,9 +39,11 @@ is now warranted and shipped:
   - `requiresImageInput` (text-only turns refused before a multi-GB
     sidecar starts),
   - `chatTemplate` (`ChatTemplatePolicy`: `hermes` / `gemma4` /
-    `llama` / `qwen`),
-  - `capabilities` / `supportTier` delegated to `ModelCapabilities`
-    so each fact still has exactly one table.
+    `llama` / `qwen`).
+
+  Capability and support-tier facts stay in `ModelCapabilities` (the
+  sibling per-family table); `ModelAdapter` is scoped to the server's
+  routing and chat-template decisions.
 - `Server.swift`: the duplicated `manifest.family == .qwen25vl` /
   `.moe` branches in `handleChatCompletions` and `handleOllamaChat`
   are replaced by one `dispatchFamilyChat` helper driven by

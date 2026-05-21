@@ -96,34 +96,14 @@ final class ModelAdapterTests: XCTestCase {
     /// template - otherwise the registry advertises native tool
     /// support it does not back. (`.moe` -> `.qwen` satisfies this;
     /// `.qwen25vl` declares `.tools` but is bridge-backed, so it is
-    /// excused.)
+    /// excused.) `ModelAdapter` and `ModelCapabilities` are sibling
+    /// tables; this test pins that they stay consistent.
     func testNativeToolCapabilityAgreesWithTemplate() {
         for family in ModelFamily.allCases where family != .qwen25vl {
-            let adapter = ModelAdapter(family: family)
-            if adapter.capabilities.contains(.tools) {
-                XCTAssertNotEqual(adapter.chatTemplate, .hermes,
+            if ModelCapabilities.capabilities(for: family).contains(.tools) {
+                XCTAssertNotEqual(ModelAdapter(family: family).chatTemplate, .hermes,
                     "\(family) declares the tools capability but falls back to the Hermes template")
             }
-        }
-    }
-
-    // MARK: - Delegated capability / tier facts
-
-    func testCapabilitiesDelegateToModelCapabilities() {
-        for family in ModelFamily.allCases {
-            XCTAssertEqual(
-                ModelAdapter(family: family).capabilities,
-                ModelCapabilities.capabilities(for: family),
-                "\(family) adapter capabilities must match the registry table")
-        }
-    }
-
-    func testSupportTierDelegatesToModelCapabilities() {
-        for family in ModelFamily.allCases {
-            XCTAssertEqual(
-                ModelAdapter(family: family).supportTier,
-                ModelCapabilities.supportTier(for: family),
-                "\(family) adapter support tier must match the registry table")
         }
     }
 }

@@ -81,9 +81,10 @@ declarative source of truth for a family's *server-side* contract:
 - `requiresImageInput` — whether a text-only turn is refused up front.
 - `chatTemplate` — `ChatTemplatePolicy` (`hermes` / `gemma4` / `llama` /
   `qwen`); KLMServer maps this onto its concrete renderer/parser.
-- `capabilities` / `supportTier` — delegated to `ModelCapabilities`, so
-  each fact still has exactly one table and `ModelAdapter` is the one
-  type a caller consults.
+
+Capability and support-tier facts are a separate concern and stay in
+`ModelCapabilities` (the sibling per-family table); `ModelAdapter` is
+scoped to the server's routing and chat-template decisions.
 
 Adding a bridge-backed or specially-routed family is now a registry
 change (a `switch` case in `ModelAdapter`), not a new `Server.swift`

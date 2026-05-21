@@ -13,10 +13,11 @@ import Foundation
 ///   - `chatTemplate`: which tool / function-call chat template the
 ///     family expects.
 ///
-/// Capability and support-tier facts are delegated to
-/// `ModelCapabilities` so there is exactly one table per concern;
-/// `ModelAdapter` is the one type a caller consults to get all of
-/// them for a family.
+/// Capability and support-tier facts are a separate concern and stay
+/// in `ModelCapabilities` (the sibling per-family table); a caller
+/// that needs those reads `ModelCapabilities` directly. `ModelAdapter`
+/// is deliberately scoped to the server's *routing and chat-template*
+/// decisions - the things that were previously scattered switches.
 ///
 /// Adding a new family should start here: give it a `chatRouting`
 /// and a `chatTemplate`, and the server picks it up without a new
@@ -36,22 +37,6 @@ public struct ModelAdapter: Sendable, Equatable {
 
     public init(family: ModelFamily) {
         self.family = family
-    }
-
-    /// The declared capability set for the family.
-    ///
-    /// Delegates to `ModelCapabilities` - the per-family capability
-    /// table stays the single source of truth; `ModelAdapter` is the
-    /// one entry point a caller needs.
-    public var capabilities: Set<Capability> {
-        ModelCapabilities.capabilities(for: family)
-    }
-
-    /// The support tier for the family in this build.
-    ///
-    /// Delegates to `ModelCapabilities` (see `capabilities`).
-    public var supportTier: SupportTier {
-        ModelCapabilities.supportTier(for: family)
     }
 
     /// Which server chat handler a request for this family needs.

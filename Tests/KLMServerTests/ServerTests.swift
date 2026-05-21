@@ -1065,6 +1065,14 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(ToolCalling.ToolFormat.forFamily("mistral"), .hermes)
         XCTAssertEqual(ToolCalling.ToolFormat.forFamily("gemma"), .hermes)
         XCTAssertEqual(ToolCalling.ToolFormat.forFamily("phi"), .hermes)
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("glm"), .hermes)
+        // The VL loader string is "qwen25vl" but ModelFamily.qwen25vl's
+        // rawValue is "qwen2_5_vl", so it does not round-trip through
+        // ModelFamily(rawValue:). It is bridge-routed and never reaches
+        // this path; it correctly resolves to the Hermes fallback
+        // either way. Both spellings are pinned here.
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("qwen25vl"), .hermes)
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("qwen2_5_vl"), .hermes)
         // A nil or unrecognized family string falls back to Hermes.
         XCTAssertEqual(ToolCalling.ToolFormat.forFamily(nil), .hermes)
         XCTAssertEqual(ToolCalling.ToolFormat.forFamily("not-a-family"), .hermes)

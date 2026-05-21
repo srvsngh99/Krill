@@ -47,14 +47,27 @@ internal enum ToolCalling {
         /// Resolve the wire format from the loaded model family
         /// (`InferenceEngine.family`).
         ///
-        /// The family→template decision is owned by the registry's
+        /// The family-to-template decision is owned by the registry's
         /// `ModelAdapter.chatTemplate` (WS3); this method only maps
         /// the registry's module-neutral `ChatTemplatePolicy` onto
         /// the concrete renderer/parser in this module. A new family
         /// declares its template in `ModelAdapter`, not here - which
         /// is why, e.g., `.moe` resolving to `.qwen` lives there.
         ///
-        /// A nil or unrecognized family string falls back to
+        /// `family` is the loader string from `InferenceEngine.family`,
+        /// resolved to a `ModelFamily` by `rawValue`. Every loader
+        /// string that can reach a dense tool-calling turn (`gemma4`,
+        /// `llama`, `qwen`, `moe`, `mistral`, `gemma`, `phi`, `glm`)
+        /// equals its `ModelFamily.rawValue`. The one loader string
+        /// that does NOT round-trip - `"qwen25vl"` vs
+        /// `ModelFamily.qwen25vl.rawValue == "qwen2_5_vl"` - is
+        /// harmless here: the VL family is bridge-routed (see
+        /// `ModelAdapter.chatRouting`) and never reaches this path,
+        /// and even if it did, an unresolved string falls back to
+        /// `.hermes` - the same template `ModelAdapter` assigns the
+        /// VL family anyway.
+        ///
+        /// So a nil or unrecognized family string falls back to
         /// `.hermes`, matching the registry's own default.
         static func forFamily(_ family: String?) -> ToolFormat {
             guard let family,
