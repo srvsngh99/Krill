@@ -98,6 +98,12 @@ struct CatalogRefresh: AsyncParsableCommand {
         } catch let error as CatalogError {
             print("Error: \(error.description)")
             throw ExitCode.failure
+        } catch {
+            // Transport failures (unreachable host, DNS, a missing
+            // file:// path) surface as URLError / CocoaError, not
+            // CatalogError; keep the curated single-line output.
+            print("Error: could not fetch catalog: \(error.localizedDescription)")
+            throw ExitCode.failure
         }
     }
 }
