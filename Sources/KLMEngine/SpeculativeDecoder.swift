@@ -109,16 +109,14 @@ public final class SpeculativeDecoder: @unchecked Sendable {
 
         let k = adaptiveK
 
-        // Draft: generate K tokens greedily
+        // Draft: generate K tokens greedily.
         var draftTokens: [Int] = []
-        var draftLogits: [MLXArray] = []
         var currentToken = lastToken
 
         for _ in 0 ..< k {
             let input = MLXArray([Int32(currentToken)]).reshaped(1, 1)
             let logits = draftModel.forward(input, draftCaches)
             MLX.eval(logits)
-            draftLogits.append(logits)
             let nextToken = sampler.sample(logits)
             draftTokens.append(nextToken)
             currentToken = nextToken
@@ -144,21 +142,30 @@ public final class SpeculativeDecoder: @unchecked Sendable {
         let targetLogits = targetModel.forward(verifyInput, targetCaches)
         MLX.eval(targetLogits)
 
-        // Accept/reject: compare target vs draft at each position
+        // Accept/reject: compare target vs draft at each position.
+        //
+        // The spec path is greedy-gated (see the class doc), so target
+        // verification is an argmax. Compute the argmax for ALL K
+        // positions in one batched op plus one eval, rather than slicing
+        // each position and calling `sampler.sample` K times - that cost
+        // K-1 extra GPU synchronizations per round, pure overhead on a
+        // path whose entire purpose is to beat plain decode. The result
+        // is identical to the per-position greedy sample.
+        let verifiedTokens = argMax(targetLogits, axis: -1)
+            .asType(.int32)
+        MLX.eval(verifiedTokens)
+        let targetTokens = verifiedTokens.asArray(Int32.self).map(Int.init)
+
         var accepted: [Int] = []
         var allAccepted = true
 
         for i in 0 ..< k {
-            // Target logits at position i correspond to the prediction after token i
-            let targetLogitSlice = targetLogits[0..., i, 0...]
-            let targetToken = sampler.sample(expandedDimensions(targetLogitSlice, axis: 0))
-
-            if targetToken == draftTokens[i] {
-                // Match: accept the draft token
+            if targetTokens[i] == draftTokens[i] {
+                // Match: accept the draft token.
                 accepted.append(draftTokens[i])
             } else {
-                // Rejection: use target's token instead
-                accepted.append(targetToken)
+                // Rejection: use the target's token instead.
+                accepted.append(targetTokens[i])
                 allAccepted = false
                 break
             }
