@@ -773,6 +773,57 @@ final class ServerTests: XCTestCase {
         try readResponseEnd(from: channel)
     }
 
+    func testCatalogEndpointReturnsBuiltInModels() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+
+        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/catalog")
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.end(nil)))
+
+        XCTAssertEqual(try readResponseHead(from: channel).status, .ok)
+        let json = try readJSONResponseBody(from: channel)
+        let models = try XCTUnwrap(json["models"] as? [[String: Any]])
+        XCTAssertFalse(models.isEmpty, "built-in aliases must be listed")
+        XCTAssertEqual(json["builtin_count"] as? Int, models.count)
+        XCTAssertEqual(json["catalog_count"] as? Int, 0,
+            "a fresh registry has no catalog cache")
+        XCTAssertTrue(models.allSatisfy { ($0["source"] as? String) == "builtin" })
+        XCTAssertTrue(models.allSatisfy { $0["repo"] is String && $0["alias"] is String })
+        try readResponseEnd(from: channel)
+    }
+
+    func testCatalogEndpointIncludesCatalogModels() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-catalog-endpoint-\(UUID().uuidString)")
+        let registry = Registry(baseDir: root)
+        // Seed a catalog cache with one model not in the built-in map.
+        try ModelCatalogStore(baseDir: registry.baseDir).save(
+            ModelCatalog(models: [
+                CatalogEntry(alias: "catalog-only-7b",
+                             repo: "mlx-community/Catalog-Only-7B-4bit",
+                             family: .qwen, params: "7B", quant: "4bit",
+                             context: 32768),
+            ]))
+
+        let channel = try makeChannel(registry: registry)
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+
+        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/catalog")
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.end(nil)))
+
+        XCTAssertEqual(try readResponseHead(from: channel).status, .ok)
+        let json = try readJSONResponseBody(from: channel)
+        XCTAssertEqual(json["catalog_count"] as? Int, 1)
+        let models = try XCTUnwrap(json["models"] as? [[String: Any]])
+        let catalogModel = models.first { ($0["alias"] as? String) == "catalog-only-7b" }
+        XCTAssertEqual(catalogModel?["source"] as? String, "catalog")
+        XCTAssertEqual(catalogModel?["repo"] as? String,
+                       "mlx-community/Catalog-Only-7B-4bit")
+        try readResponseEnd(from: channel)
+    }
+
     func testApiShowUnknownModelReturns404() throws {
         let channel = try makeChannel()
         defer { _ = try? channel.finish(acceptAlreadyClosed: true) }

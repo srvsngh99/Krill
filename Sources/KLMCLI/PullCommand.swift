@@ -15,11 +15,20 @@ struct PullCommand: AsyncParsableCommand {
     var force: Bool = false
 
     func run() async throws {
-        guard let resolved = AliasMap.resolve(model) else {
+        let registry = Registry()
+        let catalog = ModelCatalogStore(baseDir: registry.baseDir)
+
+        guard let resolved = AliasMap.resolve(model, catalog: catalog) else {
             print("Error: unknown model '\(model)'")
             print("\nAvailable models:")
             for (name, info) in AliasMap.allAliases {
                 print("  \(name.padding(toLength: 20, withPad: " ", startingAt: 0)) \(info.params) \(info.family.rawValue)")
+            }
+            if let extra = catalog.load()?.models, !extra.isEmpty {
+                print("\nFrom catalog (krillm catalog list):")
+                for entry in extra.sorted(by: { $0.alias < $1.alias }) {
+                    print("  \(entry.alias.padding(toLength: 20, withPad: " ", startingAt: 0)) \(entry.params) \(entry.family.rawValue)")
+                }
             }
             print("\nOr use a full HuggingFace repo path: krillm pull org/model-name")
             throw ExitCode.failure
@@ -29,7 +38,6 @@ struct PullCommand: AsyncParsableCommand {
         print("Family: \(resolved.family.rawValue), Params: \(resolved.params), Quant: \(resolved.quant)")
         print()
 
-        let registry = Registry()
         let puller = Puller(registry: registry)
 
         let startTime = CFAbsoluteTimeGetCurrent()

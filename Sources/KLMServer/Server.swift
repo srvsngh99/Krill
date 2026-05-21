@@ -311,6 +311,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         case (.GET, "/v1/status"):
             handleStatus(context: context)
 
+        // Model discovery: the pullable-model catalog
+        case (.GET, "/v1/catalog"):
+            handleCatalog(context: context)
+
         // Ollama endpoints
         case (.POST, "/api/chat"):
             guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
@@ -2697,6 +2701,51 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         sendJSON(context: context, status: .ok, body: response)
+    }
+
+    // MARK: - Discovery: GET /v1/catalog
+
+    /// Return the catalog of pullable models: the built-in curated
+    /// aliases plus any models from the on-disk catalog cache. Lets
+    /// external tooling (managers, bots) discover what `krillm pull`
+    /// accepts without rebuilding the binary or shelling out to the
+    /// CLI. Each model carries a `source` of `builtin` or `catalog`.
+    private func handleCatalog(context: ChannelHandlerContext) {
+        let store = ModelCatalogStore(baseDir: registry.baseDir)
+        let cached = store.load()
+
+        func row(
+            alias: String, repo: String, family: String,
+            params: String, quant: String, context ctx: Int, source: String
+        ) -> [String: Any] {
+            ["alias": alias, "repo": repo, "family": family,
+             "params": params, "quant": quant, "context": ctx,
+             "source": source]
+        }
+
+        let builtIn = AliasMap.allAliases
+        var models: [[String: Any]] = builtIn.map { name, model in
+            row(alias: name, repo: model.repo, family: model.family.rawValue,
+                params: model.params, quant: model.quant,
+                context: model.context, source: "builtin")
+        }
+
+        // Built-in aliases win: a catalog entry that collides with a
+        // curated alias is dropped, mirroring `AliasMap.resolve`.
+        let builtInNames = Set(builtIn.map { $0.shortName.lowercased() })
+        for entry in cached?.models ?? []
+        where !builtInNames.contains(entry.alias.lowercased()) {
+            models.append(row(
+                alias: entry.alias, repo: entry.repo,
+                family: entry.family.rawValue, params: entry.params,
+                quant: entry.quant, context: entry.context, source: "catalog"))
+        }
+
+        sendJSON(context: context, status: .ok, body: [
+            "models": models,
+            "builtin_count": builtIn.count,
+            "catalog_count": cached?.models.count ?? 0,
+        ])
     }
 
     // MARK: - Helpers
