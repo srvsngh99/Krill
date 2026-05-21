@@ -200,14 +200,27 @@ private func loadQwen(configData: Data, directory: URL) throws -> LoadedModel {
 private func loadQwen25VL(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(Qwen25VLConfig.self, from: configData)
     let model = Qwen25VLForConditionalGeneration(config)
-    // `loadWeights` quantizes every Linear when the config carries
-    // quantization params and loads the safetensors. The Conv3d in
-    // the vision patch embedding is not a Linear, so it stays fp16
-    // (matching the checkpoint, which cannot quantize a Conv3d).
-    try loadWeights(
-        into: model, from: directory,
-        quantization: config.quantization,
-        tieWordEmbeddings: config.tieWordEmbeddings)
+
+    // The mlx-community Qwen2.5-VL 4-bit checkpoints quantize ONLY
+    // the language model; the vision tower ships fp16 (verified
+    // from the safetensors header - there are no `.scales` tensors
+    // under `vision_tower.*`). Quantizing the vision tower's
+    // Linears here would make `update(parameters:)` expect packed
+    // 4-bit weights the checkpoint does not provide. Restrict the
+    // quantization predicate to `language_model.*`, mirroring how
+    // `loadGemma4` excludes its vision / PLE towers.
+    if let q = config.quantization {
+        quantize(model: model, groupSize: q.groupSize, bits: q.bits) { name, _ in
+            name.contains("language_model")
+        }
+    }
+    let flatWeights = try loadWeightArrays(from: directory)
+    let tuples = flatWeights.map { ($0.key, $0.value) }
+    let nested = ModuleParameters.unflattened(tuples)
+    // `verify: []` tolerates the checkpoint omitting `lm_head.*`
+    // when embeddings are tied (the model then has no lm_head
+    // module either, so there is nothing to assign).
+    try model.update(parameters: nested, verify: [])
 
     let mergeSize = config.vision.spatialMergeSize
 

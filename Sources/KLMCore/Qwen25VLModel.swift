@@ -988,17 +988,43 @@ public class Qwen25VLForConditionalGeneration: Module {
     ///
     /// `inputEmbeds` is `[1, L, H]`; `visionEmbeds` is
     /// `[n_merged, H]`. `imagePadStart` is the host index of the
-    /// first `<|image_pad|>` token; the span length must equal
-    /// `n_merged`. Returns `[1, L, H]` with the span replaced.
+    /// first `<|image_pad|>` token; the span `[imagePadStart,
+    /// imagePadStart + n_merged)` is replaced. Returns `[1, L, H]`.
+    ///
+    /// The span bounds are validated: a mismatch between the
+    /// vision-embed count and the placeholder span (a malformed
+    /// prompt, or a grid that disagrees with the image) would
+    /// otherwise either crash on an out-of-range slice or silently
+    /// corrupt the sequence. The caller is expected to have
+    /// verified the span is genuinely `<|image_pad|>` tokens.
     static func injectVisionEmbeds(
         inputEmbeds: MLXArray, visionEmbeds: MLXArray, imagePadStart: Int
     ) -> MLXArray {
         let L = inputEmbeds.dim(1)
         let n = visionEmbeds.dim(0)
+        precondition(imagePadStart >= 0,
+            "imagePadStart must be non-negative; got \(imagePadStart)")
+        precondition(imagePadStart + n <= L,
+            "Vision-embed span [\(imagePadStart), \(imagePadStart + n)) "
+            + "exceeds the input sequence length \(L). The vision-embed "
+            + "count (\(n)) must match the <|image_pad|> placeholder span.")
         let before = inputEmbeds[0..., 0 ..< imagePadStart, 0...]
         let after = inputEmbeds[0..., (imagePadStart + n) ..< L, 0...]
         let mid = visionEmbeds.expandedDimensions(axis: 0)  // [1, n, H]
         return MLX.concatenated([before, mid, after], axis: 1)
+    }
+
+    /// Count the contiguous run of `<|image_pad|>` tokens starting
+    /// at `start` in the host token-id list.
+    private func imagePadSpanLength(_ tokenIds: [Int32], from start: Int) -> Int {
+        let pad = Int32(config.imageTokenId)
+        var n = 0
+        var i = start
+        while i < tokenIds.count && tokenIds[i] == pad {
+            n += 1
+            i += 1
+        }
+        return n
     }
 
     /// Multimodal forward.
@@ -1012,11 +1038,23 @@ public class Qwen25VLForConditionalGeneration: Module {
     ///     the image, or nil for a text-only prompt. The product
     ///     must equal the number of `<|image_pad|>` tokens.
     ///   - caches: optional per-layer KV caches.
+    ///   - mropePositionOffset: explicit base offset added to the
+    ///     computed 3D mRoPE position ids. Pass `nil` for a fresh
+    ///     prefill (offset 0). For a decode step the caller MUST
+    ///     pass the prefill's final mRoPE position + 1: the cache
+    ///     length is NOT a valid offset after an image prompt
+    ///     because the image span compresses
+    ///     `gridH * gridW` placeholder tokens down to
+    ///     `max(gridH, gridW)` positions. Threading the precise
+    ///     decode offset is the server-integration follow-up; for
+    ///     a text-only prompt `nil` falls back to the cache length,
+    ///     which is correct there.
     public func callAsFunction(
         _ tokens: MLXArray,
         pixelValues: MLXArray? = nil,
         imageGridMerged: (Int, Int)? = nil,
-        caches: [KVCache]? = nil
+        caches: [KVCache]? = nil,
+        mropePositionOffset: Int? = nil
     ) -> MLXArray {
         let textModel = languageModel.model
         var inputEmbeds = textModel.embedTokens(tokens)  // [1, L, H]
@@ -1032,6 +1070,18 @@ public class Qwen25VLForConditionalGeneration: Module {
             gridW = grid.1
             let visionEmbeds = visual(pixelValues)  // [n_merged, H]
             if let start = tokenIds.firstIndex(of: Int32(config.imageTokenId)) {
+                // The contiguous <|image_pad|> span must match the
+                // vision-embed count exactly; otherwise the splice
+                // would corrupt the sequence or trip the
+                // injectVisionEmbeds bounds precondition.
+                let spanLen = imagePadSpanLength(tokenIds, from: start)
+                let nMerged = visionEmbeds.dim(0)
+                precondition(spanLen == nMerged,
+                    "The <|image_pad|> span (\(spanLen) tokens) must "
+                    + "equal the merged vision-embed count (\(nMerged) "
+                    + "= n_patches / spatial_merge_size^2). The image "
+                    + "grid passed to the forward disagrees with the "
+                    + "prompt's placeholder count.")
                 inputEmbeds = Self.injectVisionEmbeds(
                     inputEmbeds: inputEmbeds,
                     visionEmbeds: visionEmbeds,
@@ -1046,8 +1096,11 @@ public class Qwen25VLForConditionalGeneration: Module {
             imageTokenId: config.imageTokenId,
             gridHMerged: gridH,
             gridWMerged: gridW)
+        // Prefill (cacheLen 0) -> offset 0. For a decode step the
+        // caller passes the explicit mRoPE offset; falling back to
+        // the cache length is correct ONLY for a text-only prompt.
         let cacheLen = caches?.first?.sequenceLength ?? 0
-        let offset = Int32(cacheLen)
+        let offset = Int32(mropePositionOffset ?? cacheLen)
         let posT = MLXArray(coords.t.map { $0 + offset })
         let posH = MLXArray(coords.h.map { $0 + offset })
         let posW = MLXArray(coords.w.map { $0 + offset })

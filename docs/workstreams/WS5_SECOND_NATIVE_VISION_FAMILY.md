@@ -53,6 +53,13 @@ real checkpoint and the server image-preprocessing path is wired.
   `multimodalForward` closure. Today the closure derives a
   SQUARE grid from the patch count; non-square images need the
   grid passed explicitly.
+- Thread the decode-step mRoPE offset. The forward exposes a
+  `mropePositionOffset` parameter: a fresh prefill passes `nil`
+  (offset 0, correct), but a decode step after an IMAGE prompt
+  must pass the prefill's final mRoPE position + 1 - the cache
+  length is not a valid offset there because the image span
+  compresses `gridH * gridW` placeholder tokens to
+  `max(gridH, gridW)` positions. Text-only decode is unaffected.
 - Validate the native path against a real
   `mlx-community/Qwen2.5-VL-*-Instruct-*bit` checkpoint
   (parity smoke vs mlx-vlm on the red/green PNG fixtures), then
