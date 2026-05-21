@@ -83,6 +83,24 @@ If the model uses special chat tokens that don't survive decode->encode, add a d
 "new-7b": "new-1b",
 ```
 
+### 7. Declare the family's runtime adapter (new family only)
+
+Adding a whole new `ModelFamily` (not just an alias of an existing
+one) means declaring its server-side contract in the registry so the
+server routes it without a new hand-written branch:
+
+- `ModelCapabilities.swift`: add a `capabilities(for:)` and a
+  `supportTier(for:)` case.
+- `ModelAdapter.swift`: the `switch family` in `chatRouting`,
+  `requiresImageInput`, and `chatTemplate` is exhaustive, so a new
+  `ModelFamily` case will not compile until each is given a value.
+  Pick `.denseEngine` for a native Swift+MLX text/vision family;
+  `.visionBridge` / `.mixtureOfExperts` only for bridge-backed paths.
+
+The server's `dispatchFamilyChat` and `ToolFormat.forFamily` then
+pick the family up automatically — do not add a `family == …` branch
+in `Server.swift`.
+
 ## Checklist
 
 - [ ] Config decodes from the model's `config.json`

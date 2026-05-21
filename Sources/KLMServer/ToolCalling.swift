@@ -1,4 +1,5 @@
 import Foundation
+import KLMRegistry
 
 /// Model-agnostic tool/function calling (WS-D D1).
 ///
@@ -43,22 +44,41 @@ internal enum ToolCalling {
         case llama
         case qwen
 
-        /// Resolve the adapter from the loaded model family
+        /// Resolve the wire format from the loaded model family
         /// (`InferenceEngine.family`).
         ///
-        /// `.moe` maps to `.qwen` because the only native MoE
-        /// runtime today (WS6) is Qwen 3 MoE, which uses the Qwen
-        /// chat / tool-call template verbatim. If a future native
-        /// MoE family (Mixtral, OLMoE) needs a different template,
-        /// promote the family string carried in `LoadedModel.family`
-        /// to a more specific identifier and add a case here.
+        /// The family-to-template decision is owned by the registry's
+        /// `ModelAdapter.chatTemplate` (WS3); this method only maps
+        /// the registry's module-neutral `ChatTemplatePolicy` onto
+        /// the concrete renderer/parser in this module. A new family
+        /// declares its template in `ModelAdapter`, not here - which
+        /// is why, e.g., `.moe` resolving to `.qwen` lives there.
+        ///
+        /// `family` is the loader string from `InferenceEngine.family`,
+        /// resolved to a `ModelFamily` by `rawValue`. Every loader
+        /// string that can reach a dense tool-calling turn (`gemma4`,
+        /// `llama`, `qwen`, `moe`, `mistral`, `gemma`, `phi`, `glm`)
+        /// equals its `ModelFamily.rawValue`. The one loader string
+        /// that does NOT round-trip - `"qwen25vl"` vs
+        /// `ModelFamily.qwen25vl.rawValue == "qwen2_5_vl"` - is
+        /// harmless here: the VL family is bridge-routed (see
+        /// `ModelAdapter.chatRouting`) and never reaches this path,
+        /// and even if it did, an unresolved string falls back to
+        /// `.hermes` - the same template `ModelAdapter` assigns the
+        /// VL family anyway.
+        ///
+        /// So a nil or unrecognized family string falls back to
+        /// `.hermes`, matching the registry's own default.
         static func forFamily(_ family: String?) -> ToolFormat {
-            switch family {
-            case "gemma4": return .gemma4
-            case "llama": return .llama
-            case "qwen": return .qwen
-            case "moe": return .qwen
-            default: return .hermes
+            guard let family,
+                  let modelFamily = ModelFamily(rawValue: family) else {
+                return .hermes
+            }
+            switch ModelAdapter(family: modelFamily).chatTemplate {
+            case .hermes: return .hermes
+            case .gemma4: return .gemma4
+            case .llama: return .llama
+            case .qwen: return .qwen
             }
         }
     }

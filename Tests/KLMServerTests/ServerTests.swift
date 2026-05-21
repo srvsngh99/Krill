@@ -1052,6 +1052,32 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(cleaned, "Just a normal answer.")
     }
 
+    /// WS3: `ToolFormat.forFamily` now delegates the family→template
+    /// decision to the registry's `ModelAdapter`. This pins the
+    /// observable mapping so the delegation stays behaviour-preserving.
+    func testToolFormatForFamilyMapping() {
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("gemma4"), .gemma4)
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("llama"), .llama)
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("qwen"), .qwen)
+        // MoE inherits the Qwen tool template.
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("moe"), .qwen)
+        // Families without a native template fall back to Hermes.
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("mistral"), .hermes)
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("gemma"), .hermes)
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("phi"), .hermes)
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("glm"), .hermes)
+        // The VL loader string is "qwen25vl" but ModelFamily.qwen25vl's
+        // rawValue is "qwen2_5_vl", so it does not round-trip through
+        // ModelFamily(rawValue:). It is bridge-routed and never reaches
+        // this path; it correctly resolves to the Hermes fallback
+        // either way. Both spellings are pinned here.
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("qwen25vl"), .hermes)
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("qwen2_5_vl"), .hermes)
+        // A nil or unrecognized family string falls back to Hermes.
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily(nil), .hermes)
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("not-a-family"), .hermes)
+    }
+
     func testToolSystemInjectionMergesIntoExistingSystem() {
         let msgs = [["role": "system", "content": "Be terse."],
                     ["role": "user", "content": "hi"]]
