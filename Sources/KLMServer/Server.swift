@@ -2475,7 +2475,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
         let stream = (json["stream"] as? Bool) ?? true
-        guard let resolved = AliasMap.resolve(name) else {
+        // Consult the model catalog as a fallback, exactly like the
+        // `krillm pull` CLI - so a catalog-only model discoverable via
+        // GET /v1/catalog is also installable over HTTP.
+        let catalog = ModelCatalogStore(baseDir: registry.baseDir)
+        guard let resolved = AliasMap.resolve(name, catalog: catalog) else {
             sendJSON(context: context, status: .badRequest, body: [
                 "error": "Cannot resolve '\(name)'. Use a known alias or an org/repo HuggingFace path."
             ])
