@@ -217,20 +217,35 @@ class Qwen3MoEExpert: Module {
 ///   - `mlp.experts.{e}.up_proj.weight`     [moe_intermediate_size, hidden]
 ///   - `mlp.experts.{e}.down_proj.weight`   [hidden, moe_intermediate_size]
 ///
-/// Forward pass:
+/// Forward pass (router):
 ///   1. Router logits = `gate(x)` -> `[N, E]`.
-///   2. Compute top-K mask using a rank derived from argSort
-///      (no native top_k op in mlx-swift today; the argSort+argSort
-///      rank trick gives the same mask in two vectorized passes).
-///   3. Softmax over the top-K logits only (positions outside top-K
-///      get zero weight). Optionally renormalize to sum to 1.
-///   4. Accumulate `expert_e(x) * dispatch_weight[:, e]` for every
-///      expert. This evaluates ALL experts on ALL tokens — correct
-///      but O(num_experts) FFN passes per layer. This is the
-///      correctness-first variant; a follow-up replaces the loop
-///      with a gather/scatter dispatch that runs each expert only
-///      on its assigned tokens. Documented in
-///      `docs/workstreams/WS6_MOE_RUNTIME_SUPPORT.md`.
+///   2. Compute top-K experts per token using a rank derived from
+///      argSort (no native top_k op in mlx-swift today; the
+///      argSort+argSort rank trick gives the same selection in two
+///      vectorized passes).
+///   3. Softmax over the top-K logits only; optionally renormalize.
+///
+/// Forward pass (expert dispatch) — `callAsFunction`:
+///   The default path is a **scatter dispatch** (`scatterForward`):
+///   it builds the `N * topK` (token, expert) assignment list,
+///   sorts the assignments by expert id, runs each expert ONCE on
+///   the contiguous slice of tokens routed to it, then un-sorts and
+///   weight-sums back per token. Each expert sees only `count_e`
+///   tokens, so total FFN work is `N * topK` token-passes instead
+///   of the brute-force `N * numExperts`. For Qwen3-30B-A3B
+///   (128 experts, top-8) that is a 16x reduction.
+///
+///   The brute-force reference (`referenceForward`) — every expert
+///   on every token, weighted by a dense `[N, E]` dispatch matrix —
+///   is retained for the parity test: `scatterForward` must produce
+///   numerically equal output (within fp tolerance; the two differ
+///   only in summation order).
+///
+/// The scatter dispatch performs ONE host sync per layer to read
+/// the per-expert token counts (needed to slice the sorted
+/// assignment array). That is a per-layer cost, not per-token, and
+/// is the price of exact (non-capacity-dropping) routing without a
+/// fused gather-matmul kernel.
 ///
 /// The forward is deterministic and family-agnostic; the same
 /// implementation would work for Mixtral or OLMoE with a different
@@ -260,56 +275,116 @@ class Qwen3MoESparseMLP: Module {
             key: "experts")
     }
 
-    /// Build a dense `[N, E]` dispatch-weight matrix from `[N, E]`
-    /// router logits. Top-K positions carry the softmax probability
-    /// (optionally renormalized); all other positions are zero. Used
-    /// to combine per-expert outputs by elementwise multiply+sum.
-    private func dispatchWeights(routerLogits: MLXArray) -> MLXArray {
-        // routerLogits: [N, E]
-        // Rank trick: argSort of (-logits) gives indices ordered
-        // descending; argSort of those indices gives each position's
-        // descending rank (0 = top, 1 = second, ...).
+    /// Router top-K. Returns the per-token top-K expert ids
+    /// `[N, topK]` (descending router score) and the per-token
+    /// dense dispatch-weight matrix `[N, E]` (softmax over the
+    /// top-K logits, zero elsewhere, optionally renormalized).
+    private func route(_ flat: MLXArray) -> (topKExperts: MLXArray, dispatch: MLXArray) {
+        let routerLogits = gate(flat)  // [N, E]
+        // Rank trick: argSort of (-logits) gives indices ordered by
+        // descending score; argSort of those indices gives each
+        // position's descending rank (0 = top, 1 = second, ...).
         let neg = MLXArray(0) - routerLogits
-        let sortedIdx = argSort(neg, axis: -1)
-        let rank = argSort(sortedIdx, axis: -1)
-        let kArr = MLXArray(Int32(topK))
-        let topKMask = (rank .< kArr).asType(routerLogits.dtype)  // [N, E]
+        let sortedByScore = argSort(neg, axis: -1)        // [N, E]
+        let rank = argSort(sortedByScore, axis: -1)        // [N, E]
+        let topKMask = rank .< MLXArray(Int32(topK))       // [N, E] bool
 
         // Mask logits outside top-K with a large negative so they
-        // collapse to ~0 after softmax. We MUST mask BEFORE softmax
-        // (not after) so the top-K probabilities are the softmax over
-        // the K winning logits, matching mlx-lm / HF Transformers.
+        // collapse to ~0 after softmax. Masking BEFORE softmax makes
+        // the top-K probabilities the softmax over the K winning
+        // logits, matching mlx-lm / HF Transformers.
         let negInf = MLXArray(Float(-1e9)).asType(routerLogits.dtype)
-        let maskedLogits = MLX.where(topKMask .> 0, routerLogits, negInf)
-        var weights = softmax(maskedLogits, axis: -1)
-
+        let maskedLogits = MLX.where(topKMask, routerLogits, negInf)
+        var dispatch = softmax(maskedLogits, axis: -1)     // [N, E]
         if normTopK {
-            // Softmax over the masked logits already sums to ~1
-            // across the top-K because the masked-out positions
-            // contribute ~0. The explicit renorm guards against
-            // numerical drift when `topK` >> 1.
-            let denom = weights.sum(axis: -1, keepDims: true)
-            weights = weights / (denom + Float(1e-9))
+            let denom = dispatch.sum(axis: -1, keepDims: true)
+            dispatch = dispatch / (denom + Float(1e-9))
         }
-        return weights  // [N, E]
+        // The first `topK` columns of sortedByScore are the chosen
+        // expert ids for each token (highest score first).
+        let topKExperts = sortedByScore[0..., 0 ..< topK]  // [N, topK]
+        return (topKExperts, dispatch)
     }
 
+    /// Scatter dispatch: each expert runs once on the contiguous
+    /// slice of tokens routed to it. See the type doc for the
+    /// algorithm and the per-layer host-sync note.
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        // x: [B, L, H] -> [N, H]
+        let B = x.dim(0)
+        let L = x.dim(1)
+        let H = x.dim(2)
+        let N = B * L
+        let flat = x.reshaped(N, H)
+
+        let (topKExperts, dispatch) = route(flat)  // [N, topK], [N, E]
+
+        // Build the flat (token, expert) assignment list of length
+        // N * topK. `assignExpert[i]` is the expert id; `tokenIds[i]`
+        // the source token.
+        let assignExpert = topKExperts.reshaped(N * topK)            // [N*topK]
+        let tokenIdsCol = MLXArray(Int32(0) ..< Int32(N)).reshaped(N, 1)
+        let tokenIds = MLX.broadcast(tokenIdsCol, to: [N, topK])
+            .reshaped(N * topK)                                       // [N*topK]
+
+        // Sort the assignments by expert id so each expert's tokens
+        // form one contiguous run.
+        let order = argSort(assignExpert, axis: -1)                   // [N*topK]
+        let sortedExpert = MLX.take(assignExpert, order, axis: 0)     // [N*topK]
+        let sortedToken = MLX.take(tokenIds, order, axis: 0)         // [N*topK]
+        let gathered = MLX.take(flat, sortedToken, axis: 0)          // [N*topK, H]
+
+        // Per-expert token counts via a one-hot sum. ONE host sync
+        // per layer: the counts are needed on the host to slice the
+        // sorted assignment array into per-expert chunks.
+        let expertRange = MLXArray(Int32(0) ..< Int32(numExperts))   // [E]
+        let oneHot = sortedExpert.reshaped(N * topK, 1) .== expertRange  // [N*topK, E]
+        let counts = oneHot.asType(.int32).sum(axis: 0)               // [E]
+        eval(counts)
+        let countsHost = counts.asArray(Int32.self)
+
+        // Run each non-empty expert on its slice and concatenate the
+        // results back in sorted-assignment order.
+        var parts: [MLXArray] = []
+        var offset = 0
+        for e in 0 ..< numExperts {
+            let c = Int(countsHost[e])
+            if c == 0 { continue }
+            let chunk = gathered[offset ..< (offset + c)]   // [c, H]
+            parts.append(experts[e](chunk))                 // [c, H]
+            offset += c
+        }
+        let sortedOut: MLXArray = parts.isEmpty
+            ? MLXArray.zeros([N * topK, H]).asType(flat.dtype)
+            : MLX.concatenated(parts, axis: 0)              // [N*topK, H]
+
+        // Un-sort: argSort(order) is the inverse permutation, so
+        // taking sortedOut by it restores token-major order
+        // [token0 slot0, token0 slot1, ..., token1 slot0, ...].
+        let inverseOrder = argSort(order, axis: -1)          // [N*topK]
+        let perSlot = MLX.take(sortedOut, inverseOrder, axis: 0)
+            .reshaped(N, topK, H)                            // [N, topK, H]
+
+        // Weight each slot by its router probability and sum the
+        // topK contributions per token. The slot weight is
+        // dispatch[token, chosen_expert]; gather it along the expert
+        // axis with the per-token topK expert ids.
+        let slotWeights = takeAlong(dispatch, topKExperts, axis: 1)   // [N, topK]
+        let weighted = perSlot * slotWeights.reshaped(N, topK, 1)
+        let result = weighted.sum(axis: 1)                            // [N, H]
+        return result.reshaped(B, L, H)
+    }
+
+    /// Brute-force reference: every expert on every token, combined
+    /// by a dense `[N, E]` dispatch matrix. Retained ONLY as the
+    /// parity oracle for `callAsFunction` (the scatter dispatch).
+    /// O(numExperts) FFN passes per layer; not used in production.
+    func referenceForward(_ x: MLXArray) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
         let H = x.dim(2)
         let flat = x.reshaped(B * L, H)
+        let (_, dispatch) = route(flat)  // [N, E]
 
-        let routerLogits = gate(flat)  // [N, E]
-        let dispatch = dispatchWeights(routerLogits: routerLogits)  // [N, E]
-
-        // Accumulate weighted expert outputs. Each expert sees ALL
-        // tokens; tokens that did not select expert e contribute 0
-        // because `dispatch[n, e]` is 0 outside their top-K. This is
-        // the correctness-first variant; performance optimization
-        // (gather assigned tokens, run expert on the subset, scatter
-        // back) is tracked as a follow-up.
         var out = MLXArray.zeros([B * L, H]).asType(flat.dtype)
         for e in 0 ..< numExperts {
             let weight = dispatch[0..., e ..< (e + 1)]  // [N, 1]

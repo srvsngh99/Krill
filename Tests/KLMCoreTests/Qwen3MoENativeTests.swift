@@ -246,4 +246,118 @@ final class Qwen3MoENativeTests: XCTestCase {
         XCTAssertFalse(names.contains("model.layers.1.mlp.gate_proj.weight"),
             "Sparse layer 1 must not expose the dense gate_proj key")
     }
+
+    // MARK: - Scatter dispatch parity + benchmark
+
+    /// Build a sparse MLP, freeze its random weights, run BOTH the
+    /// production scatter dispatch (`callAsFunction`) and the
+    /// brute-force reference (`referenceForward`) on the same
+    /// input, and assert the outputs are numerically equal. The
+    /// two differ only in summation order, so the result must
+    /// agree within a small fp tolerance. This is the load-bearing
+    /// correctness test for the scatter optimization: a wrong
+    /// sort / un-sort / index mapping would diverge here.
+    private func assertScatterMatchesReference(
+        numExperts: Int, topK: Int, hidden: Int, moeIntermediate: Int,
+        batch: Int, seqLen: Int, file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let cfg = try decode(tinyConfigJSON(
+            hidden: hidden, heads: 2, kvHeads: 1, layers: 1, headDim: 16,
+            numExperts: numExperts, topK: topK, moeIntermediate: moeIntermediate))
+        let mlp = Qwen3MoESparseMLP(cfg)
+        // Deterministic-ish input; the random module weights are
+        // shared between the two forwards so any divergence is the
+        // dispatch logic, not the weights.
+        let x = MLXRandom.normal([batch, seqLen, hidden]).asType(.float32)
+        let scatter = mlp(x)
+        let reference = mlp.referenceForward(x)
+        eval(scatter, reference)
+        XCTAssertEqual(scatter.shape, reference.shape, file: file, line: line)
+        let diff = abs(scatter - reference).max().item(Float.self)
+        XCTAssertLessThan(diff, 2e-3,
+            "Scatter dispatch must match the brute-force reference "
+            + "within fp tolerance; max abs diff was \(diff)",
+            file: file, line: line)
+    }
+
+    func testScatterMatchesReferenceSmall() throws {
+        // 4 experts, top-2, single token.
+        try assertScatterMatchesReference(
+            numExperts: 4, topK: 2, hidden: 32, moeIntermediate: 16,
+            batch: 1, seqLen: 1)
+    }
+
+    func testScatterMatchesReferenceMultiToken() throws {
+        // 8 experts, top-2, a prefill-sized batch (24 tokens) so
+        // multiple tokens route to the same expert.
+        try assertScatterMatchesReference(
+            numExperts: 8, topK: 2, hidden: 64, moeIntermediate: 32,
+            batch: 2, seqLen: 12)
+    }
+
+    func testScatterMatchesReferenceManyExperts() throws {
+        // 32 experts, top-4 - closer to the Qwen3-30B-A3B
+        // sparsity ratio. Some experts will receive zero tokens;
+        // the scatter path must skip them and still match.
+        try assertScatterMatchesReference(
+            numExperts: 32, topK: 4, hidden: 64, moeIntermediate: 32,
+            batch: 4, seqLen: 8)
+    }
+
+    func testScatterMatchesReferenceTopKEqualsExperts() throws {
+        // Degenerate case: top-K == numExperts. Every token routes
+        // to every expert; the scatter must still equal the
+        // reference (all experts non-empty, full assignment list).
+        try assertScatterMatchesReference(
+            numExperts: 4, topK: 4, hidden: 32, moeIntermediate: 16,
+            batch: 1, seqLen: 6)
+    }
+
+    /// Micro-benchmark: time the scatter dispatch against the
+    /// brute-force reference on a sparsity ratio that mirrors
+    /// Qwen3-30B-A3B (top-K much smaller than numExperts). The
+    /// scatter path runs each expert on only its routed tokens,
+    /// so total expert-FFN work scales with `topK` instead of
+    /// `numExperts`. This is not a hard assertion on wall time
+    /// (CI timing is noisy); it prints both timings and asserts
+    /// the scatter path is not pathologically slower.
+    func testScatterDispatchBenchmark() throws {
+        let numExperts = 64
+        let topK = 8
+        let hidden = 128
+        let moeIntermediate = 64
+        let cfg = try decode(tinyConfigJSON(
+            hidden: hidden, heads: 4, kvHeads: 2, layers: 1, headDim: 16,
+            numExperts: numExperts, topK: topK, moeIntermediate: moeIntermediate))
+        let mlp = Qwen3MoESparseMLP(cfg)
+        // Prefill-sized input: 64 tokens.
+        let x = MLXRandom.normal([1, 64, hidden]).asType(.float32)
+
+        // Warm up both paths (first call compiles MLX kernels).
+        eval(mlp(x))
+        eval(mlp.referenceForward(x))
+
+        let iterations = 20
+        let scatterStart = Date()
+        for _ in 0 ..< iterations { eval(mlp(x)) }
+        let scatterMs = Date().timeIntervalSince(scatterStart) / Double(iterations) * 1000
+
+        let refStart = Date()
+        for _ in 0 ..< iterations { eval(mlp.referenceForward(x)) }
+        let refMs = Date().timeIntervalSince(refStart) / Double(iterations) * 1000
+
+        print("[WS6 scatter benchmark] experts=\(numExperts) topK=\(topK) "
+            + "tokens=64 | scatter=\(String(format: "%.3f", scatterMs))ms "
+            + "reference=\(String(format: "%.3f", refMs))ms "
+            + "ratio=\(String(format: "%.2fx", refMs / max(scatterMs, 1e-6)))")
+        // The scatter path does more index bookkeeping but far
+        // fewer expert-FFN flops. On a 64-expert / top-8 shape it
+        // should not be more than ~1.5x slower even in the worst
+        // case (tiny test FFNs make the fixed overhead dominate);
+        // on the real 128-expert checkpoint the FFN flops dominate
+        // and the scatter path wins decisively.
+        XCTAssertLessThan(scatterMs, refMs * 1.5,
+            "Scatter dispatch should not be pathologically slower "
+            + "than the brute-force reference")
+    }
 }
