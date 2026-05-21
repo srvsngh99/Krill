@@ -9,15 +9,28 @@ public struct AliasMap: Sendable {
     /// Resolve a model name to a HuggingFace repo path.
     ///
     /// Priority:
-    /// 1. Exact match in alias map
-    /// 2. Treat as raw HF repo path if contains "/"
-    /// 3. Return nil (not found)
-    public static func resolve(_ name: String) -> ResolvedModel? {
+    /// 1. Exact match in the built-in alias map
+    /// 2. Exact match in the on-disk catalog cache, when a `catalog`
+    ///    store is supplied (lets models be added without rebuilding)
+    /// 3. Treat as raw HF repo path if it contains "/"
+    /// 4. Return nil (not found)
+    ///
+    /// The built-in map always wins over the catalog, so a catalog can
+    /// never silently shadow a curated, tested alias.
+    public static func resolve(
+        _ name: String, catalog: ModelCatalogStore? = nil
+    ) -> ResolvedModel? {
         let normalized = name.lowercased().trimmingCharacters(in: .whitespaces)
 
-        // Direct alias match
+        // Direct alias match (built-in, curated map).
         if let entry = aliases[normalized] {
             return entry
+        }
+
+        // Catalog fallback: a model added via `krillm catalog` without
+        // a binary rebuild. Only consulted when a store is supplied.
+        if let fromCatalog = catalog?.resolve(normalized) {
+            return fromCatalog
         }
 
         // If it looks like a HF repo path (org/name), use directly
