@@ -1,13 +1,75 @@
 # WS5: Second Native Vision Family
 
-Status: native foundation shipped (config parser, 3D mRoPE,
-window-attention vision blocks, patch merger, image preprocessing).
-End-to-end multimodal forward (vision token injection, language-
-side mRoPE wiring, retiring the Python sidecar) is the follow-up.
-The bridge (`Qwen25VLEngine` -> mlx-vlm) stays the default until
-the runtime PR lands.
+Status: native multimodal forward shipped. The Swift+MLX
+`Qwen25VLForConditionalGeneration` (vision tower + 3D mRoPE text
+tower + image-token injection) is built, wired into the loader
+behind `KRILL_NATIVE_QWEN25VL=1`, and tested end-to-end on
+synthetic models. The Python bridge (`Qwen25VLEngine` -> mlx-vlm)
+stays the default until the native path is validated against a
+real checkpoint and the server image-preprocessing path is wired.
 
-## What landed in the native foundation PR
+## What landed in the native multimodal-forward PR
+
+- `Qwen25VLMRoPE` is now consumed by a native text tower:
+  - `Qwen25VLTextAttention` applies 3D mRoPE to Q/K with explicit
+    per-axis (t, h, w) position arrays, instead of the standard
+    1D `RoPE` module. QKV-bias, GQA, no q_norm/k_norm - dense
+    Qwen 2.5 attention shape otherwise.
+  - `Qwen25VLTextBlock` / `Qwen25VLTextModel` build the language
+    transformer stack; the text model accepts pre-computed input
+    embeddings so vision embeddings can be injected first.
+- `Qwen25VLPositions.compute` computes 3D mRoPE position ids on
+  the host for a prompt with at most one image span: text tokens
+  advance all three axes together; `<|image_pad|>` tokens form a
+  `gridHMerged x gridWMerged` 2D grid at a fixed temporal index;
+  text resumes at `startPos + max(gridH, gridW)` - matching the
+  HF `get_rope_index` reference.
+- `Qwen25VLForConditionalGeneration` is the full multimodal
+  model. Module keys match the mlx-vlm checkpoint layout:
+  `vision_tower.*`, `language_model.model.*`,
+  `language_model.lm_head.*`. The forward embeds tokens, runs the
+  vision tower, splices vision embeddings into the `<|image_pad|>`
+  span (`injectVisionEmbeds`), computes mRoPE positions, runs the
+  text stack, and projects to logits.
+- `Sources/KLMCore/ModelLoader.swift`: the `KRILL_NATIVE_QWEN25VL=1`
+  arm now calls `loadQwen25VL`, which builds the native model,
+  loads weights, and returns a `LoadedModel` with both a text-only
+  `forward` and a `multimodalForward` closure.
+- Tests: `Qwen25VLNativeTests` adds mRoPE position-id tests
+  (text-only, square + non-square image grids), `injectVisionEmbeds`
+  splice tests, module-key-layout tests, text-only + multimodal
+  forward finite-logit tests, the WS5 acceptance-bar tests (image
+  changes output vs text-only; two images differ), and a
+  multimodal micro-benchmark.
+
+## What remains for the runtime follow-up
+
+- Server image-preprocessing wiring: decode the request PNG,
+  resize to a multiple of `patch_size * spatial_merge_size`,
+  normalize, run `toConv3DInput`, and route the VL manifest to
+  the native `InferenceEngine` instead of the bridge when
+  `KRILL_NATIVE_QWEN25VL=1`.
+- Thread the real `(gridH, gridW)` through the
+  `multimodalForward` closure. Today the closure derives a
+  SQUARE grid from the patch count; non-square images need the
+  grid passed explicitly.
+- Thread the decode-step mRoPE offset. The forward exposes a
+  `mropePositionOffset` parameter: a fresh prefill passes `nil`
+  (offset 0, correct), but a decode step after an IMAGE prompt
+  must pass the prefill's final mRoPE position + 1 - the cache
+  length is not a valid offset there because the image span
+  compresses `gridH * gridW` placeholder tokens to
+  `max(gridH, gridW)` positions. Text-only decode is unaffected.
+- Validate the native path against a real
+  `mlx-community/Qwen2.5-VL-*-Instruct-*bit` checkpoint
+  (parity smoke vs mlx-vlm on the red/green PNG fixtures), then
+  retire `Qwen25VLEngine` + `qwen25vl_bridge.py` and promote the
+  tier from `compatible_fallback` to `production_native`.
+- Window-attention mask builder that takes the real image grid
+  shape and emits per-block masks (the foundation runs all
+  vision blocks with full attention).
+
+## What landed in the native foundation PR (prior)
 
 - `Sources/KLMCore/Qwen25VLModel.swift` (new): native Swift+MLX
   modules for Qwen 2.5-VL.
@@ -47,36 +109,27 @@ the runtime PR lands.
   the follow-up" rejection so users see the env-gate is intentional;
   without the gate the existing bridge redirect stands.
 
-## What remains for the runtime PR
-
-- Native `Qwen25VLForConditionalGeneration` that composes the
-  vision tower + a dense Qwen 2.5 text tower + the multimodal
-  forward (vision_start / image_pad / vision_end token injection,
-  language-side 3D mRoPE positions).
-- Wire the env-gated loader arm to actually return a `LoadedModel`
-  with the native multimodal forward.
-- Window-attention mask builder that takes the real image grid
-  shape (h_patches, w_patches) and emits per-block masks.
-- Retire `Qwen25VLEngine` + `qwen25vl_bridge.py` once the native
-  parity smoke matches mlx-vlm on the existing fixtures
-  (red/green PNGs).
-
-## Acceptance status (foundation)
+## Acceptance status (native multimodal forward)
 
 - "Selected family handles image-only prompts natively." -
-  **DEFERRED** to the runtime PR.
+  **DONE (in-engine).** `Qwen25VLForConditionalGeneration`
+  runs a native Swift+MLX multimodal forward. Live generation
+  on a real checkpoint via the server is gated on the
+  image-preprocessing wiring follow-up.
 - "Image fixture changes output versus text-only prompt." -
-  Bridge continues to honor this through the existing
-  `Qwen25VLBridgeTests`.
+  **DONE.** `testImageInputChangesOutputVsTextOnly` asserts the
+  native forward diverges when vision embeddings are injected.
 - "Two different image fixtures produce different outputs." -
-  Same as above; native path inherits the contract.
+  **DONE.** `testTwoImagesProduceDifferentOutputs` asserts two
+  different image fills produce different logits.
 - "Server rejects unsupported media/family combinations clearly." -
   **DONE** (bridge handler unchanged; native loader rejection
   message names the env-gate).
 - "Benchmark shows production-native performance or marks the
-  path experimental/fallback." - **DONE** for the foundation
-  (path stays `compatible_fallback`; tier promotion gated on
-  the runtime PR).
+  path experimental/fallback." - **PARTIAL.** An in-engine
+  micro-benchmark (`testMultimodalForwardBenchmark`) times the
+  native multimodal forward. The path stays `compatible_fallback`
+  until the real-checkpoint parity smoke lands.
 
 ## What landed in the bridge PR (prior)
 
