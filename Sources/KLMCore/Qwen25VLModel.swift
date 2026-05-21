@@ -697,3 +697,368 @@ public enum Qwen25VLImagePreprocessor {
         return x
     }
 }
+
+// MARK: - mRoPE position computation
+
+/// 3D mRoPE position ids for a Qwen 2.5-VL prompt that contains at
+/// most one image span.
+///
+/// Each token gets three position coordinates (t, h, w):
+///   - Text tokens advance all three axes together (t == h == w),
+///     so they behave like standard 1D RoPE.
+///   - Image-placeholder tokens (`<|image_pad|>`) span a
+///     `gridHMerged x gridWMerged` 2D grid. The temporal axis is
+///     constant across the image (`startPos`); the height axis
+///     ranges `startPos ..< startPos + gridHMerged`; the width
+///     axis ranges `startPos ..< startPos + gridWMerged`.
+///   - After the image, text resumes at
+///     `startPos + max(gridHMerged, gridWMerged)`, matching the
+///     reference `get_rope_index` in HF transformers.
+///
+/// `gridHMerged` / `gridWMerged` are the post-spatial-merge grid
+/// dimensions (the count of `<|image_pad|>` tokens is their
+/// product). Computed on the host because the token sequence is
+/// known; returns three `[L]` Int32 `MLXArray`s.
+public enum Qwen25VLPositions {
+    public struct Coords: Sendable {
+        public let t: [Int32]
+        public let h: [Int32]
+        public let w: [Int32]
+    }
+
+    /// - Parameters:
+    ///   - tokenIds: the flat prompt token ids (host array).
+    ///   - imageTokenId: the `<|image_pad|>` id.
+    ///   - gridHMerged: post-merge image grid height (0 if no image).
+    ///   - gridWMerged: post-merge image grid width (0 if no image).
+    public static func compute(
+        tokenIds: [Int32],
+        imageTokenId: Int,
+        gridHMerged: Int,
+        gridWMerged: Int
+    ) -> Coords {
+        var t: [Int32] = []
+        var h: [Int32] = []
+        var w: [Int32] = []
+        t.reserveCapacity(tokenIds.count)
+        h.reserveCapacity(tokenIds.count)
+        w.reserveCapacity(tokenIds.count)
+
+        var nextPos: Int32 = 0
+        var i = 0
+        let imgTok = Int32(imageTokenId)
+        while i < tokenIds.count {
+            if tokenIds[i] == imgTok && gridHMerged > 0 && gridWMerged > 0 {
+                // Image span. Consume exactly gridHMerged*gridWMerged
+                // placeholder tokens (or until the run of image
+                // tokens ends, whichever is shorter, so a malformed
+                // prompt cannot walk off the end).
+                let start = nextPos
+                var consumed = 0
+                let total = gridHMerged * gridWMerged
+                while i < tokenIds.count && tokenIds[i] == imgTok && consumed < total {
+                    let row = Int32(consumed / gridWMerged)
+                    let col = Int32(consumed % gridWMerged)
+                    t.append(start)
+                    h.append(start + row)
+                    w.append(start + col)
+                    consumed += 1
+                    i += 1
+                }
+                nextPos = start + Int32(max(gridHMerged, gridWMerged))
+            } else {
+                t.append(nextPos)
+                h.append(nextPos)
+                w.append(nextPos)
+                nextPos += 1
+                i += 1
+            }
+        }
+        return Coords(t: t, h: h, w: w)
+    }
+}
+
+// MARK: - Text-side attention with 3D mRoPE
+
+/// Qwen 2.5-VL text attention. Identical to dense Qwen 2.5
+/// attention (QKV bias, no q_norm/k_norm, GQA) EXCEPT that the
+/// rotary embedding is 3D mRoPE applied with explicit per-axis
+/// position arrays, rather than the standard 1D `RoPE` module.
+class Qwen25VLTextAttention: Module {
+    @ModuleInfo(key: "q_proj") var qProj: Linear
+    @ModuleInfo(key: "k_proj") var kProj: Linear
+    @ModuleInfo(key: "v_proj") var vProj: Linear
+    @ModuleInfo(key: "o_proj") var oProj: Linear
+
+    let numHeads: Int
+    let numKVHeads: Int
+    let headDim: Int
+    let scale: Float
+    let mrope: Qwen25VLMRoPE
+
+    init(_ config: Qwen25VLConfig) {
+        let dim = config.hiddenSize
+        self.numHeads = config.numAttentionHeads
+        self.numKVHeads = config.numKeyValueHeads
+        self.headDim = config.headDim
+        self.scale = 1.0 / Float(config.headDim).squareRoot()
+        self.mrope = Qwen25VLMRoPE(
+            headDim: config.headDim,
+            sections: config.mropeSection,
+            theta: config.ropeTheta)
+        _qProj = ModuleInfo(
+            wrappedValue: Linear(dim, numHeads * headDim, bias: true), key: "q_proj")
+        _kProj = ModuleInfo(
+            wrappedValue: Linear(dim, numKVHeads * headDim, bias: true), key: "k_proj")
+        _vProj = ModuleInfo(
+            wrappedValue: Linear(dim, numKVHeads * headDim, bias: true), key: "v_proj")
+        _oProj = ModuleInfo(
+            wrappedValue: Linear(numHeads * headDim, dim, bias: false), key: "o_proj")
+    }
+
+    func callAsFunction(
+        _ x: MLXArray,
+        positionsT: MLXArray, positionsH: MLXArray, positionsW: MLXArray,
+        mask: MLXArray? = nil, cache: KVCache? = nil
+    ) -> MLXArray {
+        let B = x.dim(0)
+        let L = x.dim(1)
+
+        var queries = qProj(x).reshaped(B, L, numHeads, headDim).transposed(0, 2, 1, 3)
+        var keys = kProj(x).reshaped(B, L, numKVHeads, headDim).transposed(0, 2, 1, 3)
+        let values = vProj(x).reshaped(B, L, numKVHeads, headDim).transposed(0, 2, 1, 3)
+
+        // 3D mRoPE on Q and K. Positions are [L]; mrope.apply
+        // broadcasts across batch and head dims.
+        queries = mrope.apply(
+            queries, positionsT: positionsT, positionsH: positionsH, positionsW: positionsW)
+        keys = mrope.apply(
+            keys, positionsT: positionsT, positionsH: positionsH, positionsW: positionsW)
+
+        var k = keys
+        var v = values
+        if let cache {
+            (k, v) = cache.update(keys: keys, values: values)
+        }
+
+        let output = MLXFast.scaledDotProductAttention(
+            queries: queries, keys: k, values: v, scale: scale, mask: mask)
+        return oProj(output.transposed(0, 2, 1, 3).reshaped(B, L, -1))
+    }
+}
+
+// MARK: - Text-side transformer block
+
+class Qwen25VLTextBlock: Module {
+    @ModuleInfo(key: "self_attn") var selfAttn: Qwen25VLTextAttention
+    @ModuleInfo(key: "mlp") var mlp: QwenMLP
+    @ModuleInfo(key: "input_layernorm") var inputLayernorm: RMSNorm
+    @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayernorm: RMSNorm
+
+    init(_ config: Qwen25VLConfig) {
+        _selfAttn = ModuleInfo(
+            wrappedValue: Qwen25VLTextAttention(config), key: "self_attn")
+        _mlp = ModuleInfo(
+            wrappedValue: QwenMLP(config.qwenTextConfig), key: "mlp")
+        _inputLayernorm = ModuleInfo(
+            wrappedValue: RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps),
+            key: "input_layernorm")
+        _postAttentionLayernorm = ModuleInfo(
+            wrappedValue: RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps),
+            key: "post_attention_layernorm")
+    }
+
+    func callAsFunction(
+        _ x: MLXArray,
+        positionsT: MLXArray, positionsH: MLXArray, positionsW: MLXArray,
+        mask: MLXArray? = nil, cache: KVCache? = nil
+    ) -> MLXArray {
+        let h = x + selfAttn(
+            inputLayernorm(x),
+            positionsT: positionsT, positionsH: positionsH, positionsW: positionsW,
+            mask: mask, cache: cache)
+        return h + mlp(postAttentionLayernorm(h))
+    }
+}
+
+// MARK: - Text-side model
+
+/// Qwen 2.5-VL language model: token embedding, mRoPE transformer
+/// blocks, final norm. Weight keys live under `model.*` in the
+/// checkpoint. `callAsFunction` accepts pre-computed input
+/// embeddings (rather than token ids) so the multimodal forward
+/// can inject vision embeddings before the transformer stack.
+class Qwen25VLTextModel: Module {
+    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
+    @ModuleInfo(key: "layers") var layers: [Qwen25VLTextBlock]
+    @ModuleInfo(key: "norm") var norm: RMSNorm
+
+    init(_ config: Qwen25VLConfig) {
+        _embedTokens = ModuleInfo(
+            wrappedValue: Embedding(
+                embeddingCount: config.vocabSize, dimensions: config.hiddenSize),
+            key: "embed_tokens")
+        _layers = ModuleInfo(
+            wrappedValue: (0 ..< config.numHiddenLayers).map { _ in
+                Qwen25VLTextBlock(config)
+            },
+            key: "layers")
+        _norm = ModuleInfo(
+            wrappedValue: RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps),
+            key: "norm")
+    }
+
+    func callAsFunction(
+        inputEmbeds: MLXArray,
+        positionsT: MLXArray, positionsH: MLXArray, positionsW: MLXArray,
+        caches: [KVCache]? = nil
+    ) -> MLXArray {
+        var x = inputEmbeds
+        let seqLen = x.dim(1)
+        let cacheLen = caches?.first?.sequenceLength ?? 0
+        let mask = createCachedCausalMask(
+            newLen: seqLen, cacheLen: cacheLen, dtype: x.dtype)
+        for (i, layer) in layers.enumerated() {
+            x = layer(
+                x,
+                positionsT: positionsT, positionsH: positionsH, positionsW: positionsW,
+                mask: mask, cache: caches?[i])
+        }
+        return norm(x)
+    }
+}
+
+// MARK: - Language-model wrapper
+
+/// Wraps the Qwen 2.5-VL text tower + LM head under the
+/// `language_model.*` key prefix that the mlx-vlm checkpoint
+/// layout uses (`language_model.model.*` for the transformer,
+/// `language_model.lm_head.*` for the projection head).
+class Qwen25VLLanguageModel: Module {
+    @ModuleInfo(key: "model") var model: Qwen25VLTextModel
+    @ModuleInfo(key: "lm_head") var lmHead: Linear?
+
+    init(_ config: Qwen25VLConfig) {
+        _model = ModuleInfo(wrappedValue: Qwen25VLTextModel(config), key: "model")
+        if !config.tieWordEmbeddings {
+            _lmHead = ModuleInfo(
+                wrappedValue: Linear(config.hiddenSize, config.vocabSize, bias: false),
+                key: "lm_head")
+        }
+    }
+}
+
+// MARK: - Qwen 2.5-VL ForConditionalGeneration
+
+/// Native Qwen 2.5-VL multimodal model: vision tower + text tower
+/// + LM head.
+///
+/// Module key layout matches the mlx-vlm checkpoint convention
+/// used by the mlx-community Qwen2.5-VL-*-Instruct-*bit repos:
+///   - `vision_tower.*`           patch embed, blocks, merger
+///   - `language_model.model.*`   token embedding, text layers, norm
+///   - `language_model.lm_head.*` projection head (absent when
+///      embeddings are tied)
+///
+/// The multimodal forward (`callAsFunction`):
+///   1. Embed the text tokens.
+///   2. If `pixelValues` is provided, run the vision tower to get
+///      `[n_merged, hidden]` vision embeddings, then splice them
+///      into the input-embedding sequence at the contiguous
+///      `<|image_pad|>` span.
+///   3. Compute 3D mRoPE position ids for the merged sequence.
+///   4. Run the text transformer stack and project to logits.
+public class Qwen25VLForConditionalGeneration: Module {
+    @ModuleInfo(key: "vision_tower") var visual: Qwen25VLVisionTower
+    @ModuleInfo(key: "language_model") var languageModel: Qwen25VLLanguageModel
+
+    public let config: Qwen25VLConfig
+
+    public init(_ config: Qwen25VLConfig) {
+        self.config = config
+        _visual = ModuleInfo(
+            wrappedValue: Qwen25VLVisionTower(config.vision, normEps: config.rmsNormEps),
+            key: "vision_tower")
+        _languageModel = ModuleInfo(
+            wrappedValue: Qwen25VLLanguageModel(config), key: "language_model")
+    }
+
+    /// Splice vision embeddings into the text input-embedding
+    /// sequence at the `<|image_pad|>` span.
+    ///
+    /// `inputEmbeds` is `[1, L, H]`; `visionEmbeds` is
+    /// `[n_merged, H]`. `imagePadStart` is the host index of the
+    /// first `<|image_pad|>` token; the span length must equal
+    /// `n_merged`. Returns `[1, L, H]` with the span replaced.
+    static func injectVisionEmbeds(
+        inputEmbeds: MLXArray, visionEmbeds: MLXArray, imagePadStart: Int
+    ) -> MLXArray {
+        let L = inputEmbeds.dim(1)
+        let n = visionEmbeds.dim(0)
+        let before = inputEmbeds[0..., 0 ..< imagePadStart, 0...]
+        let after = inputEmbeds[0..., (imagePadStart + n) ..< L, 0...]
+        let mid = visionEmbeds.expandedDimensions(axis: 0)  // [1, n, H]
+        return MLX.concatenated([before, mid, after], axis: 1)
+    }
+
+    /// Multimodal forward.
+    ///
+    /// - Parameters:
+    ///   - tokens: prompt token ids `[1, L]`.
+    ///   - pixelValues: preprocessed per-patch batch
+    ///     `[n_patches, T, ps, ps, C]` for the single image, or nil
+    ///     for a text-only prompt.
+    ///   - imageGridMerged: post-spatial-merge `(gridH, gridW)` of
+    ///     the image, or nil for a text-only prompt. The product
+    ///     must equal the number of `<|image_pad|>` tokens.
+    ///   - caches: optional per-layer KV caches.
+    public func callAsFunction(
+        _ tokens: MLXArray,
+        pixelValues: MLXArray? = nil,
+        imageGridMerged: (Int, Int)? = nil,
+        caches: [KVCache]? = nil
+    ) -> MLXArray {
+        let textModel = languageModel.model
+        var inputEmbeds = textModel.embedTokens(tokens)  // [1, L, H]
+
+        // Host-side token id list for image-span location + mRoPE.
+        eval(tokens)
+        let tokenIds = tokens.asArray(Int32.self)
+
+        var gridH = 0
+        var gridW = 0
+        if let pixelValues, let grid = imageGridMerged {
+            gridH = grid.0
+            gridW = grid.1
+            let visionEmbeds = visual(pixelValues)  // [n_merged, H]
+            if let start = tokenIds.firstIndex(of: Int32(config.imageTokenId)) {
+                inputEmbeds = Self.injectVisionEmbeds(
+                    inputEmbeds: inputEmbeds,
+                    visionEmbeds: visionEmbeds,
+                    imagePadStart: start)
+            }
+        }
+
+        // 3D mRoPE position ids. With no image, gridH/gridW are 0
+        // and every token advances all three axes together.
+        let coords = Qwen25VLPositions.compute(
+            tokenIds: tokenIds,
+            imageTokenId: config.imageTokenId,
+            gridHMerged: gridH,
+            gridWMerged: gridW)
+        let cacheLen = caches?.first?.sequenceLength ?? 0
+        let offset = Int32(cacheLen)
+        let posT = MLXArray(coords.t.map { $0 + offset })
+        let posH = MLXArray(coords.h.map { $0 + offset })
+        let posW = MLXArray(coords.w.map { $0 + offset })
+
+        let hidden = textModel(
+            inputEmbeds: inputEmbeds,
+            positionsT: posT, positionsH: posH, positionsW: posW,
+            caches: caches)
+        if let lmHead = languageModel.lmHead {
+            return lmHead(hidden)
+        }
+        return textModel.embedTokens.asLinear(hidden)
+    }
+}

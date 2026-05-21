@@ -67,46 +67,23 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
     if arch.contains("qwen2_5_vl") || arch.contains("qwen2vl")
         || modelType == "qwen2_5_vl" || modelType == "qwen2_vl"
     {
-        // Qwen 2.5-VL native runtime: foundation modules landed
-        // (Qwen25VLConfig + 3D mRoPE + patch merger + window-
-        // attention vision blocks + image preprocessing). The
-        // multimodal forward (vision tower wiring, image_pad
-        // token injection, language-side mRoPE) lands in a
-        // follow-up. Today the loader validates the config (so
-        // the parser is exercised end-to-end) and then defers to
-        // the bridge with a clear note about the env-gate that
-        // will switch to native once the runtime PR lands.
-        //
-        // The env-gate (`KRILL_NATIVE_QWEN25VL=1`) is reserved
-        // here so the follow-up PR only needs to flip behavior
-        // behind the same flag - no API change for users. We do
-        // NOT eagerly decode the full config in the rejection
-        // path: a partial / placeholder config that callers use
-        // to test the rejection contract should still hit the
-        // rejection message rather than a deserialization error.
-        // The runtime PR moves the decode inside the opt-in
-        // branch where the parsed config is actually consumed.
+        // Qwen 2.5-VL native runtime. With `KRILL_NATIVE_QWEN25VL=1`
+        // the loader builds the native Swift+MLX
+        // `Qwen25VLForConditionalGeneration` (vision tower + 3D
+        // mRoPE text tower + multimodal forward) and returns a
+        // `LoadedModel`. Without the env var the family routes
+        // through the `Qwen25VLEngine` Python bridge
+        // (compatible_fallback tier) - the default until the native
+        // path is validated against a real checkpoint.
         if ProcessInfo.processInfo.environment["KRILL_NATIVE_QWEN25VL"] == "1" {
-            // Stable tag `[WS5_FOUNDATION_ONLY]` lets callers (CI,
-            // smoke harness) discriminate "feature gated and only
-            // the foundation has landed" from "feature does not
-            // exist" via substring match, instead of prose
-            // collisions with the default-arm rejection.
-            throw ModelLoadError.unsupportedArchitecture(
-                "[WS5_FOUNDATION_ONLY] Qwen 2.5-VL native runtime: foundation "
-                + "modules (config parser, 3D mRoPE, Conv3d patch embedding, "
-                + "patch merger, image preprocessor) are wired and tested. "
-                + "Full multimodal forward + vision-token injection is the "
-                + "runtime PR. Unset KRILL_NATIVE_QWEN25VL to use the "
-                + "compatible_fallback bridge path. Detected arch=\(arch), "
-                + "model_type=\(modelType).")
+            return try loadQwen25VL(configData: configData, directory: directory)
         }
         throw ModelLoadError.unsupportedArchitecture(
             "Qwen 2.5-VL runs through the multimodal bridge (compatible_fallback "
             + "tier). Use POST /api/chat or /v1/chat/completions with an image "
             + "attachment - the server routes VL manifests to Qwen25VLEngine. "
-            + "Native Swift+MLX vision tower / mRoPE / patch merger landed in "
-            + "WS5; full multimodal forward is the follow-up. Detected "
+            + "The native Swift+MLX runtime is opt-in via KRILL_NATIVE_QWEN25VL=1 "
+            + "until it is validated against a real checkpoint. Detected "
             + "arch=\(arch), model_type=\(modelType).")
     } else if arch.contains("forsequenceclassification") || arch.contains("crossencoder") {
         // Cross-encoder rerankers (BGE Reranker, Cohere Rerank,
@@ -216,6 +193,52 @@ private func loadQwen(configData: Data, directory: URL) throws -> LoadedModel {
         family: "qwen",
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
         multimodalForward: nil,
+        vocabSize: config.vocabSize
+    )
+}
+
+private func loadQwen25VL(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(Qwen25VLConfig.self, from: configData)
+    let model = Qwen25VLForConditionalGeneration(config)
+    // `loadWeights` quantizes every Linear when the config carries
+    // quantization params and loads the safetensors. The Conv3d in
+    // the vision patch embedding is not a Linear, so it stays fp16
+    // (matching the checkpoint, which cannot quantize a Conv3d).
+    try loadWeights(
+        into: model, from: directory,
+        quantization: config.quantization,
+        tieWordEmbeddings: config.tieWordEmbeddings)
+
+    let mergeSize = config.vision.spatialMergeSize
+
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "qwen25vl",
+        forward: { tokens, caches in
+            // Text-only path: no image, no vision tower.
+            model(tokens, pixelValues: nil, imageGridMerged: nil,
+                  caches: caches as? [KVCache])
+        },
+        multimodalForward: { tokens, caches, pixelValues, _, _, _ in
+            // pixelValues is the preprocessed per-patch batch
+            // `[n_patches, T, ps, ps, C]`. The post-merge grid is
+            // derived assuming a square image (n_patches is a
+            // perfect square): gridFull = sqrt(n_patches),
+            // gridMerged = gridFull / spatial_merge_size. Non-square
+            // images need the grid threaded explicitly - that is
+            // the remaining server-integration follow-up.
+            guard let pixelValues else {
+                return model(tokens, pixelValues: nil, imageGridMerged: nil,
+                             caches: caches as? [KVCache])
+            }
+            let nPatches = pixelValues.dim(0)
+            let gridFull = Int(Double(nPatches).squareRoot().rounded())
+            let gridMerged = max(1, gridFull / mergeSize)
+            return model(tokens, pixelValues: pixelValues,
+                         imageGridMerged: (gridMerged, gridMerged),
+                         caches: caches as? [KVCache])
+        },
         vocabSize: config.vocabSize
     )
 }
