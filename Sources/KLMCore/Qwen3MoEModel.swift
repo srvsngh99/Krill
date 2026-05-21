@@ -225,21 +225,21 @@ class Qwen3MoEExpert: Module {
 ///      vectorized passes).
 ///   3. Softmax over the top-K logits only; optionally renormalize.
 ///
-/// Forward pass (expert dispatch) — `callAsFunction`:
-///   The default path is a **scatter dispatch** (`scatterForward`):
-///   it builds the `N * topK` (token, expert) assignment list,
-///   sorts the assignments by expert id, runs each expert ONCE on
-///   the contiguous slice of tokens routed to it, then un-sorts and
+/// Forward pass (expert dispatch), `callAsFunction`:
+///   The default path is a **scatter dispatch**: it builds the
+///   `N * topK` (token, expert) assignment list, sorts the
+///   assignments by expert id, runs each expert ONCE on the
+///   contiguous slice of tokens routed to it, then un-sorts and
 ///   weight-sums back per token. Each expert sees only `count_e`
 ///   tokens, so total FFN work is `N * topK` token-passes instead
 ///   of the brute-force `N * numExperts`. For Qwen3-30B-A3B
 ///   (128 experts, top-8) that is a 16x reduction.
 ///
-///   The brute-force reference (`referenceForward`) — every expert
-///   on every token, weighted by a dense `[N, E]` dispatch matrix —
-///   is retained for the parity test: `scatterForward` must produce
-///   numerically equal output (within fp tolerance; the two differ
-///   only in summation order).
+///   The brute-force reference (`referenceForward`), every expert
+///   on every token weighted by a dense `[N, E]` dispatch matrix,
+///   is retained for the parity test: `callAsFunction` must
+///   produce numerically equal output (within fp tolerance; the
+///   two differ only in summation order).
 ///
 /// The scatter dispatch performs ONE host sync per layer to read
 /// the per-expert token counts (needed to slice the sorted

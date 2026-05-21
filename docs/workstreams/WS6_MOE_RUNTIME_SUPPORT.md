@@ -67,8 +67,8 @@ Algorithm per sparse layer:
    each slot by its router probability, sum the topK
    contributions per token.
 
-The brute-force reference (`referenceForward` — every expert on
-every token, weighted by a dense `[N, E]` dispatch matrix) is
+The brute-force reference (`referenceForward`, every expert on
+every token weighted by a dense `[N, E]` dispatch matrix) is
 retained as the parity oracle. `Qwen3MoENativeTests` asserts
 `callAsFunction` matches `referenceForward` within fp tolerance
 across small / multi-token / many-expert / `topK == numExperts`
