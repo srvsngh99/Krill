@@ -75,12 +75,14 @@ public func detectSpecializedModelType(
         return .imageGeneration
     }
     // Video-language models.
-    if anyOf(["video"]) {
+    if anyOf(["videollava", "video_llava", "llavanextvideo",
+              "llava_next_video", "videollama", "video_llama",
+              "videomae", "internvideo", "video-language"]) {
         return .videoLanguage
     }
     // Document understanding / OCR.
     if anyOf(["donut", "nougat", "trocr", "layoutlm", "udop",
-              "got_ocr", "gotocr", "ocr"]) {
+              "got_ocr", "gotocr"]) {
         return .documentOCR
     }
     return nil
