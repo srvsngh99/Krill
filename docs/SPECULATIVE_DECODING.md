@@ -97,6 +97,18 @@ Two correctness fixes were required to make this hold:
      acceptance (otherwise the draft cache would be one position behind
      the target after every bonus, again poisoning the next round).
 
+## Verification: one batched argmax
+
+The spec path is greedy-gated, so target verification of the K proposed
+tokens is an argmax. The verifier computes that argmax for all K
+positions in a single batched op (`argMax(targetLogits, axis: -1)`,
+one eval), rather than slicing each position and sampling it
+separately. The per-position form cost `K - 1` extra GPU
+synchronizations per round - pure overhead on the path the structural
+analysis below identifies as overhead-bound. The batched form is
+bit-identical (same per-position argmax) and is the only correct
+shortcut here precisely because the path is greedy-only.
+
 ## Benchmark metadata
 
 `GenerationStats.speculative` (`SpeculativeStats`) is populated when the
