@@ -496,6 +496,79 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return false
     }
 
+    // MARK: - Family-specific chat routing
+
+    /// Route a chat request to a family-specific handler when the
+    /// model family requires one.
+    ///
+    /// Returns `true` iff the request has been fully handled (a
+    /// response was sent, or it was rejected with an error) and the
+    /// caller must `return`. Returns `false` for "no special routing
+    /// - fall through to the native dense engine path".
+    ///
+    /// WS3 consolidates the former per-handler
+    /// `manifest.family == .qwen25vl` / `.moe` branches into this
+    /// single point: `handleChatCompletions` and `handleOllamaChat`
+    /// call it with their own `VLMResponseStyle`. The routing
+    /// decision itself comes from `ModelAdapter`, so a new
+    /// bridge-backed family is added in the registry, not here.
+    private func dispatchFamilyChat(
+        context: ChannelHandlerContext,
+        request: ServerChatRequest,
+        style: VLMResponseStyle
+    ) -> Bool {
+        guard let model = request.requestedModel,
+              let manifest = registry.getModel(model) else {
+            return false
+        }
+        let adapter = ModelAdapter(family: manifest.family)
+        switch adapter.chatRouting {
+        case .denseEngine:
+            return false
+
+        case .visionBridge:
+            // Text-only requests against a VL manifest are refused:
+            // spinning up a multi-GB Python sidecar for a text-only
+            // turn is a sharp performance trap, and the user can pick
+            // a text-only alias instead. The explicit error gives
+            // them the right next step.
+            if adapter.requiresImageInput, request.media.images.isEmpty {
+                sendJSON(context: context, status: .badRequest, body: [
+                    "error":
+                        "Qwen 2.5-VL requires an image in the request. For text-only "
+                        + "workflows use a Qwen 2.5 text-only model (e.g. qwen2.5-3b) "
+                        + "or include an image attachment."
+                ])
+                return true
+            }
+            handleVLMChat(
+                context: context, request: request,
+                manifest: manifest, style: style)
+            return true
+
+        case .mixtureOfExperts:
+            // MoE is text-only whether it runs native or bridged.
+            if !request.media.images.isEmpty {
+                sendJSON(context: context, status: .badRequest, body: [
+                    "error": "MoE models do not accept image input. Use a multimodal "
+                        + "checkpoint (e.g. qwen2.5-vl-3b) instead."
+                ])
+                return true
+            }
+            // Native Swift+MLX MoE when the checkpoint supports it
+            // (today: Qwen 3 MoE) - fall through to the dense engine
+            // path. Otherwise route through the mlx-lm sidecar bridge.
+            let dir = registry.modelPath(manifest.name)
+            if nativeMoEDispatchSupported(at: dir) {
+                return false
+            }
+            handleMoEChat(
+                context: context, request: request,
+                manifest: manifest, style: style)
+            return true
+        }
+    }
+
     // MARK: - OpenAI: POST /v1/chat/completions
 
     private func handleChatCompletions(context: ChannelHandlerContext, body: ByteBuffer) {
@@ -515,56 +588,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        // Route Qwen 2.5-VL (and any future bridge-backed
-        // multimodal family) through the dedicated VLM handler -
-        // but ONLY when the request actually carries an image.
-        // Text-only requests against a VL manifest are refused
-        // here: spinning up a 3GB Python sidecar for a text-only
-        // turn is a sharp performance trap, and the user can
-        // always pick a text-only Qwen 2.5 alias for that. The
-        // explicit error gives them the right next step.
-        if let model = request.requestedModel,
-           let manifest = registry.getModel(model),
-           manifest.family == .qwen25vl {
-            if request.media.images.isEmpty {
-                sendJSON(context: context, status: .badRequest, body: [
-                    "error":
-                        "Qwen 2.5-VL requires an image in the request. For text-only "
-                        + "workflows use a Qwen 2.5 text-only model (e.g. qwen2.5-3b) "
-                        + "or include an image attachment."
-                ])
-                return
-            }
-            handleVLMChat(
-                context: context, request: request,
-                manifest: manifest, style: .openAI)
+        // Family-specific routing: Qwen 2.5-VL goes to the VLM
+        // bridge, MoE to the native runtime or the MoE bridge. One
+        // dispatch point shared with the Ollama chat handler (see
+        // `dispatchFamilyChat`). Runs before the model-loaded gate
+        // so a bridge-backed family is not refused for "no model
+        // loaded".
+        if dispatchFamilyChat(context: context, request: request, style: .openAI) {
             return
-        }
-
-        // Route MoE family through the dedicated MoE bridge handler
-        // (compatible_fallback tier via mlx-lm) UNLESS the underlying
-        // checkpoint has a native Swift+MLX runtime in this build
-        // (today: Qwen 3 MoE). Native MoE manifests fall through to
-        // the dense `engine.generate` path below. MoE manifests
-        // refuse images either way: MoE is text-only.
-        if let model = request.requestedModel,
-           let manifest = registry.getModel(model),
-           manifest.family == .moe {
-            if !request.media.images.isEmpty {
-                sendJSON(context: context, status: .badRequest, body: [
-                    "error": "MoE models do not accept image input. Use a multimodal "
-                        + "checkpoint (e.g. qwen2.5-vl-3b) instead."
-                ])
-                return
-            }
-            let dir = registry.modelPath(manifest.name)
-            if !nativeMoEDispatchSupported(at: dir) {
-                handleMoEChat(
-                    context: context, request: request,
-                    manifest: manifest, style: .openAI)
-                return
-            }
-            // Native MoE: fall through to normal dense engine flow.
         }
 
         // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
@@ -1253,45 +1284,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        // Route Qwen 2.5-VL through the multimodal bridge (mirror
-        // of the dispatch in `handleChatCompletions`). Runs BEFORE
-        // the InferenceEngine model-loaded gate so a VL request
-        // does not get refused for "no model loaded".
-        if let model = request.requestedModel,
-           let manifest = registry.getModel(model),
-           manifest.family == .qwen25vl {
-            if request.media.images.isEmpty {
-                sendJSON(context: context, status: .badRequest, body: [
-                    "error":
-                        "Qwen 2.5-VL requires an image in the request. For text-only "
-                        + "workflows use a Qwen 2.5 text-only model (e.g. qwen2.5-3b) "
-                        + "or include an image attachment."
-                ])
-                return
-            }
-            handleVLMChat(
-                context: context, request: request,
-                manifest: manifest, style: .ollama)
+        // Family-specific routing (Qwen 2.5-VL bridge, MoE) - the
+        // same dispatch point as `handleChatCompletions`. Runs
+        // BEFORE the InferenceEngine model-loaded gate so a
+        // bridge-backed request is not refused for "no model loaded".
+        if dispatchFamilyChat(context: context, request: request, style: .ollama) {
             return
-        }
-        if let model = request.requestedModel,
-           let manifest = registry.getModel(model),
-           manifest.family == .moe {
-            if !request.media.images.isEmpty {
-                sendJSON(context: context, status: .badRequest, body: [
-                    "error": "MoE models do not accept image input. Use a multimodal "
-                        + "checkpoint (e.g. qwen2.5-vl-3b) instead."
-                ])
-                return
-            }
-            let dir = registry.modelPath(manifest.name)
-            if !nativeMoEDispatchSupported(at: dir) {
-                handleMoEChat(
-                    context: context, request: request,
-                    manifest: manifest, style: .ollama)
-                return
-            }
-            // Native MoE: fall through to normal dense engine flow.
         }
 
         // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
