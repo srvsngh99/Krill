@@ -79,6 +79,13 @@ Unloads the current model from memory.
 
 Returns server status, memory, uptime, loaded model info.
 
+### GET /v1/catalog
+
+Returns the catalog of pullable models: the built-in curated aliases
+plus any models from the on-disk catalog cache. Each model carries a
+`source` of `builtin` or `catalog`. See
+[MODEL_CATALOG.md](MODEL_CATALOG.md).
+
 ## Ollama-Compatible Endpoints
 
 ### POST /api/generate
