@@ -1,6 +1,9 @@
 # WS7: Specialized Model Types
 
-Status: planned
+Status: rerankers shipped (native runtime + `/v1/rerank`). The other
+specialized types (ASR / TTS / diffusion / video-language / OCR) are
+now detected and explicitly rejected at load time (the "Unsupported"
+tier); their native runtimes remain future work.
 
 ## Goal
 
@@ -25,6 +28,29 @@ code-specific fill-in-middle models
 Each model type needs its own API shape, runtime path, tests, and benchmark.
 Do not hide specialized models behind chat-completions if that produces
 incorrect semantics or bad performance.
+
+## Unsupported-tier foundation
+
+Before a specialized type gets a runtime it must, per the roadmap, at
+least fail with an explicit error rather than being mis-handled. That
+foundation has landed for every WS7 type that is not yet runnable:
+
+- `SpecializedModelType` (`Sources/KLMCore/SpecializedModelTypes.swift`)
+  enumerates the specialized types KrillLM does not run as a causal LM:
+  speech recognition, speech synthesis, image generation,
+  video-language, document OCR.
+- `detectSpecializedModelType(arch:modelType:)` recognizes them from a
+  checkpoint's `config.json` (Whisper, wav2vec2, Parler-TTS, Bark,
+  Stable Diffusion, FLUX, Video-LLaVA, Donut, TrOCR, and similar).
+- `loadModel` consults it after every supported-family arm and, on a
+  match, throws `ModelLoadError.specializedModelUnsupported` with a
+  specific message naming the type and this doc. Previously such a
+  checkpoint fell through to the Llama fallback and emitted a garbage
+  forward pass.
+
+This is the "Unsupported: explicit error before execution" tier from
+the coverage roadmap. Promotion of any of these to a real runtime is
+still gated on the per-type acceptance criteria below.
 
 ## Subtracks
 

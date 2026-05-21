@@ -156,6 +156,20 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
         return try loadGemma(configData: configData, directory: directory)
     } else if arch.contains("phi") || modelType.hasPrefix("phi") {
         return try loadPhi(configData: configData, directory: directory)
+    } else if let specialized = detectSpecializedModelType(arch: arch, modelType: modelType) {
+        // WS7 specialized model types (ASR / TTS / diffusion / video /
+        // OCR). KrillLM has no native runtime for these; rejecting
+        // here with a specific error is the roadmap's "Unsupported
+        // tier" - far better than mis-loading them via the Llama
+        // fallback below and emitting a garbage forward pass.
+        throw ModelLoadError.specializedModelUnsupported(
+            "KrillLM does not support \(specialized.displayName) models. "
+            + "These are WS7 specialized model types with no native "
+            + "runtime in this build (of the WS7 types, only rerankers "
+            + "have shipped - use POST /v1/rerank for those; see "
+            + "docs/workstreams/WS7_SPECIALIZED_MODEL_TYPES.md). KrillLM "
+            + "serves causal text LMs, Gemma 4 vision/audio, embeddings, "
+            + "and rerankers. Detected arch=\(arch), model_type=\(modelType).")
     } else {
         // Fallback: try as Llama (most common architecture)
         return try loadLlama(configData: configData, directory: directory)
@@ -451,11 +465,16 @@ private func loadGLM(configData: Data, directory: URL) throws -> LoadedModel {
 public enum ModelLoadError: Error, CustomStringConvertible {
     case invalidConfig(String)
     case unsupportedArchitecture(String)
+    /// A WS7 specialized model type (ASR / TTS / diffusion / video /
+    /// OCR) with no native runtime in this build. See
+    /// `SpecializedModelType` / `detectSpecializedModelType`.
+    case specializedModelUnsupported(String)
 
     public var description: String {
         switch self {
         case .invalidConfig(let msg): return "Invalid config: \(msg)"
         case .unsupportedArchitecture(let arch): return "Unsupported architecture: \(arch)"
+        case .specializedModelUnsupported(let msg): return "Unsupported model type: \(msg)"
         }
     }
 }
