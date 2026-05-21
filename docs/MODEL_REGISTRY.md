@@ -1,9 +1,9 @@
 # Model Capability And Support-Tier Registry (WS3)
 
-Status: foundational metadata layer landed. Full adapter polymorphism
-(per-family `ModelAdapter` runtime contract) is intentionally NOT in
-this PR; that is a follow-up once the metadata layer is in use across
-call sites.
+Status: metadata layer landed; the server-side `ModelAdapter` runtime
+contract (chat routing + chat-template policy) has since landed on top
+of it. Load-time adapter polymorphism (`detect` / `load` / tokenizer /
+cache) remains a deliberate follow-up — see "What this does NOT do".
 
 ## Why this exists
 
@@ -61,24 +61,44 @@ upgrade a family.
 | `Server` pre-generation media gate | calls `engine.supportsNativeImage` / `engine.supportsAudio` |
 | `OllamaCompat.capabilities(for:)` (used by `/api/show`, `/api/tags`) | `ModelCapabilities.capabilities(for:).map(\.ollamaTag)` |
 | `OllamaCompat.showPayload`      | adds `support_tier` key derived from `ModelCapabilities.supportTier(for:)` |
+| `Server.dispatchFamilyChat`     | `ModelAdapter(family:).chatRouting` — picks the dense / VLM-bridge / MoE handler |
+| `ToolCalling.ToolFormat.forFamily` | `ModelAdapter(family:).chatTemplate` — picks the tool chat template |
 
 Existing call sites that asked "is this Gemma 4?" to decide whether to
-accept image / audio now read through `capabilities`. Other Gemma-4
-specific branches (e.g. chat-template selection, audio token IDs) remain
-family-keyed; those are model-mechanics decisions, not capability
-decisions, so the family check is still the right primitive.
+accept image / audio read through `capabilities`. The server's chat
+*routing* and *tool-template* selection — formerly duplicated
+`manifest.family == .qwen25vl` / `.moe` branches — now read through
+`ModelAdapter` (see below). The remaining family-keyed branches (audio
+token IDs) are low-level model-mechanics decisions, so the family check
+is still the right primitive there.
 
-## What this PR does NOT do
+## The `ModelAdapter` runtime contract
 
-- It does not introduce a runtime `ModelAdapter` polymorphic dispatch.
-  Adding one in the same PR would force every loader rewrite for an
-  abstraction whose first user is not in tree yet.
-- It does not change the chat template selection path. That stays
-  family-keyed for now; once a second native VLM lands (WS5), the
-  template-selection branch is the right place to introduce adapter
-  dispatch.
-- It does not change per-family chat templates or any model-level
-  Swift code.
+`ModelAdapter` (`Sources/KLMRegistry/ModelAdapter.swift`) is the single
+declarative source of truth for a family's *server-side* contract:
+
+- `chatRouting` — `.denseEngine` / `.visionBridge` / `.mixtureOfExperts`.
+- `requiresImageInput` — whether a text-only turn is refused up front.
+- `chatTemplate` — `ChatTemplatePolicy` (`hermes` / `gemma4` / `llama` /
+  `qwen`); KLMServer maps this onto its concrete renderer/parser.
+
+Capability and support-tier facts are a separate concern and stay in
+`ModelCapabilities` (the sibling per-family table); `ModelAdapter` is
+scoped to the server's routing and chat-template decisions.
+
+Adding a bridge-backed or specially-routed family is now a registry
+change (a `switch` case in `ModelAdapter`), not a new `Server.swift`
+branch.
+
+## What this does NOT do
+
+- It does not introduce *load-time* adapter polymorphism. The WS3
+  design sketch also lists `detect`, `load`, `tokenizerPolicy`, and
+  `cachePolicy`; folding those in would force a rewrite of every loader
+  and engine for an abstraction whose hot decode path must stay
+  zero-cost. They remain in `ModelLoader` / the per-family engines.
+- It does not change per-family chat *rendering* or any model-level
+  Swift code — only which template/handler a family selects.
 
 ## What it unblocks
 
