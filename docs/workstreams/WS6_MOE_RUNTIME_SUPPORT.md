@@ -42,26 +42,44 @@ families (Mixtral, Qwen2-MoE, OLMoE, DeepSeek-V3) keep the
   `MoEFoundationTests` pins `nativeMoEDispatchSupported` for
   qwen3_moe (true) vs mixtral / olmoe (false).
 
-### Forward-pass algorithm (correctness-first)
+### Forward-pass algorithm (scatter dispatch)
 
-The router/dispatch is correct and deterministic but not yet
-performance-optimized. The current implementation evaluates ALL
-experts on ALL tokens per layer and weights their outputs by the
-top-K dispatch matrix (positions outside top-K carry zero weight).
-That is O(num_experts) per-layer FFN cost — for the Qwen3-30B-A3B
-shape (128 experts, top-8) this is 16x the necessary compute. The
-output is mathematically identical to a true scatter-gather
-dispatch.
+`Qwen3MoESparseMLP.callAsFunction` uses a **scatter dispatch**:
+each expert runs once on the contiguous slice of tokens routed
+to it, so total expert-FFN work is `N * topK` token-passes
+instead of the brute-force `N * numExperts`. For Qwen3-30B-A3B
+(128 experts, top-8) that is a 16x reduction in expert-FFN flops.
 
-The follow-up replaces the per-expert loop with a gather/scatter
-dispatch (run each expert only on its assigned tokens, scatter
-back through `sorted_token_idx`). That unblocks productionNative
-tier promotion under the benchmark gate.
+Algorithm per sparse layer:
 
-Top-K selection uses an `argSort(argSort(-logits))` rank trick
-(no native top_k op in mlx-swift today) followed by softmax over
-the masked logits, then optional renormalization
-(`norm_topk_prob`).
+1. Router: `gate(x)` -> `[N, E]` logits. Top-K selection uses an
+   `argSort(argSort(-logits))` rank trick (no native top_k op in
+   mlx-swift today), then softmax over the masked top-K logits
+   with optional `norm_topk_prob` renormalization.
+2. Build the flat `N * topK` (token, expert) assignment list and
+   sort it by expert id (`argSort`), so each expert's tokens form
+   one contiguous run.
+3. ONE host sync per layer reads the per-expert token counts
+   (a one-hot sum), needed to slice the sorted array. This is a
+   per-layer cost, not per-token.
+4. Run each non-empty expert on its slice; concatenate results.
+5. Un-sort via the inverse permutation (`argSort(order)`), weight
+   each slot by its router probability, sum the topK
+   contributions per token.
+
+The brute-force reference (`referenceForward`, every expert on
+every token weighted by a dense `[N, E]` dispatch matrix) is
+retained as the parity oracle. `Qwen3MoENativeTests` asserts
+`callAsFunction` matches `referenceForward` within fp tolerance
+across small / multi-token / many-expert / `topK == numExperts`
+shapes, and includes a micro-benchmark
+(`testScatterDispatchBenchmark`) that times both paths.
+
+The one structural cost is the per-layer host sync (step 3).
+A fully sync-free variant using `gatherQuantizedMM` with
+load-time-stacked expert weights is a further optimization
+tracked as a follow-up; the scatter dispatch here already
+delivers the order-of-magnitude FFN-flop reduction.
 
 ## Acceptance status (native Qwen 3 MoE)
 
@@ -74,17 +92,20 @@ From the workstream's acceptance bar:
   the standard `/api/chat` path. Synthetic tests pin forward-pass
   correctness on a tiny instance with random weights.
 - "Expert routing is tested against a reference implementation
-  where possible." - **DEFERRED.** Reference parity vs mlx-lm's
-  router on the same prompt is the follow-up that ships
-  benchmark coverage.
+  where possible." - **DONE (in-engine).** The scatter dispatch
+  is parity-tested against the brute-force `referenceForward`
+  oracle in `Qwen3MoENativeTests` across small / multi-token /
+  many-expert / `topK == numExperts` shapes. Cross-engine parity
+  vs mlx-lm's router on the full checkpoint is a follow-up.
 - "Memory footprint is measured and documented." -
   **DEFERRED.** All-experts-resident memory policy inherited
   from the dense weight loader; per-expert / active-experts
   metadata in the benchmark report is the follow-up.
 - "Server-mode benchmark runs against Ollama/reference." -
-  **DEFERRED.** Same as the memory item — performance work and
-  the active-experts benchmark column ship after the scatter
-  dispatch.
+  **PARTIAL.** An in-engine micro-benchmark
+  (`testScatterDispatchBenchmark`) times the scatter dispatch
+  against the brute-force reference. A full server-mode
+  benchmark vs Ollama on the real checkpoint is a follow-up.
 - "Support tier is explicit." - **DONE.** The native path is
   used by default for Qwen 3 MoE; the family-level tier stays
   `compatibleFallback` (not all MoE families are native yet),
