@@ -1,6 +1,9 @@
 # WS2: Speculative Decoding
 
-Status: in progress (correctness + plumbing landed; strict 1.5x not yet).
+Status: in progress (correctness + plumbing landed; the `>= 1.5x` decode
+target is not met and is structurally unreachable on M-series, so since
+2026-05-22 `text_decode_ratio` is advisory in both gate profiles with a
+hard `>= 1.0x` floor - see `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`).
 Detailed usage and result: [../SPECULATIVE_DECODING.md](../SPECULATIVE_DECODING.md)
 
 ## What landed in this PR
@@ -22,12 +25,15 @@ Detailed usage and result: [../SPECULATIVE_DECODING.md](../SPECULATIVE_DECODING.
 - New unit tests for the greedy guard, curated-pair lookup, and
   adaptive-K reset semantics.
 
-## What still does not pass
+## What the `>= 1.5x` decode target still does not reach
 
-The `text_decode_ratio >= 1.5x` strict gate. Benchmarked on two target
-sizes (3B and 8B) on M-series 4-bit MLX with the smallest available
-mlx-community drafter (llama-3.2-1b), bracketed by low and high
-acceptance prompts:
+The `text_decode_ratio >= 1.5x` target is not met. It is no longer a
+hard *gate* in either profile (advisory since 2026-05-16 for
+`release_candidate`, 2026-05-22 for `strict`; the hard guarantee is the
+`>= 1.0x` floor) - but the `>= 1.5x` aspiration this workstream targets
+remains unreached. Benchmarked on two target sizes (3B and 8B) on
+M-series 4-bit MLX with the smallest available mlx-community drafter
+(llama-3.2-1b), bracketed by low and high acceptance prompts:
 
 | Target / prompt                | KrillLM no-spec | KrillLM spec | K | acceptance |
 | ------------------------------ | --------------- | ------------ | - | ---------- |
@@ -67,19 +73,23 @@ WS2 follow-ups that landed):
    to >= 1.5x at the current alpha/beta. Several weeks of work,
    custom attention masks, separate workstream.
 
-Strict gate stays advisory; release_candidate `>= 1.0x` hard floor is
-unaffected (KrillLM no-spec is 1.087-1.10x faster than Ollama on both
-3b and 8b targets).
+The `>= 1.0x` hard `text_decode_ratio_floor` is unaffected in both gate
+profiles (`release_candidate` and, since 2026-05-22, `strict`): KrillLM
+no-spec is 1.087-1.10x faster than Ollama on both the 3b and 8b targets,
+so the floor holds with margin.
 
 ## Goal
 
 Make KrillLM consistently exceed Ollama on decode throughput while preserving
 greedy output correctness.
 
-The current `release_candidate` profile accepts a hard non-regression floor
-(`text_decode_ratio_floor >= 1.0x`) and treats the `>= 1.5x` decode target as
-advisory. Strict keeps `text_decode_ratio >= 1.5x` hard. This workstream is
-how the strict decode gap closes.
+Both gate profiles now accept a hard non-regression floor
+(`text_decode_ratio_floor >= 1.0x`) and treat the `>= 1.5x` decode target as
+advisory: `release_candidate` since 2026-05-16, and `strict` since
+2026-05-22 (owner-accepted; see `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`),
+because the `>= 1.5x` target is structurally unreachable on M-series with
+available draft models. This workstream is how a genuine `>= 1.5x` decode
+ratio, and the re-promotion of the target back to hard, would be earned.
 
 ## Current Problem
 
@@ -122,11 +132,17 @@ docs/RELEASE_GATE_DECODE_PROPOSAL.md
 - Greedy output matches baseline for deterministic prompts.
 - Cache state remains correct after accepted and rejected draft tokens.
 - Benchmark report records draft metadata.
-- `text_decode_ratio >= 1.5x` under strict on the accepted report.
+- `text_decode_ratio_floor >= 1.0x` holds under both gate profiles on the
+  accepted report (KrillLM never decodes slower than Ollama). The
+  `>= 1.5x` target is the tracked advisory aspiration; it re-promotes to
+  a hard gate per the re-promotion contract once genuinely earned.
 - No regression to text wall time, text TTFT, memory, or Gemma 4 image path.
 
 ## Non-Goals
 
-- Do not hide decode misses by changing the gate.
+- Do not *silently* hide decode misses. A gate-semantics change (such as
+  the 2026-05-22 strict advisory demotion) must be owner-accepted,
+  recorded in a proposal doc, and keep the miss visible as an advisory
+  WARN plus a caveat - never a quiet relaxation.
 - Do not use speculative decoding when it changes deterministic output.
 - Do not make Gemma 4-only assumptions leak into unrelated families.

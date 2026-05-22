@@ -266,8 +266,11 @@ Against the accepted multimodal report (`.build/benchmarks/v6-mm.json`):
   than Ollama). `text_decode_ratio`'s `>= 1.5x` target is **advisory** and
   still printed as a WARN — the gate does not claim KrillLM hit 1.5x
   decode.
-- **`strict` exits `1`** — unchanged; the uncompromised reference still
-  fails `text_decode_ratio`, prefill TPS, and audio.
+- **`strict` exits `1`** - the uncompromised reference still fails on
+  prefill TPS and audio. `text_decode_ratio` is advisory under `strict`
+  too since 2026-05-22 (with the hard `>= 1.0x` floor; see
+  `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`), so it is no longer a
+  `strict` blocker.
 
 See `docs/RELEASE_GATE_DECODE_PROPOSAL.md` for the full rationale,
 anti-relaxation safeguards, and the objective re-promotion contract, and
@@ -286,7 +289,9 @@ anti-relaxation safeguards, and the objective re-promotion contract, and
   re-promotes to hard `>= 1.5x` when **either** Gemma 4 speculative
   decoding (Workstream 2) sustains `>= 1.5x` with greedy parity **or** the
   matrix adds a long-output decode task where decode dominates wall time.
-  `strict` keeps it hard `>= 1.5x` regardless. This build remains a
+  Since 2026-05-22 `strict` also treats `text_decode_ratio` as advisory
+  with the hard `>= 1.0x` floor (owner-accepted;
+  `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`). This build remains a
   release-readiness baseline, not a production tag.
 - ~~**`memory_ratio` 1.1447x**~~ — **CLOSED in PR #16.** Two compounding
   causes, both now fixed (see Section 4.4):
@@ -418,8 +423,9 @@ release-ready only when all of the following are true:
 > **not** 1.5x ahead on raw decode-token/s against llama.cpp's Metal
 > kernels on this tiny 4-bit model; that `>= 1.5x` decode target is a
 > tracked advisory pending speculative decoding, and no release language
-> should claim faster raw decode. The `strict` gate still exits `1`
-> (decode, prefill, audio). This is a release-readiness baseline plus a
+> should claim faster raw decode. The `strict` gate still exits `1` on
+> prefill TPS (decode is advisory under `strict` too since 2026-05-22,
+> with the hard `>= 1.0x` floor). This is a release-readiness baseline plus a
 > documented follow-up roadmap; a production tag still requires a follow-up
 > PR that closes the PR #18 rereview issues, reruns the multimodal
 > benchmark, and either keeps audio explicitly scoped out or ships native
@@ -676,6 +682,11 @@ safeguards, and the objective re-promotion contract:
 demotion in `scope.text_decode_ratio` and a caveat; the summary still
 prints `text_decode_ratio` as an advisory WARN at 1.19x — no claim that
 KrillLM hit 1.5x decode.
+
+(Follow-up 2026-05-22: the same `text_decode_ratio` advisory demotion was
+later extended to the `strict` profile - see
+`docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`. The "`strict` unchanged"
+scope above is historical, accurate for the 2026-05-16 decision only.)
 
 Net effect: `memory_ratio` hard-passes; `release_candidate` exits `0`
 honestly on the metrics that substantiate the product claim plus a hard

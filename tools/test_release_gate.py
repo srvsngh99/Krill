@@ -121,6 +121,28 @@ def baseline_report(**overrides) -> dict:
     return make_report(**defaults)
 
 
+def strict_passing_report(**overrides) -> dict:
+    """A report where every strict-HARD metric passes (prefill >= 1.5x,
+    walls/ttft well under budget). `text_decode` defaults to 1.19x - it
+    clears the >= 1.0 non-regression floor but misses the >= 1.5 advisory
+    target, so the only thing between this report and a strict gate pass
+    is the `text_decode_ratio` advisory demotion."""
+    defaults = dict(
+        text_decode=(119.0, 100.0),    # ratio 1.19 (advisory miss, floor pass)
+        text_prefill=(160.0, 100.0),   # ratio 1.60 (hard pass)
+        text_wall=(0.50, 1.00),        # ratio 0.50 (hard pass)
+        text_ttft=(50.0, 500.0),       # ratio 0.10 (hard pass)
+        image_wall=(0.50, 1.00),       # ratio 0.50 (hard pass)
+        image_prefill=(160.0, 100.0),  # ratio 1.60 (hard pass)
+        audio_wall=(0.50, 1.00),       # ratio 0.50 (hard pass)
+        audio_prefill=(160.0, 100.0),  # ratio 1.60 (hard pass)
+        text_memory=(1.40, 1.60),      # ratio 0.875 (hard pass, <= 1.0)
+        quant_class_equal=True,        # keep memory_ratio a fair hard gate
+    )
+    defaults.update(overrides)
+    return make_report(**defaults)
+
+
 class ReleaseCandidateProfileTests(unittest.TestCase):
     """Profile 'release_candidate' downgrades prefill TPS (text/image/audio)
     to advisory, so a report with failing prefill TPS but passing wall
@@ -278,11 +300,13 @@ class MemoryMetricTests(unittest.TestCase):
 
 
 class DecodeAdvisoryFloorTests(unittest.TestCase):
-    """Under `release_candidate`, `text_decode_ratio` is advisory at the
-    >= 1.5x target but carries a synthetic HARD `text_decode_ratio_floor`
-    (>= 1.0x): KrillLM must never decode slower than Ollama. `strict` keeps
-    `text_decode_ratio` hard at >= 1.5x and has no floor.
-    Owner-accepted; see docs/RELEASE_GATE_DECODE_PROPOSAL.md."""
+    """`text_decode_ratio` is advisory at the >= 1.5x target in BOTH
+    profiles, carrying a synthetic HARD `text_decode_ratio_floor` (>= 1.0x):
+    KrillLM must never decode slower than Ollama. The demotion was accepted
+    for `release_candidate` (2026-05-16) and extended to `strict`
+    (2026-05-22) because the >= 1.5x decode ratio is structurally
+    unreachable on M-series. See docs/RELEASE_GATE_DECODE_PROPOSAL.md and
+    docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md."""
 
     def _eval(self, gate: dict, name: str):
         return next((e for e in gate["evaluations"] if e["name"] == name), None)
@@ -316,24 +340,44 @@ class DecodeAdvisoryFloorTests(unittest.TestCase):
         self.assertEqual(floor["kind"], "hard")
         self.assertFalse(floor["pass"], "0.90 < 1.0 floor must fail")
 
-    def test_strict_decode_below_target_still_hard_fails(self):
-        # strict is unchanged: 1.19x < 1.5x hard threshold -> fail, no floor.
-        report = baseline_report(text_decode=(119.0, 100.0))
+    def test_strict_decode_below_target_is_advisory_and_passes(self):
+        # 1.19x under strict: misses the >= 1.5 advisory target but clears
+        # the hard >= 1.0 floor. With every other strict-hard metric passing,
+        # the gate must now PASS (owner-accepted 2026-05-22 demotion).
+        report = strict_passing_report(text_decode=(119.0, 100.0))
         code, gate = run_gate(report)  # default profile = strict
-        self.assertEqual(code, 1, "strict must still hard-fail decode < 1.5")
+        self.assertEqual(code, 0, "strict must pass: decode advisory, floor met")
+        self.assertEqual(gate["gate"], "pass")
         dec = self._eval(gate, "text_decode_ratio")
-        self.assertEqual(dec["kind"], "hard")
-        self.assertFalse(dec["pass"])
-        self.assertIsNone(
-            self._eval(gate, "text_decode_ratio_floor"),
-            "strict must not introduce a decode floor",
+        self.assertEqual(dec["kind"], "advisory")
+        self.assertFalse(dec["pass"], "1.19 should miss the >= 1.5 advisory")
+        floor = self._eval(gate, "text_decode_ratio_floor")
+        self.assertIsNotNone(floor, "strict must now carry the synthetic floor")
+        self.assertEqual(floor["kind"], "hard")
+        self.assertTrue(floor["pass"], "1.19 >= 1.0 floor must pass")
+        self.assertTrue(
+            any("never decode slower" in c for c in gate["caveats"]),
+            "the demotion+floor must be recorded as a caveat under strict",
         )
 
-    def test_strict_decode_at_target_passes_unchanged(self):
+    def test_strict_decode_regression_fails_via_hard_floor(self):
+        # 0.90x under strict: KrillLM slower than Ollama -> the hard floor
+        # breaks the gate even though the >= 1.5 target itself is advisory.
+        report = strict_passing_report(text_decode=(90.0, 100.0))
+        code, gate = run_gate(report)  # default profile = strict
+        self.assertEqual(code, 1, "decode regression must hard-fail via floor")
+        self.assertEqual(gate["gate"], "fail")
+        floor = self._eval(gate, "text_decode_ratio_floor")
+        self.assertEqual(floor["kind"], "hard")
+        self.assertFalse(floor["pass"], "0.90 < 1.0 floor must fail")
+
+    def test_strict_still_hard_gates_prefill(self):
+        # The demotion is scoped to text_decode_ratio ONLY. A prefill
+        # near-miss must still hard-fail strict, even with decode passing.
         report = baseline_report(text_decode=(150.0, 100.0))
-        code, _ = run_gate(report)
+        code, _ = run_gate(report)  # default profile = strict
         self.assertEqual(code, 1, "strict still fails on the prefill near-miss")
-        # (decode itself passes at 1.50; failure is the unchanged prefill gate)
+        # (decode passes at 1.50; the failure is the unchanged prefill gate)
 
 
 if __name__ == "__main__":

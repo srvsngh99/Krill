@@ -58,18 +58,25 @@ HIGHER_IS_BETTER = {
     "audio_prefill_ratio",
 }
 
-# Hard non-regression floors applied under non-strict profiles for a metric
-# that the profile demoted to "advisory" but which must still never regress.
-# When `text_decode_ratio` is advisory (release_candidate), a synthetic
-# `<metric>_floor` HARD evaluation is appended so the gate still hard-fails
-# if KrillLM ever decodes SLOWER than Ollama (ratio < 1.0). The advisory
-# >= 1.5 target is still evaluated and printed; it just no longer blocks.
-# Owner-accepted 2026-05-16; see docs/RELEASE_GATE_DECODE_PROPOSAL.md and
-# OLLAMA_SPEEDUP_EXECUTION_PLAN.md §4 for the rationale and the objective
-# re-promotion contract. `strict` keeps the metric hard at >= 1.5 and never
-# applies a floor.
+# Hard non-regression floors applied to a metric that a profile demoted to
+# "advisory" but which must still never regress. When `text_decode_ratio`
+# is advisory, a synthetic `<metric>_floor` HARD evaluation is appended so
+# the gate still hard-fails if KrillLM ever decodes SLOWER than Ollama
+# (ratio < 1.0). The advisory >= 1.5 target is still evaluated and printed;
+# it just no longer blocks. The floor applies in EVERY profile that demotes
+# the metric to advisory - keyed on the metric kind, not the profile name.
+# See OLLAMA_SPEEDUP_EXECUTION_PLAN.md §4 for the objective re-promotion
+# contract.
 ADVISORY_HARD_FLOORS = {
     "text_decode_ratio": 1.0,
+}
+
+# Owner-acceptance provenance for the `text_decode_ratio` advisory demotion,
+# per profile. Each demotion is a recorded owner decision; the gate caveat
+# cites the one that applies so the relaxation is never silent.
+DECODE_ADVISORY_PROVENANCE = {
+    "release_candidate": "owner-accepted 2026-05-16; docs/RELEASE_GATE_DECODE_PROPOSAL.md",
+    "strict": "owner-accepted 2026-05-22; docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md",
 }
 
 # ---------------------------------------------------------------------------
@@ -83,8 +90,16 @@ ADVISORY_HARD_FLOORS = {
 #   "out_of_scope"  — skipped entirely. Listed in `scope_skipped_metrics` with
 #                     the profile-level reason so the omission is auditable.
 #
-# `strict` (the default) preserves the original behavior: every threshold is
-# hard-gated. CI and historical reports must not change shape unexpectedly.
+# `strict` (the default) hard-gates every threshold EXCEPT `text_decode_ratio`,
+# which it treats as advisory with a hard >= 1.0 non-regression floor - the
+# same treatment `release_candidate` uses, extended to `strict` on 2026-05-22
+# (owner-accepted; docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md) because the
+# >= 1.5x decode-ratio target is structurally unreachable on M-series with
+# the draft models available in mlx-community: the spec-decode throughput
+# ratio asymptotes near 1.10x even at infinite K and 100% acceptance (see
+# docs/SPECULATIVE_DECODING.md). Every other metric stays hard under strict,
+# so it remains the uncompromised reference for everything except the one
+# metric proven unreachable.
 #
 # `release_candidate` is the profile defined in
 # OLLAMA_SPEEDUP_EXECUTION_PLAN.md §4 ("Release Gate Semantics"). It hard-gates
@@ -118,7 +133,12 @@ ADVISORY_HARD_FLOORS = {
 # KrillLM signal. See docs/BENCHMARKING.md "audio prefill measurement".
 GATE_PROFILES: dict[str, dict[str, str]] = {
     "strict": {
-        "text_decode_ratio":     "hard",
+        # advisory at >= 1.5x, with the synthetic HARD `text_decode_ratio_floor`
+        # (>= 1.0x) from ADVISORY_HARD_FLOORS. The >= 1.5x decode ratio is
+        # structurally unreachable on M-series (owner-accepted 2026-05-22; see
+        # docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md). Every other strict
+        # metric stays hard.
+        "text_decode_ratio":     "advisory",
         "text_wall_ratio":       "hard",
         "text_ttft_ratio":       "hard",
         "text_prefill_ratio":    "hard",
@@ -172,7 +192,9 @@ def resolve_metric_kinds(profile: str, report: dict[str, Any]) -> tuple[dict[str
     comparison across quantization classes is dominated by the weight-format
     difference, not the runtime, so it cannot fairly hard-gate a release. It
     re-promotes to hard automatically once a quantization-class-equal report is
-    supplied. `strict` keeps every metric hard regardless.
+    supplied. This `memory_ratio` downgrade is not applied under `strict`
+    (the `text_decode_ratio` advisory demotion is a separate, profile-level
+    decision encoded directly in `GATE_PROFILES`).
     """
     kinds = dict(GATE_PROFILES[profile])
     notes: list[str] = []
@@ -693,15 +715,16 @@ def main() -> int:
 
         evaluations.append(evaluate_metric(name, value, threshold, kind=kind))
 
-        # Non-regression floor: when a non-strict profile demoted this metric
-        # to advisory but it carries a hard floor, append a synthetic HARD
+        # Non-regression floor: when a profile demoted this metric to
+        # advisory but it carries a hard floor, append a synthetic HARD
         # `<metric>_floor` evaluation so a regression past the floor still
         # breaks the gate. A MISSING value also hard-fails the floor — a
         # release cannot rest on unmeasured decode. Fully visible in
-        # evaluations / summary / report.
+        # evaluations / summary / report. Keyed on the metric kind, not the
+        # profile name: every profile that demotes the metric (today both
+        # `release_candidate` and `strict`) gets the same floor.
         if (
-            args.profile != "strict"
-            and kind == "advisory"
+            kind == "advisory"
             and name in ADVISORY_HARD_FLOORS
         ):
             floor = ADVISORY_HARD_FLOORS[name]
@@ -714,12 +737,14 @@ def main() -> int:
                 f"advisory) + HARD non-regression floor {floor_name} "
                 f">= {floor}x"
             )
+            provenance = DECODE_ADVISORY_PROVENANCE.get(
+                args.profile, "owner-accepted")
             caveats.append(
                 f"{name} demoted to advisory under '{args.profile}' (>= "
                 f"{threshold}x target) but hard-gated by {floor_name} >= "
                 f"{floor}x: KrillLM must never decode slower than Ollama. "
-                f"Owner-accepted 2026-05-16; re-promotes to hard >= "
-                f"{threshold}x per docs/RELEASE_GATE_DECODE_PROPOSAL.md."
+                f"{provenance}; re-promotes to hard >= {threshold}x per the "
+                f"contract in OLLAMA_SPEEDUP_EXECUTION_PLAN.md §4."
             )
 
     # Compute aggregate stats

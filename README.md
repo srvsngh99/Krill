@@ -6,7 +6,7 @@ Built on Apple's [MLX](https://github.com/ml-explore/mlx-swift) framework. Ships
 
 ## Release Status
 
-This is not yet a production release. Server multimodal is implemented for Gemma 4 — native image and native audio (WS6: native Swift+MLX USM audio, numerically validated against the `mlx-vlm` oracle and benchmarked faster than Ollama on the M4 target; the bridge was then removed in WS6 Step 4) — and shipped with end-to-end tests. The int8 KV cache composes with the prefix cache on Gemma 4 (PR #11), and the release gate now distinguishes hard, advisory, and out_of_scope metrics via `--profile release_candidate` (PR #12). Peak-memory sampling is wired into the benchmark and `memory_ratio` is hard-gated for class-equal comparisons (PR #14). PR #16 capped the MLX Metal buffer pool (`KRILL_MLX_CACHE_LIMIT_MB`), closed the `memory_ratio` hard miss (now 0.32–0.84, passing), and — per an owner-accepted gate proposal (`docs/RELEASE_GATE_DECODE_PROPOSAL.md`) — demoted `text_decode_ratio` to advisory under `release_candidate` with a new **hard `text_decode_ratio_floor ≥1.0x`** (KrillLM must never decode slower than Ollama). **`release_candidate` exits `0` (GATE: PASS)** on the WS6 native-audio multimodal report with audio enforced as hard; `strict` still exits `1` but only on pre-existing non-audio items (text decode ≥1.5x, image prefill) — audio now passes strict. The gate makes **no claim** that KrillLM hit 1.5x raw decode — that target is a tracked advisory pending speculative decoding. See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) and [`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](OLLAMA_SPEEDUP_EXECUTION_PLAN.md) for the full status, the per-metric promotion contract, and acceptance criteria.
+This is not yet a production release. Server multimodal is implemented for Gemma 4 - native image and native audio (WS6: native Swift+MLX USM audio, numerically validated against the `mlx-vlm` oracle and benchmarked faster than Ollama on the M4 target; the bridge was then removed in WS6 Step 4) - and shipped with end-to-end tests. The int8 KV cache composes with the prefix cache on Gemma 4 (PR #11), and the release gate now distinguishes hard, advisory, and out_of_scope metrics via `--profile release_candidate` (PR #12). Peak-memory sampling is wired into the benchmark and `memory_ratio` is hard-gated for class-equal comparisons (PR #14). PR #16 capped the MLX Metal buffer pool (`KRILL_MLX_CACHE_LIMIT_MB`), closed the `memory_ratio` hard miss (now 0.32-0.84, passing), and, per an owner-accepted gate proposal (`docs/RELEASE_GATE_DECODE_PROPOSAL.md`), demoted `text_decode_ratio` to advisory under `release_candidate` with a new **hard `text_decode_ratio_floor ≥1.0x`** (KrillLM must never decode slower than Ollama). **`release_candidate` exits `0` (GATE: PASS)** on the WS6 native-audio multimodal report with audio enforced as hard; `strict` still exits `1`, but only on the pre-existing prefill-TPS items. Since 2026-05-22 `text_decode_ratio` is advisory under `strict` too (owner-accepted; `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`), carrying the same hard `text_decode_ratio_floor ≥1.0x`, because the ≥1.5x decode target is structurally unreachable on M-series. The gate makes **no claim** that KrillLM hit 1.5x raw decode - that target is a tracked advisory pending speculative decoding. See [`docs/RELEASE_READINESS_REMEDIATION.md`](docs/RELEASE_READINESS_REMEDIATION.md) and [`OLLAMA_SPEEDUP_EXECUTION_PLAN.md`](OLLAMA_SPEEDUP_EXECUTION_PLAN.md) for the full status, the per-metric promotion contract, and acceptance criteria.
 
 ### Support Matrix
 
@@ -112,12 +112,14 @@ promoted from `out_of_scope` to **hard** in both profiles and the
 `release_candidate` gate now enforces — and passes — it.
 
 The `strict` benchmark gate (the uncompromised reference) still fails,
-but only on **pre-existing, owner-accepted, non-audio** items: text
-decode (`text_decode_ratio` ≥1.5×, the tracked advisory pending
-speculative decoding) and image prefill. Audio now **passes strict**.
-The `release_candidate` profile keeps prefill TPS advisory and uses a
-hard `text_decode_ratio_floor >= 1.0x`; on the WS6 native-audio
-multimodal report it **exits `0` (GATE: PASS)** with audio enforced as
+but only on the **pre-existing, owner-accepted** image-prefill item.
+Audio now **passes strict**. Both gate profiles treat `text_decode_ratio`
+as advisory (the ≥1.5× target is structurally unreachable on M-series;
+owner-accepted for `strict` 2026-05-22,
+`docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`) with a hard
+`text_decode_ratio_floor >= 1.0x`. The `release_candidate` profile keeps
+prefill TPS advisory and, on the WS6 native-audio multimodal report,
+**exits `0` (GATE: PASS)** with audio enforced as
 hard. No tagged release has shipped this posture yet (bridge retirement
 is a separate follow-up). No claim states KrillLM decodes 1.5x faster
 than Ollama.
