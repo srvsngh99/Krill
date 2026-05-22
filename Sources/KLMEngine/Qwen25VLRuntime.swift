@@ -64,41 +64,133 @@ public enum Qwen25VLRuntime {
         maxTokens: Int,
         stopIds: Set<Int>,
         params: SamplingParams = .greedy,
+        mediaHash: String? = nil,
+        prefixCache: PrefixCache? = nil,
+        modelId: String? = nil,
         onToken: ((Int) -> Void)? = nil
     ) -> Output {
         let caches = makeKVCaches(numLayers: model.config.numHiddenLayers)
         let sampler = Sampler(params: params)
         let promptInt32 = promptTokens.map { Int32($0) }
 
-        // -- Prefill --
-        let prefillStart = CFAbsoluteTimeGetCurrent()
-        let promptArray = MLXArray(promptInt32)
-            .reshaped(1, promptTokens.count)
-        // `hostTokenIds` lets the forward skip the mid-forward
-        // eval(tokens) host sync (we already have the host array).
-        // `lastTokenOnly` drops the vocab matmul to the single
-        // position we actually sample - exact for that token.
-        let prefillLogits = model(
-            promptArray,
-            pixelValues: pixelValues,
-            imageGridMerged: imageGridMerged,
-            caches: caches,
-            mropePositionOffset: nil,
-            hostTokenIds: promptInt32,
-            lastTokenOnly: true)
-        MLX.eval(prefillLogits)
-        let prefillSeconds = CFAbsoluteTimeGetCurrent() - prefillStart
-
         // The mRoPE frontier: the absolute position the FIRST
         // post-prompt token takes. For a text-only prompt this is
         // the prompt length; for an image prompt it is smaller
         // (the image span is compressed - see the type doc). Decode
         // step `k` forwards its token with offset `frontier + k`.
-        let frontier = Int(Qwen25VLPositions.compute(
+        // Needed both for decode and for the prefix-cache fast path
+        // (where the last prompt token needs its absolute mRoPE
+        // position).
+        let coords = Qwen25VLPositions.compute(
             tokenIds: promptInt32,
             imageTokenId: model.config.imageTokenId,
             gridHMerged: imageGridMerged?.0 ?? 0,
-            gridWMerged: imageGridMerged?.1 ?? 0).nextPos)
+            gridWMerged: imageGridMerged?.1 ?? 0)
+        let frontier = Int(coords.nextPos)
+
+        // -- Prefix-cache fast path --
+        // Mirrors the dense `InferenceEngine` text path: a FULL
+        // prefix hit restores KV for tokens 0..L-1, then we truncate
+        // to L-1 and forward only the last token to produce the
+        // sampling logits without duplicating that position's KV.
+        // The mediaHash makes the key image-aware, so a different
+        // image misses safely. We accept hits only when the last
+        // prompt token is plain text (not an image or video
+        // placeholder): the multi-axis mRoPE coords of an image_pad
+        // / video_pad cannot be expressed as a single scalar offset,
+        // so on those rare shapes we fall through to a full prefill.
+        var cacheHit = false
+        let lastTokenId = promptInt32.last
+        let lastIsText = lastTokenId != Int32(model.config.imageTokenId)
+            && lastTokenId != Int32(model.config.videoTokenId)
+        if let prefixCache, let modelId, lastIsText,
+           let hit = prefixCache.lookup(
+               tokens: promptTokens, modelId: modelId,
+               mediaHash: mediaHash),
+           hit.prefixLength == promptTokens.count,
+           // A truncated / stale disk entry could carry fewer
+           // per-layer snapshots than the model has caches. Treat
+           // any layer-count mismatch as a miss rather than
+           // partial-restoring: a layer left at sequenceLength 0
+           // would write its first decode K/V at slot 0 and silently
+           // diverge from the un-cached forward.
+           hit.keys.count == caches.count,
+           hit.values.count == caches.count {
+            for (i, cache) in caches.enumerated() {
+                if let k = hit.keys[i].first,
+                   let v = hit.values[i].first {
+                    cache.restore(keys: k, values: v)
+                }
+            }
+            cacheHit = true
+        }
+
+        // -- Prefill --
+        // `hostTokenIds` lets the forward skip the mid-forward
+        // eval(tokens) host sync (we already have the host array).
+        // `lastTokenOnly` drops the vocab matmul to the single
+        // position we actually sample - exact for that token.
+        let prefillStart = CFAbsoluteTimeGetCurrent()
+        let prefillLogits: MLXArray
+        if cacheHit {
+            // Trim the restored caches so the upcoming forward
+            // appends the last token at slot L-1 (matches the
+            // un-cached path's final cache shape exactly).
+            let trimmed = max(0, promptTokens.count - 1)
+            for cache in caches { cache.truncate(to: trimmed) }
+            // Forward just the last token. The last text token's
+            // absolute mRoPE position is `frontier - 1` because the
+            // last text token bumps `nextPos` by 1; pixelValues /
+            // imageGridMerged stay nil because the image was
+            // already absorbed into the restored KV state.
+            let lastInt32 = promptInt32.last!
+            let lastArray = MLXArray([lastInt32]).reshaped(1, 1)
+            prefillLogits = model(
+                lastArray,
+                pixelValues: nil,
+                imageGridMerged: nil,
+                caches: caches,
+                mropePositionOffset: frontier - 1,
+                hostTokenIds: [lastInt32],
+                lastTokenOnly: true,
+                mediaHash: nil)
+        } else {
+            let promptArray = MLXArray(promptInt32)
+                .reshaped(1, promptTokens.count)
+            prefillLogits = model(
+                promptArray,
+                pixelValues: pixelValues,
+                imageGridMerged: imageGridMerged,
+                caches: caches,
+                mropePositionOffset: nil,
+                hostTokenIds: promptInt32,
+                lastTokenOnly: true,
+                mediaHash: mediaHash)
+        }
+        MLX.eval(prefillLogits)
+        let prefillSeconds = CFAbsoluteTimeGetCurrent() - prefillStart
+
+        // -- Store prefill KV in prefix cache (write-behind) --
+        // Only on the miss path: a hit means the cache already holds
+        // this entry. Mirror the dense path's gate (>=8 tokens) to
+        // avoid storing trivially-short prefixes.
+        if let prefixCache, let modelId, !cacheHit,
+           promptTokens.count >= 8 {
+            var snapshotKeys: [[MLXArray]] = []
+            var snapshotValues: [[MLXArray]] = []
+            for cache in caches {
+                if let snap = cache.snapshot() {
+                    snapshotKeys.append([snap.keys])
+                    snapshotValues.append([snap.values])
+                }
+            }
+            if !snapshotKeys.isEmpty {
+                prefixCache.store(
+                    tokens: promptTokens, modelId: modelId,
+                    keys: snapshotKeys, values: snapshotValues,
+                    mediaHash: mediaHash)
+            }
+        }
 
         // -- Decode --
         // Two-deep on-GPU pipeline (mirrors InferenceEngine's dense
