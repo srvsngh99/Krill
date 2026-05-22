@@ -423,8 +423,9 @@ release-ready only when all of the following are true:
 > **not** 1.5x ahead on raw decode-token/s against llama.cpp's Metal
 > kernels on this tiny 4-bit model; that `>= 1.5x` decode target is a
 > tracked advisory pending speculative decoding, and no release language
-> should claim faster raw decode. The `strict` gate still exits `1`
-> (decode, prefill, audio). This is a release-readiness baseline plus a
+> should claim faster raw decode. The `strict` gate still exits `1` on
+> prefill TPS (decode is advisory under `strict` too since 2026-05-22,
+> with the hard `>= 1.0x` floor). This is a release-readiness baseline plus a
 > documented follow-up roadmap; a production tag still requires a follow-up
 > PR that closes the PR #18 rereview issues, reruns the multimodal
 > benchmark, and either keeps audio explicitly scoped out or ships native
