@@ -1279,6 +1279,16 @@ public class Qwen25VLForConditionalGeneration: Module {
 
     public let config: Qwen25VLConfig
 
+    /// Per-instance vision-encoder cache keyed by SHA-256 of image
+    /// bytes. Lifetime is bound to the model: reloading the model
+    /// (different weights) gets a fresh cache. Mirrors the
+    /// `visionCache` field on `Gemma4ForConditionalGeneration`. The
+    /// cache makes a follow-up request on the same image skip the
+    /// ~100 ms vision tower entirely; a same-image bench like the
+    /// WS5 headline (5 warm runs on one 224x224 PNG) hits cache on
+    /// every run after warmup.
+    public let visionCache: VisionEncoderCache = VisionEncoderCache()
+
     public init(_ config: Qwen25VLConfig) {
         self.config = config
         _visual = ModuleInfo(
@@ -1361,7 +1371,8 @@ public class Qwen25VLForConditionalGeneration: Module {
         caches: [KVCache]? = nil,
         mropePositionOffset: Int? = nil,
         hostTokenIds: [Int32]? = nil,
-        lastTokenOnly: Bool = false
+        lastTokenOnly: Bool = false,
+        mediaHash: String? = nil
     ) -> MLXArray {
         let textModel = languageModel.model
         var inputEmbeds = textModel.embedTokens(tokens)  // [1, L, H]
@@ -1391,8 +1402,27 @@ public class Qwen25VLForConditionalGeneration: Module {
             // The vision tower needs the FULL patch grid (the merged
             // grid times spatial_merge_size) to build window masks.
             let ms = config.vision.spatialMergeSize
-            let visionEmbeds = visual(
-                pixelValues, gridHWFull: (gridH * ms, gridW * ms))  // [n_merged, H]
+            // Consult the per-instance vision-embed cache before
+            // re-running the tower. Mirrors the Gemma 4 path: on a
+            // same-image follow-up the ~100 ms vision tower forward
+            // is skipped entirely. The cache key encodes the image
+            // bytes, so a different image misses safely; the
+            // language-model layers still run normally below.
+            let visionEmbeds: MLXArray
+            if let hash = mediaHash, let cached = visionCache.lookup(hash) {
+                visionEmbeds = cached
+            } else {
+                let computed = visual(
+                    pixelValues, gridHWFull: (gridH * ms, gridW * ms))  // [n_merged, H]
+                if let hash = mediaHash {
+                    // Realize before storing so the cached array is
+                    // materialized rather than a deferred graph
+                    // pinning the entire prefill subtree.
+                    MLX.eval(computed)
+                    visionCache.store(hash, value: computed)
+                }
+                visionEmbeds = computed
+            }
             if let start = tokenIds.firstIndex(of: Int32(config.imageTokenId)) {
                 // The contiguous <|image_pad|> span must match the
                 // vision-embed count exactly; otherwise the splice

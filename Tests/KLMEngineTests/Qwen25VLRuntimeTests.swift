@@ -199,6 +199,70 @@ final class Qwen25VLRuntimeTests: XCTestCase {
             + "prefill+decode loop with the same mRoPE offset")
     }
 
+    /// Same generation must produce identical tokens whether or not
+    /// the prefix-cache fast path is exercised. We run the runtime
+    /// twice with the same `PrefixCache` instance and the same
+    /// inputs: the first call misses and stores the prefill KV; the
+    /// second call must hit, restore the KV, and forward only the
+    /// last prompt token - and yet produce bit-identical greedy
+    /// output. The synthetic-model decode-equivalence test
+    /// (`testDecodeEquivalence*`) already guards per-position logits
+    /// at 2e-3; this test guards the cache-hit path's full token
+    /// sequence equality, with and without an image prompt.
+    private func assertPrefixCacheReplaysIdentically(image: Bool) throws {
+        let cfg = try config()
+        let model = Qwen25VLForConditionalGeneration(cfg)
+        let imgPad = Int32(cfg.imageTokenId)
+        let prompt: [Int]
+        let pixels: MLXArray?
+        let grid: (Int, Int)?
+        if image {
+            prompt = [11, 12]
+                + Array(repeating: Int(imgPad), count: 6)
+                + [13, 14]
+            pixels = imagePixels(cfg: cfg, fill: 0.4)
+            grid = (2, 3)
+        } else {
+            prompt = [11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+            pixels = nil
+            grid = nil
+        }
+        // Isolate the cache to a temp directory so the test cannot
+        // race against a real `~/.krillm/cache`.
+        let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("krillm-vlcache-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(
+            at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let cache = PrefixCache(cacheDir: tmpDir)
+        let modelId = "qwen25vl-test"
+        let mediaHash: String? = image ? "img:test-fixture" : nil
+
+        let first = Qwen25VLRuntime.generate(
+            model: model, promptTokens: prompt,
+            pixelValues: pixels, imageGridMerged: grid,
+            maxTokens: 8, stopIds: [], params: .greedy,
+            mediaHash: mediaHash,
+            prefixCache: cache, modelId: modelId)
+        let second = Qwen25VLRuntime.generate(
+            model: model, promptTokens: prompt,
+            pixelValues: pixels, imageGridMerged: grid,
+            maxTokens: 8, stopIds: [], params: .greedy,
+            mediaHash: mediaHash,
+            prefixCache: cache, modelId: modelId)
+        XCTAssertEqual(first.tokens, second.tokens,
+            "Prefix-cache replay must produce the same greedy tokens "
+            + "as the un-cached forward (image=\(image)).")
+    }
+
+    func testPrefixCacheReplayMatchesUncachedTextOnly() throws {
+        try assertPrefixCacheReplaysIdentically(image: false)
+    }
+
+    func testPrefixCacheReplayMatchesUncachedImagePrompt() throws {
+        try assertPrefixCacheReplaysIdentically(image: true)
+    }
+
     func testRuntimeStopsOnStopId() throws {
         let cfg = try config()
         let model = Qwen25VLForConditionalGeneration(cfg)

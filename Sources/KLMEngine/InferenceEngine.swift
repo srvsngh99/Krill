@@ -865,6 +865,12 @@ public final class InferenceEngine: @unchecked Sendable {
 
         let stopIds = Self.stopTokenIds(
             modelDirectory: modelDirectory, tokenizerEOS: tokenizer.eosTokenId)
+        // Hash the image bytes once so the model can consult its
+        // per-instance vision-encoder cache and skip the vision tower
+        // on a same-image follow-up (mirrors the Gemma 4 path).
+        let mediaHash: String? = imageData.map {
+            "img:" + VisionEncoderCache.key(forImageBytes: $0)
+        }
         let statsHolder = StatsHolder()
         nonisolated(unsafe) let capturedModel = model
         let capturedTokenizer = tokenizer
@@ -874,6 +880,15 @@ public final class InferenceEngine: @unchecked Sendable {
         let capturedStops = stopIds
         let capturedParams = params
         let capturedMax = maxTokens
+        let capturedMediaHash = mediaHash
+        // The VL path now consults the same `PrefixCache` the dense
+        // path uses: a same-image, same-prompt follow-up restores KV
+        // for the whole prompt and forwards just the last token,
+        // bypassing the 36-layer text prefill (~125 ms) entirely.
+        // The mediaHash includes the image bytes so a different
+        // image misses safely.
+        nonisolated(unsafe) let capturedPrefixCache = self.prefixCache
+        let capturedModelId = self.modelId
 
         let stream = AsyncStream<TokenEvent> { continuation in
             Task { [statsHolder] in
@@ -886,6 +901,9 @@ public final class InferenceEngine: @unchecked Sendable {
                     maxTokens: capturedMax,
                     stopIds: capturedStops,
                     params: capturedParams,
+                    mediaHash: capturedMediaHash,
+                    prefixCache: capturedPrefixCache,
+                    modelId: capturedModelId,
                     onToken: { token in
                         // Stream content tokens only. The terminal
                         // (isEnd) event is emitted below - AFTER the
