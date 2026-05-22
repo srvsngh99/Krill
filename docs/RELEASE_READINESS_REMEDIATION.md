@@ -682,6 +682,11 @@ demotion in `scope.text_decode_ratio` and a caveat; the summary still
 prints `text_decode_ratio` as an advisory WARN at 1.19x — no claim that
 KrillLM hit 1.5x decode.
 
+(Follow-up 2026-05-22: the same `text_decode_ratio` advisory demotion was
+later extended to the `strict` profile - see
+`docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`. The "`strict` unchanged"
+scope above is historical, accurate for the 2026-05-16 decision only.)
+
 Net effect: `memory_ratio` hard-passes; `release_candidate` exits `0`
 honestly on the metrics that substantiate the product claim plus a hard
 non-regression floor; `strict` still exits `1`. The `>= 1.5x` decode
