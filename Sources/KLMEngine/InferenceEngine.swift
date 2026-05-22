@@ -887,37 +887,38 @@ public final class InferenceEngine: @unchecked Sendable {
                     stopIds: capturedStops,
                     params: capturedParams,
                     onToken: { token in
-                        let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-                        if capturedStops.contains(token) {
-                            // Terminal: empty text, isEnd. Consumers
-                            // that break on isEnd before reading text
-                            // still finish correctly.
-                            continuation.yield(TokenEvent(
-                                tokenId: token, text: "",
-                                elapsed: elapsed, isEnd: true))
-                        } else {
-                            continuation.yield(TokenEvent(
-                                tokenId: token,
-                                text: capturedTokenizer.decode(token: token),
-                                elapsed: elapsed))
-                        }
+                        // Stream content tokens only. The terminal
+                        // (isEnd) event is emitted below - AFTER the
+                        // stats are published - so a consumer that
+                        // breaks on the first isEnd event always
+                        // observes populated GenerationStats. A stop
+                        // token carries no text, so nothing is lost
+                        // by not emitting it here.
+                        guard !capturedStops.contains(token) else { return }
+                        continuation.yield(TokenEvent(
+                            tokenId: token,
+                            text: capturedTokenizer.decode(token: token),
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
                     })
-                // maxTokens hit with no stop token: emit a terminal
-                // event so the stream still closes with isEnd.
-                let sawStop = output.tokens.last.map {
-                    capturedStops.contains($0)
-                } ?? false
-                if !sawStop {
-                    continuation.yield(TokenEvent(
-                        tokenId: -1, text: "",
-                        elapsed: CFAbsoluteTimeGetCurrent() - startTime,
-                        isEnd: true))
-                }
+                // Publish stats BEFORE the terminal event. The server
+                // reads the stats accessor as soon as it sees isEnd;
+                // setting stats first keeps the (stream, stats)
+                // contract race-free.
                 statsHolder.stats = GenerationStats(
                     promptTokens: capturedPrompt.count,
                     generatedTokens: output.tokens.count,
                     prefillTime: output.prefillSeconds,
                     decodeTime: output.decodeSeconds)
+                // One terminal event: the stop token id if generation
+                // ended on a stop, else -1 (maxTokens reached).
+                let sawStop = output.tokens.last.map {
+                    capturedStops.contains($0)
+                } ?? false
+                continuation.yield(TokenEvent(
+                    tokenId: sawStop ? (output.tokens.last ?? -1) : -1,
+                    text: "",
+                    elapsed: CFAbsoluteTimeGetCurrent() - startTime,
+                    isEnd: true))
                 continuation.finish()
             }
         }
