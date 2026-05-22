@@ -266,8 +266,11 @@ Against the accepted multimodal report (`.build/benchmarks/v6-mm.json`):
   than Ollama). `text_decode_ratio`'s `>= 1.5x` target is **advisory** and
   still printed as a WARN — the gate does not claim KrillLM hit 1.5x
   decode.
-- **`strict` exits `1`** — unchanged; the uncompromised reference still
-  fails `text_decode_ratio`, prefill TPS, and audio.
+- **`strict` exits `1`** - the uncompromised reference still fails on
+  prefill TPS and audio. `text_decode_ratio` is advisory under `strict`
+  too since 2026-05-22 (with the hard `>= 1.0x` floor; see
+  `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`), so it is no longer a
+  `strict` blocker.
 
 See `docs/RELEASE_GATE_DECODE_PROPOSAL.md` for the full rationale,
 anti-relaxation safeguards, and the objective re-promotion contract, and
@@ -286,7 +289,9 @@ anti-relaxation safeguards, and the objective re-promotion contract, and
   re-promotes to hard `>= 1.5x` when **either** Gemma 4 speculative
   decoding (Workstream 2) sustains `>= 1.5x` with greedy parity **or** the
   matrix adds a long-output decode task where decode dominates wall time.
-  `strict` keeps it hard `>= 1.5x` regardless. This build remains a
+  Since 2026-05-22 `strict` also treats `text_decode_ratio` as advisory
+  with the hard `>= 1.0x` floor (owner-accepted;
+  `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`). This build remains a
   release-readiness baseline, not a production tag.
 - ~~**`memory_ratio` 1.1447x**~~ — **CLOSED in PR #16.** Two compounding
   causes, both now fixed (see Section 4.4):
