@@ -10,20 +10,17 @@ final class ModelAdapterTests: XCTestCase {
 
     // MARK: - Chat routing
 
-    func testQwen25VLRoutesToVisionBridge() {
-        XCTAssertEqual(ModelAdapter(family: .qwen25vl).chatRouting, .visionBridge,
-            "Qwen 2.5-VL is bridge-backed and must route to the VLM handler")
-    }
-
     func testMoERoutesToMixtureOfExperts() {
         XCTAssertEqual(ModelAdapter(family: .moe).chatRouting, .mixtureOfExperts,
             "MoE must route to the native-or-bridge MoE path")
     }
 
     func testDenseFamiliesRouteToDenseEngine() {
+        // Qwen 2.5-VL is included: WS5 retired its Python bridge,
+        // so it routes through the native dense engine path.
         let dense: [ModelFamily] = [
-            .llama, .qwen, .mistral, .gemma, .gemma4, .phi, .glm,
-            .deepseek, .bert, .reranker,
+            .llama, .qwen, .qwen25vl, .mistral, .gemma, .gemma4, .phi,
+            .glm, .deepseek, .bert, .reranker,
         ]
         for family in dense {
             XCTAssertEqual(ModelAdapter(family: family).chatRouting, .denseEngine,
@@ -45,25 +42,13 @@ final class ModelAdapterTests: XCTestCase {
 
     // MARK: - Image-input requirement
 
-    func testOnlyQwen25VLRequiresImageInput() {
-        XCTAssertTrue(ModelAdapter(family: .qwen25vl).requiresImageInput,
-            "Qwen 2.5-VL has no text-only runtime; a text-only turn must be refused")
-        for family in ModelFamily.allCases where family != .qwen25vl {
+    /// No family forces an image today: WS5 retired the Qwen 2.5-VL
+    /// Python sidecar, and the native VL runtime serves a text-only
+    /// turn directly (it just skips the vision tower).
+    func testNoFamilyRequiresImageInput() {
+        for family in ModelFamily.allCases {
             XCTAssertFalse(ModelAdapter(family: family).requiresImageInput,
                 "\(family) must not force an image on every request")
-        }
-    }
-
-    /// A family that requires image input must be the one that routes
-    /// to the vision bridge - the refusal in `dispatchFamilyChat`
-    /// depends on these two facts agreeing.
-    func testRequiresImageInputImpliesVisionBridge() {
-        for family in ModelFamily.allCases {
-            let adapter = ModelAdapter(family: family)
-            if adapter.requiresImageInput {
-                XCTAssertEqual(adapter.chatRouting, .visionBridge,
-                    "\(family) requires an image but does not route to the VLM bridge")
-            }
         }
     }
 
@@ -95,7 +80,8 @@ final class ModelAdapterTests: XCTestCase {
     /// native dense path must have a non-Hermes (native) tool
     /// template - otherwise the registry advertises native tool
     /// support it does not back. (`.moe` -> `.qwen` satisfies this;
-    /// `.qwen25vl` declares `.tools` but is bridge-backed, so it is
+    /// `.qwen25vl` declares `.tools` and resolves to `.hermes`,
+    /// which IS Qwen's native `<tool_call>` format, so it is
     /// excused.) `ModelAdapter` and `ModelCapabilities` are sibling
     /// tables; this test pins that they stay consistent.
     func testNativeToolCapabilityAgreesWithTemplate() {

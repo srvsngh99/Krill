@@ -1,0 +1,32 @@
+{
+  "_comment": "WS5 Qwen 2.5-VL oracle baseline. Recorded from mlx-vlm 0.5.0 (the retired Python bridge path) on Qwen2.5-VL-3B-Instruct-4bit before the bridge was removed, so the native Swift+MLX runtime has a fixed correctness oracle. Qwen25VLSmokeTests.testMatchesOracleRubric asserts the native path satisfies each rubric (expected_any / forbidden substrings); oracle_output is the recorded mlx-vlm text, kept for provenance. Cross-runtime greedy token equality is not expected - rubric-equivalence is the contract.",
+  "entries": [
+    {
+      "name": "solid_red",
+      "prompt": "What is the dominant color of this image? Answer with one word.",
+      "color": "red",
+      "max_tokens": 16,
+      "expected_any": ["red"],
+      "forbidden": ["green", "blue"],
+      "oracle_output": "Red"
+    },
+    {
+      "name": "solid_green",
+      "prompt": "What is the dominant color of this image? Answer with one word.",
+      "color": "green",
+      "max_tokens": 16,
+      "expected_any": ["green"],
+      "forbidden": ["red", "blue"],
+      "oracle_output": "Green"
+    },
+    {
+      "name": "solid_blue",
+      "prompt": "What is the dominant color of this image? Answer with one word.",
+      "color": "blue",
+      "max_tokens": 16,
+      "expected_any": ["blue"],
+      "forbidden": ["red", "green"],
+      "oracle_output": "Blue"
+    }
+  ]
+}

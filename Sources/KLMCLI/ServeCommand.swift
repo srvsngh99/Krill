@@ -95,18 +95,17 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        // Bridge-backed sidecars (VLM + MoE). Both are lazy-loaded
-        // on first request; instantiated up front so a signal
-        // handler can shut them down on SIGINT (otherwise Python
-        // children become orphans on Ctrl+C, holding the GPU
-        // and the loaded model weights resident).
-        let vlmEngine = Qwen25VLEngine()
+        // Bridge-backed MoE sidecar. Lazy-loaded on first request;
+        // instantiated up front so a signal handler can shut it
+        // down on SIGINT (otherwise the Python child becomes an
+        // orphan on Ctrl+C, holding the GPU and the loaded model
+        // weights resident). WS5 retired the Qwen 2.5-VL sidecar -
+        // that family is now native Swift+MLX.
         let moeEngine = MoEEngine()
-        installVLMSidecarSignalHandler(vlmEngine, moeEngine)
+        installSidecarSignalHandler(moeEngine)
 
         let server = KLMServer(host: host, port: port, compat: compatMode,
                                engine: engine, registry: registry,
-                               vlmEngine: vlmEngine,
                                moeEngine: moeEngine,
                                corsOrigins: config.origins,
                                keepAliveDefaultSeconds:
@@ -118,12 +117,12 @@ struct ServeCommand: AsyncParsableCommand {
     }
 }
 
-/// Hook SIGINT / SIGTERM so the VLM Python sidecar (if any) is
+/// Hook SIGINT / SIGTERM so the MoE Python sidecar (if any) is
 /// terminated before the krillm process exits. Without this the
 /// child Python process becomes an orphan on Ctrl+C, holding the
-/// GPU and the mlx-vlm-loaded model in memory until manually
+/// GPU and the mlx-lm-loaded model in memory until manually
 /// killed. The sidecar's own stdin EOF would also tear it down,
-/// but only AFTER mlx-vlm's blocking generate returns - which can
+/// but only AFTER mlx-lm's blocking generate returns - which can
 /// be many seconds for a large prompt.
 ///
 /// Uses DispatchSource so the handler runs on a dedicated queue
@@ -132,11 +131,8 @@ struct ServeCommand: AsyncParsableCommand {
 /// is preserved via `exit(0)` after shutdown.
 private nonisolated(unsafe) var vlmShutdownHandler: (() -> Void)?
 
-private func installVLMSidecarSignalHandler(
-    _ vlm: Qwen25VLEngine, _ moe: MoEEngine
-) {
-    vlmShutdownHandler = { [weak vlm, weak moe] in
-        try? vlm?.shutdown()
+private func installSidecarSignalHandler(_ moe: MoEEngine) {
+    vlmShutdownHandler = { [weak moe] in
         try? moe?.shutdown()
     }
     for sig in [SIGINT, SIGTERM] {

@@ -99,8 +99,8 @@ server routes it without a new hand-written branch:
 - `ModelAdapter.swift`: the `switch family` in `chatRouting`,
   `requiresImageInput`, and `chatTemplate` is exhaustive, so a new
   `ModelFamily` case will not compile until each is given a value.
-  Pick `.denseEngine` for a native Swift+MLX text/vision family;
-  `.visionBridge` / `.mixtureOfExperts` only for bridge-backed paths.
+  Pick `.denseEngine` for a native Swift+MLX text/vision family
+  (Qwen 2.5-VL is one); `.mixtureOfExperts` for the MoE path.
 
 The server's `dispatchFamilyChat` and `ToolFormat.forFamily` then
 pick the family up automatically — do not add a `family == …` branch

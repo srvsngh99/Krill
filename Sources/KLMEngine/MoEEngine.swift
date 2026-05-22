@@ -20,16 +20,15 @@ import Glibc
 /// selection on Metal, expert FFN dispatch, memory policy) is a
 /// follow-up to this PR.
 ///
-/// Structurally identical to `Qwen25VLEngine` (same JSON
-/// protocol, same poll(2)-bounded LineReader, same SIGINT
-/// shutdown contract). The two engines are kept separate rather
-/// than refactored into a shared base because their underlying
-/// Python deps differ (`mlx_lm` vs `mlx_vlm`) and the request
-/// shape differs (no image path here).
+/// Built on the shared `PythonSidecar` plumbing (`LineReader`,
+/// `VLMError`, the venv interpreter path). WS5 retired the sibling
+/// Qwen 2.5-VL bridge once that family went native Swift+MLX; this
+/// MoE bridge remains until the native MoE runtime fully replaces
+/// it (the experimental `KRILL_NATIVE_MOE` path).
 public final class MoEEngine: @unchecked Sendable {
     public static var defaultPython: String {
         ProcessInfo.processInfo.environment["KRILLM_MOE_PYTHON"]
-            ?? Qwen25VLEngine.defaultPython
+            ?? PythonSidecar.defaultVenvPython
     }
 
     public static func defaultBridgeScript() -> String {

@@ -77,7 +77,7 @@ is still the right primitive there.
 `ModelAdapter` (`Sources/KLMRegistry/ModelAdapter.swift`) is the single
 declarative source of truth for a family's *server-side* contract:
 
-- `chatRouting` — `.denseEngine` / `.visionBridge` / `.mixtureOfExperts`.
+- `chatRouting` — `.denseEngine` / `.mixtureOfExperts`.
 - `requiresImageInput` — whether a text-only turn is refused up front.
 - `chatTemplate` — `ChatTemplatePolicy` (`hermes` / `gemma4` / `llama` /
   `qwen`); KLMServer maps this onto its concrete renderer/parser.
