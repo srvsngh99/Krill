@@ -67,9 +67,10 @@ WS2 follow-ups that landed):
    to >= 1.5x at the current alpha/beta. Several weeks of work,
    custom attention masks, separate workstream.
 
-Strict gate stays advisory; release_candidate `>= 1.0x` hard floor is
-unaffected (KrillLM no-spec is 1.087-1.10x faster than Ollama on both
-3b and 8b targets).
+The `>= 1.0x` hard `text_decode_ratio_floor` is unaffected in both gate
+profiles (`release_candidate` and, since 2026-05-22, `strict`): KrillLM
+no-spec is 1.087-1.10x faster than Ollama on both the 3b and 8b targets,
+so the floor holds with margin.
 
 ## Goal
 
