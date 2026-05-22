@@ -1411,7 +1411,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                             "total_duration": totalNs,
                             "prompt_eval_count": promptTokens,
                             "prompt_eval_duration": prefillNs,
-                            "eval_count": generatedCount,
+                            "eval_count": stats?.generatedTokens ?? generatedCount,
                             "eval_duration": decodeNs,
                         ]
                         if let ftt = firstTokenTime {
