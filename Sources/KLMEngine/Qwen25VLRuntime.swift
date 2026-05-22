@@ -101,15 +101,29 @@ public enum Qwen25VLRuntime {
             gridWMerged: imageGridMerged?.1 ?? 0).nextPos)
 
         // -- Decode --
+        // Two-deep on-GPU pipeline (mirrors InferenceEngine's dense
+        // decode loop). The sampled token stays as a lazy MLXArray
+        // and feeds the next forward without a host roundtrip; the
+        // next forward + sample is `asyncEval`d while we yield the
+        // current token; we sync once per step on a 1-element int32.
+        // For a non-image single decode token the host id is never
+        // consulted (the image-pad scan is skipped because
+        // pixelValues is nil, and the mRoPE coords for a single
+        // text token are always (0,0,0) regardless of id), so we
+        // pass a fixed placeholder host id and keep the real token
+        // on-GPU.
         let decodeStart = CFAbsoluteTimeGetCurrent()
         var generated: [Int] = []
         // Penalty sampling needs the trailing token window; only
         // maintained when the request opts into penalties.
         var recent: [Int] = sampler.needsHistory
             ? Array(promptTokens.suffix(512)) : []
-        var nextToken = sampler.needsHistory
-            ? sampler.sample(prefillLogits, recent: recent)
-            : sampler.sample(prefillLogits)
+        var nextTokenArr: MLXArray = sampler.needsHistory
+            ? sampler.sampleArray(prefillLogits, recent: recent)
+            : sampler.sampleArray(prefillLogits)
+        MLX.asyncEval(nextTokenArr)
+        var nextToken = nextTokenArr.item(Int.self)
+        let decodePlaceholder: [Int32] = [Int32(0)]
         var step = 0
         while generated.count < maxTokens {
             onToken?(nextToken)
@@ -117,26 +131,30 @@ public enum Qwen25VLRuntime {
             if stopIds.contains(nextToken) { break }
             if generated.count >= maxTokens { break }
 
-            // Forward the single new token. Its mRoPE position is
-            // `frontier + step`: a single non-image token's computed
-            // coords are all zero, so the offset IS its absolute
-            // position on every axis.
-            let nextInt32 = Int32(nextToken)
-            let tokenArray = MLXArray([nextInt32]).reshaped(1, 1)
+            // Reuse the on-GPU sampled token as the next forward
+            // input; mRoPE position is `frontier + step` because a
+            // single non-image token's computed coords are all zero.
+            let tokenInput = nextTokenArr.reshaped(1, 1)
             let logits = model(
-                tokenArray,
+                tokenInput,
                 pixelValues: nil,
                 imageGridMerged: nil,
                 caches: caches,
                 mropePositionOffset: frontier + step,
-                hostTokenIds: [nextInt32],
+                hostTokenIds: decodePlaceholder,
                 lastTokenOnly: true)
+            let nextTokenArr2: MLXArray
             if sampler.needsHistory {
                 recent.append(nextToken)
-                nextToken = sampler.sample(logits, recent: recent)
+                nextTokenArr2 = sampler.sampleArray(logits, recent: recent)
             } else {
-                nextToken = sampler.sample(logits)
+                nextTokenArr2 = sampler.sampleArray(logits)
             }
+            // Kick GPU work for step k+1 before reading step k's
+            // host int below, so kernel launch overlaps execution.
+            MLX.asyncEval(nextTokenArr2)
+            nextTokenArr = nextTokenArr2
+            nextToken = nextTokenArr.item(Int.self)
             step += 1
         }
         let decodeSeconds = CFAbsoluteTimeGetCurrent() - decodeStart
