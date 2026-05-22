@@ -109,14 +109,22 @@ final class BertSelfAttention: Module {
         _value = ModuleInfo(wrappedValue: Linear(cfg.hiddenSize, cfg.hiddenSize), key: "value")
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
+    /// Bidirectional self-attention. `mask`, if given, is an ADDITIVE
+    /// key-padding mask broadcast onto the `[B, numHeads, T, T]` score
+    /// tensor — shape `[B, 1, 1, T]`, `0` for real keys and a large
+    /// negative value for padding keys. It is needed only when a batched
+    /// call pads sequences to a common length (e.g. the reranker scoring
+    /// multiple documents at once); batch-1 callers pass `nil`.
+    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
         let B = x.dim(0), T = x.dim(1)
         var q = query(x).reshaped(B, T, numHeads, headDim).transposed(0, 2, 1, 3)
-        var k = key(x).reshaped(B, T, numHeads, headDim).transposed(0, 2, 1, 3)
+        let k = key(x).reshaped(B, T, numHeads, headDim).transposed(0, 2, 1, 3)
         let v = value(x).reshaped(B, T, numHeads, headDim).transposed(0, 2, 1, 3)
         let scale = 1.0 / Float(headDim).squareRoot()
         q = q * scale
-        let scores = MLX.softmax(MLX.matmul(q, k.transposed(0, 1, 3, 2)), axis: -1)
+        var logits = MLX.matmul(q, k.transposed(0, 1, 3, 2))
+        if let mask { logits = logits + mask }
+        let scores = MLX.softmax(logits, axis: -1)
         let out = MLX.matmul(scores, v)
         return out.transposed(0, 2, 1, 3).reshaped(B, T, numHeads * headDim)
     }
@@ -147,8 +155,8 @@ final class BertAttention: Module {
         _output = ModuleInfo(wrappedValue: BertSelfOutput(cfg), key: "output")
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
-        output(selfAttn(x), x)
+    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
+        output(selfAttn(x, mask: mask), x)
     }
 }
 
@@ -189,8 +197,8 @@ final class BertLayer: Module {
         _output = ModuleInfo(wrappedValue: BertOutput(cfg), key: "output")
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let a = attention(x)
+    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
+        let a = attention(x, mask: mask)
         return output(intermediate(a), a)
     }
 }
@@ -202,9 +210,9 @@ final class BertEncoder: Module {
             wrappedValue: (0 ..< cfg.numHiddenLayers).map { _ in BertLayer(cfg) },
             key: "layer")
     }
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
+    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
         var h = x
-        for l in layer { h = l(h) }
+        for l in layer { h = l(h, mask: mask) }
         return h
     }
 }
