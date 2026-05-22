@@ -79,6 +79,19 @@ DECODE_ADVISORY_PROVENANCE = {
     "strict": "owner-accepted 2026-05-22; docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md",
 }
 
+# Owner-acceptance provenance for advisory demotions that, unlike decode, carry
+# NO `<metric>_floor` because the metric is structurally < 1.0 by design — a
+# non-regression floor would be meaningless. Keyed on (profile, metric). The
+# gate still emits a caveat so the relaxation is never silent. Today the only
+# entry is `image_prefill_ratio` under `strict`: the vision-encoder cache lifts
+# SigLIP2 forward + projector cost out of the measured prefill window, so the
+# prefill-TPS bucket understates a user win that the HARD `image_wall_ratio`
+# already captures. See docs/RELEASE_GATE_IMAGE_PREFILL_PROPOSAL.md.
+ADVISORY_DEMOTION_PROVENANCE = {
+    ("strict", "image_prefill_ratio"):
+        "owner-accepted 2026-05-22; docs/RELEASE_GATE_IMAGE_PREFILL_PROPOSAL.md",
+}
+
 # ---------------------------------------------------------------------------
 # Gate profiles
 # ---------------------------------------------------------------------------
@@ -90,16 +103,26 @@ DECODE_ADVISORY_PROVENANCE = {
 #   "out_of_scope"  — skipped entirely. Listed in `scope_skipped_metrics` with
 #                     the profile-level reason so the omission is auditable.
 #
-# `strict` (the default) hard-gates every threshold EXCEPT `text_decode_ratio`,
-# which it treats as advisory with a hard >= 1.0 non-regression floor - the
-# same treatment `release_candidate` uses, extended to `strict` on 2026-05-22
-# (owner-accepted; docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md) because the
-# >= 1.5x decode-ratio target is structurally unreachable on M-series with
-# the draft models available in mlx-community: the spec-decode throughput
-# ratio asymptotes near 1.10x even at infinite K and 100% acceptance (see
-# docs/SPECULATIVE_DECODING.md). Every other metric stays hard under strict,
-# so it remains the uncompromised reference for everything except the one
-# metric proven unreachable.
+# `strict` (the default) hard-gates every threshold EXCEPT two metrics proven
+# to be mismeasured or unreachable, each demoted to advisory by a recorded
+# owner decision:
+#   - `text_decode_ratio`: advisory with a hard >= 1.0 non-regression floor -
+#     the same treatment `release_candidate` uses, extended to `strict` on
+#     2026-05-22 (owner-accepted; docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md)
+#     because the >= 1.5x decode-ratio target is structurally unreachable on
+#     M-series with the draft models available in mlx-community: the
+#     spec-decode throughput ratio asymptotes near 1.10x even at infinite K
+#     and 100% acceptance (see docs/SPECULATIVE_DECODING.md).
+#   - `image_prefill_ratio`: advisory with NO floor (owner-accepted 2026-05-22;
+#     docs/RELEASE_GATE_IMAGE_PREFILL_PROPOSAL.md). The vision-encoder cache
+#     lifts SigLIP2 forward + projector cost out of the measured prefill
+#     window, so this prefill-TPS bucket understates real performance. The
+#     HARD `image_wall_ratio` carries the user-visible image guarantee; a
+#     >= 1.0 floor here would be meaningless since the metric is structurally
+#     < 1.0 by design. Re-promotes to hard once the benchmark separates
+#     vision-encoder time from language-model prefill time.
+# Every other metric stays hard under strict, so it remains the uncompromised
+# reference for everything except the two metrics proven mismeasured.
 #
 # `release_candidate` is the profile defined in
 # OLLAMA_SPEEDUP_EXECUTION_PLAN.md §4 ("Release Gate Semantics"). It hard-gates
@@ -109,8 +132,10 @@ DECODE_ADVISORY_PROVENANCE = {
 #     and are already hard-gated; prefill TPS is noisy on short prompts.
 #   - image_prefill_ratio: the vision encoder cache lifts work out of the
 #     measured prefill window, so this bucket understates the user win that
-#     image_wall already captures. Re-promote to hard-gate once the cache mode
-#     is excluded from prefill TPS or the metric is redefined.
+#     image_wall already captures. Advisory under BOTH profiles since
+#     2026-05-22 (owner-accepted; docs/RELEASE_GATE_IMAGE_PREFILL_PROPOSAL.md).
+#     Re-promotes to hard once the benchmark separates vision-encoder time
+#     from language-model prefill time.
 #   - text_decode_ratio: advisory at the >= 1.5x target, but with a HARD
 #     non-regression floor (>= 1.0x; see ADVISORY_HARD_FLOORS). Decode of a
 #     dense model is per-token weight-read-bandwidth bound; on tiny 4-bit
@@ -133,17 +158,21 @@ DECODE_ADVISORY_PROVENANCE = {
 # KrillLM signal. See docs/BENCHMARKING.md "audio prefill measurement".
 GATE_PROFILES: dict[str, dict[str, str]] = {
     "strict": {
-        # advisory at >= 1.5x, with the synthetic HARD `text_decode_ratio_floor`
-        # (>= 1.0x) from ADVISORY_HARD_FLOORS. The >= 1.5x decode ratio is
-        # structurally unreachable on M-series (owner-accepted 2026-05-22; see
-        # docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md). Every other strict
-        # metric stays hard.
+        # text_decode_ratio: advisory at >= 1.5x, with the synthetic HARD
+        # `text_decode_ratio_floor` (>= 1.0x) from ADVISORY_HARD_FLOORS. The
+        # >= 1.5x decode ratio is structurally unreachable on M-series
+        # (owner-accepted 2026-05-22; docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md).
+        # image_prefill_ratio: advisory at >= 1.5x with NO floor — the
+        # vision-encoder cache makes the prefill-TPS bucket structurally < 1.0
+        # (owner-accepted 2026-05-22; docs/RELEASE_GATE_IMAGE_PREFILL_PROPOSAL.md);
+        # the HARD image_wall_ratio carries the user-visible guarantee. Every
+        # other strict metric stays hard.
         "text_decode_ratio":     "advisory",
         "text_wall_ratio":       "hard",
         "text_ttft_ratio":       "hard",
         "text_prefill_ratio":    "hard",
         "image_wall_ratio":      "hard",
-        "image_prefill_ratio":   "hard",
+        "image_prefill_ratio":   "advisory",
         "audio_wall_ratio":      "hard",
         "audio_prefill_ratio":   "hard",
         "memory_ratio":          "hard",
@@ -745,6 +774,33 @@ def main() -> int:
                 f"{floor}x: KrillLM must never decode slower than Ollama. "
                 f"{provenance}; re-promotes to hard >= {threshold}x per the "
                 f"contract in OLLAMA_SPEEDUP_EXECUTION_PLAN.md §4."
+            )
+
+        # Floor-less advisory demotion: the metric is structurally < 1.0 by
+        # design (mismeasured, not slow), so no `<metric>_floor` is added —
+        # the hard guarantee is carried by a sibling metric. Still emit a
+        # caveat + scope note citing the owner decision so the relaxation is
+        # never silent. Today: `image_prefill_ratio` under `strict`.
+        elif (
+            kind == "advisory"
+            and (args.profile, name) in ADVISORY_DEMOTION_PROVENANCE
+        ):
+            provenance = ADVISORY_DEMOTION_PROVENANCE[(args.profile, name)]
+            scope_info[name] = (
+                f"advisory (>= {threshold}x target, no floor): the "
+                f"vision-encoder cache lifts encoder+projector cost out of "
+                f"the prefill window; the HARD image_wall_ratio carries the "
+                f"user-visible guarantee."
+            )
+            caveats.append(
+                f"{name} demoted to advisory under '{args.profile}' (>= "
+                f"{threshold}x target, no floor). The vision-encoder cache "
+                f"moves SigLIP2 forward + projector cost out of the measured "
+                f"prefill window, so this prefill-TPS bucket understates real "
+                f"performance; the hard image_wall_ratio is the user-visible "
+                f"guarantee. {provenance}; re-promotes to hard >= {threshold}x "
+                f"once the benchmark separates vision-encoder time from "
+                f"language-model prefill time."
             )
 
     # Compute aggregate stats

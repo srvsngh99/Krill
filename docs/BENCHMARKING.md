@@ -101,7 +101,7 @@ profile is recorded in the gate report so audit trails are unambiguous.
 | text_ttft_ratio     | hard | User-visible first-token latency. |
 | text_prefill_ratio  | advisory | Wall time and TTFT already gate user latency; prefill TPS is noisy on short prompts. |
 | image_wall_ratio    | hard | User-visible total latency on image prompts. |
-| image_prefill_ratio | advisory | Vision encoder cache lifts work out of the measured prefill window, so this bucket understates the user win that image_wall already captures. Re-promote once the metric excludes cache mode or is redefined. |
+| image_prefill_ratio | **advisory in BOTH profiles, no floor** | Owner-accepted for `strict` 2026-05-22 (`docs/RELEASE_GATE_IMAGE_PREFILL_PROPOSAL.md`); already advisory under `release_candidate`. The vision-encoder cache lifts SigLIP2 forward + projector cost out of the measured prefill window, so this prefill-TPS bucket divides non-comparable denominators and is structurally `< 1.0x` by design — a measurement artifact, not a regression. Unlike `text_decode_ratio` it carries **no `<metric>_floor`** (a `>= 1.0x` floor would be meaningless here); the hard `image_wall_ratio` carries the user-visible image guarantee. Re-promotes to hard `>= 1.5x` once the benchmark separates vision-encoder time from language-model prefill time. |
 | memory_ratio        | hard (auto-downgraded to advisory when quantization classes differ) | The benchmark now samples each engine's process-tree memory; the gate hard-gates the ratio so KrillLM cannot quietly regress its footprint. When the comparison crosses quantization classes (e.g. one engine bf16 vs the other Q4_K_M) the metric is dominated by the weight format, not the runtime, so the gate auto-downgrades it to advisory and records the downgrade in `scope.memory_ratio` and the caveats. The canonical Gemma 4 e2b comparison is class-equal (KrillLM affine 4-bit MLX vs Ollama Q4_K_M GGUF, both `4-bit` class), so memory is hard-gated on it. |
 | audio_wall_ratio    | hard | WS6: native Swift+MLX audio is the only audio path and benchmarks faster than Ollama (~0.53× wall). |
 | audio_prefill_ratio | hard | WS6: native audio prefill ~2.4× Ollama. |
@@ -189,12 +189,13 @@ release-candidate path, not yet a production release.
   advisory (printed as WARN at ~1.19x — **no claim KrillLM hit 1.5x
   decode**). Voice/audio is native (WS6) and `hard` in both profiles —
   faster than Ollama (~0.53× wall, ~2.4× prefill). Prefill is advisory.
-- **`strict` gate** (default) still exits `1`: `text_prefill_ratio`,
-  `image_prefill_ratio`, and `audio_wall_ratio` fail. `text_decode_ratio`
-  is advisory in `strict` too since 2026-05-22 (with the hard >=1.0x
-  floor), so it is no longer a strict blocker. `strict` stays the
-  uncompromised reference for every other metric and is required (with
-  native audio) for a production tag.
+- **`strict` gate** (default) exits `0` on the post-native-audio multimodal
+  report since 2026-05-22. Native Swift audio (WS1) made `audio_*`
+  hard-pass; the two remaining structural microbenchmark misses are
+  owner-accepted advisory demotions — `text_decode_ratio` (advisory + hard
+  `>=1.0x` floor) and `image_prefill_ratio` (advisory, no floor). Every
+  other metric stays hard, so `strict` remains the uncompromised reference
+  and is the gate required for a production tag.
 
 Post-merge PR #18 note: a text-only `llama-3.2-1b` vs `llama3.2:1b`
 server sanity run produced strong decode numbers, but the report failed
@@ -223,9 +224,12 @@ Key release gaps as of the last reviewed run:
 - `text_prefill_ratio` (1.22x) is advisory under `release_candidate`;
   re-promote once a drafter, fused kernel, or eval-cadence change
   pushes it past 1.5x.
-- `image_prefill_ratio` (0.89x) is advisory because the vision-encoder
-  cache lifts work out of the measured prefill window;
-  `image_wall_ratio` (0.67x) just barely passes hard.
+- `image_prefill_ratio` (~0.9–1.1x) is advisory under BOTH profiles
+  (no floor) since 2026-05-22: the vision-encoder cache lifts SigLIP2 +
+  projector cost out of the measured prefill window, so the metric divides
+  non-comparable denominators. The hard `image_wall_ratio` (~0.50x) carries
+  the user-visible image guarantee. See
+  `docs/RELEASE_GATE_IMAGE_PREFILL_PROPOSAL.md`.
 - `memory_ratio` is **hard** and now **passing** (0.32–0.84 across 5
   runs; canonical 0.322). PR #16 root-caused the historical 1.14x / ~9.6
   GB reading to an uncapped MLX buffer pool plus contaminated sampling;

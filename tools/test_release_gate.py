@@ -122,11 +122,14 @@ def baseline_report(**overrides) -> dict:
 
 
 def strict_passing_report(**overrides) -> dict:
-    """A report where every strict-HARD metric passes (prefill >= 1.5x,
-    walls/ttft well under budget). `text_decode` defaults to 1.19x - it
-    clears the >= 1.0 non-regression floor but misses the >= 1.5 advisory
-    target, so the only thing between this report and a strict gate pass
-    is the `text_decode_ratio` advisory demotion."""
+    """A report where every strict-HARD metric passes (text/audio prefill
+    >= 1.5x, walls/ttft well under budget). `text_decode` defaults to 1.19x -
+    it clears the >= 1.0 non-regression floor but misses the >= 1.5 advisory
+    target, so the only thing between this report and a strict gate pass is
+    the `text_decode_ratio` advisory demotion. `image_prefill` defaults to
+    1.60x: it is advisory under strict (no floor), so the default clears even
+    the advisory target to keep this fixture a clean pass; override it to
+    exercise the image-prefill advisory demotion."""
     defaults = dict(
         text_decode=(119.0, 100.0),    # ratio 1.19 (advisory miss, floor pass)
         text_prefill=(160.0, 100.0),   # ratio 1.60 (hard pass)
@@ -372,12 +375,79 @@ class DecodeAdvisoryFloorTests(unittest.TestCase):
         self.assertFalse(floor["pass"], "0.90 < 1.0 floor must fail")
 
     def test_strict_still_hard_gates_prefill(self):
-        # The demotion is scoped to text_decode_ratio ONLY. A prefill
-        # near-miss must still hard-fail strict, even with decode passing.
+        # The decode demotion is scoped to text_decode_ratio ONLY. The
+        # text/audio prefill gates stay hard, so a prefill near-miss must
+        # still hard-fail strict even with decode passing.
         report = baseline_report(text_decode=(150.0, 100.0))
         code, _ = run_gate(report)  # default profile = strict
         self.assertEqual(code, 1, "strict still fails on the prefill near-miss")
-        # (decode passes at 1.50; the failure is the unchanged prefill gate)
+        # (decode passes at 1.50; the failure is the unchanged text/audio
+        # prefill gates — image_prefill is advisory and does not gate.)
+
+
+class ImagePrefillAdvisoryTests(unittest.TestCase):
+    """`image_prefill_ratio` is advisory at the >= 1.5x target under BOTH
+    profiles. Unlike `text_decode_ratio` it carries NO `<metric>_floor`: the
+    vision-encoder cache lifts SigLIP2 forward + projector cost out of the
+    measured prefill window, making this prefill-TPS bucket structurally
+    < 1.0 by design, so a non-regression floor would be meaningless. The
+    HARD `image_wall_ratio` carries the user-visible image guarantee.
+    Owner-accepted 2026-05-22; see docs/RELEASE_GATE_IMAGE_PREFILL_PROPOSAL.md."""
+
+    def _eval(self, gate: dict, name: str):
+        return next((e for e in gate["evaluations"] if e["name"] == name), None)
+
+    def test_strict_image_prefill_below_target_is_advisory_and_passes(self):
+        # 0.90x under strict: misses the >= 1.5 target. With every strict-HARD
+        # metric passing, the gate must PASS (owner-accepted demotion).
+        report = strict_passing_report(image_prefill=(90.0, 100.0))
+        code, gate = run_gate(report)  # default profile = strict
+        self.assertEqual(code, 0, "strict must pass: image_prefill is advisory")
+        self.assertEqual(gate["gate"], "pass")
+        ipr = self._eval(gate, "image_prefill_ratio")
+        self.assertEqual(ipr["kind"], "advisory")
+        self.assertFalse(ipr["pass"], "0.90 should miss the >= 1.5 advisory")
+
+    def test_strict_image_prefill_carries_no_floor(self):
+        # Unlike text_decode_ratio, the image-prefill demotion adds no
+        # synthetic `<metric>_floor` HARD evaluation.
+        report = strict_passing_report(image_prefill=(90.0, 100.0))
+        _, gate = run_gate(report)
+        floor = self._eval(gate, "image_prefill_ratio_floor")
+        self.assertIsNone(floor, "image_prefill must NOT carry a synthetic floor")
+
+    def test_strict_image_prefill_demotion_is_recorded(self):
+        # The relaxation must never be silent: a caveat + scope note cite it.
+        report = strict_passing_report(image_prefill=(90.0, 100.0))
+        _, gate = run_gate(report)
+        self.assertIn("image_prefill_ratio", gate["scope"])
+        self.assertTrue(
+            any("image_prefill_ratio demoted to advisory" in c for c in gate["caveats"]),
+            "the image-prefill demotion must be recorded as a caveat",
+        )
+
+    def test_strict_image_wall_stays_hard(self):
+        # The demotion is scoped to image_prefill_ratio ONLY. image_wall is
+        # still hard: a regression there must break strict.
+        report = strict_passing_report(image_wall=(2.00, 1.00))  # ratio 2.0 > 0.67
+        code, gate = run_gate(report)  # default profile = strict
+        self.assertEqual(code, 1, "image_wall regression must still fail strict")
+        iw = self._eval(gate, "image_wall_ratio")
+        self.assertEqual(iw["kind"], "hard")
+        self.assertFalse(iw["pass"])
+
+    def test_release_candidate_has_no_strict_demotion_caveat(self):
+        # image_prefill is advisory under release_candidate by profile design
+        # (silent, pre-existing). The strict-only owner-accepted demotion
+        # caveat must NOT appear there.
+        report = strict_passing_report(image_prefill=(90.0, 100.0))
+        _, gate = run_gate(report, "--profile", "release_candidate")
+        ipr = self._eval(gate, "image_prefill_ratio")
+        self.assertEqual(ipr["kind"], "advisory")
+        self.assertFalse(
+            any("image_prefill_ratio demoted to advisory" in c for c in gate["caveats"]),
+            "the strict-only demotion caveat must not appear under release_candidate",
+        )
 
 
 if __name__ == "__main__":
