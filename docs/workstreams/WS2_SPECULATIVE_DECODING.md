@@ -76,10 +76,13 @@ unaffected (KrillLM no-spec is 1.087-1.10x faster than Ollama on both
 Make KrillLM consistently exceed Ollama on decode throughput while preserving
 greedy output correctness.
 
-The current `release_candidate` profile accepts a hard non-regression floor
-(`text_decode_ratio_floor >= 1.0x`) and treats the `>= 1.5x` decode target as
-advisory. Strict keeps `text_decode_ratio >= 1.5x` hard. This workstream is
-how the strict decode gap closes.
+Both gate profiles now accept a hard non-regression floor
+(`text_decode_ratio_floor >= 1.0x`) and treat the `>= 1.5x` decode target as
+advisory: `release_candidate` since 2026-05-16, and `strict` since
+2026-05-22 (owner-accepted; see `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`),
+because the `>= 1.5x` target is structurally unreachable on M-series with
+available draft models. This workstream is how a genuine `>= 1.5x` decode
+ratio, and the re-promotion of the target back to hard, would be earned.
 
 ## Current Problem
 

@@ -1,6 +1,6 @@
 # Proposal: `text_decode_ratio` gate semantics under `strict`
 
-Status: **ACCEPTED & APPLIED** — owner answered "Demote it under strict too"
+Status: **ACCEPTED & APPLIED** - owner answered "Demote it under strict too"
 (AskUserQuestion, 2026-05-22). Implemented in `tools/release_gate.py`
 (`GATE_PROFILES["strict"]["text_decode_ratio"] = "advisory"`, floor applied
 profile-agnostically) with unit tests in `tools/test_release_gate.py`
@@ -21,12 +21,12 @@ M-series with the draft models available in mlx-community:
 
 - `docs/SPECULATIVE_DECODING.md` derives that the speculative-decode
   throughput ratio asymptotes near **1.10x** even at infinite K and 100%
-  acceptance — the per-round overhead (`beta`) is structural.
-- Re-measured 2026-05-22: `llama-3.2-3b` + `llama-3.2-1b` draft, greedy —
+  acceptance - the per-round overhead (`beta`) is structural.
+- Re-measured 2026-05-22: `llama-3.2-3b` + `llama-3.2-1b` draft, greedy -
   no-spec 59.1 tok/s vs spec 50.3 tok/s (**0.85x**). Speculative decoding
   does not raise effective decode throughput on this hardware; it lowers
   it.
-- Plain-decode `text_decode_ratio` vs Ollama sits at ~1.13–1.19x: KrillLM
+- Plain-decode `text_decode_ratio` vs Ollama sits at ~1.13-1.19x: KrillLM
   beats Ollama at decode, but not by 1.5x. Decode of a dense 4-bit model
   is per-token weight-read-bandwidth bound, and llama.cpp's Metal kernels
   are mature.
@@ -38,7 +38,7 @@ regression but because the bar encodes a speedup the hardware cannot give.
 
 Under `strict`, for `text_decode_ratio` **only**:
 
-1. **Demote the `>= 1.5x` target to `advisory`** — it is still evaluated,
+1. **Demote the `>= 1.5x` target to `advisory`** - it is still evaluated,
    reported, and printed (`WARN [advisory]`); it just no longer breaks the
    gate. This mirrors the already-accepted `release_candidate` treatment.
 
@@ -55,7 +55,7 @@ This is **not** a silent relaxation:
   comment, and the gate report records `scope.text_decode_ratio` plus a
   caveat line citing this doc.
 - The terminal summary prints `text_decode_ratio` as `WARN [advisory]`
-  next to the hard `text_decode_ratio_floor` — a reader cannot miss it.
+  next to the hard `text_decode_ratio_floor` - a reader cannot miss it.
 
 ## What this does and does not claim
 
@@ -67,7 +67,7 @@ This is **not** a silent relaxation:
 - It **does not touch any other `strict` metric.** In particular the
   prefill-ratio metrics (`text_prefill_ratio`, `image_prefill_ratio`,
   `audio_prefill_ratio`) remain **hard** under `strict`. On the current
-  benchmark matrix `strict` can therefore still exit 1 on a prefill miss —
+  benchmark matrix `strict` can therefore still exit 1 on a prefill miss -
   this proposal removes `text_decode_ratio` as a blocker, it does **not**
   by itself turn the whole `strict` gate green. Any prefill demotion is a
   separate decision and is explicitly out of scope here.
