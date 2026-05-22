@@ -21,10 +21,10 @@ final class RerankerClassificationHead: Module {
             wrappedValue: Linear(hiddenSize, numLabels), key: "out_proj")
     }
 
-    /// `lastHidden [1, T, H] -> logits [1, numLabels]` using the
+    /// `lastHidden [B, T, H] -> logits [B, numLabels]` using each row's
     /// `[CLS]` token (position 0).
     func callAsFunction(_ lastHidden: MLXArray) -> MLXArray {
-        // [CLS] hidden -> [1, H]
+        // [CLS] hidden of every row -> [B, H]
         let cls = lastHidden[0..., 0, 0...]
         // Standard XLMRobertaClassificationHead: tanh activation; no
         // dropout at inference time (dropout layers are no-ops in
@@ -58,10 +58,15 @@ public final class RerankerModel: Module {
             key: "classifier")
     }
 
-    /// `tokens [1, T] -> logits [1, numLabels]`. For a single-label
-    /// reranker (`numLabels == 1`), call sites typically take the
-    /// scalar at `[0, 0]` as the relevance score.
-    public func callAsFunction(_ tokens: MLXArray) -> MLXArray {
-        classifier(encoder(embeddings(tokens)))
+    /// `tokens [B, T] -> logits [B, numLabels]`. For a single-label
+    /// reranker (`numLabels == 1`), call sites take the scalar at
+    /// `[b, 0]` as relevance score for row `b`.
+    ///
+    /// `mask`, if given, is an additive key-padding mask of shape
+    /// `[B, 1, 1, T]` (`0` for real keys, large-negative for padding).
+    /// It is required when `B > 1` because the rows are padded to a
+    /// common length; a single unpadded pair passes `nil`.
+    public func callAsFunction(_ tokens: MLXArray, mask: MLXArray? = nil) -> MLXArray {
+        classifier(encoder(embeddings(tokens), mask: mask))
     }
 }
