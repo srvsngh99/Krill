@@ -2,7 +2,7 @@
 
 ## Status and Scope
 
-This build is a release-readiness baseline, not a production release. The HTTP server supports **text generation on every model family** plus **Gemma 4 image and audio input**. Image input runs through the native Swift SigLIP2 vision encoder; audio input runs through the native Swift+MLX USM path. Combined image+audio requests also run natively. The `mlx-vlm` Python bridge was removed in WS6 Step 4. Non-Gemma 4 models (and text-only Gemma 4 checkpoints, for audio) reject image/audio payloads with HTTP 400. See [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for full status.
+This build is a release-readiness baseline, not a production release. The HTTP server supports **text generation on every model family**, **Gemma 4 and Qwen 2.5-VL image input**, and **Gemma 4 audio input**. Gemma 4 image input runs through the native Swift SigLIP2 vision encoder; Qwen 2.5-VL runs through its own native Swift+MLX vision tower + 3D mRoPE runtime (WS5 retired the `mlx-vlm` Python bridge); audio input runs through the native Swift+MLX USM path. Combined Gemma 4 image+audio requests also run natively. Models without a vision/audio tower reject the corresponding payload with HTTP 400. See [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for full status.
 
 **Limits:**
 - 1 image per request maximum (Gemma 4 supports a single image per turn).
@@ -101,9 +101,9 @@ curl http://127.0.0.1:11435/api/generate -d '{
   "options": {"temperature": 0, "num_predict": 32}
 }'
 
-# Image (Gemma 4 only — native Swift vision path)
+# Image (Gemma 4 and Qwen 2.5-VL — native Swift vision path)
 curl http://127.0.0.1:11435/api/generate -d '{
-  "model": "gemma-4-e2b",
+  "model": "qwen2.5-vl-3b",
   "prompt": "What is in this image?",
   "images": ["'"$(base64 -i photo.png)"'"]
 }'

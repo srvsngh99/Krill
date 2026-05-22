@@ -3,6 +3,12 @@ import MLX
 import MLXNN
 import MLXFast
 import KLMCache
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
+#if canImport(ImageIO)
+import ImageIO
+#endif
 
 // MARK: - Qwen 2.5-VL Config
 
@@ -570,6 +576,67 @@ public class Qwen25VLVisionTower: Module {
             key: "merger")
     }
 
+    /// Build the additive window-attention mask for the windowed
+    /// vision blocks.
+    ///
+    /// Qwen 2.5-VL's vision tower runs most blocks with *windowed*
+    /// attention: a patch attends only to patches in the same
+    /// `vit_merger_window_size` square window of the post-merge
+    /// (LLM) grid; the periodic `fullatt_block_indexes` layers run
+    /// full attention so information mixes across windows. The HF
+    /// reference implements this by permuting the patch sequence so
+    /// window members are contiguous and then attending with
+    /// variable-length `cu_window_seqlens` boundaries. Because
+    /// attention is permutation-equivariant, an equivalent result
+    /// is obtained WITHOUT any permutation by a block-diagonal
+    /// additive mask over the original patch order: patch *i*
+    /// attends *j* iff they share a window.
+    ///
+    /// `gridHFull` / `gridWFull` are the FULL patch-grid dimensions
+    /// (`spatial_merge_size *` the LLM grid). Patches are in
+    /// `Qwen25VLImagePreprocessor.toConv3DInput` merge-block
+    /// row-major order, so patch `p` belongs to LLM-grid (merged)
+    /// token `p / spatial_merge_size^2`, laid out row-major over
+    /// the LLM grid. Returns a `[1, 1, L, L]` additive mask, or
+    /// `nil` when the whole image fits in a single window (the mask
+    /// would then be all-zero, i.e. full attention).
+    static func windowAttentionMask(
+        gridHFull: Int, gridWFull: Int,
+        vision: Qwen25VLConfig.VisionConfig, dtype: DType
+    ) -> MLXArray? {
+        let ms = max(1, vision.spatialMergeSize)
+        let llmH = gridHFull / ms
+        let llmW = gridWFull / ms
+        guard llmH > 0, llmW > 0 else { return nil }
+        // vit_merger_window_size: window edge in LLM-grid (merged)
+        // tokens. window_size is in pixels; / patch_size gives
+        // patches, / spatial_merge_size gives merged tokens.
+        let vitWin = max(1, vision.windowSize / vision.patchSize / ms)
+        let numWinW = (llmW + vitWin - 1) / vitWin
+        let numWinH = (llmH + vitWin - 1) / vitWin
+        // One window covers the whole image -> windowed attention
+        // is identical to full attention; skip the mask entirely.
+        if numWinH * numWinW <= 1 { return nil }
+
+        let patchesPerMerge = ms * ms
+        let nPatches = gridHFull * gridWFull
+        var winId = [Int32](repeating: 0, count: nPatches)
+        for p in 0 ..< nPatches {
+            let merged = p / patchesPerMerge
+            let r = merged / llmW
+            let c = merged % llmW
+            winId[p] = Int32((r / vitWin) * numWinW + (c / vitWin))
+        }
+        let ids = MLXArray(winId)  // [L]
+        let same = ids.expandedDimensions(axis: 1)
+            .== ids.expandedDimensions(axis: 0)  // [L, L] bool
+        // -1e4 (not -inf): fp16-safe and the value Gemma 4's vision
+        // encoder uses for the same purpose.
+        let mask = MLX.where(
+            same, MLXArray(Float(0)), MLXArray(Float(-1e4)))
+        return mask.reshaped(1, 1, nPatches, nPatches).asType(dtype)
+    }
+
     /// Run the vision tower over a per-patch batched tensor and
     /// return language-aligned vision embeddings.
     ///
@@ -582,18 +649,27 @@ public class Qwen25VLVisionTower: Module {
     /// Output: `[N_merged_tokens, out_hidden]` where
     /// `N_merged_tokens = N_patches / spatial_merge_size^2`.
     ///
-    /// Window-attention masking depends on the per-image grid
-    /// shape (h_patches, w_patches); the foundation runs all
-    /// blocks with mask=nil (full attention) so the modules are
-    /// exercised end-to-end. The runtime PR wires per-image
-    /// window masks through `fullAttnLayers` without changing
-    /// the iteration shape here. (Issue tracked in WS5 follow-up.)
-    public func callAsFunction(_ patchBatch: MLXArray) -> MLXArray {
+    /// - Parameter gridHWFull: the FULL patch-grid `(h, w)` of the
+    ///   image. When supplied, windowed blocks attend with the
+    ///   `windowAttentionMask` and `fullAttnBlockIndexes` layers
+    ///   attend globally - matching the HF reference. When `nil`,
+    ///   every block runs full attention (the back-compatible path
+    ///   used by module-level tests that do not have a grid).
+    public func callAsFunction(
+        _ patchBatch: MLXArray, gridHWFull: (Int, Int)? = nil
+    ) -> MLXArray {
         var h = patchEmbed(patchBatch)  // [N_patches, vision_hidden]
         h = h.expandedDimensions(axis: 0)  // [1, N_patches, hidden]
+        let windowMask: MLXArray? = gridHWFull.flatMap { grid in
+            Self.windowAttentionMask(
+                gridHFull: grid.0, gridWFull: grid.1,
+                vision: visionConfig, dtype: h.dtype)
+        }
         for (i, block) in blocks.enumerated() {
-            _ = fullAttnLayers.contains(i)
-            h = block(h, mask: nil)
+            // Full-attention layers see the whole image; windowed
+            // layers see only same-window patches.
+            let mask = fullAttnLayers.contains(i) ? nil : windowMask
+            h = block(h, mask: mask)
         }
         let merged = merger(h.squeezed(axis: 0))
         return merged  // [N_merged_tokens, out_hidden]
@@ -696,6 +772,127 @@ public enum Qwen25VLImagePreprocessor {
         }
         return x
     }
+
+    /// Smart-resize target dimensions for an image of the given
+    /// size: both a multiple of `factor` (`patch_size *
+    /// spatial_merge_size`), aspect ratio preserved as closely as
+    /// the `factor` rounding allows, total pixel count clamped into
+    /// `[minPixels, maxPixels]`. Mirrors the HF Qwen 2.5-VL image
+    /// processor `smart_resize`.
+    static func smartResize(
+        height: Int, width: Int, factor: Int,
+        minPixels: Int, maxPixels: Int
+    ) -> (h: Int, w: Int) {
+        let hF = Double(height), wF = Double(width)
+        func roundTo(_ v: Double) -> Int {
+            max(factor, Int((v / Double(factor)).rounded()) * factor)
+        }
+        var hBar = roundTo(hF)
+        var wBar = roundTo(wF)
+        if hBar * wBar > maxPixels {
+            let beta = (hF * wF / Double(maxPixels)).squareRoot()
+            hBar = max(factor,
+                Int((hF / beta / Double(factor)).rounded(.down)) * factor)
+            wBar = max(factor,
+                Int((wF / beta / Double(factor)).rounded(.down)) * factor)
+        } else if hBar * wBar < minPixels {
+            let beta = (Double(minPixels) / (hF * wF)).squareRoot()
+            hBar = max(factor,
+                Int((hF * beta / Double(factor)).rounded(.up)) * factor)
+            wBar = max(factor,
+                Int((wF * beta / Double(factor)).rounded(.up)) * factor)
+        }
+        return (hBar, wBar)
+    }
+
+    /// Upper bound on the resized pixel count. Caps the vision
+    /// sequence length L (and hence the L x L window-attention
+    /// mask) at a runtime-sane size: 768x768 / 14^2 ~= 3000 patches.
+    static let maxPixels = 768 * 768
+
+    /// Decode PNG/JPEG image data into a normalized `[H, W, 3]`
+    /// float32 tensor in `[0, 1]`, resized (via `smartResize`) so
+    /// `H` and `W` are multiples of `patch_size * spatial_merge_size`.
+    /// CoreGraphics-backed; throws `imagePreprocessingUnavailable`
+    /// on platforms without it.
+    public static func decode(
+        _ imageData: Data, patchSize: Int, spatialMergeSize: Int
+    ) throws -> MLXArray {
+        guard !imageData.isEmpty else {
+            throw MultimodalPreprocessingError.emptyImageData
+        }
+        #if canImport(CoreGraphics) && canImport(ImageIO)
+        let factor = patchSize * spatialMergeSize
+        guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw MultimodalPreprocessingError.emptyImageData
+        }
+        let (newH, newW) = smartResize(
+            height: cgImage.height, width: cgImage.width, factor: factor,
+            minPixels: factor * factor * 4, maxPixels: maxPixels)
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(
+            data: nil, width: newW, height: newH,
+            bitsPerComponent: 8, bytesPerRow: newW * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            throw MultimodalPreprocessingError.emptyImageData
+        }
+        // Resize by drawing into the full target rect (CoreGraphics
+        // interpolates). smartResize already preserved the aspect
+        // ratio to within the `factor` rounding.
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: newW, height: newH))
+        guard let data = context.data else {
+            throw MultimodalPreprocessingError.emptyImageData
+        }
+
+        // RGBA -> channel-last [H, W, 3] in [0, 1]. CGContext stores
+        // rows bottom-to-top; flip so row 0 is the top of the image.
+        let pixelCount = newH * newW
+        var floats = [Float](repeating: 0, count: pixelCount * 3)
+        let ptr = data.bindMemory(to: UInt8.self, capacity: pixelCount * 4)
+        for row in 0 ..< newH {
+            let flippedRow = newH - 1 - row
+            for col in 0 ..< newW {
+                let srcIdx = (flippedRow * newW + col) * 4
+                let dstIdx = (row * newW + col) * 3
+                floats[dstIdx] = Float(ptr[srcIdx]) / 255.0
+                floats[dstIdx + 1] = Float(ptr[srcIdx + 1]) / 255.0
+                floats[dstIdx + 2] = Float(ptr[srcIdx + 2]) / 255.0
+            }
+        }
+        return MLXArray(floats, [newH, newW, 3])
+        #else
+        throw MultimodalPreprocessingError.imagePreprocessingUnavailable
+        #endif
+    }
+
+    /// Full image -> patch-batch pipeline: decode + resize,
+    /// CLIP-normalize, pack into the Conv3d per-patch batch, and
+    /// report the post-spatial-merge image grid.
+    ///
+    /// The returned `(gridHMerged, gridWMerged)` is what the caller
+    /// uses to size the `<|image_pad|>` placeholder run
+    /// (`gridHMerged * gridWMerged` tokens) and to drive the 3D
+    /// mRoPE positions. The grid is generally NOT square.
+    public static func preprocess(
+        _ imageData: Data, vision: Qwen25VLConfig.VisionConfig
+    ) throws -> (patches: MLXArray, gridHMerged: Int, gridWMerged: Int) {
+        let pixels = try decode(
+            imageData, patchSize: vision.patchSize,
+            spatialMergeSize: vision.spatialMergeSize)
+        let H = pixels.dim(0)
+        let W = pixels.dim(1)
+        let patches = toConv3DInput(
+            normalize(pixels),
+            patchSize: vision.patchSize,
+            temporalPatchSize: vision.temporalPatchSize,
+            spatialMergeSize: vision.spatialMergeSize)
+        let mergeFactor = vision.patchSize * vision.spatialMergeSize
+        return (patches, H / mergeFactor, W / mergeFactor)
+    }
 }
 
 // MARK: - mRoPE position computation
@@ -724,6 +921,17 @@ public enum Qwen25VLPositions {
         public let t: [Int32]
         public let h: [Int32]
         public let w: [Int32]
+        /// The mRoPE position the FIRST token after this prompt must
+        /// take. For a pure-text prompt this equals the prompt
+        /// length; for an image prompt it is smaller than the token
+        /// count, because the `gridH * gridW` `<|image_pad|>` tokens
+        /// occupy only `max(gridH, gridW)` positions. A native
+        /// decode loop threads `nextPos + k` as the
+        /// `mropePositionOffset` of decode step `k`.
+        ///
+        /// Computed pre-offset: a caller that prefilled with a
+        /// non-zero `mropePositionOffset` must add that offset back.
+        public let nextPos: Int32
     }
 
     /// - Parameters:
@@ -774,7 +982,7 @@ public enum Qwen25VLPositions {
                 i += 1
             }
         }
-        return Coords(t: t, h: h, w: w)
+        return Coords(t: t, h: h, w: w, nextPos: nextPos)
     }
 }
 
@@ -1068,7 +1276,11 @@ public class Qwen25VLForConditionalGeneration: Module {
         if let pixelValues, let grid = imageGridMerged {
             gridH = grid.0
             gridW = grid.1
-            let visionEmbeds = visual(pixelValues)  // [n_merged, H]
+            // The vision tower needs the FULL patch grid (the merged
+            // grid times spatial_merge_size) to build window masks.
+            let ms = config.vision.spatialMergeSize
+            let visionEmbeds = visual(
+                pixelValues, gridHWFull: (gridH * ms, gridW * ms))  // [n_merged, H]
             if let start = tokenIds.firstIndex(of: Int32(config.imageTokenId)) {
                 // The contiguous <|image_pad|> span must match the
                 // vision-embed count exactly; otherwise the splice

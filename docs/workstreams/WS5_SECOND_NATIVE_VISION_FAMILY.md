@@ -1,12 +1,61 @@
 # WS5: Second Native Vision Family
 
-Status: native multimodal forward shipped. The Swift+MLX
-`Qwen25VLForConditionalGeneration` (vision tower + 3D mRoPE text
-tower + image-token injection) is built, wired into the loader
-behind `KRILL_NATIVE_QWEN25VL=1`, and tested end-to-end on
-synthetic models. The Python bridge (`Qwen25VLEngine` -> mlx-vlm)
-stays the default until the native path is validated against a
-real checkpoint and the server image-preprocessing path is wired.
+Status: COMPLETE. Qwen 2.5-VL runs end-to-end on a native
+Swift+MLX runtime - vision tower, 3D mRoPE text tower, image
+preprocessing, and a grid- and decode-offset-correct generation
+loop. The native path is the default and only runtime: the Python
+bridge (`Qwen25VLEngine` + `qwen25vl_bridge.py`) is retired, the
+support tier is promoted `compatible_fallback` -> `production_native`,
+and a request flows HTTP -> image decode -> native prefill -> native
+decode -> response with no Python sidecar. Validated on a real
+`Qwen2.5-VL-3B-Instruct-4bit` checkpoint against a recorded mlx-vlm
+oracle baseline.
+
+## What landed in the runtime PR (this PR)
+
+- `Qwen25VLRuntime` (`Sources/KLMEngine/Qwen25VLRuntime.swift`):
+  the native decode driver - prefill then an incremental KV-cached
+  decode loop. It threads the per-step mRoPE offset
+  (`Qwen25VLForConditionalGeneration.mropePositionOffset`): the
+  driver captures the prefill's mRoPE frontier
+  (`Qwen25VLPositions.Coords.nextPos`, newly exposed) and forwards
+  decode step `k` at `frontier + k`. After an image prompt the
+  KV-cache length is NOT the next mRoPE position - the image span
+  compresses `gridH * gridW` placeholder tokens to
+  `max(gridH, gridW)` positions - so this offset is load-bearing.
+- Real `(gridH, gridW)` grid threading. `Qwen25VLImagePreprocessor.preprocess`
+  decodes a PNG/JPEG (CoreGraphics), `smartResize`s it to a multiple
+  of `patch_size * spatial_merge_size`, and returns the per-patch
+  batch together with the actual - generally non-square - post-merge
+  grid. No more square-grid assumption.
+- Window-attention mask. `Qwen25VLVisionTower.windowAttentionMask`
+  builds a block-diagonal additive mask (a patch attends only
+  same-window patches; `fullatt_block_indexes` layers attend
+  globally) from the real grid. Equivalent to the HF
+  permutation + `cu_window_seqlens` scheme without reordering.
+- Engine + tokenizer. `InferenceEngine.generate` detects a VL model
+  and routes through `generateQwen25VL`, which preprocesses the
+  image and renders the ChatML prompt with the `<|image_pad|>` run
+  via `KLMTokenizer.formatQwen25VLTokenIds`.
+- Server. `ModelAdapter` routes `.qwen25vl` to `.denseEngine`; the
+  standard chat path handles a VL request exactly like Gemma 4
+  vision (`decodeMediaForRequest` -> `engine.generate(... imageData:)`).
+  `handleVLMChat` / `decodeMediaForRequestVLM` / the `vlmEngine`
+  field / the `.visionBridge` routing are removed.
+- Bridge retired. `Sources/KLMEngine/Qwen25VLEngine.swift` and
+  `tools/qwen25vl_bridge.py` are deleted; the shared sidecar
+  plumbing (`LineReader`, `VLMError`, the venv interpreter path)
+  moved to `Sources/KLMEngine/PythonSidecar.swift` for `MoEEngine`.
+  Tier promoted to `production_native` in `ModelCapabilities`.
+- Tests. `Qwen25VLRuntimeTests` is the decode-correctness gold
+  standard: an incremental prefill+decode loop must match a single
+  full forward over `prompt + generated`, per-position, including a
+  non-square image span and a decode run long enough to cross the
+  KV-cache compaction threshold. `Qwen25VLSmokeTests` (gated on
+  `KLM_QWEN25VL_MODEL_PATH`) loads the real checkpoint, asserts the
+  image conditions the answer, and checks rubric-equivalence to the
+  recorded mlx-vlm oracle (`Fixtures/ws5_oracle_baseline.json`).
+  Window-mask and preprocessing tests cover the foundation pieces.
 
 ## What landed in the native multimodal-forward PR
 
@@ -42,32 +91,14 @@ real checkpoint and the server image-preprocessing path is wired.
   changes output vs text-only; two images differ), and a
   multimodal micro-benchmark.
 
-## What remains for the runtime follow-up
+## Runtime follow-up: complete
 
-- Server image-preprocessing wiring: decode the request PNG,
-  resize to a multiple of `patch_size * spatial_merge_size`,
-  normalize, run `toConv3DInput`, and route the VL manifest to
-  the native `InferenceEngine` instead of the bridge when
-  `KRILL_NATIVE_QWEN25VL=1`.
-- Thread the real `(gridH, gridW)` through the
-  `multimodalForward` closure. Today the closure derives a
-  SQUARE grid from the patch count; non-square images need the
-  grid passed explicitly.
-- Thread the decode-step mRoPE offset. The forward exposes a
-  `mropePositionOffset` parameter: a fresh prefill passes `nil`
-  (offset 0, correct), but a decode step after an IMAGE prompt
-  must pass the prefill's final mRoPE position + 1 - the cache
-  length is not a valid offset there because the image span
-  compresses `gridH * gridW` placeholder tokens to
-  `max(gridH, gridW)` positions. Text-only decode is unaffected.
-- Validate the native path against a real
-  `mlx-community/Qwen2.5-VL-*-Instruct-*bit` checkpoint
-  (parity smoke vs mlx-vlm on the red/green PNG fixtures), then
-  retire `Qwen25VLEngine` + `qwen25vl_bridge.py` and promote the
-  tier from `compatible_fallback` to `production_native`.
-- Window-attention mask builder that takes the real image grid
-  shape and emits per-block masks (the foundation runs all
-  vision blocks with full attention).
+Every item the multimodal-forward PR deferred shipped in the
+runtime PR above: server image-preprocessing wiring, real
+`(gridH, gridW)` grid threading, the decode-step mRoPE offset,
+real-checkpoint validation + bridge retirement + tier promotion,
+and the window-attention mask builder. There is no remaining WS5
+follow-up.
 
 ## What landed in the native foundation PR (prior)
 
@@ -109,27 +140,28 @@ real checkpoint and the server image-preprocessing path is wired.
   the follow-up" rejection so users see the env-gate is intentional;
   without the gate the existing bridge redirect stands.
 
-## Acceptance status (native multimodal forward)
+## Acceptance status (native runtime - final)
 
 - "Selected family handles image-only prompts natively." -
-  **DONE (in-engine).** `Qwen25VLForConditionalGeneration`
-  runs a native Swift+MLX multimodal forward. Live generation
-  on a real checkpoint via the server is gated on the
-  image-preprocessing wiring follow-up.
+  **DONE.** A VL chat request runs end-to-end on the native
+  Swift+MLX engine: `Qwen25VLSmokeTests` loads the real
+  `Qwen2.5-VL-3B-Instruct-4bit` checkpoint and generates from a
+  PNG with no Python sidecar.
 - "Image fixture changes output versus text-only prompt." -
-  **DONE.** `testImageInputChangesOutputVsTextOnly` asserts the
-  native forward diverges when vision embeddings are injected.
+  **DONE.** `testImageInputChangesOutputVsTextOnly` (synthetic)
+  and `testImageConditionsTheAnswer` (real checkpoint: red vs
+  green).
 - "Two different image fixtures produce different outputs." -
-  **DONE.** `testTwoImagesProduceDifferentOutputs` asserts two
-  different image fills produce different logits.
+  **DONE.** `testTwoImagesProduceDifferentOutputs` (synthetic);
+  the real-checkpoint smoke distinguishes red / green / blue.
 - "Server rejects unsupported media/family combinations clearly." -
-  **DONE** (bridge handler unchanged; native loader rejection
-  message names the env-gate).
+  **DONE.** A non-vision model rejects an image payload with
+  HTTP 400 on the standard chat path's capability gate.
 - "Benchmark shows production-native performance or marks the
-  path experimental/fallback." - **PARTIAL.** An in-engine
-  micro-benchmark (`testMultimodalForwardBenchmark`) times the
-  native multimodal forward. The path stays `compatible_fallback`
-  until the real-checkpoint parity smoke lands.
+  path experimental/fallback." - **DONE.** The path is
+  `production_native`; correctness is gated by the
+  decode-equivalence test and rubric-equivalence to the recorded
+  mlx-vlm oracle.
 
 ## What landed in the bridge PR (prior)
 

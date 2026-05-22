@@ -67,24 +67,11 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
     if arch.contains("qwen2_5_vl") || arch.contains("qwen2vl")
         || modelType == "qwen2_5_vl" || modelType == "qwen2_vl"
     {
-        // Qwen 2.5-VL native runtime. With `KRILL_NATIVE_QWEN25VL=1`
-        // the loader builds the native Swift+MLX
-        // `Qwen25VLForConditionalGeneration` (vision tower + 3D
-        // mRoPE text tower + multimodal forward) and returns a
-        // `LoadedModel`. Without the env var the family routes
-        // through the `Qwen25VLEngine` Python bridge
-        // (compatible_fallback tier) - the default until the native
-        // path is validated against a real checkpoint.
-        if ProcessInfo.processInfo.environment["KRILL_NATIVE_QWEN25VL"] == "1" {
-            return try loadQwen25VL(configData: configData, directory: directory)
-        }
-        throw ModelLoadError.unsupportedArchitecture(
-            "Qwen 2.5-VL runs through the multimodal bridge (compatible_fallback "
-            + "tier). Use POST /api/chat or /v1/chat/completions with an image "
-            + "attachment - the server routes VL manifests to Qwen25VLEngine. "
-            + "The native Swift+MLX runtime is opt-in via KRILL_NATIVE_QWEN25VL=1 "
-            + "until it is validated against a real checkpoint. Detected "
-            + "arch=\(arch), model_type=\(modelType).")
+        // Qwen 2.5-VL native Swift+MLX runtime: vision tower + 3D
+        // mRoPE text tower + multimodal forward. WS5 retired the
+        // `Qwen25VLEngine` Python bridge - the native path is now
+        // the only runtime for this family.
+        return try loadQwen25VL(configData: configData, directory: directory)
     } else if arch.contains("forsequenceclassification") || arch.contains("crossencoder") {
         // Cross-encoder rerankers (BGE Reranker, Cohere Rerank,
         // etc.) are loaded through the dedicated `RerankEngine`,
@@ -238,10 +225,14 @@ private func loadQwen25VL(configData: Data, directory: URL) throws -> LoadedMode
 
     let mergeSize = config.vision.spatialMergeSize
 
+    // `family` must round-trip through `ModelFamily(rawValue:)` so
+    // `InferenceEngine.capabilities` and the tool-template selector
+    // resolve correctly - `ModelFamily.qwen25vl.rawValue` is
+    // `"qwen2_5_vl"`, not `"qwen25vl"`.
     return LoadedModel(
         module: model,
         numLayers: config.numHiddenLayers,
-        family: "qwen25vl",
+        family: "qwen2_5_vl",
         forward: { tokens, caches in
             // Text-only path: no image, no vision tower.
             model(tokens, pixelValues: nil, imageGridMerged: nil,

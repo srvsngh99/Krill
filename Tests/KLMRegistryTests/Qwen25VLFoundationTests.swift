@@ -56,17 +56,14 @@ final class Qwen25VLFoundationTests: XCTestCase {
 
     // MARK: - Support tier
 
-    func testQwen25VLIsCompatibleFallback() {
-        // Native Swift+MLX vision tower / mRoPE / patch merger
-        // are NOT in tree yet; the runtime path is the Python
-        // sidecar (Qwen25VLEngine). The workstream's tier
-        // definitions reserve `productionNative` for the native
-        // path and `compatibleFallback` for bridge-backed
-        // runtimes. Promotion to productionNative requires the
-        // native modules.
+    func testQwen25VLIsProductionNative() {
+        // WS5 shipped the native Swift+MLX runtime (vision tower,
+        // patch merger, 3D mRoPE, image preprocessing, grid- and
+        // decode-offset-correct generation) and retired the Python
+        // bridge, so the tier is `productionNative`.
         XCTAssertEqual(
             ModelCapabilities.supportTier(for: .qwen25vl),
-            .compatibleFallback)
+            .productionNative)
     }
 
     // MARK: - Raw value stability (used by /api/tags, /api/show)
