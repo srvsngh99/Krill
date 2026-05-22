@@ -1,6 +1,9 @@
 # WS2: Speculative Decoding
 
-Status: in progress (correctness + plumbing landed; strict 1.5x not yet).
+Status: in progress (correctness + plumbing landed; the `>= 1.5x` decode
+target is not met and is structurally unreachable on M-series, so since
+2026-05-22 `text_decode_ratio` is advisory in both gate profiles with a
+hard `>= 1.0x` floor - see `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`).
 Detailed usage and result: [../SPECULATIVE_DECODING.md](../SPECULATIVE_DECODING.md)
 
 ## What landed in this PR
@@ -22,12 +25,15 @@ Detailed usage and result: [../SPECULATIVE_DECODING.md](../SPECULATIVE_DECODING.
 - New unit tests for the greedy guard, curated-pair lookup, and
   adaptive-K reset semantics.
 
-## What still does not pass
+## What the `>= 1.5x` decode target still does not reach
 
-The `text_decode_ratio >= 1.5x` strict gate. Benchmarked on two target
-sizes (3B and 8B) on M-series 4-bit MLX with the smallest available
-mlx-community drafter (llama-3.2-1b), bracketed by low and high
-acceptance prompts:
+The `text_decode_ratio >= 1.5x` target is not met. It is no longer a
+hard *gate* in either profile (advisory since 2026-05-16 for
+`release_candidate`, 2026-05-22 for `strict`; the hard guarantee is the
+`>= 1.0x` floor) - but the `>= 1.5x` aspiration this workstream targets
+remains unreached. Benchmarked on two target sizes (3B and 8B) on
+M-series 4-bit MLX with the smallest available mlx-community drafter
+(llama-3.2-1b), bracketed by low and high acceptance prompts:
 
 | Target / prompt                | KrillLM no-spec | KrillLM spec | K | acceptance |
 | ------------------------------ | --------------- | ------------ | - | ---------- |

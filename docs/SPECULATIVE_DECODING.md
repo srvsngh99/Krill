@@ -193,12 +193,13 @@ strong drafter agreement - and spec still LOSES vs KrillLM no-spec
 (44.1 vs 50.2 tok/s). This is the strongest single-run evidence
 that the gap is in the per-round overhead, not in acceptance.
 
-## Why 1.5x strict is empirically out of reach on this hardware
+## Why the 1.5x decode target is empirically out of reach on this hardware
 
-The WS2 `text_decode_ratio >= 1.5x` strict gate cannot be unblocked
+The WS2 `text_decode_ratio >= 1.5x` target cannot be reached
 on M-series with the model pairs currently available in mlx-community
 **on any prompt or K setting tested**, including the high-acceptance
-0.73 run above. Below we fit a cost model to the measured numbers
+0.73 run above. (This is why the target is advisory in both gate
+profiles, with a hard `>= 1.0x` floor, rather than a hard gate.) Below we fit a cost model to the measured numbers
 and show that even at infinite K and 100% acceptance, the achievable
 spec speedup on this engine on this hardware is bounded at roughly
 1.10x - well short of 1.5x.
