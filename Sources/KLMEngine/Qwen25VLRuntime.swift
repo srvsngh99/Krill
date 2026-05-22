@@ -95,21 +95,30 @@ public enum Qwen25VLRuntime {
         // sampling logits without duplicating that position's KV.
         // The mediaHash makes the key image-aware, so a different
         // image misses safely. We accept hits only when the last
-        // prompt token is text (the bench / chat-template case):
-        // an image_pad last token has per-axis mRoPE coords that
-        // disagree with a single scalar offset, so on that rare
-        // shape we just fall through to a full prefill.
+        // prompt token is plain text (not an image or video
+        // placeholder): the multi-axis mRoPE coords of an image_pad
+        // / video_pad cannot be expressed as a single scalar offset,
+        // so on those rare shapes we fall through to a full prefill.
         var cacheHit = false
-        let lastIsText = promptInt32.last != Int32(model.config.imageTokenId)
+        let lastTokenId = promptInt32.last
+        let lastIsText = lastTokenId != Int32(model.config.imageTokenId)
+            && lastTokenId != Int32(model.config.videoTokenId)
         if let prefixCache, let modelId, lastIsText,
            let hit = prefixCache.lookup(
                tokens: promptTokens, modelId: modelId,
                mediaHash: mediaHash),
-           !hit.keys.isEmpty,
-           hit.prefixLength == promptTokens.count {
+           hit.prefixLength == promptTokens.count,
+           // A truncated / stale disk entry could carry fewer
+           // per-layer snapshots than the model has caches. Treat
+           // any layer-count mismatch as a miss rather than
+           // partial-restoring: a layer left at sequenceLength 0
+           // would write its first decode K/V at slot 0 and silently
+           // diverge from the un-cached forward.
+           hit.keys.count == caches.count,
+           hit.values.count == caches.count {
             for (i, cache) in caches.enumerated() {
-                if i < hit.keys.count, let k = hit.keys[i].first,
-                   i < hit.values.count, let v = hit.values[i].first {
+                if let k = hit.keys[i].first,
+                   let v = hit.values[i].first {
                     cache.restore(keys: k, values: v)
                 }
             }
