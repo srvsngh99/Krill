@@ -96,7 +96,7 @@ profile is recorded in the gate report so audit trails are unambiguous.
 
 | Metric | Kind | Rationale |
 |--------|------|-----------|
-| text_decode_ratio   | strict: hard (≥1.5x). release_candidate: **advisory** (≥1.5x) + synthetic **hard `text_decode_ratio_floor` ≥1.0x** | Owner-accepted 2026-05-16 (`docs/RELEASE_GATE_DECODE_PROPOSAL.md`). Dense decode is per-token weight-read-bandwidth bound; on tiny 4-bit Gemma 4 e2b llama.cpp's Metal kernels are at parity, and the user-visible "1.5x faster" claim is carried by text_wall/text_ttft (hard). The floor still guarantees KrillLM never decodes slower than Ollama (a missing decode value hard-fails too). Re-promotes to hard ≥1.5x when speculative decoding sustains ≥1.5x with greedy parity OR a long-output decode task is added. `strict` keeps it hard ≥1.5x with no floor. |
+| text_decode_ratio   | **advisory** (>=1.5x) + synthetic **hard `text_decode_ratio_floor` >=1.0x** in BOTH profiles | Owner-accepted for `release_candidate` 2026-05-16 (`docs/RELEASE_GATE_DECODE_PROPOSAL.md`) and for `strict` 2026-05-22 (`docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`). Dense decode is per-token weight-read-bandwidth bound; on tiny 4-bit Gemma 4 e2b llama.cpp's Metal kernels are at parity, and the user-visible "1.5x faster" claim is carried by text_wall/text_ttft (hard). The floor still guarantees KrillLM never decodes slower than Ollama (a missing decode value hard-fails too). The >=1.5x target is structurally unreachable on M-series (see `docs/SPECULATIVE_DECODING.md`); it re-promotes to hard >=1.5x when speculative decoding sustains >=1.5x with greedy parity OR a long-output decode task is added. |
 | text_wall_ratio     | hard | User-visible total latency. |
 | text_ttft_ratio     | hard | User-visible first-token latency. |
 | text_prefill_ratio  | advisory | Wall time and TTFT already gate user latency; prefill TPS is noisy on short prompts. |
@@ -189,10 +189,12 @@ release-candidate path, not yet a production release.
   advisory (printed as WARN at ~1.19x — **no claim KrillLM hit 1.5x
   decode**). Voice/audio is native (WS6) and `hard` in both profiles —
   faster than Ollama (~0.53× wall, ~2.4× prefill). Prefill is advisory.
-- **`strict` gate** (default) still exits `1`: `text_decode_ratio`
-  (hard ≥1.5x, no floor), `text_prefill_ratio`, `image_prefill_ratio`,
-  and `audio_wall_ratio` fail. `strict` is the uncompromised reference and
-  is required (with native audio) for a production tag.
+- **`strict` gate** (default) still exits `1`: `text_prefill_ratio`,
+  `image_prefill_ratio`, and `audio_wall_ratio` fail. `text_decode_ratio`
+  is advisory in `strict` too since 2026-05-22 (with the hard >=1.0x
+  floor), so it is no longer a strict blocker. `strict` stays the
+  uncompromised reference for every other metric and is required (with
+  native audio) for a production tag.
 
 Post-merge PR #18 note: a text-only `llama-3.2-1b` vs `llama3.2:1b`
 server sanity run produced strong decode numbers, but the report failed
@@ -210,8 +212,8 @@ the full plan, the per-metric promotion contract, and acceptance criteria.
 
 Key release gaps as of the last reviewed run:
 
-- `text_decode_ratio` (~1.19x on v6-mm) is advisory under
-  `release_candidate` but hard under `strict`. KrillLM decodes ~102 tok/s
+- `text_decode_ratio` (~1.19x on v6-mm) is advisory under BOTH profiles
+  (with the hard >=1.0x floor). KrillLM decodes ~102 tok/s
   vs Ollama's ~86 tok/s on the accepted Gemma 4 E2B report, where
   llama.cpp's hand-tuned Metal decode kernels are genuinely competitive.
   Closing it to ≥1.5x is owned by Workstream 2 (Gemma 4-compatible

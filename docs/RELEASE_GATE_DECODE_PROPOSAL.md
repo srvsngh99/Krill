@@ -8,6 +8,14 @@ ahead and you do it"). Implemented in `tools/release_gate.py`
 Authored: 2026-05-16, after PR #16 closed `memory_ratio`.
 Scope: `release_candidate` profile only. `strict` is **unchanged**.
 
+> **Follow-up (2026-05-22):** the same `text_decode_ratio` demotion was
+> later extended to the `strict` profile - see
+> [RELEASE_GATE_STRICT_DECODE_PROPOSAL.md](RELEASE_GATE_STRICT_DECODE_PROPOSAL.md).
+> The "`strict` is unchanged" / "strict keeps `text_decode_ratio` hard"
+> statements in this 2026-05-16 document are historical: `strict` now also
+> treats `text_decode_ratio` as advisory with the same hard `>= 1.0`
+> floor. Every other `strict` metric remains hard.
+
 ## Verified outcome (`.build/benchmarks/v6-mm.json`, 2026-05-16)
 
 ```text

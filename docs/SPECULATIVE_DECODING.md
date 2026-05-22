@@ -1,10 +1,13 @@
 # Speculative Decoding (WS2)
 
 Status: correctness + plumbing landed. Decode uplift on available pairs on
-M-series Macs does **not** yet meet the WS2 `text_decode_ratio >= 1.5x`
-strict-gate target. The strict gate remains advisory; the
-release_candidate hard floor (`>= 1.0x`) is unchanged. See "Benchmark
-result" below.
+M-series Macs does **not** meet the WS2 `text_decode_ratio >= 1.5x` target,
+and the "Why 1.5x strict is empirically out of reach" section below derives
+that target is structurally unreachable on this hardware. As of 2026-05-22
+`text_decode_ratio` is therefore **advisory in both gate profiles**
+(`release_candidate` and `strict`), each carrying a hard `>= 1.0x`
+non-regression floor (KrillLM must never decode slower than Ollama). See
+`docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md` and "Benchmark results" below.
 
 ## What this gives you
 
@@ -190,12 +193,13 @@ strong drafter agreement - and spec still LOSES vs KrillLM no-spec
 (44.1 vs 50.2 tok/s). This is the strongest single-run evidence
 that the gap is in the per-round overhead, not in acceptance.
 
-## Why 1.5x strict is empirically out of reach on this hardware
+## Why the 1.5x decode target is empirically out of reach on this hardware
 
-The WS2 `text_decode_ratio >= 1.5x` strict gate cannot be unblocked
+The WS2 `text_decode_ratio >= 1.5x` target cannot be reached
 on M-series with the model pairs currently available in mlx-community
 **on any prompt or K setting tested**, including the high-acceptance
-0.73 run above. Below we fit a cost model to the measured numbers
+0.73 run above. (This is why the target is advisory in both gate
+profiles, with a hard `>= 1.0x` floor, rather than a hard gate.) Below we fit a cost model to the measured numbers
 and show that even at infinite K and 100% acceptance, the achievable
 spec speedup on this engine on this hardware is bounded at roughly
 1.10x - well short of 1.5x.
