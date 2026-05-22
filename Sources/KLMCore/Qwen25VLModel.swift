@@ -3,6 +3,7 @@ import MLX
 import MLXNN
 import MLXFast
 import KLMCache
+import KLMKernels
 #if canImport(CoreGraphics)
 import CoreGraphics
 #endif
@@ -243,6 +244,16 @@ public struct Qwen25VLMRoPE {
     public let headDim: Int
     public let sections: [Int]
     public let theta: Float
+    /// Inverse-frequency table `[halfDim]`, precomputed once at init.
+    /// Identical across calls (depends only on `headDim` / `theta`),
+    /// so rebuilding it every `apply` was pure overhead.
+    let invFreq: MLXArray
+    /// Sections normalized to the half-dim convention; precomputed.
+    let normSections: [Int]
+    /// Cumulative per-axis offsets into `invFreq` so the slicing in
+    /// `apply` is one host-side lookup per axis instead of a running
+    /// sum.
+    let sectionOffsets: [Int]
 
     public init(headDim: Int, sections: [Int], theta: Float = 1_000_000.0) {
         self.headDim = headDim
@@ -252,85 +263,96 @@ public struct Qwen25VLMRoPE {
         precondition(sectionSum * 2 == headDim || sectionSum == headDim,
             "mrope_section must sum to head_dim or head_dim/2; "
             + "got sections=\(sections), head_dim=\(headDim)")
+        let halfDim = headDim / 2
+        // Two valid conventions: sections sum to head_dim/2 (most
+        // common) or to head_dim (older); normalize to half-dim.
+        if sectionSum == halfDim {
+            self.normSections = sections
+        } else {
+            self.normSections = sections.map { $0 / 2 }
+        }
+        var offsets: [Int] = [0]
+        for s in normSections { offsets.append(offsets.last! + s) }
+        self.sectionOffsets = offsets
+        // inv_freq[i] = 1 / theta^(2*i / head_dim) for i in 0..halfDim.
+        let positionsHalf = MLXArray(stride(from: 0, to: Int32(headDim), by: 2)
+            .map { Float($0) }).asType(.float32)
+        self.invFreq = MLXArray(Float(1.0))
+            / MLX.pow(MLXArray(Float(theta)),
+                      positionsHalf / Float(headDim))
     }
 
-    /// Apply 3D mRoPE rotation to a `[B, H, L, D]` tensor using
-    /// per-axis position arrays of shape `[L]`. Returns the same
-    /// shape.
-    public func apply(
-        _ x: MLXArray,
+    /// Build broadcast-ready cos/sin tables for a given set of
+    /// per-axis position arrays. The text-side mRoPE positions are
+    /// the same across all 36 transformer layers within one forward,
+    /// so the cos/sin work (per-axis outer product + cos/sin +
+    /// concat) is identical at every layer. Computing it once in
+    /// the text model and reusing it cuts ~10 elementwise op
+    /// dispatches per layer (35 redundant rebuilds).
+    ///
+    /// Returns `(cos, sin)` of shape `[1, 1, L, halfDim]`, already
+    /// expanded with the leading batch/head singleton axes so the
+    /// downstream `apply` can broadcast directly against `[B, H,
+    /// L, D]` queries/keys.
+    public func buildCosSin(
         positionsT: MLXArray,
         positionsH: MLXArray,
         positionsW: MLXArray
-    ) -> MLXArray {
-        // The reference handles fp16 / bf16 inputs by upcasting to
-        // fp32 for the rotation math and downcasting on output.
-        let dtype = x.dtype
-        let xF = x.asType(.float32)
+    ) -> (cos: MLXArray, sin: MLXArray) {
         let positions: [MLXArray] = [
             positionsT.asType(.float32),
             positionsH.asType(.float32),
             positionsW.asType(.float32),
         ]
-
-        // Section dim sums to head_dim/2 (each pair of even+odd
-        // dims rotates together, so we work in the half-dim
-        // frequency space).
-        let halfDim = headDim / 2
-        let sumSections = sections.reduce(0, +)
-        // Two valid conventions: sections sum to head_dim/2 (most
-        // common) or to head_dim (older); normalize to half-dim.
-        let normSections: [Int]
-        if sumSections == halfDim {
-            normSections = sections
-        } else if sumSections == headDim {
-            normSections = sections.map { $0 / 2 }
-        } else {
-            fatalError("Invalid mrope_section sum")
-        }
-
-        // Build inverse-frequency table for the full half-dim.
-        // inv_freq[i] = 1 / theta^(2*i / head_dim) for i in 0..halfDim.
-        let positionsHalf = MLXArray(stride(from: 0, to: Int32(headDim), by: 2)
-            .map { Float($0) }).asType(.float32)  // [halfDim]
-        let invFreq = MLXArray(Float(1.0))
-            / MLX.pow(MLXArray(Float(theta)), positionsHalf / Float(headDim))  // [halfDim]
-
-        // Per-axis (cos, sin): for each axis (t, h, w) compute the
-        // outer product position * inv_freq -> [L, halfDim], then
-        // cos/sin. Slice each axis's chunk and stitch.
         var cosChunks: [MLXArray] = []
         var sinChunks: [MLXArray] = []
-        var offset = 0
         for (axisIdx, sectionLen) in normSections.enumerated() {
             let pos = positions[axisIdx]  // [L]
-            let subInvFreq = invFreq[offset ..< (offset + sectionLen)]  // [sectionLen]
+            let start = sectionOffsets[axisIdx]
+            let subInvFreq = invFreq[start ..< (start + sectionLen)]  // [sectionLen]
             let angles = pos.expandedDimensions(axis: 1) * subInvFreq  // [L, sectionLen]
             cosChunks.append(MLX.cos(angles))
             sinChunks.append(MLX.sin(angles))
-            offset += sectionLen
         }
         let cos = MLX.concatenated(cosChunks, axis: -1)  // [L, halfDim]
         let sin = MLX.concatenated(sinChunks, axis: -1)  // [L, halfDim]
+        // Two sequential single-axis expansions avoid the duplicate
+        // axis trap that `expandedDimensions(axes: [0, 0])` would hit.
+        return (
+            cos.expandedDimensions(axis: 0).expandedDimensions(axis: 0),
+            sin.expandedDimensions(axis: 0).expandedDimensions(axis: 0))
+    }
 
+    /// Apply 3D mRoPE rotation to a `[B, H, L, D]` tensor using
+    /// precomputed cos/sin tables of shape `[1, 1, L, halfDim]`.
+    public func apply(_ x: MLXArray, cos: MLXArray, sin: MLXArray) -> MLXArray {
+        let dtype = x.dtype
+        let xF = x.asType(.float32)
+        let halfDim = headDim / 2
         // x shape [B, H, L, D]. Split last dim into two halves
         // x1, x2 of width halfDim. The rotation is:
         //   y1 = x1 * cos - x2 * sin
         //   y2 = x1 * sin + x2 * cos
         let x1 = xF[.ellipsis, 0 ..< halfDim]
         let x2 = xF[.ellipsis, halfDim ..< headDim]
-
-        // cos/sin are [L, halfDim]; broadcast to [B, H, L, halfDim]
-        // by inserting two leading singleton dims. Two sequential
-        // single-axis expansions avoid the duplicate-axis trap
-        // that `expandedDimensions(axes: [0, 0])` would hit.
-        let cos4 = cos.expandedDimensions(axis: 0).expandedDimensions(axis: 0)
-        let sin4 = sin.expandedDimensions(axis: 0).expandedDimensions(axis: 0)
-
-        let y1 = x1 * cos4 - x2 * sin4
-        let y2 = x1 * sin4 + x2 * cos4
+        let y1 = x1 * cos - x2 * sin
+        let y2 = x1 * sin + x2 * cos
         let y = MLX.concatenated([y1, y2], axis: -1)
         return y.asType(dtype)
+    }
+
+    /// Back-compat: build cos/sin internally then apply. Used by
+    /// any caller that has not been threaded through the hoisted
+    /// table path.
+    public func apply(
+        _ x: MLXArray,
+        positionsT: MLXArray,
+        positionsH: MLXArray,
+        positionsW: MLXArray
+    ) -> MLXArray {
+        let (cos, sin) = buildCosSin(
+            positionsT: positionsT, positionsH: positionsH, positionsW: positionsW)
+        return apply(x, cos: cos, sin: sin)
     }
 }
 
@@ -445,7 +467,12 @@ class Qwen25VLVisionMLP: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(silu(gateProj(x)) * upProj(x))
+        // Fused SwiGLU: silu(gate) * up in one Metal kernel pass,
+        // avoiding the intermediate fp16 silu materialization. Same
+        // fusion the dense Llama FeedForward already uses.
+        let gate = gateProj(x)
+        let up = upProj(x)
+        return downProj(KLMKernels.fusedSwiGLU(gate: gate, up: up))
     }
 }
 
@@ -454,6 +481,18 @@ class Qwen25VLVisionBlock: Module {
     @ModuleInfo(key: "norm2") var norm2: RMSNorm
     @ModuleInfo(key: "attn") var attn: Qwen25VLVisionAttention
     @ModuleInfo(key: "mlp") var mlp: Qwen25VLVisionMLP
+
+    /// Lazily-built `MLX.compile`'d forwards. The vision block has
+    /// no KV cache and is the analogue of GGML's fused Metal
+    /// kernels for the vision-tower repeated subgraph: compiling
+    /// once and replaying across the 32 vision-block invocations
+    /// per prefill fuses the residual / norm / SwiGLU elementwise
+    /// ops and cuts kernel-launch overhead. Two variants because
+    /// MLX.compile keys on input arity / shape signature: the
+    /// periodic full-attention layers pass `mask == nil`, the
+    /// windowed layers pass the additive `[1, 1, L, L]` mask.
+    private var _compiledMasked: ((MLXArray, MLXArray) -> MLXArray)?
+    private var _compiledUnmasked: ((MLXArray) -> MLXArray)?
 
     init(_ visionConfig: Qwen25VLConfig.VisionConfig, eps: Float = 1e-6) {
         _norm1 = ModuleInfo(
@@ -473,9 +512,45 @@ class Qwen25VLVisionBlock: Module {
             key: "mlp")
     }
 
-    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
+    private func uncompiledForward(_ x: MLXArray, _ mask: MLXArray?) -> MLXArray {
         let h = x + attn(norm1(x), mask: mask)
         return h + mlp(norm2(h))
+    }
+
+    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
+        // The compiled closure captures `self` weakly because storing it
+        // on `self` would otherwise leak the block for the program's
+        // lifetime. The only way `self` is nil when the closure runs is
+        // a programmer bug (calling the compiled forward on a block
+        // already torn down by the parent module hierarchy); crash
+        // loudly rather than silently pass `xi` through, which would
+        // skip the entire transformer block.
+        if let mask {
+            if _compiledMasked == nil {
+                _compiledMasked = MLX.compile(inputs: [self]) {
+                    [weak self] (xi, mi) -> MLXArray in
+                    guard let self else {
+                        fatalError(
+                            "Qwen25VLVisionBlock compiled forward "
+                            + "invoked after the block was deallocated")
+                    }
+                    return self.uncompiledForward(xi, mi)
+                }
+            }
+            return _compiledMasked!(x, mask)
+        }
+        if _compiledUnmasked == nil {
+            _compiledUnmasked = MLX.compile(inputs: [self]) {
+                [weak self] xi -> MLXArray in
+                guard let self else {
+                    fatalError(
+                        "Qwen25VLVisionBlock compiled forward "
+                        + "invoked after the block was deallocated")
+                }
+                return self.uncompiledForward(xi, nil)
+            }
+        }
+        return _compiledUnmasked!(x)
     }
 }
 
@@ -529,11 +604,26 @@ class Qwen25VLPatchEmbed: Module {
     /// and preserves the merge-aware ordering established by the
     /// preprocessor.
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        // [N_patches, T, ph, pw, C] -> [N_patches, 1, 1, 1, embed_dim]
-        let y = proj(x)
-        let n = y.dim(0)
-        let embed = y.dim(4)
-        return y.reshaped(n, embed)
+        // The Conv3d kernel size equals the stride equals the full
+        // patch, so the spatial output is 1x1x1 and the convolution
+        // collapses to a per-patch linear projection: each output
+        // channel is the dot product of the flattened patch with the
+        // flattened kernel row. Running the equivalent matmul avoids
+        // the Conv3d kernel-launch overhead and lets the result
+        // participate in the surrounding compiled graph (an MLX
+        // `Conv3d` call is its own kernel boundary).
+        //
+        // MLX `Conv3d.weight` shape is `[O, kT, kH, kW, I]`; flatten
+        // to `[O, kT*kH*kW*I]`. Input `[N, T, ph, pw, C]` flattens to
+        // `[N, T*ph*pw*C]` in the same row-major order, so the
+        // resulting `xFlat @ wFlat.T` is bit-identical to the
+        // single-output-position Conv3d cross-correlation. An
+        // equivalence unit test guards the swap.
+        let n = x.dim(0)
+        let w = proj.weight
+        let wFlat = w.reshaped(embedDim, -1)
+        let xFlat = x.reshaped(n, -1)
+        return MLX.matmul(xFlat, wFlat.transposed(1, 0))
     }
 }
 
@@ -1026,7 +1116,7 @@ class Qwen25VLTextAttention: Module {
 
     func callAsFunction(
         _ x: MLXArray,
-        positionsT: MLXArray, positionsH: MLXArray, positionsW: MLXArray,
+        cos: MLXArray, sin: MLXArray,
         mask: MLXArray? = nil, cache: KVCache? = nil
     ) -> MLXArray {
         let B = x.dim(0)
@@ -1036,12 +1126,12 @@ class Qwen25VLTextAttention: Module {
         var keys = kProj(x).reshaped(B, L, numKVHeads, headDim).transposed(0, 2, 1, 3)
         let values = vProj(x).reshaped(B, L, numKVHeads, headDim).transposed(0, 2, 1, 3)
 
-        // 3D mRoPE on Q and K. Positions are [L]; mrope.apply
-        // broadcasts across batch and head dims.
-        queries = mrope.apply(
-            queries, positionsT: positionsT, positionsH: positionsH, positionsW: positionsW)
-        keys = mrope.apply(
-            keys, positionsT: positionsT, positionsH: positionsH, positionsW: positionsW)
+        // 3D mRoPE on Q and K with precomputed cos/sin tables. The
+        // cos/sin work is identical across all 36 text layers, so
+        // the caller hoists it out of the layer loop and shares one
+        // pair of tables per forward.
+        queries = mrope.apply(queries, cos: cos, sin: sin)
+        keys = mrope.apply(keys, cos: cos, sin: sin)
 
         var k = keys
         var v = values
@@ -1078,12 +1168,12 @@ class Qwen25VLTextBlock: Module {
 
     func callAsFunction(
         _ x: MLXArray,
-        positionsT: MLXArray, positionsH: MLXArray, positionsW: MLXArray,
+        cos: MLXArray, sin: MLXArray,
         mask: MLXArray? = nil, cache: KVCache? = nil
     ) -> MLXArray {
         let h = x + selfAttn(
             inputLayernorm(x),
-            positionsT: positionsT, positionsH: positionsH, positionsW: positionsW,
+            cos: cos, sin: sin,
             mask: mask, cache: cache)
         return h + mlp(postAttentionLayernorm(h))
     }
@@ -1126,10 +1216,17 @@ class Qwen25VLTextModel: Module {
         let cacheLen = caches?.first?.sequenceLength ?? 0
         let mask = createCachedCausalMask(
             newLen: seqLen, cacheLen: cacheLen, dtype: x.dtype)
+        // Build the 3D mRoPE cos/sin tables once and share across
+        // every layer (all 36 attention layers use the same per-axis
+        // positions). The first layer's mrope owns the constants
+        // (invFreq, section offsets); every layer was constructed
+        // from the same config so the tables are identical.
+        let (cos, sin) = layers[0].selfAttn.mrope.buildCosSin(
+            positionsT: positionsT, positionsH: positionsH, positionsW: positionsW)
         for (i, layer) in layers.enumerated() {
             x = layer(
                 x,
-                positionsT: positionsT, positionsH: positionsH, positionsW: positionsW,
+                cos: cos, sin: sin,
                 mask: mask, cache: caches?[i])
         }
         return norm(x)
@@ -1262,14 +1359,29 @@ public class Qwen25VLForConditionalGeneration: Module {
         pixelValues: MLXArray? = nil,
         imageGridMerged: (Int, Int)? = nil,
         caches: [KVCache]? = nil,
-        mropePositionOffset: Int? = nil
+        mropePositionOffset: Int? = nil,
+        hostTokenIds: [Int32]? = nil,
+        lastTokenOnly: Bool = false
     ) -> MLXArray {
         let textModel = languageModel.model
         var inputEmbeds = textModel.embedTokens(tokens)  // [1, L, H]
 
         // Host-side token id list for image-span location + mRoPE.
-        eval(tokens)
-        let tokenIds = tokens.asArray(Int32.self)
+        // When the caller already has it (the runtime constructs
+        // tokens from a host `[Int32]` array), threading it through
+        // avoids the `eval(tokens); asArray(...)` GPU->host stall
+        // that would otherwise sit in the middle of the forward and
+        // block whole-graph fusion.
+        let tokenIds: [Int32]
+        if let hostTokenIds {
+            precondition(hostTokenIds.count == tokens.dim(1),
+                "hostTokenIds must match tokens.dim(1); got "
+                + "\(hostTokenIds.count) vs \(tokens.dim(1))")
+            tokenIds = hostTokenIds
+        } else {
+            eval(tokens)
+            tokenIds = tokens.asArray(Int32.self)
+        }
 
         var gridH = 0
         var gridW = 0
@@ -1317,10 +1429,24 @@ public class Qwen25VLForConditionalGeneration: Module {
         let posH = MLXArray(coords.h.map { $0 + offset })
         let posW = MLXArray(coords.w.map { $0 + offset })
 
-        let hidden = textModel(
+        var hidden = textModel(
             inputEmbeds: inputEmbeds,
             positionsT: posT, positionsH: posH, positionsW: posW,
             caches: caches)
+        // The runtime samples from the last position only, so for
+        // prefill the lm_head's `[1, L, vocab]` projection is
+        // wasteful work over ~L-1 unused rows: the 2048 x 151936
+        // (or tied-embedding equivalent) matmul dominates the head
+        // cost. Slicing `[:, -1:, :]` before the projection drops
+        // the vocab matmul to a single position. The KV cache was
+        // already filled by the attention layers above, so the
+        // sliced path is bit-exact for the sampled token. Decode
+        // steps forward a single token so `hidden.dim(1)` is 1 and
+        // the slice is a no-op.
+        if lastTokenOnly {
+            let last = hidden.dim(1) - 1
+            hidden = hidden[0..., last ..< (last + 1), 0...]
+        }
         if let lmHead = languageModel.lmHead {
             return lmHead(hidden)
         }

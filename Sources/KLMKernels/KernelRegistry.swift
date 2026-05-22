@@ -14,6 +14,12 @@ public enum KLMKernels {
 
     /// JIT-compiled fused SwiGLU kernel.
     /// Computes output[i] = silu(gate[i]) * up[i] without materializing silu(gate).
+    ///
+    /// The sigmoid/multiply intermediates run in fp32; the result is
+    /// written through Metal's implicit conversion to the buffer's
+    /// element type. That keeps the kernel correct for fp16, bf16,
+    /// and fp32 outputs (the prior version hardcoded `half(...)`,
+    /// which would silently fp16-truncate bf16 outputs).
     private static let _fusedSwiGLUKernel: MLXFast.MLXFastKernel = {
         MLXFast.metalKernel(
             name: "fused_swiglu",
@@ -24,7 +30,7 @@ public enum KLMKernels {
                 float g = float(gate[elem]);
                 float u = float(up[elem]);
                 float sig = 1.0f / (1.0f + exp(-g));
-                out[elem] = half(g * sig * u);
+                out[elem] = g * sig * u;
             """,
             ensureRowContiguous: true
         )
