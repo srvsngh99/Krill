@@ -15,8 +15,10 @@ import KLMTokenizer
 ///
 /// Usage:
 ///   `engine.score(query: "...", documents: ["doc1", "doc2", ...])`
-/// runs the model once per (query, document) pair and returns the raw
-/// classifier logits. Clients sort documents by logit descending.
+/// tokenizes every (query, document) pair, pads them to a common length,
+/// and runs the model once over the whole batch (a key-padding mask keeps
+/// padding tokens out of attention). Returns the raw classifier logits;
+/// clients sort documents by logit descending.
 public final class RerankEngine: @unchecked Sendable {
     private var model: RerankerModel?
     private var tokenizer: KLMTokenizer?
@@ -99,8 +101,11 @@ public final class RerankEngine: @unchecked Sendable {
         public let totalTokens: Int
     }
 
-    /// Score every document against the query. Each pair is forwarded
-    /// independently (batch = 1) so no padding mask is needed.
+    /// Score every document against the query in a single batched
+    /// forward. Pairs are tokenized, padded to the batch's longest
+    /// sequence, and run together; a key-padding mask keeps padding
+    /// tokens out of attention so the result is identical to scoring
+    /// each pair on its own.
     public func score(query: String, documents: [String]) throws -> RerankResult {
         lock.lock()
         let model = self.model
@@ -112,39 +117,44 @@ public final class RerankEngine: @unchecked Sendable {
             throw RerankError.notLoaded
         }
 
-        var logits: [Double] = []
-        logits.reserveCapacity(documents.count)
+        if documents.isEmpty {
+            return RerankResult(scores: [], logits: [], totalTokens: 0)
+        }
+
+        // The query is identical for every pair, so tokenize it once.
+        // Reserve budget for the query side and the separators
+        // (`</s></s>` for XLMR is 2 tokens; `[SEP]` for Bert is 1;
+        // conservatively reserve 4 to cover both plus the trailing EOS).
+        let queryIds = tokenizer.encode(query)
+        let queryReserved = min(queryIds.count, max(0, cap - 4))
+        let docBudget = max(8, cap - queryReserved - 4)
+
+        var perPairIds: [[Int]] = []
+        perPairIds.reserveCapacity(documents.count)
         var totalTokens = 0
 
         for doc in documents {
-            // Cross-encoder input is the (query, document) pair
-            // joined with the model's pair separator. BGE / XLMR
-            // expects `<s> q </s></s> d </s>`; SentenceBERT / Bert
-            // use `[CLS] q [SEP] d [SEP]`.
+            // Cross-encoder input is the (query, document) pair joined
+            // with the model's pair separator. BGE / XLMR expects
+            // `<s> q </s></s> d </s>`; SentenceBERT / Bert use
+            // `[CLS] q [SEP] d [SEP]`.
             //
-            // Truncation policy: keep the query intact, truncate
-            // the document if the joined pair exceeds the model's
+            // Truncation policy: keep the query intact, truncate the
+            // document if the joined pair exceeds the model's
             // max_position_embeddings. This matches the standard
             // sentence-transformers / HuggingFace
             // `truncation="only_second"` behavior used by every
-            // cross-encoder reranker we ship. A blunt
-            // `prefix(cap)` on the joined pair would risk
-            // dropping the trailing EOS (so attention sees a
-            // sequence the post-processor never produces) or, for
-            // a long query, deleting the document entirely.
-            let queryIds = tokenizer.encode(query)
-            // Reserve budget for the query side and the
-            // separators (`</s></s>` for XLMR is 2 tokens; `[SEP]`
-            // for Bert is 1; conservatively reserve 4 to cover
-            // both plus the trailing EOS).
-            let queryReserved = min(queryIds.count, max(0, cap - 4))
-            let docBudget = max(8, cap - queryReserved - 4)
+            // cross-encoder reranker we ship. A blunt `prefix(cap)` on
+            // the joined pair would risk dropping the trailing EOS (so
+            // attention sees a sequence the post-processor never
+            // produces) or, for a long query, deleting the document
+            // entirely.
             let trimmedDoc: String
             if doc.count > docBudget * 4 {
-                // Cheap character-level pre-cap to keep the
-                // tokenizer from doing huge work on a doc we will
-                // truncate anyway. 4 chars/token is a soft upper
-                // bound for SentencePiece.
+                // Cheap character-level pre-cap to keep the tokenizer
+                // from doing huge work on a doc we will truncate
+                // anyway. 4 chars/token is a soft upper bound for
+                // SentencePiece.
                 trimmedDoc = String(doc.prefix(docBudget * 4))
             } else {
                 trimmedDoc = doc
@@ -152,22 +162,50 @@ public final class RerankEngine: @unchecked Sendable {
             var pairIds = tokenizer.encodePair(
                 query: query, document: trimmedDoc)
             if pairIds.count > cap {
-                // Final cap. Preserve the trailing EOS by reading
-                // it off the end before truncating, then
-                // re-appending after.
+                // Final cap. Preserve the trailing EOS by reading it
+                // off the end before truncating, then re-appending.
                 let trailing = pairIds.last
                 pairIds = Array(pairIds.prefix(cap - 1))
                 if let t = trailing { pairIds.append(t) }
             }
-            let ids = pairIds
-            totalTokens += ids.count
+            totalTokens += pairIds.count
+            perPairIds.append(pairIds)
+        }
 
-            let tokens = MLXArray(ids.map { Int32($0) }).reshaped(1, ids.count)
-            let out = model(tokens)
-            // [1, 1] -> single Float
-            MLX.eval(out)
-            let arr = out.asArray(Float.self)
-            logits.append(Double(arr.first ?? 0))
+        // Pad every pair to the batch's longest sequence and build an
+        // additive key-padding mask ([B, 1, 1, T], broadcast over heads
+        // and query rows). Padding ids are arbitrary (0): they are
+        // masked out as attention keys, and their query rows are never
+        // read - only the CLS row at position 0 is, and CLS is always a
+        // real token. The batched result is therefore identical to
+        // scoring each pair alone.
+        let batch = perPairIds.count
+        let maxLen = perPairIds.map(\.count).max() ?? 1
+        var tokenBuf = [Int32](repeating: 0, count: batch * maxLen)
+        var maskBuf = [Float](repeating: 0, count: batch * maxLen)
+        let padMaskValue: Float = -1e9
+        for (b, ids) in perPairIds.enumerated() {
+            for (t, id) in ids.enumerated() {
+                tokenBuf[b * maxLen + t] = Int32(id)
+            }
+            for t in ids.count ..< maxLen {
+                maskBuf[b * maxLen + t] = padMaskValue
+            }
+        }
+        let tokens = MLXArray(tokenBuf).reshaped(batch, maxLen)
+        let mask = MLXArray(maskBuf).reshaped(batch, 1, 1, maxLen)
+
+        let out = model(tokens, mask: mask)   // [B, numLabels]
+        MLX.eval(out)
+        let numLabels = out.dim(1)
+        let flat = out.asArray(Float.self)    // row-major [B * numLabels]
+        var logits: [Double] = []
+        logits.reserveCapacity(batch)
+        for b in 0 ..< batch {
+            // numLabels == 1 for a reranker: column 0 is the relevance
+            // logit. Take it explicitly so a stray multi-label head
+            // does not silently read the wrong column.
+            logits.append(Double(flat[b * numLabels]))
         }
 
         // Sigmoid-normalize each logit so callers get a [0, 1]

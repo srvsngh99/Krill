@@ -125,4 +125,36 @@ final class RerankEngineTests: XCTestCase {
                 "(q=\(q), d=\(d)) logit got=\(got) ref=\(ref)")
         }
     }
+
+    func testBatchedScoresMatchPerPairScores() async throws {
+        try requireMLX()
+        let dir = try liveModelDir()
+        let engine = RerankEngine()
+        try await engine.load(directory: dir)
+
+        // Documents of deliberately uneven length so the batched call
+        // must pad to a common length. The key-padding mask must keep
+        // padding tokens out of attention, so a document's score must
+        // not depend on what else is in the batch.
+        let query = "What is the capital of France?"
+        let docs = [
+            "Paris.",
+            "Paris is the capital of France and a major European city.",
+            "Apples are red.",
+            "The Eiffel Tower, completed in 1889, is a landmark in Paris, France.",
+        ]
+
+        let batched = try engine.score(query: query, documents: docs)
+        XCTAssertEqual(batched.logits.count, docs.count)
+
+        for (i, doc) in docs.enumerated() {
+            let alone = try engine.score(query: query, documents: [doc])
+            // A correct mask makes the batched (padded) forward
+            // numerically equivalent to scoring the pair on its own;
+            // the small tolerance only absorbs fp non-determinism.
+            XCTAssertEqual(batched.logits[i], alone.logits[0], accuracy: 0.05,
+                "doc \(i) batched logit \(batched.logits[i]) must match "
+                + "per-pair logit \(alone.logits[0]) (padding must not leak)")
+        }
+    }
 }

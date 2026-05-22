@@ -69,17 +69,23 @@ Benchmark on M-series, 8 (query, document) pairs, BGE Reranker v2-m3:
 
 | Engine                              | Median latency |
 | ----------------------------------- | -------------- |
-| KrillLM `/v1/rerank` (per-pair, batch=1) | 104 ms |
+| KrillLM `/v1/rerank` (per-pair, batch=1, original) | 104 ms |
+| KrillLM `/v1/rerank` (single batched forward) | ~46 ms |
 | sentence-transformers `CrossEncoder` (Python, batched) | 34 ms |
 
 Ollama does not natively ship cross-encoder rerankers; the reference
-here is the upstream Python implementation. KrillLM is currently
-slower because it forwards each pair independently (batch = 1). A
-batched-forward follow-up would close the gap; tracked as a
-future-work item rather than a blocker for this PR. Quality is at
-parity (the live `testScoreMagnitudeMatchesReferenceWithinTolerance`
-asserts `±1.0` logit vs the Python reference, and ordering matches
-on all test pairs).
+here is the upstream Python implementation. The batched-forward
+follow-up landed: `RerankEngine.score` now tokenizes the query once,
+pads every (query, document) pair to the batch's longest sequence, and
+runs the model once over the whole batch. A `[B, 1, 1, T]` additive
+key-padding mask threaded through `BertSelfAttention` keeps padding
+tokens out of attention, so the batched result is numerically
+equivalent to scoring each pair alone (asserted by the live
+`testBatchedScoresMatchPerPairScores`). This roughly halves median
+latency (104 ms -> ~46 ms for 8 pairs), closing most of the gap to the
+Python reference. Quality stays at parity (the live
+`testLogitsMatchReferenceWithinTolerance` asserts `±1.0` logit vs the
+Python reference, and ordering matches on all test pairs).
 
 What landed:
 
