@@ -518,11 +518,22 @@ class Qwen25VLVisionBlock: Module {
     }
 
     func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
+        // The compiled closure captures `self` weakly because storing it
+        // on `self` would otherwise leak the block for the program's
+        // lifetime. The only way `self` is nil when the closure runs is
+        // a programmer bug (calling the compiled forward on a block
+        // already torn down by the parent module hierarchy); crash
+        // loudly rather than silently pass `xi` through, which would
+        // skip the entire transformer block.
         if let mask {
             if _compiledMasked == nil {
                 _compiledMasked = MLX.compile(inputs: [self]) {
                     [weak self] (xi, mi) -> MLXArray in
-                    guard let self else { return xi }
+                    guard let self else {
+                        fatalError(
+                            "Qwen25VLVisionBlock compiled forward "
+                            + "invoked after the block was deallocated")
+                    }
                     return self.uncompiledForward(xi, mi)
                 }
             }
@@ -531,7 +542,11 @@ class Qwen25VLVisionBlock: Module {
         if _compiledUnmasked == nil {
             _compiledUnmasked = MLX.compile(inputs: [self]) {
                 [weak self] xi -> MLXArray in
-                guard let self else { return xi }
+                guard let self else {
+                    fatalError(
+                        "Qwen25VLVisionBlock compiled forward "
+                        + "invoked after the block was deallocated")
+                }
                 return self.uncompiledForward(xi, nil)
             }
         }

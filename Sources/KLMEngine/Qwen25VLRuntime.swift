@@ -118,6 +118,8 @@ public enum Qwen25VLRuntime {
         // maintained when the request opts into penalties.
         var recent: [Int] = sampler.needsHistory
             ? Array(promptTokens.suffix(512)) : []
+        // Sample the first generated token (lazy), kick its eval so
+        // it can start while we set up the loop, then sync it once.
         var nextTokenArr: MLXArray = sampler.needsHistory
             ? sampler.sampleArray(prefillLogits, recent: recent)
             : sampler.sampleArray(prefillLogits)
@@ -126,10 +128,15 @@ public enum Qwen25VLRuntime {
         let decodePlaceholder: [Int32] = [Int32(0)]
         var step = 0
         while generated.count < maxTokens {
-            onToken?(nextToken)
-            generated.append(nextToken)
-            if stopIds.contains(nextToken) { break }
-            if generated.count >= maxTokens { break }
+            // Stop check on the previously-synced token: yield it
+            // (matches the existing contract that the stop token is
+            // included in `generated` and reported via `onToken`),
+            // then break before forwarding it.
+            if stopIds.contains(nextToken) {
+                onToken?(nextToken)
+                generated.append(nextToken)
+                break
+            }
 
             // Reuse the on-GPU sampled token as the next forward
             // input; mRoPE position is `frontier + step` because a
@@ -143,16 +150,19 @@ public enum Qwen25VLRuntime {
                 mropePositionOffset: frontier + step,
                 hostTokenIds: decodePlaceholder,
                 lastTokenOnly: true)
-            let nextTokenArr2: MLXArray
             if sampler.needsHistory {
                 recent.append(nextToken)
-                nextTokenArr2 = sampler.sampleArray(logits, recent: recent)
-            } else {
-                nextTokenArr2 = sampler.sampleArray(logits)
             }
-            // Kick GPU work for step k+1 before reading step k's
-            // host int below, so kernel launch overlaps execution.
+            let nextTokenArr2: MLXArray = sampler.needsHistory
+                ? sampler.sampleArray(logits, recent: recent)
+                : sampler.sampleArray(logits)
+            // Kick GPU work for step k+1 first, then do the host
+            // work for step k between the kick and the sync. The
+            // dense InferenceEngine pattern (~lines 769-781) does
+            // the same: that overlap is the point of asyncEval.
             MLX.asyncEval(nextTokenArr2)
+            onToken?(nextToken)
+            generated.append(nextToken)
             nextTokenArr = nextTokenArr2
             nextToken = nextTokenArr.item(Int.self)
             step += 1
