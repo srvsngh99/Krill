@@ -89,7 +89,7 @@ profile is recorded in the gate report so audit trails are unambiguous.
 
 | Profile | Behavior |
 |---------|----------|
-| `strict` (default) | Every threshold is hard-gated. Preserves the original behavior; existing CI invocations do not need to change. |
+| `strict` (default) | Hard-gates every threshold EXCEPT two owner-accepted advisory demotions: `text_decode_ratio` (advisory >=1.5x + hard `text_decode_ratio_floor` >=1.0x; `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`) and `image_prefill_ratio` (advisory, no floor; `docs/RELEASE_GATE_IMAGE_PREFILL_PROPOSAL.md`). Both are structural microbenchmark mismeasurements; every other metric stays hard, so `strict` remains the uncompromised reference. |
 | `release_candidate` | Hard-gates user-visible latency metrics and class-equal peak memory. Treats prefill TPS as advisory. Scopes audio metrics out until native Swift audio (Workstream 1) lands. |
 
 **Per-metric kind under `release_candidate`:**
