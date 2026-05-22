@@ -74,12 +74,18 @@ public enum Qwen25VLRuntime {
         let prefillStart = CFAbsoluteTimeGetCurrent()
         let promptArray = MLXArray(promptInt32)
             .reshaped(1, promptTokens.count)
+        // `hostTokenIds` lets the forward skip the mid-forward
+        // eval(tokens) host sync (we already have the host array).
+        // `lastTokenOnly` drops the vocab matmul to the single
+        // position we actually sample - exact for that token.
         let prefillLogits = model(
             promptArray,
             pixelValues: pixelValues,
             imageGridMerged: imageGridMerged,
             caches: caches,
-            mropePositionOffset: nil)
+            mropePositionOffset: nil,
+            hostTokenIds: promptInt32,
+            lastTokenOnly: true)
         MLX.eval(prefillLogits)
         let prefillSeconds = CFAbsoluteTimeGetCurrent() - prefillStart
 
@@ -95,39 +101,70 @@ public enum Qwen25VLRuntime {
             gridWMerged: imageGridMerged?.1 ?? 0).nextPos)
 
         // -- Decode --
+        // Two-deep on-GPU pipeline (mirrors InferenceEngine's dense
+        // decode loop). The sampled token stays as a lazy MLXArray
+        // and feeds the next forward without a host roundtrip; the
+        // next forward + sample is `asyncEval`d while we yield the
+        // current token; we sync once per step on a 1-element int32.
+        // For a non-image single decode token the host id is never
+        // consulted (the image-pad scan is skipped because
+        // pixelValues is nil, and the mRoPE coords for a single
+        // text token are always (0,0,0) regardless of id), so we
+        // pass a fixed placeholder host id and keep the real token
+        // on-GPU.
         let decodeStart = CFAbsoluteTimeGetCurrent()
         var generated: [Int] = []
         // Penalty sampling needs the trailing token window; only
         // maintained when the request opts into penalties.
         var recent: [Int] = sampler.needsHistory
             ? Array(promptTokens.suffix(512)) : []
-        var nextToken = sampler.needsHistory
-            ? sampler.sample(prefillLogits, recent: recent)
-            : sampler.sample(prefillLogits)
+        // Sample the first generated token (lazy), kick its eval so
+        // it can start while we set up the loop, then sync it once.
+        var nextTokenArr: MLXArray = sampler.needsHistory
+            ? sampler.sampleArray(prefillLogits, recent: recent)
+            : sampler.sampleArray(prefillLogits)
+        MLX.asyncEval(nextTokenArr)
+        var nextToken = nextTokenArr.item(Int.self)
+        let decodePlaceholder: [Int32] = [Int32(0)]
         var step = 0
         while generated.count < maxTokens {
-            onToken?(nextToken)
-            generated.append(nextToken)
-            if stopIds.contains(nextToken) { break }
-            if generated.count >= maxTokens { break }
+            // Stop check on the previously-synced token: yield it
+            // (matches the existing contract that the stop token is
+            // included in `generated` and reported via `onToken`),
+            // then break before forwarding it.
+            if stopIds.contains(nextToken) {
+                onToken?(nextToken)
+                generated.append(nextToken)
+                break
+            }
 
-            // Forward the single new token. Its mRoPE position is
-            // `frontier + step`: a single non-image token's computed
-            // coords are all zero, so the offset IS its absolute
-            // position on every axis.
-            let tokenArray = MLXArray([Int32(nextToken)]).reshaped(1, 1)
+            // Reuse the on-GPU sampled token as the next forward
+            // input; mRoPE position is `frontier + step` because a
+            // single non-image token's computed coords are all zero.
+            let tokenInput = nextTokenArr.reshaped(1, 1)
             let logits = model(
-                tokenArray,
+                tokenInput,
                 pixelValues: nil,
                 imageGridMerged: nil,
                 caches: caches,
-                mropePositionOffset: frontier + step)
+                mropePositionOffset: frontier + step,
+                hostTokenIds: decodePlaceholder,
+                lastTokenOnly: true)
             if sampler.needsHistory {
                 recent.append(nextToken)
-                nextToken = sampler.sample(logits, recent: recent)
-            } else {
-                nextToken = sampler.sample(logits)
             }
+            let nextTokenArr2: MLXArray = sampler.needsHistory
+                ? sampler.sampleArray(logits, recent: recent)
+                : sampler.sampleArray(logits)
+            // Kick GPU work for step k+1 first, then do the host
+            // work for step k between the kick and the sync. The
+            // dense InferenceEngine pattern (~lines 769-781) does
+            // the same: that overlap is the point of asyncEval.
+            MLX.asyncEval(nextTokenArr2)
+            onToken?(nextToken)
+            generated.append(nextToken)
+            nextTokenArr = nextTokenArr2
+            nextToken = nextTokenArr.item(Int.self)
             step += 1
         }
         let decodeSeconds = CFAbsoluteTimeGetCurrent() - decodeStart

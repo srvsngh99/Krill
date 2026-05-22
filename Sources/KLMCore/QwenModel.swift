@@ -2,6 +2,7 @@ import MLX
 import MLXNN
 import MLXFast
 import KLMCache
+import KLMKernels
 
 // MARK: - Qwen Config
 
@@ -228,7 +229,14 @@ class QwenMLP: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(silu(gateProj(x)) * upProj(x))
+        // Fused SwiGLU: silu(gate) * up in one Metal kernel pass.
+        // Same fusion the dense Llama FeedForward already uses; the
+        // kernel writes through Metal's implicit conversion to the
+        // output buffer's element type so fp16, bf16, and fp32
+        // activations are all handled correctly.
+        let gate = gateProj(x)
+        let up = upProj(x)
+        return downProj(KLMKernels.fusedSwiGLU(gate: gate, up: up))
     }
 }
 

@@ -1,6 +1,7 @@
 import XCTest
 import MLX
 import MLXNN
+import MLXRandom
 @testable import KLMCore
 #if canImport(CoreGraphics)
 import CoreGraphics
@@ -707,6 +708,36 @@ final class Qwen25VLNativeTests: XCTestCase {
         XCTAssertGreaterThan(diff, 1e-3,
             "Two different images must produce different logits; "
             + "max abs diff was \(diff)")
+    }
+
+    /// `Qwen25VLPatchEmbed` replaces the Conv3d forward with a
+    /// per-patch matmul. The two are mathematically identical when
+    /// kernel == stride == the full patch (the conv is a single
+    /// output position so the cross-correlation reduces to a dot
+    /// product of the flattened patch with the flattened kernel).
+    /// This test asserts they agree to within float-precision
+    /// rounding, guarding the swap against a future MLX `Conv3d`
+    /// layout or weight-permutation change.
+    func testPatchEmbedMatmulMatchesConv3d() throws {
+        let cfg = try decode(tinyConfigJSON())
+        let pe = Qwen25VLPatchEmbed(cfg.vision)
+        // A random per-patch batch [N, T, ps, ps, C].
+        let n = 8
+        let ps = cfg.vision.patchSize
+        let tps = cfg.vision.temporalPatchSize
+        let c = cfg.vision.inChannels
+        let x = MLXRandom.normal([n, tps, ps, ps, c])
+        // Reference: drive the underlying Conv3d module directly.
+        let conv = pe.proj(x)  // [N, 1, 1, 1, embedDim]
+        let convFlat = conv.reshaped(n, pe.embedDim)
+        // New path.
+        let matmul = pe(x)  // [N, embedDim]
+        eval(convFlat, matmul)
+        let diff = abs(convFlat - matmul).max().item(Float.self)
+        XCTAssertLessThan(diff, 1e-4,
+            "Conv3d (kernel == stride == full patch) and the "
+            + "flatten-then-matmul equivalent must agree; max abs "
+            + "diff was \(diff)")
     }
 }
 
