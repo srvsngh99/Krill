@@ -259,11 +259,22 @@ class Qwen3MoESparseMLP: Module {
     let hiddenSize: Int
     let normTopK: Bool
 
+    /// Cumulative count of `(token, slot)` assignments each expert has
+    /// served since the last `resetUtilizationStats()`. Index `e` is
+    /// expert `e`'s running total. Updated off the compute path from
+    /// the scatter dispatch's per-layer host count read, so it adds no
+    /// kernel work. Used only for expert-load / utilization reporting
+    /// (`Qwen3MoEForCausalLM.moeUtilization()`); it never feeds the
+    /// forward. Mutated sequentially within a generation - the server
+    /// serializes generation, so no locking is needed.
+    private(set) var cumulativeExpertCounts: [Int]
+
     init(_ config: Qwen3MoEConfig) {
         self.numExperts = config.numExperts
         self.topK = config.numExpertsPerToken
         self.hiddenSize = config.hiddenSize
         self.normTopK = config.normTopKProb
+        self.cumulativeExpertCounts = [Int](repeating: 0, count: config.numExperts)
 
         // Router. Qwen3-MoE router has no bias and no quantization
         // (the checkpoint stores it as a fp16/bf16 Linear weight).
@@ -342,6 +353,15 @@ class Qwen3MoESparseMLP: Module {
         eval(counts)
         let countsHost = counts.asArray(Int32.self)
 
+        // Off-path instrumentation: fold this forward's per-expert
+        // assignment counts into the cumulative tally. `countsHost`
+        // already sums to N * topK (every (token, slot) assignment),
+        // and it is read here for the dispatch anyway, so this adds
+        // no extra host sync.
+        for e in 0 ..< numExperts {
+            cumulativeExpertCounts[e] += Int(countsHost[e])
+        }
+
         // Run each non-empty expert on its slice and concatenate the
         // results back in sorted-assignment order.
         var parts: [MLXArray] = []
@@ -392,6 +412,13 @@ class Qwen3MoESparseMLP: Module {
             out = out + expertOut * weight
         }
         return out.reshaped(B, L, H)
+    }
+
+    /// Zero the cumulative per-expert assignment tally. Call before a
+    /// generation to scope `cumulativeExpertCounts` (and the model's
+    /// `moeUtilization()`) to that run.
+    func resetUtilizationStats() {
+        cumulativeExpertCounts = [Int](repeating: 0, count: numExperts)
     }
 }
 
@@ -501,6 +528,51 @@ class Qwen3MoEModelInner: Module {
     }
 }
 
+// MARK: - MoE utilization snapshot
+
+/// Aggregate expert-utilization snapshot across every sparse MoE layer,
+/// covering all forwards since the last `resetMoEUtilizationStats()`.
+///
+/// A `(layer, expert)` pair is one "expert slot". `activeExpertSlots` is
+/// how many slots served at least one routed token; the ratio against
+/// `totalExpertSlots` is a load-coverage signal (a healthy router spreads
+/// load, a degenerate one collapses onto a few experts). All fields are
+/// host integers read off the compute path - cheap to snapshot after a
+/// generation for load-balance inspection or benchmark metadata.
+public struct MoEUtilization: Sendable {
+    /// Number of sparse MoE layers contributing to the snapshot.
+    public let sparseLayers: Int
+    /// Experts per sparse layer (`num_experts`).
+    public let expertsPerLayer: Int
+    /// Total `(layer, expert)` slots = `sparseLayers * expertsPerLayer`.
+    public let totalExpertSlots: Int
+    /// Slots that served at least one `(token, slot)` assignment.
+    public let activeExpertSlots: Int
+    /// Total `(token, slot)` assignments routed across all sparse layers.
+    public let totalAssignments: Int
+    /// Busiest single `(layer, expert)` slot's assignment count.
+    public let maxExpertLoad: Int
+
+    public init(
+        sparseLayers: Int, expertsPerLayer: Int, totalExpertSlots: Int,
+        activeExpertSlots: Int, totalAssignments: Int, maxExpertLoad: Int
+    ) {
+        self.sparseLayers = sparseLayers
+        self.expertsPerLayer = expertsPerLayer
+        self.totalExpertSlots = totalExpertSlots
+        self.activeExpertSlots = activeExpertSlots
+        self.totalAssignments = totalAssignments
+        self.maxExpertLoad = maxExpertLoad
+    }
+
+    /// `activeExpertSlots / totalExpertSlots`, in `[0, 1]`; `0` when the
+    /// model has no sparse layers or no forward has run since the reset.
+    public var utilizationRatio: Double {
+        totalExpertSlots > 0
+            ? Double(activeExpertSlots) / Double(totalExpertSlots) : 0
+    }
+}
+
 // MARK: - Qwen 3 MoE ForCausalLM
 
 public class Qwen3MoEForCausalLM: Module {
@@ -525,5 +597,42 @@ public class Qwen3MoEForCausalLM: Module {
             return lmHead(hidden)
         }
         return model.embedTokens.asLinear(hidden)
+    }
+
+    /// Snapshot expert utilization across every sparse MoE layer for the
+    /// forwards run since the last `resetMoEUtilizationStats()`. Off the
+    /// compute path - safe to call after a generation. Returns an
+    /// all-zero snapshot for a model with no sparse layers.
+    public func moeUtilization() -> MoEUtilization {
+        var sparseLayers = 0
+        var totalSlots = 0
+        var activeSlots = 0
+        var totalAssignments = 0
+        var maxLoad = 0
+        for block in model.layers {
+            guard let sparse = block.mlp as? Qwen3MoESparseMLP else { continue }
+            sparseLayers += 1
+            for count in sparse.cumulativeExpertCounts {
+                totalSlots += 1
+                if count > 0 { activeSlots += 1 }
+                totalAssignments += count
+                if count > maxLoad { maxLoad = count }
+            }
+        }
+        return MoEUtilization(
+            sparseLayers: sparseLayers,
+            expertsPerLayer: config.numExperts,
+            totalExpertSlots: totalSlots,
+            activeExpertSlots: activeSlots,
+            totalAssignments: totalAssignments,
+            maxExpertLoad: maxLoad)
+    }
+
+    /// Zero every sparse layer's cumulative expert tally. Call before a
+    /// generation so `moeUtilization()` reflects only that run.
+    public func resetMoEUtilizationStats() {
+        for block in model.layers {
+            (block.mlp as? Qwen3MoESparseMLP)?.resetUtilizationStats()
+        }
     }
 }

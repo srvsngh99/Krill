@@ -252,4 +252,9 @@ private func printStats(_ stats: GenerationStats) {
         let rate = String(format: "%.2f", spec.acceptanceRate)
         print("spec: rounds=\(spec.rounds), accepted=\(spec.acceptedTokens), final_k=\(spec.finalK), acceptance=\(rate)")
     }
+
+    if let moe = stats.moe, moe.sparseLayers > 0 {
+        let pct = String(format: "%.0f", moe.utilizationRatio * 100)
+        print("moe: \(moe.activeExpertSlots)/\(moe.totalExpertSlots) expert slots active (\(pct)%), \(moe.sparseLayers) sparse layers, peak slot load=\(moe.maxExpertLoad)")
+    }
 }
