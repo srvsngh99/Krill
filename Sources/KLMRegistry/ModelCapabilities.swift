@@ -93,16 +93,12 @@ public enum ModelCapabilities {
         case .bert:
             return [.embeddings]
         case .qwen25vl:
-            // Qwen 2.5-VL runs via the Python sidecar
-            // (Qwen25VLEngine -> mlx-vlm). The family DECLARES
-            // textGeneration + visionInput so /api/show clients
-            // see the intended contract; the support tier is
-            // .compatibleFallback (not .productionNative) so
-            // /api/show clients also see that this is the
-            // bridge path, not a native Swift+MLX runtime.
-            // Native promotion is gated on the vision tower,
-            // patch merger, mRoPE, and image preprocessing
-            // landing in a follow-up.
+            // Qwen 2.5-VL: native Swift+MLX runtime (WS5) - vision
+            // tower, patch merger, 3D mRoPE, image preprocessing,
+            // and a grid/decode-offset-correct generation loop. The
+            // Python bridge was retired once the native path was
+            // validated against a real checkpoint and the recorded
+            // mlx-vlm oracle.
             return [.textGeneration, .visionInput, .tools]
         case .moe:
             // WS6 foundation: the family DECLARES textGeneration +
@@ -127,19 +123,15 @@ public enum ModelCapabilities {
     public static func supportTier(for family: ModelFamily) -> SupportTier {
         switch family {
         case .llama, .qwen, .mistral, .gemma, .phi, .glm, .deepseek,
-             .gemma4, .bert:
+             .gemma4, .bert, .qwen25vl:
             // Production-native: native Swift + MLX/Metal load+run
             // path, deterministic smoke tests, and a benchmark
-            // report against Ollama or a reference.
+            // report against Ollama or a reference. WS5 promoted
+            // Qwen 2.5-VL here once the native vision tower, patch
+            // merger, 3D mRoPE, and image preprocessing shipped and
+            // passed the recorded mlx-vlm oracle on a real
+            // checkpoint; the Python bridge was then retired.
             return .productionNative
-        case .qwen25vl:
-            // Bridge-backed (Python sidecar / mlx-vlm), not native
-            // Swift+MLX. Per the workstream's tier definitions,
-            // bridge paths are `compatibleFallback` - not a
-            // performance claim, but a working runtime. Promotion
-            // to productionNative requires the native vision
-            // tower, patch merger, mRoPE, and image preprocessing.
-            return .compatibleFallback
         case .moe:
             // Bridge-backed (Python sidecar / mlx-lm). Per the
             // workstream's tier definitions, bridge paths are

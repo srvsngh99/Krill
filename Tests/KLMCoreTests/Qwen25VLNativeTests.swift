@@ -2,6 +2,12 @@ import XCTest
 import MLX
 import MLXNN
 @testable import KLMCore
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
+#if canImport(ImageIO)
+import ImageIO
+#endif
 
 /// WS5 native runtime foundation: tests for the Qwen 2.5-VL
 /// (`Qwen2_5_VLForConditionalGeneration`) Swift+MLX modules. The
@@ -704,9 +710,11 @@ final class Qwen25VLNativeTests: XCTestCase {
     }
 }
 
-/// Tests for the loader's WS5 native arm and the env-gate that
-/// switches between the foundation-only rejection and the
-/// future-runtime hookup.
+/// Tests for the loader's WS5 native arm: a Qwen 2.5-VL / Qwen 2-VL
+/// architecture string must route to the native Swift+MLX loader
+/// (`loadQwen25VL`), not to the text fallback or a rejection. The
+/// Python bridge and its `KRILL_NATIVE_QWEN25VL` opt-in were retired
+/// in WS5 - native is the only path.
 final class Qwen25VLLoaderTests: XCTestCase {
 
     private func writeConfig(_ json: [String: Any], dirSlug: String) throws -> URL {
@@ -718,27 +726,13 @@ final class Qwen25VLLoaderTests: XCTestCase {
         return dir
     }
 
-    private func withEnv(_ key: String, _ value: String?, _ body: () throws -> Void) rethrows {
-        let prior = ProcessInfo.processInfo.environment[key]
-        if let value {
-            setenv(key, value, 1)
-        } else {
-            unsetenv(key)
-        }
-        defer {
-            if let prior {
-                setenv(key, prior, 1)
-            } else {
-                unsetenv(key)
-            }
-        }
-        try body()
-    }
-
-    private func tinyQwen25VLConfig() -> [String: Any] {
+    private func tinyQwen25VLConfig(
+        architecture: String = "Qwen2_5_VLForConditionalGeneration",
+        modelType: String = "qwen2_5_vl"
+    ) -> [String: Any] {
         return [
-            "architectures": ["Qwen2_5_VLForConditionalGeneration"],
-            "model_type": "qwen2_5_vl",
+            "architectures": [architecture],
+            "model_type": modelType,
             "hidden_size": 2048,
             "intermediate_size": 11008,
             "num_attention_heads": 16,
@@ -763,59 +757,45 @@ final class Qwen25VLLoaderTests: XCTestCase {
         ]
     }
 
-    func testDefaultRoutesToBridge() throws {
-        // Without KRILL_NATIVE_QWEN25VL the loader emits the
-        // bridge redirect rather than reaching the native loader.
-        // The message must point at the bridge AND name the
-        // opt-in env var so users know how to enable native.
-        let dir = try writeConfig(tinyQwen25VLConfig(), dirSlug: "default")
+    /// The native arm is reached when, on a config-only dir (no
+    /// safetensors), the failure is specifically `WeightLoadError`.
+    /// That discriminates "routed into `loadQwen25VL` and failed at
+    /// weight load" from "hit a rejection" or "fell through to the
+    /// text loader" (which would decode `LlamaConfig` and throw a
+    /// different error).
+    private func assertRoutesToNativeLoader(_ config: [String: Any],
+                                            slug: String) throws {
+        let dir = try writeConfig(config, dirSlug: slug)
         defer { try? FileManager.default.removeItem(at: dir) }
-        try withEnv("KRILL_NATIVE_QWEN25VL", nil) {
-            XCTAssertThrowsError(try loadModel(from: dir)) { error in
-                guard let modelError = error as? ModelLoadError,
-                      case .unsupportedArchitecture(let msg) = modelError else {
-                    XCTFail("Expected unsupportedArchitecture, got \(error)")
-                    return
-                }
-                XCTAssertTrue(msg.contains("multimodal bridge")
-                    || msg.contains("Qwen25VLEngine"),
-                    "Default rejection must point at the bridge")
-                XCTAssertTrue(msg.contains("KRILL_NATIVE_QWEN25VL"),
-                    "Default rejection must name the opt-in env var")
+        do {
+            _ = try loadModel(from: dir)
+            XCTFail("Expected a weight-load failure on the native arm "
+                + "for a config-only dir")
+        } catch let error as WeightLoadError {
+            guard case .noSafetensorsFiles = error else {
+                XCTFail("Expected noSafetensorsFiles, got \(error)")
+                return
             }
+            // OK: native arm reached, failed at weight load.
+        } catch {
+            XCTFail("Expected WeightLoadError.noSafetensorsFiles "
+                + "(native arm reached); got \(error)")
         }
     }
 
-    func testNativeOptInReachesNativeLoader() throws {
-        // With the opt-in env set, the loader takes the native arm
-        // (`loadQwen25VL`). On an empty config dir (no safetensors)
-        // the failure is specifically `WeightLoadError`, which
-        // proves the family routed past the bridge rejection into
-        // the native loader. Asserting the SPECIFIC error type is
-        // what discriminates "reached native arm and failed at
-        // weight load" from "got the bridge rejection".
-        let dir = try writeConfig(tinyQwen25VLConfig(), dirSlug: "optin")
-        defer { try? FileManager.default.removeItem(at: dir) }
-        try withEnv("KRILL_NATIVE_QWEN25VL", "1") {
-            do {
-                _ = try loadModel(from: dir)
-                XCTFail("Expected a weight-load failure on the native "
-                    + "arm for an empty config dir")
-            } catch let error as WeightLoadError {
-                if case .noSafetensorsFiles = error {
-                    // OK: native arm reached, failed at weight load.
-                } else {
-                    XCTFail("Expected noSafetensorsFiles, got \(error)")
-                }
-            } catch let error as ModelLoadError {
-                if case .unsupportedArchitecture(let msg) = error {
-                    XCTFail("Native arm must not throw the bridge "
-                        + "redirect when KRILL_NATIVE_QWEN25VL=1; got: \(msg)")
-                } else {
-                    XCTFail("Unexpected ModelLoadError: \(error)")
-                }
-            }
-        }
+    func testQwen25VLRoutesToNativeLoader() throws {
+        try assertRoutesToNativeLoader(
+            tinyQwen25VLConfig(), slug: "native25")
+    }
+
+    func testQwen2VLAlsoRoutesToNativeLoader() throws {
+        // The older Qwen 2-VL architecture string is caught by the
+        // same detection arm and must also build the native model.
+        try assertRoutesToNativeLoader(
+            tinyQwen25VLConfig(
+                architecture: "Qwen2VLForConditionalGeneration",
+                modelType: "qwen2_vl"),
+            slug: "native2")
     }
 
     func testConfigDecoderHandlesMinimalConfig() throws {
@@ -824,10 +804,8 @@ final class Qwen25VLLoaderTests: XCTestCase {
         // defaulting the optional fields to the Qwen2.5-VL-3B
         // reference shape. This is the contract callers rely on
         // when working with partial configs in tests and tooling.
-        // We exercise the decoder DIRECTLY rather than through
-        // the loader (the loader's rejection arm currently does
-        // not decode in this PR; the runtime PR moves the decode
-        // inside the opt-in branch).
+        // We exercise the decoder DIRECTLY so this test pins the
+        // defaulting contract independently of the loader.
         let cfg: [String: Any] = [
             "architectures": ["Qwen2_5_VLForConditionalGeneration"],
             "model_type": "qwen2_5_vl",
@@ -850,4 +828,162 @@ final class Qwen25VLLoaderTests: XCTestCase {
             "Minimal config defaults image_token_id to the "
             + "Qwen 2.5-VL tokenizer's <|image_pad|> id")
     }
+}
+
+/// WS5 native runtime: window-attention mask + image preprocessing.
+final class Qwen25VLRuntimeFoundationTests: XCTestCase {
+
+    private func visionConfig(
+        patchSize: Int = 14, spatialMerge: Int = 2,
+        windowSize: Int = 56, depth: Int = 2
+    ) throws -> Qwen25VLConfig.VisionConfig {
+        try JSONDecoder().decode(
+            Qwen25VLConfig.VisionConfig.self,
+            from: try JSONSerialization.data(withJSONObject: [
+                "depth": depth, "hidden_size": 32, "intermediate_size": 64,
+                "num_heads": 4, "patch_size": patchSize,
+                "temporal_patch_size": 2, "in_chans": 3,
+                "spatial_merge_size": spatialMerge,
+                "fullatt_block_indexes": [1], "window_size": windowSize,
+                "out_hidden_size": 64,
+            ]))
+    }
+
+    // MARK: - Window-attention mask
+
+    func testWindowMaskNilWhenSingleWindow() throws {
+        // 4x4 patch grid, merge 2 -> 2x2 LLM grid; window_size 112 /
+        // patch 14 / merge 2 = 8 merged tokens per window edge. The
+        // 2x2 LLM grid fits in one window -> mask is full attention.
+        let vision = try visionConfig(windowSize: 112)
+        let mask = Qwen25VLVisionTower.windowAttentionMask(
+            gridHFull: 4, gridWFull: 4, vision: vision, dtype: .float32)
+        XCTAssertNil(mask,
+            "A grid that fits in one window must skip the mask "
+            + "(full attention)")
+    }
+
+    func testWindowMaskBlockDiagonalStructure() throws {
+        // 4x6 patch grid, merge 2 -> 2x3 LLM grid. window_size 56 /
+        // patch 14 / merge 2 = 2 merged tokens per window edge ->
+        // window columns {0,1} and {2}, single window row -> 2
+        // windows. Patch p's merged token is p/4, row-major over
+        // the 2x3 LLM grid.
+        let vision = try visionConfig(windowSize: 56)
+        let mask = try XCTUnwrap(Qwen25VLVisionTower.windowAttentionMask(
+            gridHFull: 4, gridWFull: 6, vision: vision, dtype: .float32))
+        XCTAssertEqual(mask.shape, [1, 1, 24, 24])
+        eval(mask)
+        let arr = mask.asArray(Float.self)
+        func at(_ i: Int, _ j: Int) -> Float { arr[i * 24 + j] }
+        // merged 0,1 (patches 0-7) and merged 3,4 (patches 12-19)
+        // are window 0; merged 2 (8-11) and 5 (20-23) are window 1.
+        XCTAssertEqual(at(0, 7), 0, "patches in the same window attend")
+        XCTAssertEqual(at(0, 12), 0, "merged tokens 0 and 3 share window 0")
+        XCTAssertEqual(at(8, 23), 0, "merged tokens 2 and 5 share window 1")
+        XCTAssertLessThan(at(0, 8), -1,
+            "patch 0 (window 0) must not attend patch 8 (window 1)")
+        XCTAssertLessThan(at(20, 0), -1,
+            "patch 20 (window 1) must not attend patch 0 (window 0)")
+    }
+
+    func testWindowMaskIsSymmetric() throws {
+        // Window membership is symmetric, so the mask must be too.
+        let vision = try visionConfig(windowSize: 56)
+        let mask = try XCTUnwrap(Qwen25VLVisionTower.windowAttentionMask(
+            gridHFull: 8, gridWFull: 8, vision: vision, dtype: .float32))
+        eval(mask)
+        let n = mask.shape[3]
+        let arr = mask.asArray(Float.self)
+        for i in stride(from: 0, to: n, by: 7) {
+            for j in stride(from: 0, to: n, by: 5) {
+                XCTAssertEqual(arr[i * n + j], arr[j * n + i],
+                    "window mask must be symmetric at (\(i),\(j))")
+            }
+        }
+    }
+
+    // MARK: - smart resize
+
+    func testSmartResizeRoundsToFactor() {
+        // 100x60 with factor 28: round(100/28)*28 = 112,
+        // round(60/28)*28 = 56. Both multiples of 28.
+        let (h, w) = Qwen25VLImagePreprocessor.smartResize(
+            height: 100, width: 60, factor: 28,
+            minPixels: 28 * 28 * 4, maxPixels: 768 * 768)
+        XCTAssertEqual(h % 28, 0)
+        XCTAssertEqual(w % 28, 0)
+        XCTAssertEqual(h, 112)
+        XCTAssertEqual(w, 56)
+    }
+
+    func testSmartResizeClampsToMaxPixels() {
+        // A huge image must be scaled down so h*w <= maxPixels,
+        // staying on the 28 grid.
+        let maxPixels = 768 * 768
+        let (h, w) = Qwen25VLImagePreprocessor.smartResize(
+            height: 4000, width: 3000, factor: 28,
+            minPixels: 28 * 28 * 4, maxPixels: maxPixels)
+        XCTAssertEqual(h % 28, 0)
+        XCTAssertEqual(w % 28, 0)
+        XCTAssertLessThanOrEqual(h * w, maxPixels,
+            "smartResize must clamp the pixel count to maxPixels")
+    }
+
+    // MARK: - Image decode + preprocess
+
+    #if canImport(CoreGraphics) && canImport(ImageIO)
+    /// Encode a solid-color image as PNG bytes.
+    private func solidPNG(width: Int, height: Int,
+                          r: UInt8, g: UInt8, b: UInt8) -> Data {
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let ctx = CGContext(
+            data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: width * 4, space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.setFillColor(CGColor(
+            red: CGFloat(r) / 255, green: CGFloat(g) / 255,
+            blue: CGFloat(b) / 255, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let image = ctx.makeImage()!
+        let out = NSMutableData()
+        let dest = CGImageDestinationCreateWithData(
+            out, "public.png" as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, image, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(dest))
+        return out as Data
+    }
+
+    func testDecodeProducesGridAlignedTensor() throws {
+        let png = solidPNG(width: 200, height: 130, r: 200, g: 30, b: 30)
+        let pixels = try Qwen25VLImagePreprocessor.decode(
+            png, patchSize: 14, spatialMergeSize: 2)
+        XCTAssertEqual(pixels.ndim, 3)
+        XCTAssertEqual(pixels.dim(2), 3)
+        XCTAssertEqual(pixels.dim(0) % 28, 0,
+            "decoded height must be a multiple of patch*merge")
+        XCTAssertEqual(pixels.dim(1) % 28, 0,
+            "decoded width must be a multiple of patch*merge")
+        eval(pixels)
+        let arr = pixels.asArray(Float.self)
+        XCTAssertGreaterThan(arr[0], arr[1],
+            "a red-dominant fill must have R > G after decode")
+    }
+
+    func testPreprocessReturnsNonSquareGrid() throws {
+        let vision = try visionConfig()
+        // A landscape image must yield a non-square merged grid.
+        let png = solidPNG(width: 300, height: 120, r: 20, g: 180, b: 40)
+        let result = try Qwen25VLImagePreprocessor.preprocess(
+            png, vision: vision)
+        XCTAssertGreaterThan(result.gridWMerged, result.gridHMerged,
+            "a landscape image must produce gridW > gridH")
+        // patches batch rows == full patch grid == merged grid * ms^2
+        let ms = vision.spatialMergeSize
+        XCTAssertEqual(result.patches.dim(0),
+            result.gridHMerged * result.gridWMerged * ms * ms,
+            "patch count must equal the merged-token count times "
+            + "spatial_merge_size^2")
+    }
+    #endif
 }

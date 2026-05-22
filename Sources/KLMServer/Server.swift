@@ -24,7 +24,6 @@ public final class KLMServer: Sendable {
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
-    private let vlmEngine: Qwen25VLEngine
     private let moeEngine: MoEEngine
     private let logger = Logger(label: "krillm.server")
 
@@ -38,7 +37,6 @@ public final class KLMServer: Sendable {
                 engine: InferenceEngine, registry: Registry,
                 embedEngine: EmbeddingEngine = EmbeddingEngine(),
                 rerankEngine: RerankEngine = RerankEngine(),
-                vlmEngine: Qwen25VLEngine = Qwen25VLEngine(),
                 moeEngine: MoEEngine = MoEEngine(),
                 corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
                 keepAliveDefaultSeconds: Int = 300,
@@ -52,7 +50,6 @@ public final class KLMServer: Sendable {
         self.registry = registry
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
-        self.vlmEngine = vlmEngine
         self.moeEngine = moeEngine
         self.keepAlive = KeepAliveController(defaultSeconds: keepAliveDefaultSeconds)
         self.defaultContextLimit = defaultContextLimit
@@ -65,14 +62,12 @@ public final class KLMServer: Sendable {
         compat: CompatMode = .both,
         embedEngine: EmbeddingEngine = EmbeddingEngine(),
         rerankEngine: RerankEngine = RerankEngine(),
-        vlmEngine: Qwen25VLEngine = Qwen25VLEngine(),
         moeEngine: MoEEngine = MoEEngine(),
         maxBodySizeOverride: Int? = nil
     ) -> any ChannelHandler & Sendable {
         HTTPHandler(engine: engine, registry: registry, compat: compat,
                     embedEngine: embedEngine,
                     rerankEngine: rerankEngine,
-                    vlmEngine: vlmEngine,
                     moeEngine: moeEngine,
                     keepAlive: KeepAliveController(defaultSeconds: 300),
                     genQueue: GenerationQueue(numParallel: 1, maxQueue: 512),
@@ -92,7 +87,6 @@ public final class KLMServer: Sendable {
                         HTTPHandler(engine: self.engine, registry: self.registry,
                                     compat: self.compat, embedEngine: self.embedEngine,
                                     rerankEngine: self.rerankEngine,
-                                    vlmEngine: self.vlmEngine,
                                     moeEngine: self.moeEngine,
                                     keepAlive: self.keepAlive,
                                     corsOrigins: self.corsOrigins,
@@ -150,7 +144,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
-    private let vlmEngine: Qwen25VLEngine
     private let moeEngine: MoEEngine
     private let logger = Logger(label: "krillm.http")
     private let startedAt = Date()
@@ -169,7 +162,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     init(engine: InferenceEngine, registry: Registry,
          compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
          rerankEngine: RerankEngine = RerankEngine(),
-         vlmEngine: Qwen25VLEngine = Qwen25VLEngine(),
          moeEngine: MoEEngine = MoEEngine(),
          keepAlive: KeepAliveController = KeepAliveController(defaultSeconds: 300),
          corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
@@ -181,7 +173,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         self.compat = compat
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
-        self.vlmEngine = vlmEngine
         self.moeEngine = moeEngine
         self.keepAlive = keepAlive
         self.corsOrigins = corsOrigins
@@ -528,27 +519,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let adapter = ModelAdapter(family: manifest.family)
         switch adapter.chatRouting {
         case .denseEngine:
+            // Includes Qwen 2.5-VL: WS5 retired its Python bridge,
+            // so a VL manifest now runs on the native Swift+MLX
+            // engine exactly like Gemma 4 vision - the standard
+            // chat path decodes the image and calls
+            // `engine.generate(... imageData:)`.
             return false
-
-        case .visionBridge:
-            // Text-only requests against a VL manifest are refused:
-            // spinning up a multi-GB Python sidecar for a text-only
-            // turn is a sharp performance trap, and the user can pick
-            // a text-only alias instead. The explicit error gives
-            // them the right next step.
-            if adapter.requiresImageInput, request.media.images.isEmpty {
-                sendJSON(context: context, status: .badRequest, body: [
-                    "error":
-                        "Qwen 2.5-VL requires an image in the request. For text-only "
-                        + "workflows use a Qwen 2.5 text-only model (e.g. qwen2.5-3b) "
-                        + "or include an image attachment."
-                ])
-                return true
-            }
-            handleVLMChat(
-                context: context, request: request,
-                manifest: manifest, style: style)
-            return true
 
         case .mixtureOfExperts:
             // MoE is text-only whether it runs native or bridged.
@@ -1711,180 +1687,21 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         sendJSON(context: context, status: .ok, body: ["models": models])
     }
 
-    // MARK: - VLM: bridge-backed multimodal chat (Qwen 2.5-VL)
+    // MARK: - Bridge chat response shaping (MoE sidecar)
 
-    /// Response shape selector for VLM chat completions.
+    /// Response shape selector for bridge-backed chat completions.
+    /// WS5 made Qwen 2.5-VL native; the remaining consumer is the
+    /// MoE sidecar (`handleMoEChat`).
     private enum VLMResponseStyle {
         case openAI  // OpenAI /v1/chat/completions: `{id, object, choices, ...}`
         case ollama  // Ollama /api/chat: `{model, message:{role,content}, done, ...}`
     }
 
-    /// Handle a chat completion against a Qwen 2.5-VL manifest by
-    /// routing through the Python sidecar (`Qwen25VLEngine`). The
-    /// `style` parameter selects which response shape to emit so
-    /// /v1/chat/completions clients see OpenAI shape and /api/chat
-    /// clients see Ollama shape (NDJSON for streaming).
-    ///
-    /// The request flow is intentionally narrower than the standard
-    /// chat completion path:
-    /// - The bridge accepts ONE image per request (the first image
-    ///   in `request.media.images`). Multi-image requests are
-    ///   rejected at the `validateMediaShape` step earlier.
-    /// - Sampling parameters (temperature / top-p / penalties) are
-    ///   ignored - the bridge runs whatever its mlx-vlm `generate`
-    ///   default is. Documented in the workstream doc.
-    /// - Streaming (`request.stream == true`) degenerates to a
-    ///   single content chunk plus a terminating chunk, because
-    ///   the underlying mlx-vlm 0.5.0 generate API is not
-    ///   token-streaming today.
-    private func handleVLMChat(
-        context: ChannelHandlerContext,
-        request: ServerChatRequest,
-        manifest: ModelManifest,
-        style: VLMResponseStyle
-    ) {
-        // Decode the optional image attachment to a temp file the
-        // bridge can `open()` directly.
-        let decoded: DecodedMedia?
-        if request.media.isEmpty {
-            decoded = nil
-        } else {
-            do {
-                decoded = try decodeMediaForRequestVLM(request.media)
-            } catch let error as MediaDecodeError {
-                sendJSON(
-                    context: context,
-                    status: HTTPResponseStatus(statusCode: error.httpStatus),
-                    body: ["error": error.message])
-                return
-            } catch {
-                sendJSON(context: context, status: .internalServerError,
-                         body: ["error": "Failed to decode VLM media payload"])
-                return
-            }
-        }
-
-        // Forward the full role-tagged message history to the
-        // bridge. The bridge renders Qwen 2.5-VL's chat template
-        // over `messages` and preserves system / user / assistant
-        // turns - multi-turn VL chats round-trip without
-        // losing context.
-        let messagesForBridge = request.messages
-
-        let dir = registry.modelPath(manifest.name)
-        let eventLoop = context.eventLoop
-        nonisolated(unsafe) let ctx = context
-        let vlm = vlmEngine
-        let modelName = manifest.name
-        let maxTokens = request.maxTokens
-        let wantStream = request.stream
-        let mediaCopy = decoded
-        // Snapshot CORS headers BEFORE the Task starts.
-        // `corsHeaders()` reads `self.currentOrigin`, which is
-        // mutated by channelRead on subsequent requests; reading
-        // it from the detached Task is racy. Capture once here
-        // so the streaming branch can echo the right Origin.
-        let snapshotCORS = corsHeaders()
-
-        let started = CFAbsoluteTimeGetCurrent()
-        Task {
-            defer { mediaCopy?.cleanup() }
-            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
-            defer { self.leaveQueue() }
-            do {
-                try await vlm.load(directory: dir)
-                let result = try vlm.generate(
-                    messages: messagesForBridge,
-                    imagePath: decoded?.imagePath,
-                    maxTokens: maxTokens)
-                let totalNs = Int64(
-                    (CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
-                if wantStream {
-                    self.emitVLMStream(
-                        ctx: ctx, modelName: modelName,
-                        text: result.text, style: style,
-                        promptTokens: result.promptTokens,
-                        completionTokens: result.completionTokens,
-                        totalNs: totalNs,
-                        corsHeaders: snapshotCORS)
-                } else {
-                    let response: [String: Any]
-                    switch style {
-                    case .openAI:
-                        response = [
-                            "id": "chatcmpl-\(UUID().uuidString.prefix(8))",
-                            "object": "chat.completion",
-                            "created": Int(Date().timeIntervalSince1970),
-                            "model": modelName,
-                            "choices": [[
-                                "index": 0,
-                                "message": [
-                                    "role": "assistant",
-                                    "content": result.text,
-                                ],
-                                "finish_reason": "stop",
-                            ]],
-                            "usage": [
-                                "prompt_tokens": result.promptTokens,
-                                "completion_tokens": result.completionTokens,
-                                "total_tokens": result.promptTokens
-                                    + result.completionTokens,
-                            ],
-                            "total_duration": totalNs,
-                        ]
-                    case .ollama:
-                        response = [
-                            "model": modelName,
-                            "created_at": ISO8601DateFormatter().string(
-                                from: Date()),
-                            "message": [
-                                "role": "assistant",
-                                "content": result.text,
-                            ],
-                            "done": true,
-                            "total_duration": totalNs,
-                            "prompt_eval_count": result.promptTokens,
-                            "eval_count": result.completionTokens,
-                        ]
-                    }
-                    self.sendJSONOnLoop(
-                        context: ctx, eventLoop: eventLoop,
-                        status: .ok, body: response)
-                }
-            } catch {
-                let msg = String(describing: error).prefix(300)
-                self.sendJSONOnLoop(
-                    context: ctx, eventLoop: eventLoop,
-                    status: .internalServerError,
-                    body: ["error": "VLM bridge failed: \(msg)"])
-            }
-        }
-    }
-
-    /// VLM-specific media decode: requires an image (audio is
-    /// rejected because the .qwen25vl capability set declares no
-    /// audioInput).
-    private func decodeMediaForRequestVLM(_ payload: ServerMediaPayload) throws -> DecodedMedia {
-        try validateMediaShape(payload)
-        if payload.audio != nil {
-            throw MediaDecodeError.mediaNotSupported(
-                reason: "Qwen 2.5-VL does not accept audio input. Use a Gemma 4 audio-capable checkpoint."
-            )
-        }
-        var imagePath: String? = nil
-        if let img = payload.images.first {
-            imagePath = try ServerMultimodal.decodeAndWrite(
-                base64: img, field: "images", sniffImage: true)
-        }
-        return DecodedMedia(imagePath: imagePath, audioPath: nil)
-    }
-
     /// Emit a chat-completion stream consisting of a single content
     /// chunk plus a terminating chunk, in the shape selected by
-    /// `style`. mlx-vlm 0.5.0 does not expose a token-streaming
-    /// API the sidecar can drive without re-implementing the
-    /// decode loop in Python; degenerate streaming is the
-    /// simplest forward-compatible shape.
+    /// `style`. The MoE sidecar's mlx-lm `generate` is non-streaming
+    /// today, so degenerate streaming is the simplest
+    /// forward-compatible shape.
     ///
     /// - OpenAI: SSE `data: <json>\n\n` framing with
     ///   `chat.completion.chunk` objects ending in `data: [DONE]`.
@@ -1968,8 +1785,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     // MARK: - MoE: bridge-backed text chat (Mixtral, Qwen3-MoE, ...)
 
     /// Handle a chat completion against an MoE manifest by routing
-    /// through the Python sidecar (`MoEEngine` -> mlx-lm). Same
-    /// shape rules as `handleVLMChat`:
+    /// through the Python sidecar (`MoEEngine` -> mlx-lm):
     /// - `style: .openAI` emits OpenAI-shape JSON;
     ///   `style: .ollama` emits Ollama-shape NDJSON.
     /// - Streaming degenerates to a single content chunk plus a

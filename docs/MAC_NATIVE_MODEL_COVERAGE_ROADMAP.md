@@ -39,22 +39,17 @@ Production-native or close:
 Dense text LLMs: selected Llama, Qwen, Mistral, Gemma, Phi, GLM,
                  DeepSeek distills via Llama/Qwen architecture
 Embeddings:      selected BERT/MiniLM/BGE style encoders
-Vision:          Gemma 4 image only
+Vision:          Gemma 4 image; Qwen 2.5-VL image (native Swift+MLX
+                 vision tower + 3D mRoPE, WS5)
+Audio:           Gemma 4 audio (native Swift+MLX USM path)
 Server APIs:     Ollama + OpenAI-compatible core text/generation surface
-```
-
-Fallback / scoped:
-
-```text
-Gemma 4 audio:   mlx-vlm bridge
-Image+audio:     bridge path
 ```
 
 Not broadly supported:
 
 ```text
-MoE base models
-Qwen-VL / Llama vision / LLaVA-style models
+MoE base models (Qwen 3 MoE has an experimental native path)
+Llama vision / LLaVA-style models
 Whisper/ASR
 TTS
 Rerankers/cross-encoders

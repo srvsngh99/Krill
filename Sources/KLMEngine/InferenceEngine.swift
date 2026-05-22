@@ -325,6 +325,17 @@ public final class InferenceEngine: @unchecked Sendable {
             return (emptyStream, { nil })
         }
 
+        // Qwen 2.5-VL native runtime. Its 3D-mRoPE decode loop needs
+        // a per-step positional offset that the generic decode path
+        // does not thread (after an image span the KV-cache length
+        // is not the next mRoPE position), so every VL request -
+        // image or text-only - routes to the dedicated driver.
+        if let vlModel = loadedModel.module as? Qwen25VLForConditionalGeneration {
+            return generateQwen25VL(
+                model: vlModel, tokenizer: tokenizer, messages: messages,
+                params: params, maxTokens: maxTokens, imageData: imageData)
+        }
+
         // Inject media placeholders into the first user message before
         // tokenization so the chat path matches the prompt path. Gemma 4's
         // multimodal forward replaces embeddings at placeholder token positions
@@ -803,6 +814,113 @@ public final class InferenceEngine: @unchecked Sendable {
             }
         }
 
+        return (stream, { statsHolder.stats })
+    }
+
+    /// Native Qwen 2.5-VL generation: preprocess the image, render
+    /// the ChatML prompt with the `<|image_pad|>` run, and drive
+    /// `Qwen25VLRuntime` (prefill + 3D-mRoPE-correct decode).
+    /// Returns the same `(stream, stats)` contract as `generate`.
+    private func generateQwen25VL(
+        model: Qwen25VLForConditionalGeneration,
+        tokenizer: KLMTokenizer,
+        messages: [[String: String]],
+        params: SamplingParams,
+        maxTokens: Int,
+        imageData: Data?
+    ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
+        // Preprocess the image (if any) into the per-patch batch and
+        // its post-spatial-merge grid. The grid sizes the
+        // `<|image_pad|>` placeholder run and drives mRoPE.
+        var pixelValues: MLXArray? = nil
+        var gridMerged: (Int, Int)? = nil
+        var imagePadCount = 0
+        if let imgData = imageData {
+            do {
+                let prepped = try Qwen25VLImagePreprocessor.preprocess(
+                    imgData, vision: model.config.vision)
+                pixelValues = prepped.patches
+                gridMerged = (prepped.gridHMerged, prepped.gridWMerged)
+                imagePadCount = prepped.gridHMerged * prepped.gridWMerged
+            } catch {
+                // Never silently answer an image prompt as text-only.
+                return Self.mediaErrorStream(
+                    "Error: Qwen 2.5-VL image preprocessing failed: \(error)")
+            }
+        }
+
+        let promptTokens = tokenizer.formatQwen25VLTokenIds(
+            messages: messages,
+            imagePadCount: imagePadCount,
+            imageTokenId: model.config.imageTokenId,
+            visionStartTokenId: model.config.visionStartTokenId,
+            visionEndTokenId: model.config.visionEndTokenId)
+        guard !promptTokens.isEmpty else {
+            let empty = AsyncStream<TokenEvent> { c in
+                c.yield(TokenEvent(tokenId: 0, text: "", elapsed: 0, isEnd: true))
+                c.finish()
+            }
+            return (empty, { nil })
+        }
+
+        let stopIds = Self.stopTokenIds(
+            modelDirectory: modelDirectory, tokenizerEOS: tokenizer.eosTokenId)
+        let statsHolder = StatsHolder()
+        nonisolated(unsafe) let capturedModel = model
+        let capturedTokenizer = tokenizer
+        nonisolated(unsafe) let capturedPixels = pixelValues
+        let capturedGrid = gridMerged
+        let capturedPrompt = promptTokens
+        let capturedStops = stopIds
+        let capturedParams = params
+        let capturedMax = maxTokens
+
+        let stream = AsyncStream<TokenEvent> { continuation in
+            Task { [statsHolder] in
+                let startTime = CFAbsoluteTimeGetCurrent()
+                let output = Qwen25VLRuntime.generate(
+                    model: capturedModel,
+                    promptTokens: capturedPrompt,
+                    pixelValues: capturedPixels,
+                    imageGridMerged: capturedGrid,
+                    maxTokens: capturedMax,
+                    stopIds: capturedStops,
+                    params: capturedParams,
+                    onToken: { token in
+                        let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+                        if capturedStops.contains(token) {
+                            // Terminal: empty text, isEnd. Consumers
+                            // that break on isEnd before reading text
+                            // still finish correctly.
+                            continuation.yield(TokenEvent(
+                                tokenId: token, text: "",
+                                elapsed: elapsed, isEnd: true))
+                        } else {
+                            continuation.yield(TokenEvent(
+                                tokenId: token,
+                                text: capturedTokenizer.decode(token: token),
+                                elapsed: elapsed))
+                        }
+                    })
+                // maxTokens hit with no stop token: emit a terminal
+                // event so the stream still closes with isEnd.
+                let sawStop = output.tokens.last.map {
+                    capturedStops.contains($0)
+                } ?? false
+                if !sawStop {
+                    continuation.yield(TokenEvent(
+                        tokenId: -1, text: "",
+                        elapsed: CFAbsoluteTimeGetCurrent() - startTime,
+                        isEnd: true))
+                }
+                statsHolder.stats = GenerationStats(
+                    promptTokens: capturedPrompt.count,
+                    generatedTokens: output.tokens.count,
+                    prefillTime: output.prefillSeconds,
+                    decodeTime: output.decodeSeconds)
+                continuation.finish()
+            }
+        }
         return (stream, { statsHolder.stats })
     }
 

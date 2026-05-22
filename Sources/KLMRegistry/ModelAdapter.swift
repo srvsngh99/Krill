@@ -42,16 +42,16 @@ public struct ModelAdapter: Sendable, Equatable {
     /// Which server chat handler a request for this family needs.
     public var chatRouting: ChatRouting {
         switch family {
-        case .qwen25vl:
-            // Bridge-backed VLM: the Python sidecar (mlx-vlm) path.
-            return .visionBridge
         case .moe:
             // Native Swift+MLX runtime when the checkpoint supports
             // it (today: Qwen 3 MoE), else the mlx-lm sidecar bridge.
             return .mixtureOfExperts
-        case .llama, .qwen, .mistral, .gemma, .gemma4, .phi, .glm,
-             .deepseek, .bert, .reranker:
-            // Native Swift+MLX path. (`.bert` / `.reranker` are not
+        case .llama, .qwen, .qwen25vl, .mistral, .gemma, .gemma4,
+             .phi, .glm, .deepseek, .bert, .reranker:
+            // Native Swift+MLX path. WS5 made Qwen 2.5-VL native, so
+            // a VL manifest routes here too - the standard chat path
+            // decodes the image and calls the native engine, exactly
+            // like Gemma 4 vision. (`.bert` / `.reranker` are not
             // causal LMs and are refused by the chat surface on a
             // capability check; they never reach a chat handler, so
             // `.denseEngine` is the correct inert default.)
@@ -59,16 +59,15 @@ public struct ModelAdapter: Sendable, Equatable {
         }
     }
 
-    /// True iff a chat request for this family MUST carry an image:
-    /// the family has no text-only runtime in this build, so a
-    /// text-only turn is refused with a clear error rather than
-    /// spinning up a multi-GB sidecar for nothing.
+    /// True iff a chat request for this family MUST carry an image.
+    /// No family requires one today: WS5 retired the Qwen 2.5-VL
+    /// Python sidecar, and the native VL runtime serves a text-only
+    /// turn directly (it just skips the vision tower). The hook is
+    /// kept so a future image-only family can opt back in.
     public var requiresImageInput: Bool {
         switch family {
-        case .qwen25vl:
-            return true
-        case .llama, .qwen, .mistral, .gemma, .gemma4, .phi, .glm,
-             .deepseek, .bert, .reranker, .moe:
+        case .llama, .qwen, .qwen25vl, .mistral, .gemma, .gemma4,
+             .phi, .glm, .deepseek, .bert, .reranker, .moe:
             return false
         }
     }
@@ -99,9 +98,8 @@ public struct ModelAdapter: Sendable, Equatable {
 /// Which server chat handler a model family's request is routed to.
 public enum ChatRouting: String, Sendable, Equatable, CaseIterable {
     /// Native Swift+MLX dense engine path (`engine.generate`).
+    /// Includes Qwen 2.5-VL since WS5 retired its Python bridge.
     case denseEngine = "dense_engine"
-    /// Python-sidecar VLM bridge (`handleVLMChat`). Requires an image.
-    case visionBridge = "vision_bridge"
     /// Mixture-of-experts: the native Swift+MLX runtime when the
     /// checkpoint supports it (see `nativeMoEDispatchSupported`),
     /// otherwise the Python-sidecar MoE bridge (`handleMoEChat`).

@@ -368,6 +368,65 @@ public final class KLMTokenizer: @unchecked Sendable {
         tokens.append(107)  // \n
         return tokens
     }
+
+    /// Encode messages as Qwen 2.5-VL token ids, manually rendering
+    /// the ChatML sequence so an image span can be placed.
+    ///
+    /// Qwen 2.5-VL's stock chat template only emits a single
+    /// `<|image_pad|>` and relies on a separate image processor to
+    /// expand it; KrillLM's native runtime instead injects the full
+    /// `<|vision_start|>` + `imagePadCount` × `<|image_pad|>` +
+    /// `<|vision_end|>` run directly (the processor already produced
+    /// `imagePadCount = gridH * gridW` merged vision tokens). The
+    /// image attaches to the FIRST user turn. `imagePadCount == 0`
+    /// renders a plain text-only ChatML prompt.
+    ///
+    /// Format (per turn): `<|im_start|>{role}\n{content}<|im_end|>\n`,
+    /// then a trailing `<|im_start|>assistant\n` to cue generation.
+    /// `<|im_start|>` / `<|im_end|>` are 151644 / 151645 in every
+    /// Qwen 2 / 2.5 tokenizer; the vision ids come from the model
+    /// config and are passed in.
+    public func formatQwen25VLTokenIds(
+        messages: [[String: String]],
+        imagePadCount: Int,
+        imageTokenId: Int,
+        visionStartTokenId: Int,
+        visionEndTokenId: Int
+    ) -> [Int] {
+        let imStart = 151_644  // <|im_start|>
+        let imEnd = 151_645    // <|im_end|>
+        let newline = tokenizer.encode(text: "\n")
+        let firstUserIndex = messages.firstIndex { $0["role"] == "user" }
+
+        var tokens: [Int] = []
+        for (i, msg) in messages.enumerated() {
+            let rawRole = msg["role"] ?? "user"
+            let content = msg["content"] ?? ""
+            // Qwen ChatML roles: system / user / assistant / tool.
+            // Anything else (e.g. a "tools" definitions block) folds
+            // into a user turn.
+            let role: String
+            switch rawRole {
+            case "system", "user", "assistant", "tool": role = rawRole
+            default: role = "user"
+            }
+            tokens.append(imStart)
+            tokens += tokenizer.encode(text: role)
+            tokens += newline
+            if i == firstUserIndex && imagePadCount > 0 {
+                tokens.append(visionStartTokenId)
+                tokens += Array(repeating: imageTokenId, count: imagePadCount)
+                tokens.append(visionEndTokenId)
+            }
+            tokens += tokenizer.encode(text: content)
+            tokens.append(imEnd)
+            tokens += newline
+        }
+        tokens.append(imStart)
+        tokens += tokenizer.encode(text: "assistant")
+        tokens += newline
+        return tokens
+    }
 }
 
 // MARK: - Errors
