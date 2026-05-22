@@ -1,3 +1,5 @@
+import KLMCore
+
 /// A single token event emitted during generation.
 public struct TokenEvent: Sendable {
     /// The generated token ID.
@@ -58,18 +60,24 @@ public struct GenerationStats: Sendable {
     /// Speculative decoding telemetry (nil when spec path did not run).
     public let speculative: SpeculativeStats?
 
+    /// Mixture-of-experts routing telemetry (nil unless the loaded model
+    /// is a native MoE runtime).
+    public let moe: MoEUtilization?
+
     public init(
         promptTokens: Int,
         generatedTokens: Int,
         prefillTime: Double,
         decodeTime: Double,
-        speculative: SpeculativeStats? = nil
+        speculative: SpeculativeStats? = nil,
+        moe: MoEUtilization? = nil
     ) {
         self.promptTokens = promptTokens
         self.generatedTokens = generatedTokens
         self.prefillTime = prefillTime
         self.decodeTime = decodeTime
         self.speculative = speculative
+        self.moe = moe
     }
 
     /// Prefill throughput.

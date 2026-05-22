@@ -98,9 +98,20 @@ From the workstream's acceptance bar:
   many-expert / `topK == numExperts` shapes. Cross-engine parity
   vs mlx-lm's router on the full checkpoint is a follow-up.
 - "Memory footprint is measured and documented." -
-  **DEFERRED.** All-experts-resident memory policy inherited
-  from the dense weight loader; per-expert / active-experts
-  metadata in the benchmark report is the follow-up.
+  **PARTIAL.** All-experts-resident memory policy inherited from
+  the dense weight loader. Expert-utilization telemetry has
+  landed: `Qwen3MoESparseMLP` accumulates per-expert assignment
+  counts off the compute path (folding the scatter dispatch's
+  existing per-layer host count read), and
+  `Qwen3MoEForCausalLM.moeUtilization()` aggregates an
+  `MoEUtilization` snapshot (active vs total `(layer, expert)`
+  slots, total assignments, peak slot load). The engine scopes it
+  per generation and surfaces it on `GenerationStats.moe`; the
+  CLI prints a `moe:` line. Covered by five new
+  `Qwen3MoENativeTests`. Wiring the snapshot into the server-mode
+  benchmark report (and a real footprint-vs-active-experts
+  measurement) still needs the full Qwen3-30B-A3B checkpoint and
+  is the remaining follow-up.
 - "Server-mode benchmark runs against Ollama/reference." -
   **PARTIAL.** An in-engine micro-benchmark
   (`testScatterDispatchBenchmark`) times the scatter dispatch

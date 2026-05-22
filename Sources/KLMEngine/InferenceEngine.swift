@@ -446,6 +446,11 @@ public final class InferenceEngine: @unchecked Sendable {
         let capturedImageData = imageData
         nonisolated(unsafe) let capturedAudioMel = nativeAudio?.mel
         nonisolated(unsafe) let capturedAudioMask = nativeAudio?.validMask
+        // Native MoE runtime, when this is one: used to scope and read
+        // expert-utilization telemetry around the generation. nil for
+        // every dense family, so the reset/read calls become no-ops.
+        nonisolated(unsafe) let capturedMoEModel =
+            loadedModel.module as? Qwen3MoEForCausalLM
 
         // int8 KV + prefix cache coexist via the quantized snapshot path
         // (PrefixCache.lookupQuantized / storeQuantized).
@@ -467,6 +472,9 @@ public final class InferenceEngine: @unchecked Sendable {
         let stream = AsyncStream<TokenEvent> { continuation in
             Task { [statsHolder] in
                 let startTime = CFAbsoluteTimeGetCurrent()
+                // Scope expert-utilization telemetry to this generation
+                // (no-op for dense models).
+                capturedMoEModel?.resetMoEUtilizationStats()
                 var generatedCount = 0
                 var prefillDuration: Double = 0
                 var cacheHit = false
@@ -788,7 +796,8 @@ public final class InferenceEngine: @unchecked Sendable {
                     generatedTokens: generatedCount,
                     prefillTime: prefillDuration,
                     decodeTime: decodeDuration,
-                    speculative: specStats
+                    speculative: specStats,
+                    moe: capturedMoEModel?.moeUtilization()
                 )
                 continuation.finish()
             }
