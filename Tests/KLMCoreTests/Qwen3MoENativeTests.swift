@@ -360,4 +360,97 @@ final class Qwen3MoENativeTests: XCTestCase {
             "Scatter dispatch should not be pathologically slower "
             + "than the brute-force reference")
     }
+
+    // MARK: - Expert-utilization instrumentation
+
+    /// Every `(token, slot)` assignment must land in exactly one
+    /// expert's tally, so the cumulative counts sum to `N * topK`.
+    func testExpertCountsSumToAssignments() throws {
+        let cfg = try decode(tinyConfigJSON(
+            hidden: 64, heads: 2, kvHeads: 1, layers: 1, headDim: 16,
+            numExperts: 8, topK: 2, moeIntermediate: 32))
+        let mlp = Qwen3MoESparseMLP(cfg)
+        let batch = 2, seqLen = 6
+        eval(mlp(MLXRandom.normal([batch, seqLen, 64]).asType(.float32)))
+        let total = mlp.cumulativeExpertCounts.reduce(0, +)
+        XCTAssertEqual(total, batch * seqLen * 2,
+            "Cumulative expert counts must sum to N * topK")
+    }
+
+    /// Counts accumulate across forwards until reset; reset zeros them.
+    func testExpertCountsAccumulateAndReset() throws {
+        let cfg = try decode(tinyConfigJSON(
+            hidden: 64, heads: 2, kvHeads: 1, layers: 1, headDim: 16,
+            numExperts: 8, topK: 2, moeIntermediate: 32))
+        let mlp = Qwen3MoESparseMLP(cfg)
+        let x = MLXRandom.normal([1, 5, 64]).asType(.float32)
+        eval(mlp(x))
+        eval(mlp(x))
+        XCTAssertEqual(mlp.cumulativeExpertCounts.reduce(0, +), 2 * 5 * 2,
+            "Two forwards must accumulate into the tally")
+        mlp.resetUtilizationStats()
+        XCTAssertEqual(mlp.cumulativeExpertCounts.reduce(0, +), 0,
+            "resetUtilizationStats must zero the tally")
+        XCTAssertEqual(mlp.cumulativeExpertCounts.count, 8)
+    }
+
+    /// With `topK == numExperts` every token routes to every expert,
+    /// so after one forward every expert has a non-zero count.
+    func testTopKEqualsExpertsActivatesEveryExpert() throws {
+        let cfg = try decode(tinyConfigJSON(
+            hidden: 32, heads: 2, kvHeads: 1, layers: 1, headDim: 16,
+            numExperts: 4, topK: 4, moeIntermediate: 16))
+        let mlp = Qwen3MoESparseMLP(cfg)
+        eval(mlp(MLXRandom.normal([1, 3, 32]).asType(.float32)))
+        XCTAssertTrue(mlp.cumulativeExpertCounts.allSatisfy { $0 > 0 },
+            "topK == numExperts must activate every expert")
+    }
+
+    /// `moeUtilization()` aggregates only the sparse layers and
+    /// reports a consistent snapshot.
+    func testMoEUtilizationAggregatesSparseLayers() throws {
+        // Two layers, both sparse (sparseStep 1, no mlp_only_layers).
+        let cfg = try decode(tinyConfigJSON(
+            hidden: 32, intermediate: 64, heads: 2, kvHeads: 1,
+            layers: 2, vocab: 64, headDim: 16,
+            numExperts: 8, topK: 2, moeIntermediate: 16))
+        let model = Qwen3MoEForCausalLM(cfg)
+        model.resetMoEUtilizationStats()
+        let tokens = MLXArray([Int32(1), Int32(2), Int32(3), Int32(4)])
+            .reshaped([1, 4])
+        eval(model(tokens, caches: nil))
+
+        let util = model.moeUtilization()
+        XCTAssertEqual(util.sparseLayers, 2)
+        XCTAssertEqual(util.expertsPerLayer, 8)
+        XCTAssertEqual(util.totalExpertSlots, 16, "2 layers * 8 experts")
+        // 4 tokens * topK 2 assignments, per sparse layer.
+        XCTAssertEqual(util.totalAssignments, 2 * 4 * 2)
+        XCTAssertGreaterThan(util.activeExpertSlots, 0)
+        XCTAssertLessThanOrEqual(util.activeExpertSlots, util.totalExpertSlots)
+        XCTAssertGreaterThan(util.utilizationRatio, 0.0)
+        XCTAssertLessThanOrEqual(util.utilizationRatio, 1.0)
+        XCTAssertGreaterThan(util.maxExpertLoad, 0)
+
+        model.resetMoEUtilizationStats()
+        XCTAssertEqual(model.moeUtilization().totalAssignments, 0,
+            "resetMoEUtilizationStats must clear every sparse layer")
+    }
+
+    /// Dense (`mlp_only_layers`) layers are excluded from the
+    /// utilization snapshot — only true sparse layers are counted.
+    func testMoEUtilizationExcludesDenseLayers() throws {
+        // Layer 0 dense, layer 1 sparse.
+        let cfg = try decode(tinyConfigJSON(
+            hidden: 32, intermediate: 64, heads: 2, kvHeads: 1,
+            layers: 2, vocab: 64, headDim: 16,
+            numExperts: 4, topK: 2, moeIntermediate: 16,
+            mlpOnlyLayers: [0]))
+        let model = Qwen3MoEForCausalLM(cfg)
+        eval(model(MLXArray([Int32(0), Int32(1)]).reshaped([1, 2]), caches: nil))
+        let util = model.moeUtilization()
+        XCTAssertEqual(util.sparseLayers, 1,
+            "Only the one sparse layer must be counted")
+        XCTAssertEqual(util.totalExpertSlots, 4)
+    }
 }
