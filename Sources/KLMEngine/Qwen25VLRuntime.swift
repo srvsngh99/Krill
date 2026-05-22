@@ -74,12 +74,18 @@ public enum Qwen25VLRuntime {
         let prefillStart = CFAbsoluteTimeGetCurrent()
         let promptArray = MLXArray(promptInt32)
             .reshaped(1, promptTokens.count)
+        // `hostTokenIds` lets the forward skip the mid-forward
+        // eval(tokens) host sync (we already have the host array).
+        // `lastTokenOnly` drops the vocab matmul to the single
+        // position we actually sample - exact for that token.
         let prefillLogits = model(
             promptArray,
             pixelValues: pixelValues,
             imageGridMerged: imageGridMerged,
             caches: caches,
-            mropePositionOffset: nil)
+            mropePositionOffset: nil,
+            hostTokenIds: promptInt32,
+            lastTokenOnly: true)
         MLX.eval(prefillLogits)
         let prefillSeconds = CFAbsoluteTimeGetCurrent() - prefillStart
 
@@ -115,13 +121,16 @@ public enum Qwen25VLRuntime {
             // `frontier + step`: a single non-image token's computed
             // coords are all zero, so the offset IS its absolute
             // position on every axis.
-            let tokenArray = MLXArray([Int32(nextToken)]).reshaped(1, 1)
+            let nextInt32 = Int32(nextToken)
+            let tokenArray = MLXArray([nextInt32]).reshaped(1, 1)
             let logits = model(
                 tokenArray,
                 pixelValues: nil,
                 imageGridMerged: nil,
                 caches: caches,
-                mropePositionOffset: frontier + step)
+                mropePositionOffset: frontier + step,
+                hostTokenIds: [nextInt32],
+                lastTokenOnly: true)
             if sampler.needsHistory {
                 recent.append(nextToken)
                 nextToken = sampler.sample(logits, recent: recent)
