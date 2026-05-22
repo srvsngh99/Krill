@@ -370,6 +370,21 @@ Done:
   (`DecodeAdvisoryFloorTests`). See `docs/RELEASE_GATE_DECODE_PROPOSAL.md`
   (`release_candidate`) and `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`
   (`strict`).
+- **`image_prefill_ratio` (owner-accepted: plan approval 2026-05-22):**
+  demoted to **advisory** at the `>= 1.5x` target under **both** profiles
+  (it was already advisory under `release_candidate`; this extends it to
+  `strict`). Unlike `text_decode_ratio` it carries **no `<metric>_floor`**:
+  the vision-encoder cache lifts SigLIP2 forward + projector cost out of the
+  measured prefill window, so the prefill-TPS bucket is structurally `< 1.0x`
+  by construction and a non-regression floor would be meaningless. The hard
+  `image_wall_ratio` is the user-visible image guarantee. Recorded in
+  `release_gate.py:ADVISORY_DEMOTION_PROVENANCE`; the gate writes
+  `scope.image_prefill_ratio` and a caveat. Covered by
+  `tools/test_release_gate.py` (`ImagePrefillAdvisoryTests`).
+  **Re-promotion contract:** returns to hard `>= 1.5x` once
+  `tools/gemma4_multimodal_benchmark.py` separates vision-encoder +
+  projector time from language-model prefill time so the ratio divides
+  like-for-like buckets. See `docs/RELEASE_GATE_IMAGE_PREFILL_PROPOSAL.md`.
 - Missing hard metrics fail the gate; we cannot claim a metric passes
   without measuring it.
 - `memory_ratio` is **hard** under `release_candidate` (PR #14). It

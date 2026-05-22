@@ -266,11 +266,18 @@ Against the accepted multimodal report (`.build/benchmarks/v6-mm.json`):
   than Ollama). `text_decode_ratio`'s `>= 1.5x` target is **advisory** and
   still printed as a WARN — the gate does not claim KrillLM hit 1.5x
   decode.
-- **`strict` exits `1`** - the uncompromised reference still fails on
-  prefill TPS and audio. `text_decode_ratio` is advisory under `strict`
-  too since 2026-05-22 (with the hard `>= 1.0x` floor; see
-  `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`), so it is no longer a
-  `strict` blocker.
+- **`strict` exits `0` on the post-native-audio multimodal report** since
+  2026-05-22. Native Swift audio (WS1) made `audio_*` hard-pass, and the
+  last two structural microbenchmark misses are now owner-accepted advisory
+  demotions: `text_decode_ratio` (advisory + hard `>= 1.0x` floor;
+  `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`) and `image_prefill_ratio`
+  (advisory, no floor — the vision-encoder cache makes the prefill-TPS
+  bucket structurally `< 1.0x`; `docs/RELEASE_GATE_IMAGE_PREFILL_PROPOSAL.md`).
+  The hard `image_wall_ratio` carries the user-visible image guarantee.
+  Every other `strict` metric stays hard. Verified `exit 0` against
+  `.build/benchmarks/ws6-specequal-mm.json` and `native-audio-mm.json`;
+  a fresh canonical Gemma 4 multimodal report is the artifact to attach to
+  the production tag.
 
 See `docs/RELEASE_GATE_DECODE_PROPOSAL.md` for the full rationale,
 anti-relaxation safeguards, and the objective re-promotion contract, and
@@ -313,12 +320,16 @@ anti-relaxation safeguards, and the objective re-promotion contract, and
   Currently advisory under `release_candidate`. Re-promote to hard once a
   drafter, fused kernel, or short-prompt eval-cadence change pushes it
   consistently over 1.5x.
-- **`image_prefill_ratio` 0.8899x** — structurally below the 1.5x
-  threshold because the vision-encoder cache moves SigLIP2 forward and
-  projector cost out of the prefill window. Currently advisory under
-  `release_candidate`. Re-promote either by counting vision-encoder time
-  inside the prefill bucket or by switching the multimodal gate to a
-  wall/TTFT-based metric.
+- ~~**`image_prefill_ratio` 0.8899x**~~ — **CLOSED as an owner-accepted
+  advisory demotion (2026-05-22).** Structurally below the 1.5x threshold
+  because the vision-encoder cache moves SigLIP2 forward and projector cost
+  out of the prefill window — a measurement artifact, not a regression.
+  Demoted to **advisory under both profiles** with **no floor** (a `>= 1.0x`
+  floor would be meaningless on a structurally `< 1.0x` metric); the hard
+  `image_wall_ratio` carries the user-visible image guarantee. Re-promotes
+  to hard once `tools/gemma4_multimodal_benchmark.py` separates
+  vision-encoder time from language-model prefill time so the ratio divides
+  like-for-like buckets. See `docs/RELEASE_GATE_IMAGE_PREFILL_PROPOSAL.md`.
 - **`audio_wall_ratio` 3.7868x** — out_of_scope under
   `release_candidate` until native Swift audio lands. The persistent
   `mlx-vlm` sidecar removed subprocess startup; the remaining gap is the
