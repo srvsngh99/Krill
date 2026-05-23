@@ -934,6 +934,78 @@ final class Qwen25VLRuntimeFoundationTests: XCTestCase {
         }
     }
 
+    // MARK: - Windowed-attention plan (batched SDPA)
+
+    /// A uniform grid yields a non-nil plan; its `perm` and
+    /// `invPerm` must be inverses (perm[invPerm[i]] == i for
+    /// every patch i).
+    func testWindowedAttentionPlanPermutationsAreInverses() throws {
+        // 16x16 patch grid (224x224 image at patch=14), merge=2 ->
+        // 8x8 LLM grid, vitWin=4 LLM tokens / merge=2 = 8 patches
+        // per window edge. 256 patches in 4 windows of 64.
+        let vision = try visionConfig(windowSize: 112)
+        let plan = try XCTUnwrap(Qwen25VLVisionTower.windowedAttentionPlan(
+            gridHFull: 16, gridWFull: 16, vision: vision),
+            "uniform grid must yield a batched plan")
+        XCTAssertEqual(plan.numWindows, 4)
+        XCTAssertEqual(plan.windowSize, 64)
+        eval(plan.perm, plan.invPerm)
+        let perm = plan.perm.asArray(Int32.self)
+        let invPerm = plan.invPerm.asArray(Int32.self)
+        XCTAssertEqual(perm.count, 256)
+        XCTAssertEqual(invPerm.count, 256)
+        for i in 0 ..< perm.count {
+            XCTAssertEqual(
+                perm[Int(invPerm[i])], Int32(i),
+                "perm and invPerm must be inverses at i=\(i)")
+        }
+    }
+
+    /// A ragged grid (where the image dimensions are not a multiple
+    /// of the window edge) returns nil so the tower falls back to
+    /// the additive-mask path.
+    func testWindowedAttentionPlanNilOnRaggedGrid() throws {
+        let vision = try visionConfig(windowSize: 56)
+        // 10x6 patch grid -> 5x3 LLM grid. vitWin = 56/14/2 = 2.
+        // 5 % 2 = 1 (non-zero) -> ragged.
+        XCTAssertNil(Qwen25VLVisionTower.windowedAttentionPlan(
+            gridHFull: 10, gridWFull: 6, vision: vision),
+            "ragged grid must return nil so the tower falls back "
+            + "to the additive-mask path")
+    }
+
+    /// The plan groups patches by window id correctly: in the
+    /// permuted output, the first `windowSize` indices all belong
+    /// to window 0, the next `windowSize` to window 1, etc.
+    func testWindowedAttentionPlanGroupsByWindow() throws {
+        // Same 16x16 grid as the inverse test.
+        let vision = try visionConfig(windowSize: 112)
+        let plan = try XCTUnwrap(Qwen25VLVisionTower.windowedAttentionPlan(
+            gridHFull: 16, gridWFull: 16, vision: vision))
+        eval(plan.perm)
+        let perm = plan.perm.asArray(Int32.self)
+        // Recompute each permuted patch's window id and check it
+        // matches the slot's window.
+        let gridFull = 16
+        let ms = 2
+        let vitWin = 4
+        let numWinW = (gridFull / ms) / vitWin
+        let patchesPerMerge = ms * ms
+        let llmW = gridFull / ms
+        for slot in 0 ..< perm.count {
+            let p = Int(perm[slot])
+            let merged = p / patchesPerMerge
+            let r = merged / llmW
+            let c = merged % llmW
+            let winId = (r / vitWin) * numWinW + (c / vitWin)
+            let expectedWindow = slot / plan.windowSize
+            XCTAssertEqual(winId, expectedWindow,
+                "patch at slot \(slot) (orig \(p)) has winId "
+                + "\(winId) but slot expects window "
+                + "\(expectedWindow)")
+        }
+    }
+
     // MARK: - smart resize
 
     func testSmartResizeRoundsToFactor() {
