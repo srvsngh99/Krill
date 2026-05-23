@@ -75,7 +75,23 @@ public class MistralForCausalLM: Module {
     }
 
     public func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
-        lmHead(model(tokens, caches: caches))
+        callAsFunction(tokens, caches: caches, lastTokenOnly: false)
+    }
+
+    /// `lastTokenOnly` slices hidden to the last position before
+    /// the vocab projection. See `LlamaForCausalLM` for the
+    /// rationale; the architecture is identical.
+    public func callAsFunction(
+        _ tokens: MLXArray,
+        caches: [KVCache]? = nil,
+        lastTokenOnly: Bool
+    ) -> MLXArray {
+        var hidden = model(tokens, caches: caches)
+        if lastTokenOnly {
+            let last = hidden.dim(1) - 1
+            hidden = hidden[0..., last ..< (last + 1), 0...]
+        }
+        return lmHead(hidden)
     }
 }
 

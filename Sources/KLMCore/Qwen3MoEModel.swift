@@ -592,7 +592,22 @@ public class Qwen3MoEForCausalLM: Module {
     }
 
     public func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
-        let hidden = model(tokens, caches: caches)
+        callAsFunction(tokens, caches: caches, lastTokenOnly: false)
+    }
+
+    /// `lastTokenOnly` slices hidden to the last position before
+    /// the vocab projection. See `LlamaForCausalLM` for the
+    /// rationale; behaves identically for tied embeddings.
+    public func callAsFunction(
+        _ tokens: MLXArray,
+        caches: [KVCache]? = nil,
+        lastTokenOnly: Bool
+    ) -> MLXArray {
+        var hidden = model(tokens, caches: caches)
+        if lastTokenOnly {
+            let last = hidden.dim(1) - 1
+            hidden = hidden[0..., last ..< (last + 1), 0...]
+        }
         if let lmHead {
             return lmHead(hidden)
         }
