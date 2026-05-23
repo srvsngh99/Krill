@@ -3,16 +3,29 @@
 class Krillm < Formula
   desc "Fast local LLM inference CLI for Apple Silicon"
   homepage "https://github.com/srvsngh99/KrillLM"
-  url "https://github.com/srvsngh99/KrillLM/releases/download/v0.2.0/krillm-0.2.0-arm64-apple-macos.tar.gz"
-  sha256 "2622de9d2552c05bcc2e904aae13591e4d43b861461a012144b1135b9e78a95b"
+  url "https://github.com/srvsngh99/KrillLM/releases/download/v0.3.0/krillm-0.3.0-arm64-apple-macos.tar.gz"
+  sha256 "683e50d4847a7f9f974f8c88dbd39bc83bec271ef70f65cd3e3282d04734e093"
   license "MIT"
-  version "0.2.0"
+  version "0.3.0"
 
   depends_on :macos
   depends_on arch: :arm64
 
   def install
-    bin.install "krillm"
+    # MLX-Swift's metallib loader searches the executable directory
+    # first (MLXMetalResourceLocator.candidates[0] is
+    # `executableDirectory/mlx.metallib`), so co-locate the metallib
+    # and the Cmlx bundle next to the binary in libexec/, then
+    # symlink the binary into bin/. Installing the metallib directly
+    # into bin/ would also work, but libexec/ keeps Homebrew's
+    # `bin` shadowing rules simple and matches the "binary with
+    # adjacent resources" convention.
+    libexec.install "krillm"
+    libexec.install "mlx.metallib" if File.exist?("mlx.metallib")
+    if Dir.exist?("mlx-swift_Cmlx.bundle")
+      libexec.install "mlx-swift_Cmlx.bundle"
+    end
+    bin.install_symlink libexec/"krillm"
   end
 
   def caveats
