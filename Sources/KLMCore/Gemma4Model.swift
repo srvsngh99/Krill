@@ -711,10 +711,12 @@ public class Gemma4MultimodalModel: Module {
         pixelValues: MLXArray? = nil,
         audioMel: MLXArray? = nil,
         audioValidMask: MLXArray? = nil,
-        mediaHash: String? = nil
+        mediaHash: String? = nil,
+        lastTokenOnly: Bool = false
     ) -> MLXArray {
         if pixelValues == nil && audioMel == nil {
-            return languageModel(tokens, caches: caches)
+            return languageModel(
+                tokens, caches: caches, lastTokenOnly: lastTokenOnly)
         }
 
         var imageEmbeddings: MLXArray? = nil
@@ -744,7 +746,8 @@ public class Gemma4MultimodalModel: Module {
             imageEmbeddings: imageEmbeddings,
             audioEmbeddings: audioEmbeddings,
             imageTokenId: imageTokenId,
-            audioTokenId: audioTokenId)
+            audioTokenId: audioTokenId,
+            lastTokenOnly: lastTokenOnly)
     }
 
     /// Number of transformer layers (for KV cache creation).
