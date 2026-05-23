@@ -83,9 +83,18 @@ public enum Recommender {
             scale = 1_000_000_000
         }
         let numericPart = lower.dropLast()
-        // Handle "8x7B" style MoE labels by summing the parts —
-        // the storage footprint is the full set of experts, not the
-        // active subset.
+        // MoE label shapes seen in the catalog:
+        //   "8x7B"        Mixtral-style: experts × per-expert params
+        //                 -> storage = experts * per-expert (the full
+        //                 set lives on disk; the active subset is a
+        //                 runtime concern).
+        //   "30B-A3B"     Qwen3-MoE-style: total-params - active-params
+        //   "1B-7B"       OLMoE-style: active-params - total-params
+        //                 The on-disk footprint is the LARGER value
+        //                 (total params), not whichever happens to be
+        //                 written first; OLMoE and Qwen 3 disagree on
+        //                 ordering. Without this, "1B-7B" sizes as 1 B
+        //                 and a 4 GB checkpoint reads as 0.5 GB.
         var paramCount: Double = 0
         if numericPart.contains("x") {
             let parts = numericPart.split(separator: "x")
@@ -94,6 +103,17 @@ public enum Recommender {
             {
                 paramCount = a * b
             }
+        } else if numericPart.contains("-") {
+            // "30B-A3B" / "1B-7B" — strip a leading "a"/"A" on either
+            // half ("A3B" => active 3 B) so the numbers parse, then
+            // take the max.
+            let parts = numericPart.split(separator: "-").map { part -> Double in
+                var s = part
+                if s.first == "a" { s = s.dropFirst() }
+                if s.last == "b" || s.last == "m" { s = s.dropLast() }
+                return Double(s) ?? 0
+            }
+            paramCount = parts.max() ?? 0
         } else {
             paramCount = Double(numericPart) ?? 0
         }

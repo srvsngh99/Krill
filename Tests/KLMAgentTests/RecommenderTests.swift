@@ -22,6 +22,56 @@ final class RecommenderTests: XCTestCase {
         XCTAssertGreaterThan(gb, 20)
     }
 
+    func testEstimatedSizeHandlesQwen3MoELabel() {
+        // qwen3-30b-a3b ships params = "30B-A3B": 30 B total, 3 B
+        // active. On-disk footprint is the larger value (the full
+        // expert set lives on disk). At 4-bit that's ~16-17 GB.
+        let bytes = Recommender.estimatedSize(params: "30B-A3B", quant: "4bit")
+        let gb = Double(bytes) / 1_073_741_824.0
+        XCTAssertGreaterThan(gb, 14, "got \(gb) GB")
+        XCTAssertLessThan(gb, 20, "got \(gb) GB")
+    }
+
+    func testEstimatedSizeHandlesOLMoELabel() {
+        // olmoe-1b-7b ships params = "1B-7B" (active-total ordering).
+        // On-disk is the larger value (7 B total); active 1 B is a
+        // runtime concern. At 4-bit ~4 GB.
+        let bytes = Recommender.estimatedSize(params: "1B-7B", quant: "4bit")
+        let gb = Double(bytes) / 1_073_741_824.0
+        XCTAssertGreaterThan(gb, 3, "got \(gb) GB")
+        XCTAssertLessThan(gb, 5, "got \(gb) GB")
+    }
+
+    func testRecommendFiltersOutQwen3MoEOnSmallHardware() {
+        // Regression for the Codex round-1 finding: before the
+        // composite-label fix, qwen3-30b-a3b sized as 200 MB and
+        // recommended as "comfortable" on an 8 GB Mac. Now it
+        // should size as ~16 GB and be filtered as wontFit.
+        let catalog: [CatalogEntry] = [
+            .init(alias: "qwen3-30b-a3b",
+                  repo: "x/qwen3moe", family: .moe,
+                  params: "30B-A3B", quant: "4bit", context: 32768),
+            .init(alias: "olmoe-1b-7b",
+                  repo: "x/olmoe", family: .moe,
+                  params: "1B-7B", quant: "4bit", context: 4096),
+        ]
+        let hw = fixtureHardware(ramGB: 8)
+        let ranked = Recommender.recommend(
+            required: [.textGeneration],
+            catalog: catalog,
+            hardware: hw)
+        // qwen3-30b-a3b sizes to ~16 GB -> wontFit -> dropped.
+        // olmoe-1b-7b sizes to ~4 GB -> risky tier on 8 GB -> kept
+        // (still shortlistable with a warning, by design).
+        // Before this fix qwen3-30b-a3b appeared as "comfortable".
+        XCTAssertFalse(ranked.contains { $0.alias == "qwen3-30b-a3b" })
+        XCTAssertTrue(ranked.contains { $0.alias == "olmoe-1b-7b" })
+        let olmoe = ranked.first { $0.alias == "olmoe-1b-7b" }
+        // ~3.8 GB on-disk * 1.6 headroom -> 6.05 GB. On 8 GB, that
+        // is just under R*0.8 (6.4 GB) so it lands as `tight`.
+        XCTAssertEqual(olmoe?.fit, .tight)
+    }
+
     func testEstimatedSizeFP32MultiplesBytesPerParam() {
         // 23 M params at fp32 should be ~92 MB.
         let bytes = Recommender.estimatedSize(params: "23M", quant: "fp32")
