@@ -410,6 +410,7 @@ public final class InferenceEngine: @unchecked Sendable {
         let forwardFn = loadedModel.forward
         let prefillForwardFn = loadedModel.prefillForward
         let multimodalFn = loadedModel.multimodalForward
+        let multimodalPrefillFn = loadedModel.multimodalPrefillForward
         let statsHolder = StatsHolder()
 
         // Capture state for async Task
@@ -423,6 +424,9 @@ public final class InferenceEngine: @unchecked Sendable {
         // slice a no-op there).
         nonisolated(unsafe) let capturedPrefillForward = prefillForwardFn
         nonisolated(unsafe) let capturedMultimodalForward = multimodalFn
+        // Optional last-token-only multimodal prefill (Gemma 4 wires
+        // this; same `lastTokenOnly` win as the text path).
+        nonisolated(unsafe) let capturedMultimodalPrefillForward = multimodalPrefillFn
         nonisolated(unsafe) let capturedTokenizer = tokenizer
         nonisolated(unsafe) let capturedPrefixCache = self.prefixCache
         let capturedSpecDecoder = self.specDecoder
@@ -582,7 +586,11 @@ public final class InferenceEngine: @unchecked Sendable {
                                 ? VisionEncoderCache.key(forImageBytes: imgData)
                                 : nil
                         }
-                        prefillLogits = mmForward(
+                        // Prefer the last-token-only multimodal
+                        // prefill closure when the family wired it.
+                        let mmPrefill = capturedMultimodalPrefillForward
+                            ?? mmForward
+                        prefillLogits = mmPrefill(
                             inputArray, caches, pixelValues,
                             capturedAudioMel, capturedAudioMask, imageHash)
                     } catch {
