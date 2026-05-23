@@ -89,9 +89,19 @@ struct RunCommand: AsyncParsableCommand {
         // alias string is unreliable (a path's last component could
         // collide with a loaded alias name, and the daemon would then
         // reject the path-form `model` field with HTTP 400).
+        //
+        // Skip the route if the alias has Modelfile overrides: the
+        // server's /v1/chat/completions path applies
+        // applyModelSystemOverride / applyModelParams (so SYSTEM /
+        // PARAMETER from the Modelfile take effect), but the
+        // in-process krillm run path below does not. Routing only
+        // when both paths would produce identical behaviour keeps the
+        // optimisation observability-free.
+        let aliasHasOverrides = registry.getModel(modelPath)?.overrides != nil
         if let prompt,
            image == nil, audio == nil, draftModel == nil,
            registry.hasModel(modelPath),
+           !aliasHasOverrides,
            ProcessInfo.processInfo.environment["KRILL_NO_AUTO_DAEMON"] != "1" {
             if try await tryDaemonRoute(modelName: modelPath, prompt: prompt) {
                 return

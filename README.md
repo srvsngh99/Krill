@@ -205,11 +205,11 @@ krillm pull mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 `krillm run "<prompt>"` reloads the model on every invocation. Run `krillm serve` in the background once and subsequent `krillm run` calls detect it (probes `/v1/status` on `$KRILL_PORT` or 11435), route through `/v1/chat/completions`, and skip the per-call model load entirely. TTFT drops from seconds to tens of milliseconds.
 
 ```bash
-krillm serve --keep-alive 24h --model qwen2.5-3b &
+KRILL_KEEP_ALIVE=24h krillm serve --model qwen2.5-3b &
 krillm run qwen2.5-3b "hi"   # auto-routed; prints "(via daemon @ :11435)"
 ```
 
-Text-only single-shot requests are routed; `--image`, `--audio`, `--draft-model`, and the interactive REPL still run in-process. Set `KRILL_NO_AUTO_DAEMON=1` to force in-process behavior.
+Text-only single-shot requests are routed; `--image`, `--audio`, `--draft-model`, models with Modelfile overrides, and the interactive REPL still run in-process. Set `KRILL_NO_AUTO_DAEMON=1` to force in-process behavior.
 
 ## Gemma 4 Multimodal Support
 
