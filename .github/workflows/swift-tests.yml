@@ -1,0 +1,78 @@
+name: swift-tests
+
+# Build + test the Swift package on every PR and on main. The
+# project's core (KLMCore, KLMEngine, KLMRegistry, etc.) is
+# Swift+MLX and lives outside the existing `tools-tests.yml`
+# workflow, which only covers the Python helpers. Without this
+# job nothing automatically catches a build break or test
+# regression on the Swift surface.
+#
+# Runs on macOS (mlx-swift is Apple-only). Gated tests that
+# require local model checkpoints (KLM_QWEN25VL_MODEL_PATH,
+# KLM_GEMMA4_MODEL_PATH, KLM_MOE_MODEL_PATH,
+# KLM_RERANKER_MODEL_PATH) skip with XCTSkip when their env
+# variables are not set, so CI runs with ~22 skips out of the
+# 415-ish test suite, exercising every code path that does not
+# need a multi-GB checkpoint download.
+
+on:
+  pull_request:
+    paths:
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'Makefile'
+      - '.github/workflows/swift-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'Makefile'
+      - '.github/workflows/swift-tests.yml'
+  workflow_dispatch:
+
+# Drop in-flight CI on a PR when a new commit lands - the most
+# recent push is always the one we want test results for.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift-test:
+    name: swift test (macOS)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Swift / Xcode / hardware info
+        run: |
+          swift --version
+          xcrun --sdk macosx --show-sdk-version
+          sysctl -n machdep.cpu.brand_string || echo "no sysctl"
+
+      - name: Cache SwiftPM build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Compile Metal shaders
+        run: make metallib CONFIGURATION=release
+
+      - name: Run tests (release)
+        run: swift test -c release --skip-build
+
+      - name: Print version
+        run: .build/release/krillm --version
