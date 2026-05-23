@@ -119,17 +119,23 @@ final class Qwen25VLProfileTests: XCTestCase {
         }
 
         // -- Stage 2: the vision transformer blocks --
-        // Replicate the tower's block loop so each block is timed
-        // with the same window/full attention split it sees in
-        // production.
+        // Time both the mask-based windowed-attention path (the
+        // pre-PR-58 implementation) and the batched-per-window
+        // path the tower now uses in production. Showing both
+        // keeps the delta auditable in CI: the batched stage
+        // should be materially faster on a uniform grid.
         let embedded = model.visual.patchEmbed(patchBatch)
             .expandedDimensions(axis: 0)
         MLX.eval(embedded)
+        let gridHFull = gridHMerged * vision.spatialMergeSize
+        let gridWFull = gridWMerged * vision.spatialMergeSize
         let windowMask = Qwen25VLVisionTower.windowAttentionMask(
-            gridHFull: gridHMerged * vision.spatialMergeSize,
-            gridWFull: gridWMerged * vision.spatialMergeSize,
+            gridHFull: gridHFull, gridWFull: gridWFull,
             vision: vision, dtype: embedded.dtype)
-        timeStage("vision blocks (all \(vision.depth))") {
+        let plan = Qwen25VLVisionTower.windowedAttentionPlan(
+            gridHFull: gridHFull, gridWFull: gridWFull,
+            vision: vision)
+        timeStage("vision blocks (mask path)") {
             var h = embedded
             for (i, block) in model.visual.blocks.enumerated() {
                 let mask = model.visual.fullAttnLayers.contains(i)
@@ -138,13 +144,59 @@ final class Qwen25VLProfileTests: XCTestCase {
             }
             return h
         }
+        if let plan {
+            timeStage("vision blocks (batched windowed)") {
+                var h = embedded
+                for (i, block) in model.visual.blocks.enumerated() {
+                    if model.visual.fullAttnLayers.contains(i) {
+                        h = block(h, mask: nil)
+                        continue
+                    }
+                    // Match Qwen25VLVisionTower.runWindowedBlock:
+                    // gather by perm, reshape to per-window batch,
+                    // attend without mask, reshape back, invert.
+                    let flat = h.squeezed(axis: 0)
+                    let grouped = flat.take(plan.perm, axis: 0)
+                        .reshaped(
+                            plan.numWindows, plan.windowSize, flat.dim(1))
+                    let attended = block(grouped, mask: nil)
+                    let restored = attended
+                        .reshaped(
+                            plan.numWindows * plan.windowSize,
+                            attended.dim(2))
+                        .take(plan.invPerm, axis: 0)
+                    h = restored.expandedDimensions(axis: 0)
+                }
+                return h
+            }
+        } else {
+            print("  (batched windowed path skipped: ragged grid)")
+        }
 
         // -- Stage 3: the patch merger --
+        // Drive the blocks once more so we have a realized hidden
+        // state to feed the merger. Uses the (faster) batched path
+        // when available so the merger timing is taken against the
+        // shape the production tower produces.
         var blocksOut = embedded
         for (i, block) in model.visual.blocks.enumerated() {
-            let mask = model.visual.fullAttnLayers.contains(i)
-                ? nil : windowMask
-            blocksOut = block(blocksOut, mask: mask)
+            if model.visual.fullAttnLayers.contains(i) {
+                blocksOut = block(blocksOut, mask: nil)
+            } else if let plan {
+                let flat = blocksOut.squeezed(axis: 0)
+                let grouped = flat.take(plan.perm, axis: 0)
+                    .reshaped(
+                        plan.numWindows, plan.windowSize, flat.dim(1))
+                let attended = block(grouped, mask: nil)
+                let restored = attended
+                    .reshaped(
+                        plan.numWindows * plan.windowSize,
+                        attended.dim(2))
+                    .take(plan.invPerm, axis: 0)
+                blocksOut = restored.expandedDimensions(axis: 0)
+            } else {
+                blocksOut = block(blocksOut, mask: windowMask)
+            }
         }
         MLX.eval(blocksOut)
         let blocksSqueezed = blocksOut.squeezed(axis: 0)
