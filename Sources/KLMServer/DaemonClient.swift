@@ -23,6 +23,7 @@ public struct DaemonClient {
     public enum ChatError: Error, CustomStringConvertible {
         case httpError(Int)
         case streamTruncated
+        case streamErrorFrame(String)
         case malformedResponse(String)
 
         public var description: String {
@@ -31,6 +32,8 @@ public struct DaemonClient {
                 return "daemon returned HTTP \(code)"
             case .streamTruncated:
                 return "daemon stream ended without [DONE]"
+            case .streamErrorFrame(let detail):
+                return "daemon reported error mid-stream: \(detail)"
             case .malformedResponse(let detail):
                 return "daemon response malformed: \(detail)"
             }
@@ -102,7 +105,11 @@ public struct DaemonClient {
             "top_p": Double(topP),
             "max_tokens": maxTokens
         ]
-        if let seed { body["seed"] = Int(seed) }
+        // Wrap as NSNumber so UInt64 values above Int.max do not trap
+        // the narrowing Int(seed) conversion. JSONSerialization preserves
+        // the original value; the server validates the range and returns
+        // a clear 4xx if it cannot accept a given seed.
+        if let seed { body["seed"] = NSNumber(value: seed) }
         let bodyData = try JSONSerialization.data(withJSONObject: body)
 
         var request = URLRequest(url: url)
@@ -126,6 +133,13 @@ public struct DaemonClient {
             guard line.hasPrefix("data: ") else { continue }
             let payload = String(line.dropFirst("data: ".count))
             if payload == "[DONE]" { sawDone = true; break }
+            // Daemon error path (Server.swift writes `data: {"error": ...}`
+            // before `[DONE]` on overflow / queue-busy / generation
+            // failure) surfaces as a thrown error so the CLI reports
+            // failure instead of returning empty output.
+            if let err = parseChunkError(payload) {
+                throw ChatError.streamErrorFrame(err)
+            }
             if let token = parseChunkContent(payload), !token.isEmpty {
                 onToken(token)
                 tokenCount += 1
@@ -137,6 +151,19 @@ public struct DaemonClient {
             tokenCount: tokenCount,
             wallTimeSec: Date().timeIntervalSince(start)
         )
+    }
+
+    /// Detect a daemon-side SSE error frame. Server.swift emits
+    /// `data: {"error": "..."}` on overflow / queue-busy paths
+    /// before sending `[DONE]`. Returns the error message string if
+    /// the payload carries a top-level `error` field, else nil.
+    static func parseChunkError(_ payload: String) -> String? {
+        guard let data = payload.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let json = object as? [String: Any] else {
+            return nil
+        }
+        return json["error"] as? String
     }
 
     /// Pull `choices[0].delta.content` out of a `chat.completion.chunk`

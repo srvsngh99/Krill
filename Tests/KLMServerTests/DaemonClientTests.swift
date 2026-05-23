@@ -89,4 +89,29 @@ final class DaemonClientTests: XCTestCase {
     func testParseChunkContent_malformedPayloadReturnsNil() {
         XCTAssertNil(DaemonClient.parseChunkContent("data: not json"))
     }
+
+    // MARK: - parseChunkError
+
+    func testParseChunkError_busyFrameSurfacesMessage() {
+        // Exact shape Server.swift line 1010 writes on queue overflow.
+        let payload = """
+        {"error":"server busy: max queue exceeded"}
+        """
+        XCTAssertEqual(
+            DaemonClient.parseChunkError(payload),
+            "server busy: max queue exceeded"
+        )
+    }
+
+    func testParseChunkError_contentChunkReturnsNil() {
+        // A normal content chunk must not be misclassified as an error.
+        let payload = """
+        {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}
+        """
+        XCTAssertNil(DaemonClient.parseChunkError(payload))
+    }
+
+    func testParseChunkError_malformedPayloadReturnsNil() {
+        XCTAssertNil(DaemonClient.parseChunkError("oops"))
+    }
 }
