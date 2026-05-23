@@ -509,7 +509,22 @@ public class Gemma4ForCausalLM: Module {
     }
 
     public func callAsFunction(_ tokens: MLXArray, caches: [KVCacheProtocol]? = nil) -> MLXArray {
-        let hidden = model(tokens, caches: caches)
+        callAsFunction(tokens, caches: caches, lastTokenOnly: false)
+    }
+
+    /// `lastTokenOnly` slices hidden to the last position before
+    /// the tied head and softcap. See `LlamaForCausalLM` for the
+    /// rationale; the softcap is per-element so slicing commutes
+    /// with it.
+    public func callAsFunction(
+        _ tokens: MLXArray, caches: [KVCacheProtocol]? = nil,
+        lastTokenOnly: Bool
+    ) -> MLXArray {
+        var hidden = model(tokens, caches: caches)
+        if lastTokenOnly {
+            let last = hidden.dim(1) - 1
+            hidden = hidden[0..., last ..< (last + 1), 0...]
+        }
         let logits = lmHead(hidden)
         let cap = config.finalLogitSoftcapping
         return MLX.tanh(logits / cap) * cap
@@ -519,12 +534,17 @@ public class Gemma4ForCausalLM: Module {
     public func callAsFunction(
         _ tokens: MLXArray, caches: [KVCacheProtocol]? = nil,
         imageEmbeddings: MLXArray? = nil, audioEmbeddings: MLXArray? = nil,
-        imageTokenId: Int = 258880, audioTokenId: Int = 258881
+        imageTokenId: Int = 258880, audioTokenId: Int = 258881,
+        lastTokenOnly: Bool = false
     ) -> MLXArray {
-        let hidden = model(
+        var hidden = model(
             tokens, caches: caches,
             imageEmbeddings: imageEmbeddings, audioEmbeddings: audioEmbeddings,
             imageTokenId: imageTokenId, audioTokenId: audioTokenId)
+        if lastTokenOnly {
+            let last = hidden.dim(1) - 1
+            hidden = hidden[0..., last ..< (last + 1), 0...]
+        }
         let logits = lmHead(hidden)
         let cap = config.finalLogitSoftcapping
         return MLX.tanh(logits / cap) * cap
@@ -654,7 +674,16 @@ public class Gemma4MultimodalModel: Module {
 
     /// Text-only forward pass.
     public func callAsFunction(_ tokens: MLXArray, caches: [KVCacheProtocol]? = nil) -> MLXArray {
-        languageModel(tokens, caches: caches)
+        callAsFunction(tokens, caches: caches, lastTokenOnly: false)
+    }
+
+    /// Text-only forward pass with the prefill `lastTokenOnly`
+    /// shortcut. Mirrors the inner Gemma4ForCausalLM overload.
+    public func callAsFunction(
+        _ tokens: MLXArray, caches: [KVCacheProtocol]? = nil,
+        lastTokenOnly: Bool
+    ) -> MLXArray {
+        languageModel(tokens, caches: caches, lastTokenOnly: lastTokenOnly)
     }
 
     /// Multimodal forward pass with image pixel values.

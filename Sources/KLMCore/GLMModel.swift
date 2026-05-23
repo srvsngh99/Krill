@@ -191,8 +191,21 @@ class GLMModelInner: Module {
     }
 
     func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
+        callAsFunction(tokens, caches: caches, lastTokenOnly: false)
+    }
+
+    /// `lastTokenOnly` slices encoded hidden state to the last
+    /// position before the output projection. See
+    /// `LlamaForCausalLM` for the rationale.
+    func callAsFunction(
+        _ tokens: MLXArray, caches: [KVCache]? = nil, lastTokenOnly: Bool
+    ) -> MLXArray {
         let hidden = embedding(tokens)
-        let encoded = encoder(hidden, caches: caches)
+        var encoded = encoder(hidden, caches: caches)
+        if lastTokenOnly {
+            let last = encoded.dim(1) - 1
+            encoded = encoded[0..., last ..< (last + 1), 0...]
+        }
         return outputLayer(encoded)
     }
 }
@@ -248,6 +261,17 @@ public class GLMForCausalLM: Module {
     }
 
     public func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
-        transformer(tokens, caches: caches)
+        callAsFunction(tokens, caches: caches, lastTokenOnly: false)
+    }
+
+    /// `lastTokenOnly` is threaded through `GLMModelInner` so the
+    /// slice happens before the vocab projection. See
+    /// `LlamaForCausalLM` for the rationale.
+    public func callAsFunction(
+        _ tokens: MLXArray,
+        caches: [KVCache]? = nil,
+        lastTokenOnly: Bool
+    ) -> MLXArray {
+        transformer(tokens, caches: caches, lastTokenOnly: lastTokenOnly)
     }
 }
