@@ -253,11 +253,19 @@ public final class InferenceEngine: @unchecked Sendable {
     /// Loads the new model first — if loading fails, the previous model remains active.
     public func swap(modelDirectory newDir: URL) async throws {
         _isSwapping.withLock { $0 = true }
-        defer { _isSwapping.withLock { $0 = false } }
 
-        // Load new model into temporaries before touching current state.
-        let newModel = try loadModel(from: newDir)
-        let newTokenizer = try await KLMTokenizer(from: newDir)
+        let newModel: LoadedModel
+        let newTokenizer: KLMTokenizer
+        do {
+            // Load new model into temporaries before touching current state.
+            newModel = try loadModel(from: newDir)
+            newTokenizer = try await KLMTokenizer(from: newDir)
+        } catch {
+            // Failed before any state changed - clear the lock and
+            // rethrow. The previous model remains active.
+            _isSwapping.withLock { $0 = false }
+            throw error
+        }
 
         // Success — now swap atomically.
         unload()
@@ -265,6 +273,13 @@ public final class InferenceEngine: @unchecked Sendable {
         self.loadedModel = newModel
         self.tokenizer = newTokenizer
         self.loadedAt = Date()
+        // Release the swap lock BEFORE warmup so the server can
+        // accept requests on the new model while warmup runs.
+        // Warmup is a pre-compile / pre-JIT optimization, not a
+        // correctness requirement; new requests routed through
+        // the same compile-on-demand path naturally elide the
+        // remaining warmup work.
+        _isSwapping.withLock { $0 = false }
         await warmup()
     }
 
@@ -415,7 +430,8 @@ public final class InferenceEngine: @unchecked Sendable {
         if let vlModel = loadedModel.module as? Qwen25VLForConditionalGeneration {
             return generateQwen25VL(
                 model: vlModel, tokenizer: tokenizer, messages: messages,
-                params: params, maxTokens: maxTokens, imageData: imageData)
+                params: params, maxTokens: maxTokens, imageData: imageData,
+                usePrefixCache: usePrefixCache)
         }
 
         // Inject media placeholders into the first user message before
@@ -941,7 +957,8 @@ public final class InferenceEngine: @unchecked Sendable {
         messages: [[String: String]],
         params: SamplingParams,
         maxTokens: Int,
-        imageData: Data?
+        imageData: Data?,
+        usePrefixCache: Bool = true
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         // Preprocess the image (if any) into the per-patch batch and
         // its post-spatial-merge grid. The grid sizes the
@@ -1001,7 +1018,13 @@ public final class InferenceEngine: @unchecked Sendable {
         // bypassing the 36-layer text prefill (~125 ms) entirely.
         // The mediaHash includes the image bytes so a different
         // image misses safely.
-        nonisolated(unsafe) let capturedPrefixCache = self.prefixCache
+        // Honor the request's `usePrefixCache` flag. The warmup
+        // forward passes `false` so its synthetic-image entry does
+        // not pollute the prefix cache (which is keyed on tokens +
+        // mediaHash and would otherwise carry the warmup PNG's
+        // hash forever).
+        nonisolated(unsafe) let capturedPrefixCache: PrefixCache? =
+            usePrefixCache ? self.prefixCache : nil
         let capturedModelId = self.modelId
 
         let stream = AsyncStream<TokenEvent> { continuation in
