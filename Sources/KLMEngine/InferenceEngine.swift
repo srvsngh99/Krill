@@ -592,26 +592,7 @@ public final class InferenceEngine: @unchecked Sendable {
         }()
 
         let stream = AsyncStream<TokenEvent> { continuation in
-            // Swift 6.2's sending-parameter analysis requires every value the
-            // Task closure reads from the enclosing scope to be listed in the
-            // capture list, so ownership is transferred into the Task rather
-            // than shared with the caller. `nonisolated(unsafe)` on the let
-            // bindings alone is not sufficient.
-            Task { [
-                statsHolder,
-                capturedForward,
-                capturedPrefillForward,
-                capturedMultimodalForward,
-                capturedMultimodalPrefillForward,
-                capturedTokenizer,
-                capturedPrefixCache,
-                capturedSpecDecoder,
-                capturedModelId,
-                capturedImageData,
-                capturedAudioMel,
-                capturedAudioMask,
-                capturedMoEModel,
-            ] in
+            Task { [statsHolder] in
                 let startTime = CFAbsoluteTimeGetCurrent()
                 // Scope expert-utilization telemetry to this generation
                 // (no-op for dense models).
@@ -1047,22 +1028,7 @@ public final class InferenceEngine: @unchecked Sendable {
         let capturedModelId = self.modelId
 
         let stream = AsyncStream<TokenEvent> { continuation in
-            // See InferenceEngine.generate() for why every captured value
-            // must be listed explicitly under Swift 6.2.
-            Task { [
-                statsHolder,
-                capturedModel,
-                capturedTokenizer,
-                capturedPixels,
-                capturedGrid,
-                capturedPrompt,
-                capturedStops,
-                capturedParams,
-                capturedMax,
-                capturedMediaHash,
-                capturedPrefixCache,
-                capturedModelId,
-            ] in
+            Task { [statsHolder] in
                 let startTime = CFAbsoluteTimeGetCurrent()
                 let output = Qwen25VLRuntime.generate(
                     model: capturedModel,
