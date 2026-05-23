@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import KLMRegistry
 
 struct VersionCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -8,7 +9,7 @@ struct VersionCommand: ParsableCommand {
     )
 
     func run() throws {
-        print("KrillLM v0.3.0")
+        print("KrillLM \(KrillLMVersionTag)")
         print("By Sourav Singh / Sourav AI Labs")
         print("https://github.com/srvsngh99/KrillLM")
         print()

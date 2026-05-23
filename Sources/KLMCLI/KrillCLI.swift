@@ -1,4 +1,5 @@
 import ArgumentParser
+import KLMRegistry
 
 @main
 struct Krillm: AsyncParsableCommand {
@@ -9,7 +10,7 @@ struct Krillm: AsyncParsableCommand {
             A Mac-native LLM inference engine built on Apple's MLX framework.
             Runs open-source models locally with optimized Metal GPU acceleration.
             """,
-        version: "0.3.0",
+        version: KrillLMVersion,
         subcommands: [
             RunCommand.self,
             PullCommand.self,

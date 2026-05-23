@@ -29,7 +29,7 @@ public enum CompatMode: String, Sendable, CaseIterable {
 /// ``Server`` owns transport (streaming, status codes); this owns *shape*.
 public enum OllamaCompat {
     /// KrillLM's own version string (kept in sync with `version` CLI output).
-    public static let krillVersion = "0.3.0"
+    public static let krillVersion = KrillLMVersion
 
     /// Ollama version we advertise to version-gated clients. Spoofable via
     /// `KRILL_OLLAMA_COMPAT_VERSION` so a client that hard-requires a newer
