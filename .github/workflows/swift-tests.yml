@@ -78,10 +78,14 @@ jobs:
 
       # `--build-tests` compiles the xctest bundle so the metallib
       # post-process step has something to copy resources into.
-      # Without it `swift test --skip-build` would have no bundle
-      # to run.
+      # `-Xswiftc -enable-testing` is needed because the test
+      # suite uses `@testable import KLMRegistry` (and other
+      # `@testable` imports). `swift test` enables testability
+      # automatically, but `swift build --build-tests` does not
+      # unless we pass it through, and we need build separate
+      # from test so the metallib step can slot in between.
       - name: Build (release, with tests)
-        run: swift build -c release --build-tests
+        run: swift build -c release --build-tests -Xswiftc -enable-testing
 
       # REQUIRE_METALLIB=1 makes the Makefile exit non-zero when
       # the Metal toolchain or the MLX checkout is missing, instead
