@@ -11,8 +11,8 @@ import Foundation
 /// (`Sources/KLMServer/OllamaCompat.swift` and the CLI's version
 /// command both already `import KLMRegistry`). Keeping the constant
 /// here avoids pulling a new module into either caller.
-public let KrillLMVersion: String = "0.3.0"
+public let KrillLMVersion: String = "0.3.1"
 
 /// Convenience: same string with a leading "v", matching git tag
-/// conventions (`v0.3.0`).
+/// conventions (`v0.3.1`).
 public let KrillLMVersionTag: String = "v" + KrillLMVersion
