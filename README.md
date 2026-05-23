@@ -231,12 +231,73 @@ krillm run gemma-4-e2b "Transcribe this audio." --audio ./clip.wav --max-tokens 
 
 ## API Compatibility
 
-KrillLM serves on port 11435 (configurable) with both:
+KrillLM serves on port 11435 (configurable) with all of:
 
 - **OpenAI API**: `POST /v1/chat/completions` (SSE streaming), `POST /v1/completions`, `GET /v1/models`
 - **Ollama API**: `POST /api/chat`, `POST /api/generate`, `GET /api/tags`
+- **Anthropic API**: `POST /v1/messages` (Claude SDK drop-in)
 
-Drop-in replacement - just change the port in your client config.
+Drop-in replacement -- just change the port in your client config.
+
+### Use with existing SDKs
+
+Start `krillm serve --model <name>` once; then point any OpenAI / LangChain / LlamaIndex / Anthropic client at `http://localhost:11435`. All four snippets below are verified end-to-end against the running daemon.
+
+**OpenAI Python SDK:**
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:11435/v1", api_key="not-used")
+resp = client.chat.completions.create(
+    model="llama-3.2-1b",
+    messages=[{"role": "user", "content": "hi"}],
+)
+print(resp.choices[0].message.content)
+```
+
+**LangChain (`langchain-openai`):**
+
+```python
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(
+    base_url="http://localhost:11435/v1",
+    api_key="not-used",
+    model="llama-3.2-1b",
+)
+print(llm.invoke("hi").content)
+```
+
+**LlamaIndex (`llama-index-llms-openai-like`):**
+
+```python
+from llama_index.llms.openai_like import OpenAILike
+
+llm = OpenAILike(
+    model="llama-3.2-1b",
+    api_base="http://localhost:11435/v1",
+    api_key="not-used",
+    is_chat_model=True,
+)
+print(llm.complete("hi").text)
+```
+
+**Anthropic Python SDK** (KrillLM exposes `/v1/messages`):
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic(base_url="http://localhost:11435", api_key="not-used")
+resp = client.messages.create(
+    model="llama-3.2-1b",
+    max_tokens=64,
+    messages=[{"role": "user", "content": "hi"}],
+)
+print(resp.content[0].text)
+```
+
+For coding agents (Aider, gptme, OpenHands) configure them with the OpenAI-compatible base URL above and any model name from `krillm list`.
 
 ## Architecture
 
