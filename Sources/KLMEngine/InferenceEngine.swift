@@ -6,6 +6,10 @@ import KLMCache
 import KLMTokenizer
 import KLMSampler
 import KLMRegistry
+#if canImport(CoreGraphics) && canImport(ImageIO)
+import CoreGraphics
+import ImageIO
+#endif
 
 /// Orchestrates model loading, tokenization, and the prefill + decode loop.
 ///
@@ -168,15 +172,100 @@ public final class InferenceEngine: @unchecked Sendable {
         self.loadedAt = Date()
     }
 
+    /// Run a tiny dry forward to pre-warm compile caches, kernel
+    /// JIT, and lazy graph state so the first user request does not
+    /// pay the one-time costs. Honors `KRILL_SKIP_WARMUP=1` to opt
+    /// out (CI / cold-startup sensitive use). Safe to call after
+    /// `load()` on any family - the call returns silently if the
+    /// model is not loaded yet, and any error is swallowed (warmup
+    /// is best-effort by design; an unrelated failure here must not
+    /// block the server from accepting real requests).
+    ///
+    /// What this actually pre-warms:
+    /// - `MLX.compile` block-forward caches that PR #48 builds
+    ///   lazily on first call. For VL families, this means the 32
+    ///   vision-block compiled forwards; for text-only families,
+    ///   the JIT-compiled fused SwiGLU + any future text-block
+    ///   compile slots.
+    /// - The custom Metal kernel binaries (fused SwiGLU JIT).
+    /// - Tokenizer / weight access page-cache.
+    ///
+    /// Behaviour is family-aware: VL models warm with a tiny
+    /// synthetic image so the vision tower's compile cache fills;
+    /// other families warm with text only. Cost is well under one
+    /// second on the families this build ships.
+    public func warmup() async {
+        if let v = ProcessInfo.processInfo.environment["KRILL_SKIP_WARMUP"],
+           !v.isEmpty, v != "0", v.lowercased() != "false" {
+            return
+        }
+        guard loadedModel != nil, tokenizer != nil else { return }
+        let messages: [[String: String]] = [
+            ["role": "user", "content": "Warmup."],
+        ]
+        // For vision-capable families, attach a tiny synthetic gray
+        // PNG so the vision tower's MLX.compile cache fills here
+        // instead of on the user's first image request. The data is
+        // discarded with the stream. Best effort: a platform without
+        // CoreGraphics (or any PNG-encoding failure) just falls
+        // through to a text-only warmup.
+        var imageData: Data? = nil
+        if supportsNativeImage {
+            imageData = Self.warmupImagePNG()
+        }
+        let (stream, _) = generate(
+            messages: messages, params: .greedy, maxTokens: 1,
+            usePrefixCache: false, imageData: imageData)
+        for await event in stream {
+            if event.isEnd { break }
+        }
+    }
+
+    /// Build a tiny solid-gray 224x224 PNG for the VL warmup. The
+    /// content does not matter - only the shape does, since warmup
+    /// is purely about pre-compiling the vision tower. Returns nil
+    /// on platforms without CoreGraphics or on encoder failure.
+    private static func warmupImagePNG() -> Data? {
+        #if canImport(CoreGraphics) && canImport(ImageIO)
+        let w = 224, h = 224
+        let cs = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil, width: w, height: h, bitsPerComponent: 8,
+            bytesPerRow: w * 4, space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.setFillColor(CGColor(red: 0.5, green: 0.5, blue: 0.5, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        guard let image = ctx.makeImage() else { return nil }
+        let out = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(
+            out, "public.png" as CFString, 1, nil)
+        else { return nil }
+        CGImageDestinationAddImage(dest, image, nil)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return out as Data
+        #else
+        return nil
+        #endif
+    }
+
     /// Swap the current model for a new one at the given directory.
     /// Loads the new model first — if loading fails, the previous model remains active.
     public func swap(modelDirectory newDir: URL) async throws {
         _isSwapping.withLock { $0 = true }
-        defer { _isSwapping.withLock { $0 = false } }
 
-        // Load new model into temporaries before touching current state.
-        let newModel = try loadModel(from: newDir)
-        let newTokenizer = try await KLMTokenizer(from: newDir)
+        let newModel: LoadedModel
+        let newTokenizer: KLMTokenizer
+        do {
+            // Load new model into temporaries before touching current state.
+            newModel = try loadModel(from: newDir)
+            newTokenizer = try await KLMTokenizer(from: newDir)
+        } catch {
+            // Failed before any state changed - clear the lock and
+            // rethrow. The previous model remains active.
+            _isSwapping.withLock { $0 = false }
+            throw error
+        }
 
         // Success — now swap atomically.
         unload()
@@ -184,6 +273,14 @@ public final class InferenceEngine: @unchecked Sendable {
         self.loadedModel = newModel
         self.tokenizer = newTokenizer
         self.loadedAt = Date()
+        // Release the swap lock BEFORE warmup so the server can
+        // accept requests on the new model while warmup runs.
+        // Warmup is a pre-compile / pre-JIT optimization, not a
+        // correctness requirement; new requests routed through
+        // the same compile-on-demand path naturally elide the
+        // remaining warmup work.
+        _isSwapping.withLock { $0 = false }
+        await warmup()
     }
 
     /// Load a draft model for speculative decoding. Once loaded, subsequent
@@ -333,7 +430,8 @@ public final class InferenceEngine: @unchecked Sendable {
         if let vlModel = loadedModel.module as? Qwen25VLForConditionalGeneration {
             return generateQwen25VL(
                 model: vlModel, tokenizer: tokenizer, messages: messages,
-                params: params, maxTokens: maxTokens, imageData: imageData)
+                params: params, maxTokens: maxTokens, imageData: imageData,
+                usePrefixCache: usePrefixCache)
         }
 
         // Inject media placeholders into the first user message before
@@ -859,7 +957,8 @@ public final class InferenceEngine: @unchecked Sendable {
         messages: [[String: String]],
         params: SamplingParams,
         maxTokens: Int,
-        imageData: Data?
+        imageData: Data?,
+        usePrefixCache: Bool = true
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         // Preprocess the image (if any) into the per-patch batch and
         // its post-spatial-merge grid. The grid sizes the
@@ -919,7 +1018,13 @@ public final class InferenceEngine: @unchecked Sendable {
         // bypassing the 36-layer text prefill (~125 ms) entirely.
         // The mediaHash includes the image bytes so a different
         // image misses safely.
-        nonisolated(unsafe) let capturedPrefixCache = self.prefixCache
+        // Honor the request's `usePrefixCache` flag. The warmup
+        // forward passes `false` so its synthetic-image entry does
+        // not pollute the prefix cache (which is keyed on tokens +
+        // mediaHash and would otherwise carry the warmup PNG's
+        // hash forever).
+        nonisolated(unsafe) let capturedPrefixCache: PrefixCache? =
+            usePrefixCache ? self.prefixCache : nil
         let capturedModelId = self.modelId
 
         let stream = AsyncStream<TokenEvent> { continuation in

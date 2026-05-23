@@ -58,6 +58,11 @@ struct ServeCommand: AsyncParsableCommand {
             print("Loading model from \(modelDir.path)...")
             engine = InferenceEngine(modelDirectory: modelDir)
             try await engine.load()
+            // Pre-warm compile caches + kernel JIT so the first
+            // request does not pay one-time costs. Opt-out via
+            // `KRILL_SKIP_WARMUP=1`. Best-effort: warmup errors
+            // never block the server from accepting requests.
+            await engine.warmup()
             print("Model loaded.")
 
             let draftSpec = self.draftModel
