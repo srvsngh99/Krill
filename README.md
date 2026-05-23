@@ -241,7 +241,7 @@ Drop-in replacement -- just change the port in your client config.
 
 ### Use with existing SDKs
 
-Start `krillm serve --model <name>` once; then point any OpenAI / LangChain / LlamaIndex / Anthropic client at `http://localhost:11435`. All four snippets below are verified end-to-end against the running daemon.
+Start `krillm serve --model <name>` once. Then point your SDK at the right base URL: OpenAI-family clients (openai, langchain-openai, llama-index) use `http://localhost:11435/v1`, since their SDKs append paths like `/chat/completions` directly. The Anthropic SDK is the exception -- it appends its own `/v1/messages`, so it takes `http://localhost:11435` without the trailing `/v1`. All four snippets below are verified end-to-end against the running daemon.
 
 **OpenAI Python SDK:**
 
