@@ -16,20 +16,24 @@ public struct DaemonClient {
     }
 
     public struct ChatResult: Sendable {
-        public let tokenCount: Int
+        /// See StreamProgress.contentChunkCount for the chunk-vs-token
+        /// distinction; the daemon path does not surface a true token
+        /// count today.
+        public let contentChunkCount: Int
         public let wallTimeSec: Double
     }
 
     public enum ChatError: Error, CustomStringConvertible {
-        case httpError(Int)
+        case httpError(Int, body: String)
         case streamTruncated
         case streamErrorFrame(String)
         case malformedResponse(String)
 
         public var description: String {
             switch self {
-            case .httpError(let code):
-                return "daemon returned HTTP \(code)"
+            case .httpError(let code, let body):
+                let bodyDetail = body.isEmpty ? "" : ": \(body)"
+                return "daemon returned HTTP \(code)\(bodyDetail)"
             case .streamTruncated:
                 return "daemon stream ended without [DONE]"
             case .streamErrorFrame(let detail):
@@ -38,6 +42,16 @@ public struct DaemonClient {
                 return "daemon response malformed: \(detail)"
             }
         }
+    }
+
+    public struct StreamProgress: Sendable {
+        /// Number of non-empty content chunks seen. Note: this is
+        /// chunks, not tokens. The server's StreamingReasoningFilter
+        /// can buffer or drop chunks (eg around `<think>` blocks)
+        /// and a single chunk may carry multiple tokens, so this
+        /// value is a coarse progress indicator, not a token count.
+        public let contentChunkCount: Int
+        public let sawDone: Bool
     }
 
     /// Probe the daemon's `/v1/status` endpoint. Returns nil if
@@ -124,33 +138,63 @@ public struct DaemonClient {
             throw ChatError.malformedResponse("non-HTTP response")
         }
         guard http.statusCode == 200 else {
-            throw ChatError.httpError(http.statusCode)
+            // Drain a bounded amount of the error body into the thrown
+            // error so the caller sees the server's actual reason
+            // (eg `{"error":"model name mismatch ..."}`) rather than a
+            // bare status code.
+            let body = try await Self.collectErrorBody(bytes: bytes)
+            throw ChatError.httpError(http.statusCode, body: body)
         }
 
-        var tokenCount = 0
+        let progress = try await consumeSSE(lines: bytes.lines, onToken: onToken)
+        guard progress.sawDone else { throw ChatError.streamTruncated }
+
+        return ChatResult(
+            contentChunkCount: progress.contentChunkCount,
+            wallTimeSec: Date().timeIntervalSince(start)
+        )
+    }
+
+    /// Drive an SSE line stream: forward content chunks to `onToken`,
+    /// throw on the first `{"error": ...}` frame, return when `[DONE]`
+    /// is seen (or when the sequence ends without it; the caller decides
+    /// whether that is a truncation). Exposed as `internal` so tests
+    /// can feed a synthetic line stream without spinning a daemon.
+    static func consumeSSE<S: AsyncSequence>(
+        lines: S,
+        onToken: @Sendable (String) -> Void
+    ) async throws -> StreamProgress where S.Element == String {
+        var contentChunkCount = 0
         var sawDone = false
-        for try await line in bytes.lines {
+        for try await line in lines {
             guard line.hasPrefix("data: ") else { continue }
             let payload = String(line.dropFirst("data: ".count))
             if payload == "[DONE]" { sawDone = true; break }
-            // Daemon error path (Server.swift writes `data: {"error": ...}`
-            // before `[DONE]` on overflow / queue-busy / generation
-            // failure) surfaces as a thrown error so the CLI reports
-            // failure instead of returning empty output.
             if let err = parseChunkError(payload) {
                 throw ChatError.streamErrorFrame(err)
             }
             if let token = parseChunkContent(payload), !token.isEmpty {
                 onToken(token)
-                tokenCount += 1
+                contentChunkCount += 1
             }
         }
-        guard sawDone else { throw ChatError.streamTruncated }
-
-        return ChatResult(
-            tokenCount: tokenCount,
-            wallTimeSec: Date().timeIntervalSince(start)
+        return StreamProgress(
+            contentChunkCount: contentChunkCount,
+            sawDone: sawDone
         )
+    }
+
+    /// Read up to 4 KB of an HTTP error body so the surfaced error
+    /// can include the server's reason without unbounded memory or
+    /// time use on a misbehaving daemon.
+    private static func collectErrorBody(bytes: URLSession.AsyncBytes) async throws -> String {
+        var buffer = Data()
+        let cap = 4096
+        for try await byte in bytes {
+            buffer.append(byte)
+            if buffer.count >= cap { break }
+        }
+        return String(data: buffer, encoding: .utf8) ?? ""
     }
 
     /// Detect a daemon-side SSE error frame. Server.swift emits

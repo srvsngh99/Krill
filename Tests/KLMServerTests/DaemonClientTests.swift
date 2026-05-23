@@ -114,4 +114,111 @@ final class DaemonClientTests: XCTestCase {
     func testParseChunkError_malformedPayloadReturnsNil() {
         XCTAssertNil(DaemonClient.parseChunkError("oops"))
     }
+
+    // MARK: - consumeSSE (end-to-end loop contract)
+
+    /// Sendable collector so the @Sendable `onToken` closure can
+    /// stash tokens for the test to inspect without tripping Swift 6
+    /// strict-concurrency capture rules.
+    private final class TokenCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var tokens: [String] = []
+        func append(_ token: String) {
+            lock.lock(); defer { lock.unlock() }
+            tokens.append(token)
+        }
+        var snapshot: [String] {
+            lock.lock(); defer { lock.unlock() }
+            return tokens
+        }
+    }
+
+    /// Build an `AsyncStream<String>` from a list of SSE lines so the
+    /// loop can be exercised without spinning a real daemon. Each
+    /// element is a single line; consumeSSE will receive them in
+    /// order, matching what `URLSession.AsyncBytes.lines` would yield.
+    private func makeLineStream(_ lines: [String]) -> AsyncStream<String> {
+        AsyncStream { continuation in
+            for line in lines { continuation.yield(line) }
+            continuation.finish()
+        }
+    }
+
+    func testConsumeSSE_emitsTokensThenTerminatesOnDONE() async throws {
+        let lines = [
+            #"data: {"id":"x","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}"#,
+            #"data: {"id":"x","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"role":"assistant","content":"!"}}]}"#,
+            "data: [DONE]"
+        ]
+        let collector = TokenCollector()
+        let progress = try await DaemonClient.consumeSSE(
+            lines: makeLineStream(lines),
+            onToken: { collector.append($0) }
+        )
+        XCTAssertEqual(collector.snapshot, ["hi", "!"])
+        XCTAssertEqual(progress.contentChunkCount, 2)
+        XCTAssertTrue(progress.sawDone)
+    }
+
+    func testConsumeSSE_throwsStreamErrorFrameOnServerError() async {
+        // The exact frame Server.swift line 1010 writes on queue
+        // overflow, followed by [DONE]. The loop must throw before
+        // it sees [DONE]; the CLI should fail loudly rather than
+        // return empty success.
+        let lines = [
+            #"data: {"error":"server busy: max queue exceeded"}"#,
+            "data: [DONE]"
+        ]
+        let collector = TokenCollector()
+        do {
+            _ = try await DaemonClient.consumeSSE(
+                lines: makeLineStream(lines),
+                onToken: { collector.append($0) }
+            )
+            XCTFail("expected ChatError.streamErrorFrame to be thrown")
+        } catch let DaemonClient.ChatError.streamErrorFrame(message) {
+            XCTAssertEqual(message, "server busy: max queue exceeded")
+            XCTAssertTrue(
+                collector.snapshot.isEmpty,
+                "no tokens should be forwarded before the error throws"
+            )
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testConsumeSSE_truncationLeavesSawDoneFalse() async throws {
+        // Stream that ends without [DONE] (mid-stream disconnect from
+        // the daemon). consumeSSE returns sawDone=false; the public
+        // streamChat then throws ChatError.streamTruncated.
+        let lines = [
+            #"data: {"id":"x","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"role":"assistant","content":"partial"}}]}"#
+        ]
+        let progress = try await DaemonClient.consumeSSE(
+            lines: makeLineStream(lines),
+            onToken: { _ in }
+        )
+        XCTAssertEqual(progress.contentChunkCount, 1)
+        XCTAssertFalse(progress.sawDone)
+    }
+
+    func testConsumeSSE_ignoresNonDataLinesAndEmptyContentChunks() async throws {
+        // SSE comments (lines starting with `:`), blank lines, and
+        // finish chunks (delta with no content) are all non-events
+        // for the token forwarder.
+        let lines = [
+            ":keepalive",
+            "",
+            #"data: {"id":"x","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+            "data: [DONE]"
+        ]
+        let collector = TokenCollector()
+        let progress = try await DaemonClient.consumeSSE(
+            lines: makeLineStream(lines),
+            onToken: { collector.append($0) }
+        )
+        XCTAssertTrue(collector.snapshot.isEmpty)
+        XCTAssertEqual(progress.contentChunkCount, 0)
+        XCTAssertTrue(progress.sawDone)
+    }
 }

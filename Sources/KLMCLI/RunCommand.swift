@@ -83,8 +83,15 @@ struct RunCommand: AsyncParsableCommand {
         // route through HTTP and skip the per-call model load entirely.
         // A failed probe (default 200 ms timeout) falls through silently
         // to the in-process path. Set KRILL_NO_AUTO_DAEMON=1 to disable.
+        //
+        // Restrict daemon routing to registry-alias invocations:
+        // comparing a filesystem-path argument against the daemon's
+        // alias string is unreliable (a path's last component could
+        // collide with a loaded alias name, and the daemon would then
+        // reject the path-form `model` field with HTTP 400).
         if let prompt,
            image == nil, audio == nil, draftModel == nil,
+           registry.hasModel(modelPath),
            ProcessInfo.processInfo.environment["KRILL_NO_AUTO_DAEMON"] != "1" {
             if try await tryDaemonRoute(modelName: modelPath, prompt: prompt) {
                 return
@@ -195,11 +202,15 @@ struct RunCommand: AsyncParsableCommand {
             }
         )
         print()
-        let tokPerSec = result.wallTimeSec > 0
-            ? Double(result.tokenCount) / result.wallTimeSec : 0
+        // `contentChunkCount` is non-empty SSE delta chunks, not true
+        // tokens (the server's StreamingReasoningFilter buffers and may
+        // drop chunks around `<think>` blocks, and a single chunk may
+        // carry multiple tokens). Label it as such instead of misnaming
+        // it "tokens", which would silently disagree with the
+        // in-process stats line above.
         print(String(
-            format: "--- (via daemon @ :%d) %d tokens at %.1f tok/s, wall %.2fs",
-            port, result.tokenCount, tokPerSec, result.wallTimeSec
+            format: "--- (via daemon @ :%d) %d chunks, wall %.2fs",
+            port, result.contentChunkCount, result.wallTimeSec
         ))
         return true
     }
