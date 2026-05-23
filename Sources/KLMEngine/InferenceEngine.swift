@@ -511,24 +511,47 @@ public final class InferenceEngine: @unchecked Sendable {
         let multimodalPrefillFn = loadedModel.multimodalPrefillForward
         let statsHolder = StatsHolder()
 
-        // Capture state for async Task
-        nonisolated(unsafe) let capturedForward = forwardFn
-        // `prefillForward`, when present, returns logits sliced to
-        // the last position. The engine uses it on prefill (sampling
-        // reads the last position only) so the
-        // `[1, L, hidden] -> [1, L, vocab]` matmul drops to a single
-        // position. Bit-exact for the sampled token; decode-step
-        // forwards keep using `forward` (single-token input makes the
-        // slice a no-op there).
-        nonisolated(unsafe) let capturedPrefillForward = prefillForwardFn
-        nonisolated(unsafe) let capturedMultimodalForward = multimodalFn
-        // Optional last-token-only multimodal prefill (Gemma 4 wires
-        // this; same `lastTokenOnly` win as the text path).
-        nonisolated(unsafe) let capturedMultimodalPrefillForward = multimodalPrefillFn
-        nonisolated(unsafe) let capturedTokenizer = tokenizer
-        nonisolated(unsafe) let capturedPrefixCache = self.prefixCache
-        let capturedSpecDecoder = self.specDecoder
-        let capturedModelId = self.modelId
+        // Bundle every value the Task closure needs into a single
+        // @unchecked Sendable struct. The closure then captures just
+        // {statsHolder, captures}, sidestepping the Swift 6.2.4 SIL
+        // SendNonSendable pass crash that fires when many individual
+        // nonisolated(unsafe) values are captured under -O. Inside
+        // the closure body we re-bind each field to its original
+        // `capturedX` name as a closure-local `let`, so the body
+        // diff stays empty.
+        //
+        // Field rationale (was on the per-field declarations):
+        //   prefillForward: when present, returns logits sliced to
+        //     the last position. Used on prefill (sampling reads the
+        //     last position only) so the [1, L, hidden] -> [1, L,
+        //     vocab] matmul drops to a single position. Bit-exact
+        //     for the sampled token; decode-step forwards keep using
+        //     `forward` (single-token input makes the slice a no-op).
+        //   multimodalPrefillForward: optional last-token-only
+        //     multimodal prefill (Gemma 4 wires this; same
+        //     `lastTokenOnly` win as the text path).
+        //   moeModel: Native MoE runtime when this is one; used to
+        //     scope and read expert-utilization telemetry around the
+        //     generation. nil for every dense family, so the
+        //     reset/read calls become no-ops.
+        struct Captures: @unchecked Sendable {
+            typealias ForwardFn = (MLXArray, [KVCacheProtocol]?) -> MLXArray
+            typealias MultimodalForwardFn = (
+                MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, MLXArray?, String?
+            ) -> MLXArray
+            let forward: ForwardFn
+            let prefillForward: ForwardFn?
+            let multimodalForward: MultimodalForwardFn?
+            let multimodalPrefillForward: MultimodalForwardFn?
+            let tokenizer: KLMTokenizer
+            let prefixCache: PrefixCache
+            let specDecoder: SpeculativeDecoder?
+            let modelId: String
+            let imageData: Data?
+            let audioMel: MLXArray?
+            let audioMask: MLXArray?
+            let moeModel: Qwen3MoEForCausalLM?
+        }
         // int8 KV is gated to Gemma 4: other model loaders downcast caches to
         // [KVCache] in their forward closures (see ModelLoader.swift), so a
         // [QuantizedKVCache] would crash at first attention. Speculative
@@ -565,14 +588,20 @@ public final class InferenceEngine: @unchecked Sendable {
         let wantsSpec = useSpeculative ?? autoUseSpec
         let shouldSpec = wantsSpec && specDecoder != nil && !useInt8KV
             && !params.penaltiesActive && greedyRequest
-        let capturedImageData = imageData
-        nonisolated(unsafe) let capturedAudioMel = nativeAudio?.mel
-        nonisolated(unsafe) let capturedAudioMask = nativeAudio?.validMask
-        // Native MoE runtime, when this is one: used to scope and read
-        // expert-utilization telemetry around the generation. nil for
-        // every dense family, so the reset/read calls become no-ops.
-        nonisolated(unsafe) let capturedMoEModel =
-            loadedModel.module as? Qwen3MoEForCausalLM
+        let captures = Captures(
+            forward: forwardFn,
+            prefillForward: prefillForwardFn,
+            multimodalForward: multimodalFn,
+            multimodalPrefillForward: multimodalPrefillFn,
+            tokenizer: tokenizer,
+            prefixCache: self.prefixCache,
+            specDecoder: self.specDecoder,
+            modelId: self.modelId,
+            imageData: imageData,
+            audioMel: nativeAudio?.mel,
+            audioMask: nativeAudio?.validMask,
+            moeModel: loadedModel.module as? Qwen3MoEForCausalLM
+        )
 
         // int8 KV + prefix cache coexist via the quantized snapshot path
         // (PrefixCache.lookupQuantized / storeQuantized).
@@ -592,7 +621,25 @@ public final class InferenceEngine: @unchecked Sendable {
         }()
 
         let stream = AsyncStream<TokenEvent> { continuation in
-            Task { [statsHolder] in
+            Task { [statsHolder, captures] in
+                // Re-bind each Captures field to the closure-body
+                // local name the rest of this Task body uses. Doing
+                // this here (rather than referencing `captures.x`
+                // throughout) keeps the body diff against the
+                // pre-refactor version effectively empty.
+                let capturedForward = captures.forward
+                let capturedPrefillForward = captures.prefillForward
+                let capturedMultimodalForward = captures.multimodalForward
+                let capturedMultimodalPrefillForward = captures.multimodalPrefillForward
+                let capturedTokenizer = captures.tokenizer
+                let capturedPrefixCache = captures.prefixCache
+                let capturedSpecDecoder = captures.specDecoder
+                let capturedModelId = captures.modelId
+                let capturedImageData = captures.imageData
+                let capturedAudioMel = captures.audioMel
+                let capturedAudioMask = captures.audioMask
+                let capturedMoEModel = captures.moeModel
+
                 let startTime = CFAbsoluteTimeGetCurrent()
                 // Scope expert-utilization telemetry to this generation
                 // (no-op for dense models).
@@ -1003,32 +1050,63 @@ public final class InferenceEngine: @unchecked Sendable {
             "img:" + VisionEncoderCache.key(forImageBytes: $0)
         }
         let statsHolder = StatsHolder()
-        nonisolated(unsafe) let capturedModel = model
-        let capturedTokenizer = tokenizer
-        nonisolated(unsafe) let capturedPixels = pixelValues
-        let capturedGrid = gridMerged
-        let capturedPrompt = promptTokens
-        let capturedStops = stopIds
-        let capturedParams = params
-        let capturedMax = maxTokens
-        let capturedMediaHash = mediaHash
-        // The VL path now consults the same `PrefixCache` the dense
-        // path uses: a same-image, same-prompt follow-up restores KV
-        // for the whole prompt and forwards just the last token,
-        // bypassing the 36-layer text prefill (~125 ms) entirely.
-        // The mediaHash includes the image bytes so a different
-        // image misses safely.
-        // Honor the request's `usePrefixCache` flag. The warmup
-        // forward passes `false` so its synthetic-image entry does
-        // not pollute the prefix cache (which is keyed on tokens +
-        // mediaHash and would otherwise carry the warmup PNG's
-        // hash forever).
-        nonisolated(unsafe) let capturedPrefixCache: PrefixCache? =
-            usePrefixCache ? self.prefixCache : nil
-        let capturedModelId = self.modelId
+        // Same Swift-6.2.4 SIL-pass workaround as `generate()`:
+        // bundle every value the Task closure needs into a single
+        // @unchecked Sendable struct and capture just that, then
+        // re-bind to the original `capturedX` names inside the
+        // closure so the body diff stays empty.
+        //
+        // Field rationale (was on the per-field declarations):
+        //   prefixCache: the VL path consults the same PrefixCache
+        //     the dense path uses; a same-image, same-prompt
+        //     follow-up restores KV for the whole prompt and
+        //     forwards just the last token, bypassing the 36-layer
+        //     text prefill (~125 ms). The mediaHash includes the
+        //     image bytes so a different image misses safely.
+        //     Honor the request's `usePrefixCache` flag - the
+        //     warmup forward passes `false` so its synthetic-image
+        //     entry does not pollute the cache.
+        struct Captures: @unchecked Sendable {
+            let model: Qwen25VLForConditionalGeneration
+            let tokenizer: KLMTokenizer
+            let pixels: MLXArray?
+            let grid: (Int, Int)?
+            let prompt: [Int]
+            let stops: Set<Int>
+            let params: SamplingParams
+            let max: Int
+            let mediaHash: String?
+            let prefixCache: PrefixCache?
+            let modelId: String
+        }
+        let captures = Captures(
+            model: model,
+            tokenizer: tokenizer,
+            pixels: pixelValues,
+            grid: gridMerged,
+            prompt: promptTokens,
+            stops: stopIds,
+            params: params,
+            max: maxTokens,
+            mediaHash: mediaHash,
+            prefixCache: usePrefixCache ? self.prefixCache : nil,
+            modelId: self.modelId
+        )
 
         let stream = AsyncStream<TokenEvent> { continuation in
-            Task { [statsHolder] in
+            Task { [statsHolder, captures] in
+                let capturedModel = captures.model
+                let capturedTokenizer = captures.tokenizer
+                let capturedPixels = captures.pixels
+                let capturedGrid = captures.grid
+                let capturedPrompt = captures.prompt
+                let capturedStops = captures.stops
+                let capturedParams = captures.params
+                let capturedMax = captures.max
+                let capturedMediaHash = captures.mediaHash
+                let capturedPrefixCache = captures.prefixCache
+                let capturedModelId = captures.modelId
+
                 let startTime = CFAbsoluteTimeGetCurrent()
                 let output = Qwen25VLRuntime.generate(
                     model: capturedModel,

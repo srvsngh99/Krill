@@ -44,39 +44,28 @@ concurrency:
 jobs:
   swift-test:
     name: swift test (macOS)
-    # macos-26-arm64 is the only runner image that bundles an Xcode
-    # shipping Swift 6.3. macos-15 tops out at Xcode 26.3 (Swift
-    # 6.2.4), and 6.2.4's optimizer SIGSEGVs in the SendNonSendable
-    # SIL pass when compiling InferenceEngine.swift under `-O`. The
-    # crash is reproducible on any commit that compiles cleanly on
-    # 6.3; it is not something this project can work around without
-    # restructuring the AsyncStream/Task captures that every
-    # streaming path depends on. Until 6.2.4 is patched on the
-    # runner image, we have to ride a runner that ships 6.3.
-    runs-on: macos-26-arm64
+    # macos-15 is the only public runner image with sub-minute queue
+    # times. macos-26-arm64 has Xcode 26.4 (Swift 6.3) but the
+    # public arm64 pool routinely sits jobs in queue for hours.
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      # Package.swift declares `swift-tools-version: 6.2`, but the
-      # codebase exercises Swift 6.3 strict-concurrency analysis
-      # (see runner comment above for the 6.2.4 compiler crash).
-      # Xcode 26.4.1 is the runner default and ships Swift 6.3;
-      # we still set it explicitly so an image update that swaps
-      # the default cannot regress us silently. The next step
-      # asserts the Swift version to make any such drift fail
-      # loudly instead of recompiling under a stale toolchain.
-      - name: Pin Xcode (Swift 6.3)
-        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
+      # Package.swift declares `swift-tools-version: 6.2`, which
+      # ships in Xcode 16.3+. Xcode 26.3 is the newest available on
+      # macos-15 (Swift 6.2.4). The Task closures in
+      # InferenceEngine.swift were refactored to bundle their
+      # captures into a `@unchecked Sendable` struct so the
+      # 6.2.4 SendNonSendable SIL pass does not crash at -O.
+      - name: Pin Xcode (Swift 6.2)
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app
 
       - name: Show Swift / Xcode / hardware info
         run: |
           swift --version
           xcrun --sdk macosx --show-sdk-version
           sysctl -n machdep.cpu.brand_string || echo "no sysctl"
-          # Hard-fail if the selected toolchain is not Swift 6.3.x.
-          # Swift 6.2.4 has a known optimizer crash on this codebase.
-          swift --version | grep -qE 'Apple Swift version 6\.3\.'
 
       - name: Cache SwiftPM build artifacts
         uses: actions/cache@v4
