@@ -86,7 +86,27 @@ public class LlamaForCausalLM: Module {
         _ tokens: MLXArray,
         caches: [KVCache]? = nil
     ) -> MLXArray {
-        let hidden = model(tokens, caches: caches)
+        callAsFunction(tokens, caches: caches, lastTokenOnly: false)
+    }
+
+    /// Same forward pass, but slices the transformer output to the
+    /// last position before the vocab projection when
+    /// `lastTokenOnly` is true. The sampler reads from the last
+    /// position only, so on prefill the
+    /// `[1, L, hidden] -> [1, L, vocab]` matmul wastes work over
+    /// ~L-1 unused rows. The KV cache is filled by the attention
+    /// layers above the head, so the sampled token is bit-exact.
+    /// Decode steps forward a single token so the slice is a no-op.
+    public func callAsFunction(
+        _ tokens: MLXArray,
+        caches: [KVCache]? = nil,
+        lastTokenOnly: Bool
+    ) -> MLXArray {
+        var hidden = model(tokens, caches: caches)
+        if lastTokenOnly {
+            let last = hidden.dim(1) - 1
+            hidden = hidden[0..., last ..< (last + 1), 0...]
+        }
         return lmHead(hidden)
     }
 }

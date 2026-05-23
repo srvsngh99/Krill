@@ -408,11 +408,20 @@ public final class InferenceEngine: @unchecked Sendable {
             modelDirectory: modelDirectory, tokenizerEOS: eosId)
         let numLayers = loadedModel.numLayers
         let forwardFn = loadedModel.forward
+        let prefillForwardFn = loadedModel.prefillForward
         let multimodalFn = loadedModel.multimodalForward
         let statsHolder = StatsHolder()
 
         // Capture state for async Task
         nonisolated(unsafe) let capturedForward = forwardFn
+        // `prefillForward`, when present, returns logits sliced to
+        // the last position. The engine uses it on prefill (sampling
+        // reads the last position only) so the
+        // `[1, L, hidden] -> [1, L, vocab]` matmul drops to a single
+        // position. Bit-exact for the sampled token; decode-step
+        // forwards keep using `forward` (single-token input makes the
+        // slice a no-op there).
+        nonisolated(unsafe) let capturedPrefillForward = prefillForwardFn
         nonisolated(unsafe) let capturedMultimodalForward = multimodalFn
         nonisolated(unsafe) let capturedTokenizer = tokenizer
         nonisolated(unsafe) let capturedPrefixCache = self.prefixCache
@@ -577,11 +586,17 @@ public final class InferenceEngine: @unchecked Sendable {
                             inputArray, caches, pixelValues,
                             capturedAudioMel, capturedAudioMask, imageHash)
                     } catch {
-                        // Fall back to text-only if preprocessing fails
-                        prefillLogits = capturedForward(inputArray, caches)
+                        // Fall back to text-only if preprocessing fails -
+                        // honor `prefillForward` here too.
+                        prefillLogits = (capturedPrefillForward ?? capturedForward)(inputArray, caches)
                     }
                 } else {
-                    prefillLogits = capturedForward(inputArray, caches)
+                    // Text-only prefill. Prefer the `prefillForward`
+                    // last-token-only path when the family wired it;
+                    // otherwise fall back to the full forward. On a
+                    // prefix-cache hit the input is 1 token, so the
+                    // slice is a no-op either way.
+                    prefillLogits = (capturedPrefillForward ?? capturedForward)(inputArray, caches)
                 }
                 MLX.eval(prefillLogits)
                 prefillDuration = CFAbsoluteTimeGetCurrent() - startTime

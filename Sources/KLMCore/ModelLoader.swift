@@ -25,6 +25,16 @@ public struct LoadedModel: @unchecked Sendable {
     /// boundary; passing a non-`KVCache` array to those families is a logic error caught by the engine.
     public let forward: (MLXArray, [KVCacheProtocol]?) -> MLXArray
 
+    /// Optional prefill-specialized forward returning logits sliced
+    /// to the last position only - shape `[B, 1, vocab]` rather than
+    /// `[B, L, vocab]`. Bit-exact for the sampled token (the KV
+    /// cache is filled by the attention layers above the head). The
+    /// engine prefers this on prefill to drop the
+    /// `vocabSize * hidden` matmul over the L-1 unused rows; falls
+    /// back to `forward` when nil (text-multimodal paths that have
+    /// not yet been wired in).
+    public let prefillForward: ((MLXArray, [KVCacheProtocol]?) -> MLXArray)?
+
     /// Multimodal forward pass — only set for native-multimodal models
     /// (Gemma 4). Arguments:
     /// `(tokens, caches, pixelValues?, audioMel?, audioValidMask?, mediaHash?)`
@@ -36,6 +46,28 @@ public struct LoadedModel: @unchecked Sendable {
 
     /// Vocab size for validation
     public let vocabSize: Int
+
+    /// Explicit memberwise init so `prefillForward` and
+    /// `multimodalForward` can default to `nil` for callers that
+    /// only set the bare `forward` (the Swift-synthesized
+    /// memberwise init does not accept defaults).
+    public init(
+        module: Module,
+        numLayers: Int,
+        family: String,
+        forward: @escaping (MLXArray, [KVCacheProtocol]?) -> MLXArray,
+        prefillForward: ((MLXArray, [KVCacheProtocol]?) -> MLXArray)? = nil,
+        multimodalForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, MLXArray?, String?) -> MLXArray)? = nil,
+        vocabSize: Int
+    ) {
+        self.module = module
+        self.numLayers = numLayers
+        self.family = family
+        self.forward = forward
+        self.prefillForward = prefillForward
+        self.multimodalForward = multimodalForward
+        self.vocabSize = vocabSize
+    }
 }
 
 /// Detect the model family and load the appropriate architecture.
@@ -175,6 +207,9 @@ private func loadLlama(configData: Data, directory: URL) throws -> LoadedModel {
         numLayers: config.numHiddenLayers,
         family: "llama",
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
@@ -193,6 +228,9 @@ private func loadQwen(configData: Data, directory: URL) throws -> LoadedModel {
         numLayers: config.numHiddenLayers,
         family: "qwen",
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
@@ -268,6 +306,9 @@ private func loadMistral(configData: Data, directory: URL) throws -> LoadedModel
         numLayers: config.numHiddenLayers,
         family: "mistral",
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
@@ -283,6 +324,9 @@ private func loadGemma(configData: Data, directory: URL) throws -> LoadedModel {
         numLayers: config.numHiddenLayers,
         family: "gemma",
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
@@ -298,6 +342,9 @@ private func loadPhi(configData: Data, directory: URL) throws -> LoadedModel {
         numLayers: config.numHiddenLayers,
         family: "phi",
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
@@ -365,6 +412,13 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
             numLayers: config.numHiddenLayers,
             family: "gemma4",
             forward: { tokens, caches in model(tokens, caches: caches) },
+            // Text-only prefill on the multimodal model goes through
+            // the text-only overload (no image / audio), which
+            // accepts the same `lastTokenOnly` flag the Gemma 4 LM
+            // grew below.
+            prefillForward: { tokens, caches in
+                model(tokens, caches: caches, lastTokenOnly: true)
+            },
             multimodalForward: { tokens, caches, imageEmb, audioMel, audioMask, mediaHash in
                 model(tokens, caches: caches,
                       pixelValues: imageEmb,
@@ -403,6 +457,9 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
         numLayers: config.numHiddenLayers,
         family: "gemma4",
         forward: { tokens, caches in model(tokens, caches: caches) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches, lastTokenOnly: true)
+        },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
@@ -428,6 +485,9 @@ private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedMode
         numLayers: config.numHiddenLayers,
         family: "moe",
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
@@ -443,6 +503,9 @@ private func loadGLM(configData: Data, directory: URL) throws -> LoadedModel {
         numLayers: config.numHiddenLayers,
         family: "glm",
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
