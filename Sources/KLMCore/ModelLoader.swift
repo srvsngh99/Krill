@@ -35,7 +35,7 @@ public struct LoadedModel: @unchecked Sendable {
     /// not yet been wired in).
     public let prefillForward: ((MLXArray, [KVCacheProtocol]?) -> MLXArray)?
 
-    /// Multimodal forward pass — only set for native-multimodal models
+    /// Multimodal forward pass - only set for native-multimodal models
     /// (Gemma 4). Arguments:
     /// `(tokens, caches, pixelValues?, audioMel?, audioValidMask?, mediaHash?)`
     /// where `audioMel` is `[1,T,128]` log-mel, `audioValidMask` is `[1,T]`
@@ -43,6 +43,15 @@ public struct LoadedModel: @unchecked Sendable {
     /// per-model vision encoder cache; pass nil to bypass. Image and audio
     /// may be supplied together (combined native path).
     public let multimodalForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, MLXArray?, String?) -> MLXArray)?
+
+    /// Optional last-token-only multimodal prefill. Same argument
+    /// shape as `multimodalForward`, but returns logits sliced to
+    /// the last position - bit exact for the sampled token (the
+    /// KV cache is populated by the attention layers above the
+    /// lm_head) and skips the per-position vocab matmul over the
+    /// L-1 unused rows. The engine prefers this on multimodal
+    /// prefill when present; falls back to `multimodalForward`.
+    public let multimodalPrefillForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, MLXArray?, String?) -> MLXArray)?
 
     /// Vocab size for validation
     public let vocabSize: Int
@@ -58,6 +67,7 @@ public struct LoadedModel: @unchecked Sendable {
         forward: @escaping (MLXArray, [KVCacheProtocol]?) -> MLXArray,
         prefillForward: ((MLXArray, [KVCacheProtocol]?) -> MLXArray)? = nil,
         multimodalForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, MLXArray?, String?) -> MLXArray)? = nil,
+        multimodalPrefillForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, MLXArray?, String?) -> MLXArray)? = nil,
         vocabSize: Int
     ) {
         self.module = module
@@ -66,6 +76,7 @@ public struct LoadedModel: @unchecked Sendable {
         self.forward = forward
         self.prefillForward = prefillForward
         self.multimodalForward = multimodalForward
+        self.multimodalPrefillForward = multimodalPrefillForward
         self.vocabSize = vocabSize
     }
 }
@@ -424,6 +435,21 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
                       pixelValues: imageEmb,
                       audioMel: audioMel, audioValidMask: audioMask,
                       mediaHash: mediaHash)
+            },
+            multimodalPrefillForward: { tokens, caches, imageEmb, audioMel, audioMask, mediaHash in
+                // Multimodal prefill returns logits at the last
+                // position only - the engine samples one token from
+                // them, so the slice is bit exact and skips the
+                // per-position vocab matmul over the L-1 unused
+                // rows (Gemma 4 vocab is 262 144). The KV cache is
+                // filled inside `languageModel(...)` before the head,
+                // so the cache state is identical to the un-sliced
+                // path.
+                model(tokens, caches: caches,
+                      pixelValues: imageEmb,
+                      audioMel: audioMel, audioValidMask: audioMask,
+                      mediaHash: mediaHash,
+                      lastTokenOnly: true)
             },
             vocabSize: config.vocabSize
         )
