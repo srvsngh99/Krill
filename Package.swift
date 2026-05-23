@@ -90,6 +90,12 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
             ]
         ),
+        .target(
+            name: "KLMAgent",
+            dependencies: [
+                "KLMRegistry",
+            ]
+        ),
         .executableTarget(
             name: "KLMCLI",
             dependencies: [
@@ -142,6 +148,13 @@ let package = Package(
             dependencies: [
                 "KLMRegistry",
                 .product(name: "Crypto", package: "swift-crypto"),
+            ]
+        ),
+        .testTarget(
+            name: "KLMAgentTests",
+            dependencies: [
+                "KLMAgent",
+                "KLMRegistry",
             ]
         ),
     ]
