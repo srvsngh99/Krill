@@ -1,0 +1,102 @@
+name: swift-tests
+
+# Build + test the Swift package on every PR and on main. The
+# project's core (KLMCore, KLMEngine, KLMRegistry, etc.) is
+# Swift+MLX and lives outside the existing `tools-tests.yml`
+# workflow, which only covers the Python helpers. Without this
+# job nothing automatically catches a build break or test
+# regression on the Swift surface.
+#
+# Runs on macOS (mlx-swift is Apple-only). Gated tests that
+# require local model checkpoints (KLM_QWEN25VL_MODEL_PATH,
+# KLM_GEMMA4_MODEL_PATH, KLM_MOE_MODEL_PATH,
+# KLM_RERANKER_MODEL_PATH) skip with XCTSkip when their env
+# variables are not set, so CI runs with ~22 skips out of the
+# 415-ish test suite, exercising every code path that does not
+# need a multi-GB checkpoint download.
+
+on:
+  pull_request:
+    paths:
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'Makefile'
+      - '.github/workflows/swift-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Sources/**'
+      - 'Tests/**'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'Makefile'
+      - '.github/workflows/swift-tests.yml'
+  workflow_dispatch:
+
+# Drop in-flight CI on a PR when a new commit lands - the most
+# recent push is always the one we want test results for.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift-test:
+    name: swift test (macOS)
+    # macos-15 is the only public runner image with sub-minute queue
+    # times. macos-26-arm64 has Xcode 26.4 (Swift 6.3) but the
+    # public arm64 pool routinely sits jobs in queue for hours.
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Package.swift declares `swift-tools-version: 6.2`, which
+      # ships in Xcode 16.3+. Xcode 26.3 is the newest available on
+      # macos-15 (Swift 6.2.4). The Task closures in
+      # InferenceEngine.swift were refactored to bundle their
+      # captures into a `@unchecked Sendable` struct so the
+      # 6.2.4 SendNonSendable SIL pass does not crash at -O.
+      - name: Pin Xcode (Swift 6.2)
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app
+
+      - name: Show Swift / Xcode / hardware info
+        run: |
+          swift --version
+          xcrun --sdk macosx --show-sdk-version
+          sysctl -n machdep.cpu.brand_string || echo "no sysctl"
+
+      - name: Cache SwiftPM build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
+      # `--build-tests` compiles the xctest bundle so the metallib
+      # post-process step has something to copy resources into.
+      # `-Xswiftc -enable-testing` is needed because the test
+      # suite uses `@testable import KLMRegistry` (and other
+      # `@testable` imports). `swift test` enables testability
+      # automatically, but `swift build --build-tests` does not
+      # unless we pass it through, and we need build separate
+      # from test so the metallib step can slot in between.
+      - name: Build (release, with tests)
+        run: swift build -c release --build-tests -Xswiftc -enable-testing
+
+      # REQUIRE_METALLIB=1 makes the Makefile exit non-zero when
+      # the Metal toolchain or the MLX checkout is missing, instead
+      # of silently succeeding (default behaviour mirrors `make
+      # release` for that reason).
+      - name: Compile Metal shaders
+        run: make metallib CONFIGURATION=release REQUIRE_METALLIB=1
+
+      - name: Run tests (release)
+        run: swift test -c release --skip-build
+
+      - name: Print version
+        run: .build/release/krillm --version

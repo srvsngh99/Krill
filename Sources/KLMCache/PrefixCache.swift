@@ -13,6 +13,13 @@ import MLX
 ///
 /// Cache key = SHA256 of the token prefix bytes + model identifier.
 public final class PrefixCache: @unchecked Sendable {
+    /// Background queue for write-behind disk persistence. Shared
+    /// across PrefixCache instances; QoS `.utility` keeps it off
+    /// the user-interactive band but still progresses in a
+    /// reasonable timeframe.
+    private static let diskQueue = DispatchQueue(
+        label: "krillm.prefix-cache.disk", qos: .utility)
+
     private let cacheDir: URL
     private let maxMemoryEntries: Int
     private let minPrefixLength: Int
@@ -130,11 +137,16 @@ public final class PrefixCache: @unchecked Sendable {
 
         storeInMemory(key: key, entry: entry)
 
-        nonisolated(unsafe) let selfRef = self
-        nonisolated(unsafe) let capturedEntry = entry
-        nonisolated(unsafe) let capturedKey = key
-        Task.detached {
-            selfRef.writeToDisk(key: capturedKey, entry: capturedEntry, dtype: .fp16)
+        // Hand off the disk write to a background queue. Used to
+        // be Task.detached, but Swift 6.2's strict-concurrency
+        // checker rejects the capture of locals into a sending
+        // closure even with nonisolated(unsafe) (the captures
+        // are "accessible to the current task"). DispatchQueue's
+        // async is not bound by the same sending-parameter rules,
+        // and the semantics are identical: a one-shot
+        // fire-and-forget write on a background thread.
+        Self.diskQueue.async { [self] in
+            self.writeToDisk(key: key, entry: entry, dtype: .fp16)
         }
     }
 
@@ -157,11 +169,9 @@ public final class PrefixCache: @unchecked Sendable {
 
         storeInMemory(key: key, entry: entry)
 
-        nonisolated(unsafe) let selfRef = self
-        nonisolated(unsafe) let capturedEntry = entry
-        nonisolated(unsafe) let capturedKey = key
-        Task.detached {
-            selfRef.writeToDisk(key: capturedKey, entry: capturedEntry, dtype: .int8)
+        // See note on the equivalent fp16 path above.
+        Self.diskQueue.async { [self] in
+            self.writeToDisk(key: key, entry: entry, dtype: .int8)
         }
     }
 
