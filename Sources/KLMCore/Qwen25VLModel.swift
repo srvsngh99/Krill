@@ -727,6 +727,126 @@ public class Qwen25VLVisionTower: Module {
         return mask.reshaped(1, 1, nPatches, nPatches).asType(dtype)
     }
 
+    /// Plan for running the windowed vision-tower blocks as a
+    /// batch of per-window mini-sequences instead of one big
+    /// masked attention. The plan is host-side index arithmetic;
+    /// it is built once per image grid and reused across the 28
+    /// windowed blocks.
+    ///
+    /// The plan applies only when windows tile the grid evenly
+    /// (i.e. `llmH` and `llmW` are multiples of `vitWin`). When
+    /// the grid is ragged, the plan is `nil` and the tower falls
+    /// back to the original additive-mask path.
+    struct WindowedAttentionPlan {
+        /// Forward permutation: index array of shape `[L]` such
+        /// that `h.take(perm, axis: 1)` groups window-0 patches
+        /// first, then window-1, etc. Each window block is
+        /// contiguous.
+        let perm: MLXArray
+        /// Inverse permutation: `h_grouped.take(invPerm, axis: 1)`
+        /// restores the original patch order after a per-window
+        /// attention pass.
+        let invPerm: MLXArray
+        /// Number of windows (the batch dimension after grouping).
+        let numWindows: Int
+        /// Patches per window (the per-window sequence length).
+        let windowSize: Int
+    }
+
+    /// Build the batched-windowed-attention plan when the windows
+    /// tile the grid evenly; otherwise return `nil` so the tower
+    /// falls back to the additive-mask path. The plan computes a
+    /// host-side `Int32` index array, materializes it as an
+    /// `MLXArray`, and constructs the inverse permutation by
+    /// scattering positions back to original indices.
+    static func windowedAttentionPlan(
+        gridHFull: Int, gridWFull: Int,
+        vision: Qwen25VLConfig.VisionConfig
+    ) -> WindowedAttentionPlan? {
+        let ms = max(1, vision.spatialMergeSize)
+        let llmH = gridHFull / ms
+        let llmW = gridWFull / ms
+        guard llmH > 0, llmW > 0 else { return nil }
+        let vitWin = max(1, vision.windowSize / vision.patchSize / ms)
+        // Only the uniform case is batched; ragged windows (image
+        // dims that are not a multiple of the window edge) need
+        // padding or per-window seq-len handling, which adds
+        // complexity for a case that does not show up on the
+        // 224x224 / 336x336 / etc. canonical bench inputs.
+        guard llmH % vitWin == 0, llmW % vitWin == 0 else { return nil }
+        let numWinW = llmW / vitWin
+        let numWinH = llmH / vitWin
+        let numWindows = numWinH * numWinW
+        // Skip the optimization if there is only one window - the
+        // additive-mask path returns nil for that case too.
+        guard numWindows > 1 else { return nil }
+
+        let patchesPerMerge = ms * ms
+        let nPatches = gridHFull * gridWFull
+        // Per-patch window id, computed the same way as
+        // `windowAttentionMask`. Stable sort by winId gives the
+        // permutation; using a bucket fill keeps the operation
+        // O(n) and preserves original order within each window.
+        let patchesPerWindow = vitWin * vitWin * patchesPerMerge
+        precondition(numWindows * patchesPerWindow == nPatches,
+            "Uniform windowing must consume every patch: "
+            + "numWindows=\(numWindows) * patchesPerWindow="
+            + "\(patchesPerWindow) != nPatches=\(nPatches)")
+
+        var perm = [Int32](repeating: 0, count: nPatches)
+        var invPerm = [Int32](repeating: 0, count: nPatches)
+        var nextSlot = [Int](repeating: 0, count: numWindows)
+        for p in 0 ..< nPatches {
+            let merged = p / patchesPerMerge
+            let r = merged / llmW
+            let c = merged % llmW
+            let wId = (r / vitWin) * numWinW + (c / vitWin)
+            let slot = wId * patchesPerWindow + nextSlot[wId]
+            nextSlot[wId] += 1
+            perm[slot] = Int32(p)
+            invPerm[p] = Int32(slot)
+        }
+        return WindowedAttentionPlan(
+            perm: MLXArray(perm),
+            invPerm: MLXArray(invPerm),
+            numWindows: numWindows,
+            windowSize: patchesPerWindow)
+    }
+
+    /// Run a windowed vision block as `numWindows` parallel
+    /// attention calls of `windowSize` patches each, instead of a
+    /// single full-sequence attention with an additive
+    /// inter-window mask of `-1e4`. Mathematically equivalent
+    /// (attention is permutation-equivariant; the mask zeroes out
+    /// every cross-window pair anyway), but the SDPA cost drops
+    /// from O(L^2) to O(L * windowSize).
+    ///
+    /// Shape contract:
+    ///   `h` in:  `[1, L, hidden]`
+    ///   intermediate batched form: `[numWindows, windowSize, hidden]`
+    ///   `h` out: `[1, L, hidden]` (original patch order restored)
+    private func runWindowedBlock(
+        _ h: MLXArray, block: Qwen25VLVisionBlock,
+        plan: WindowedAttentionPlan
+    ) -> MLXArray {
+        // Squeeze the leading batch dim, gather by `plan.perm` so
+        // window members are contiguous, then reshape to
+        // `[numWindows, windowSize, hidden]`. The vision block's
+        // attention treats axis 0 as batch and axis 1 as seq, so
+        // each window attends only to its own members - no mask
+        // needed.
+        let flat = h.squeezed(axis: 0)  // [L, hidden]
+        let grouped = flat.take(plan.perm, axis: 0)
+            .reshaped(plan.numWindows, plan.windowSize, flat.dim(1))
+        let attended = block(grouped, mask: nil)
+        // Flatten back to [L, hidden], invert the permutation, and
+        // restore the leading batch dim.
+        let restored = attended
+            .reshaped(plan.numWindows * plan.windowSize, attended.dim(2))
+            .take(plan.invPerm, axis: 0)
+        return restored.expandedDimensions(axis: 0)
+    }
+
     /// Run the vision tower over a per-patch batched tensor and
     /// return language-aligned vision embeddings.
     ///
@@ -741,25 +861,39 @@ public class Qwen25VLVisionTower: Module {
     ///
     /// - Parameter gridHWFull: the FULL patch-grid `(h, w)` of the
     ///   image. When supplied, windowed blocks attend with the
-    ///   `windowAttentionMask` and `fullAttnBlockIndexes` layers
-    ///   attend globally - matching the HF reference. When `nil`,
-    ///   every block runs full attention (the back-compatible path
-    ///   used by module-level tests that do not have a grid).
+    ///   batched-per-window path (or the `windowAttentionMask`
+    ///   fall-back when the grid is ragged) and
+    ///   `fullAttnBlockIndexes` layers attend globally - matching
+    ///   the HF reference. When `nil`, every block runs full
+    ///   attention (the back-compatible path used by module-level
+    ///   tests that do not have a grid).
     public func callAsFunction(
         _ patchBatch: MLXArray, gridHWFull: (Int, Int)? = nil
     ) -> MLXArray {
         var h = patchEmbed(patchBatch)  // [N_patches, vision_hidden]
         h = h.expandedDimensions(axis: 0)  // [1, N_patches, hidden]
-        let windowMask: MLXArray? = gridHWFull.flatMap { grid in
+        // Prefer the batched-per-window plan for uniform grids;
+        // fall back to the additive mask otherwise.
+        let plan: WindowedAttentionPlan? = gridHWFull.flatMap { grid in
+            Self.windowedAttentionPlan(
+                gridHFull: grid.0, gridWFull: grid.1,
+                vision: visionConfig)
+        }
+        let windowMask: MLXArray? = (plan == nil) ? gridHWFull.flatMap { grid in
             Self.windowAttentionMask(
                 gridHFull: grid.0, gridWFull: grid.1,
                 vision: visionConfig, dtype: h.dtype)
-        }
+        } : nil
         for (i, block) in blocks.enumerated() {
             // Full-attention layers see the whole image; windowed
             // layers see only same-window patches.
-            let mask = fullAttnLayers.contains(i) ? nil : windowMask
-            h = block(h, mask: mask)
+            if fullAttnLayers.contains(i) {
+                h = block(h, mask: nil)
+            } else if let plan {
+                h = runWindowedBlock(h, block: block, plan: plan)
+            } else {
+                h = block(h, mask: windowMask)
+            }
         }
         let merged = merger(h.squeezed(axis: 0))
         return merged  // [N_merged_tokens, out_hidden]
