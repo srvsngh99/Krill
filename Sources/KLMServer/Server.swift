@@ -2508,7 +2508,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             "uptime_seconds": Int(serverUptime),
             "memory_mb": Int(residentMB),
             "installed_models": installed,
-            "version": "0.2.0"
+            "version": "0.3.0"
         ]
 
         if engine.isLoaded {
