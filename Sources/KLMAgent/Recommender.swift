@@ -169,6 +169,20 @@ public enum Recommender {
             // operator agent will still allow them via explicit
             // `pull_model`, but they have no business on a shortlist.
             if fit == .wontFit { continue }
+            // Same logic for disk: a recommendation is implicitly
+            // an "I should pull this", so a model whose estimated
+            // on-disk size exceeds the free disk on the registry
+            // partition is also off the shortlist. Adult mode is
+            // preserved: the user can still pull it explicitly via
+            // the (sub-PR B) `pull_model` tool and get a clear
+            // free-disk error from the puller.
+            // `freeDiskBytes == 0` (probe failure) skips the guard
+            // so we degrade rather than refuse on a weird host.
+            if hardware.freeDiskBytes > 0,
+               size > hardware.freeDiskBytes
+            {
+                continue
+            }
 
             let tier = ModelCapabilities.supportTier(for: entry.family)
             let score = scoreFor(

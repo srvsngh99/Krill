@@ -165,6 +165,55 @@ final class RecommenderTests: XCTestCase {
         XCTAssertEqual(ranked.map(\.alias), ["qwen2.5-3b"])
     }
 
+    func testRecommendDropsModelsLargerThanFreeDisk() {
+        // 32 GB RAM but only 2 GB free on the registry partition. A
+        // 7B 4-bit model (~4 GB on disk) RAM-fits as comfortable but
+        // would fail the download; the recommender must filter it.
+        let lowDisk = HardwareInfo(
+            arch: "arm64", chip: "fixture",
+            totalRAMBytes: 32 * 1_073_741_824,
+            freeRAMBytes: 16 * 1_073_741_824,
+            cpuCores: 8, gpuCores: 8,
+            freeDiskBytes: 2 * 1_073_741_824,
+            metalAvailable: true)
+        let catalog: [CatalogEntry] = [
+            .init(alias: "llama-3.1-8b",
+                  repo: "x/llama-8b", family: .llama,
+                  params: "8B", quant: "4bit", context: 8192),
+            .init(alias: "qwen2.5-0.5b",
+                  repo: "x/q-tiny", family: .qwen,
+                  params: "0.5B", quant: "4bit", context: 8192),
+        ]
+        let ranked = Recommender.recommend(
+            required: [.textGeneration],
+            catalog: catalog,
+            hardware: lowDisk)
+        XCTAssertEqual(ranked.map(\.alias), ["qwen2.5-0.5b"])
+    }
+
+    func testRecommendIgnoresDiskGuardWhenFreeDiskUnknown() {
+        // `freeDiskBytes == 0` is the probe-failure sentinel from
+        // HardwareInfo. The recommender must degrade-rather-than-
+        // refuse on a weird host: catalog entries are scored on RAM.
+        let unknownDisk = HardwareInfo(
+            arch: "arm64", chip: "fixture",
+            totalRAMBytes: 32 * 1_073_741_824,
+            freeRAMBytes: 16 * 1_073_741_824,
+            cpuCores: 8, gpuCores: 8,
+            freeDiskBytes: 0,
+            metalAvailable: true)
+        let catalog: [CatalogEntry] = [
+            .init(alias: "llama-3.1-8b",
+                  repo: "x/llama-8b", family: .llama,
+                  params: "8B", quant: "4bit", context: 8192),
+        ]
+        let ranked = Recommender.recommend(
+            required: [.textGeneration],
+            catalog: catalog,
+            hardware: unknownDisk)
+        XCTAssertEqual(ranked.map(\.alias), ["llama-3.1-8b"])
+    }
+
     func testRecommendShortlistRespectsLimit() {
         let catalog: [CatalogEntry] = (0 ..< 10).map { i in
             .init(alias: "model-\(i)",
