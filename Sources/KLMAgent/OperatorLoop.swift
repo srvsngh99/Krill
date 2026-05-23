@@ -10,19 +10,26 @@ import Foundation
 ///      results, and loop. Otherwise treat the turn as the final answer.
 ///
 /// Termination conditions, all surfaced as a terminal event:
-///   - `goalCompleted` — a no-tool-call assistant turn (the natural finish).
-///   - `budgetExhausted` — `maxSteps`, `maxToolCalls`, or `maxOutputTokens`.
-///   - `stuck` — the same `(name, argumentsJSON)` tool call fired three
-///     times in a row.
-///   - `cancelled` — the run was cancelled by the host (Ctrl-C).
+///   - `goalCompleted` - a no-tool-call assistant turn (the natural finish).
+///   - `budgetExhausted` - `maxSteps`, `maxToolCalls`, or `maxOutputTokens`.
+///   - `stuck` - the same `(name, canonicalized-arguments)` tool call fired
+///     three times in a row. Arguments are canonicalized (JSON-decoded
+///     then re-encoded with sorted keys) before comparison so trivial
+///     reorderings or whitespace changes do not bypass the guard.
+///   - `cancelled` - the run was cancelled by the host (Ctrl-C).
+///   - `failed` - the underlying generator threw.
 ///
-/// The loop is intentionally non-reentrant: instantiate one per goal.
+/// The loop is intentionally non-reentrant: `run(goal:)` must be called
+/// at most once per instance. A precondition flag enforces this so an
+/// accidental double-use crashes loudly rather than producing
+/// interleaved transcripts on a shared state.
 public final class OperatorLoop: @unchecked Sendable {
     private let generator: any OperatorGenerator
     private let tools: OperatorToolRegistry
     private let budget: OperatorBudget
     private let systemPrompt: String
     private let toolFormat: OperatorToolFormat
+    private var started = false
 
     public init(
         generator: any OperatorGenerator,
@@ -43,7 +50,11 @@ public final class OperatorLoop: @unchecked Sendable {
     /// The stream finishes after exactly one terminal event
     /// (`goalCompleted` / `budgetExhausted` / `stuck` / `cancelled`).
     public func run(goal: String) -> AsyncStream<OperatorEvent> {
-        AsyncStream { continuation in
+        precondition(!started,
+                     "OperatorLoop.run was called twice on the same "
+                     + "instance; create one OperatorLoop per goal.")
+        started = true
+        return AsyncStream { continuation in
             let task = Task {
                 await self.drive(goal: goal, continuation: continuation)
                 continuation.finish()
@@ -87,10 +98,7 @@ public final class OperatorLoop: @unchecked Sendable {
             do {
                 turn = try await generator.generate(messages: messages)
             } catch {
-                continuation.yield(.assistantMessage(
-                    "Generator failed: \(error)"))
-                continuation.yield(.goalCompleted(
-                    summary: "Aborted on generator error."))
+                continuation.yield(.failed(reason: "\(error)"))
                 return
             }
             tokensUsed += turn.tokenCount
@@ -113,9 +121,15 @@ public final class OperatorLoop: @unchecked Sendable {
                 return
             }
 
-            // Stuck detection: same (name, args) tool call 3 times in a row.
-            let signature = calls.map { "\($0.name)|\($0.argumentsJSON)" }
-                .joined(separator: ";")
+            // Stuck detection: same (name, canonicalized-args) tool call
+            // three times in a row. Canonicalize so a router that emits
+            // {"x":1,"y":2} and {"y":2,"x":1} on consecutive turns is
+            // still caught (raw-string comparison would let either key
+            // reordering or whitespace bypass the only structural
+            // guardrail against an in-budget infinite loop).
+            let signature = calls.map {
+                "\($0.name)|\(Self.canonicalize($0.argumentsJSON))"
+            }.joined(separator: ";")
             if signature == lastCallSignature {
                 lastCallStreak += 1
             } else {
@@ -126,6 +140,19 @@ public final class OperatorLoop: @unchecked Sendable {
                 continuation.yield(.stuck(
                     reason: "Same tool call repeated 3 times: \(signature)"))
                 return
+            }
+
+            // Surface any prose the model wrote alongside the tool call
+            // BEFORE dispatching. `cleanedText` is the assistant turn
+            // with the tool-call sentinels stripped; without this yield
+            // a "reasoning" prefix the model emits ("I'll check the
+            // hardware first, then ...") never reaches the event
+            // stream and the CLI / --json consumers see only the tool
+            // call.
+            let cleanedTrimmed = cleanedText.trimmingCharacters(
+                in: .whitespacesAndNewlines)
+            if !cleanedTrimmed.isEmpty {
+                continuation.yield(.assistantMessage(cleanedTrimmed))
             }
 
             // Record the assistant turn (with sentinels intact so the model
@@ -192,6 +219,22 @@ public final class OperatorLoop: @unchecked Sendable {
                 content: "Error: \(error)",
                 isError: true)
         }
+    }
+
+    /// Canonical JSON form of an arguments string: decoded then
+    /// re-serialized with sorted keys, so key-reorderings and
+    /// whitespace differences hash to the same signature. Falls
+    /// through to the original string on parse failure.
+    private static func canonicalize(_ json: String) -> String {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data),
+              let reencoded = try? JSONSerialization.data(
+                withJSONObject: obj, options: [.sortedKeys]),
+              let result = String(data: reencoded, encoding: .utf8)
+        else {
+            return json.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return result
     }
 
     private func firstSentence(_ s: String) -> String {

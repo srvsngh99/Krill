@@ -40,7 +40,7 @@ public enum OperatorToolFormat: Equatable, Sendable {
 /// with all tool-call sentinels stripped (so the user-visible reply
 /// never includes the raw JSON envelope).
 ///
-/// Sub-PR A's KLMAgent module is self-contained — we keep a tight
+/// Sub-PR A's KLMAgent module is self-contained - we keep a tight
 /// re-implementation here so the loop can be unit-tested without
 /// pulling in the `KLMServer` target. Sub-PR B replaces this with
 /// the server's family-aware extractor.

@@ -172,6 +172,90 @@ final class OperatorLoopTests: XCTestCase {
         } ?? false)
     }
 
+    func testGeneratorFailureEmitsFailedTerminal() async {
+        // Generator throws on the first turn. The loop must surface a
+        // `.failed` terminal (NOT `.goalCompleted`), so a --json
+        // consumer can distinguish error from success.
+        struct ThrowingGenerator: OperatorGenerator {
+            struct Boom: Error, CustomStringConvertible {
+                var description: String { "kaboom" }
+            }
+            func generate(messages: [[String: String]]) async throws -> OperatorTurn {
+                throw Boom()
+            }
+        }
+        let loop = OperatorLoop(
+            generator: ThrowingGenerator(),
+            tools: OperatorToolRegistry([]),
+            systemPrompt: "system")
+        let events = await collect(loop.run(goal: "anything"))
+        XCTAssertTrue(events.last.map {
+            if case .failed(let reason) = $0 { return reason.contains("kaboom") }
+            return false
+        } ?? false, "expected `.failed`, got \(events.last as Any)")
+        XCTAssertFalse(events.contains { evt in
+            if case .goalCompleted = evt { return true } else { return false }
+        }, "generator failure must not be surfaced as goalCompleted")
+    }
+
+    func testStuckDetectionIsInsensitiveToKeyOrderAndWhitespace() async {
+        // Three turns, identical tool call but with different JSON
+        // formatting: keys reordered, whitespace varied. The
+        // canonicalized signature must collapse them so the streak
+        // hits 3 and `.stuck` fires.
+        let v1 = "<tool_call>{\"name\": \"echo\", \"arguments\": {\"x\": 1, \"y\": 2}}</tool_call>"
+        let v2 = "<tool_call>{\"name\": \"echo\", \"arguments\": {\"y\": 2, \"x\": 1}}</tool_call>"
+        let v3 = "<tool_call>{\"name\": \"echo\", \"arguments\": { \"x\":1,\"y\":2 }}</tool_call>"
+        let echo = EchoTool(name: "echo") { _ in "ok" }
+        let loop = OperatorLoop(
+            generator: ScriptedGenerator([v1, v2, v3, v1]),
+            tools: OperatorToolRegistry([echo]),
+            systemPrompt: "system")
+        let events = await collect(loop.run(goal: "x"))
+        XCTAssertTrue(events.last.map {
+            if case .stuck = $0 { return true } else { return false }
+        } ?? false, "expected `.stuck`, got \(events.last as Any)")
+    }
+
+    func testAssistantProseAlongsideToolCallIsEmittedBeforeDispatch() async {
+        // The model writes one sentence of prose, then a tool call on
+        // the same turn. The loop should yield `.assistantMessage`
+        // with the prose BEFORE the tool call event.
+        let gen = ScriptedGenerator([
+            "Let me check the registry first. <tool_call>{\"name\": \"echo\", \"arguments\": {}}</tool_call>",
+            "All set.",
+        ])
+        let echo = EchoTool(name: "echo") { _ in "ok" }
+        let loop = OperatorLoop(
+            generator: gen,
+            tools: OperatorToolRegistry([echo]),
+            systemPrompt: "system")
+        let events = await collect(loop.run(goal: "check"))
+        // Find the indices of the first `.assistantMessage("Let me ...")`
+        // and the first `.toolCallStarted` and assert ordering.
+        var proseIdx: Int? = nil
+        var toolIdx: Int? = nil
+        for (i, evt) in events.enumerated() {
+            if proseIdx == nil,
+               case .assistantMessage(let s) = evt,
+               s.contains("Let me check")
+            {
+                proseIdx = i
+            }
+            if toolIdx == nil,
+               case .toolCallStarted = evt
+            {
+                toolIdx = i
+            }
+        }
+        XCTAssertNotNil(proseIdx, "expected prose `.assistantMessage`")
+        XCTAssertNotNil(toolIdx, "expected `.toolCallStarted`")
+        if let p = proseIdx, let t = toolIdx {
+            XCTAssertLessThan(p, t,
+                              "prose must precede the tool call event")
+        }
+    }
+
     func testBudgetExhaustedOnMaxOutputTokens() async {
         // Each turn claims 1000 tokens; budget is 500 so the first
         // turn already trips it.

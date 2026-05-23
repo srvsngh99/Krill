@@ -59,7 +59,7 @@ public struct RecommendedModel: Equatable, Sendable {
 ///   4. Return the top-N entries, sorted by score (then by alias for
 ///      stable ordering).
 ///
-/// The recommender returns a *shortlist* — the operator agent's
+/// The recommender returns a *shortlist* - the operator agent's
 /// router LLM picks the final one, with the shortlist in context so
 /// the explanation can cite hardware fit, params, and support tier.
 public enum Recommender {
@@ -104,7 +104,7 @@ public enum Recommender {
                 paramCount = a * b
             }
         } else if numericPart.contains("-") {
-            // "30B-A3B" / "1B-7B" — strip a leading "a"/"A" on either
+            // "30B-A3B" / "1B-7B" - strip a leading "a"/"A" on either
             // half ("A3B" => active 3 B) so the numbers parse, then
             // take the max.
             let parts = numericPart.split(separator: "-").map { part -> Double in
@@ -145,7 +145,7 @@ public enum Recommender {
     ///   - intelFilterOut: a set of families to drop entirely when
     ///     `hardware.arch == "x86_64"`. Defaults to the
     ///     Apple-Silicon-only families (Qwen 2.5-VL, Gemma 4) per the
-    ///     strategic plan's §2.9 open question 6 — recommend filtering
+    ///     strategic plan's §2.9 open question 6 - recommend filtering
     ///     them out of the suggestion, while still letting the user
     ///     `pull_model` them by explicit name (adult mode).
     ///   - limit: cap on the returned list. `0` means "all".
@@ -165,7 +165,7 @@ public enum Recommender {
 
             let size = estimatedSize(params: entry.params, quant: entry.quant)
             let fit = hardware.classifyFit(modelSizeBytes: size)
-            // Don't recommend models that won't fit at all — the
+            // Don't recommend models that won't fit at all - the
             // operator agent will still allow them via explicit
             // `pull_model`, but they have no business on a shortlist.
             if fit == .wontFit { continue }
@@ -198,7 +198,7 @@ public enum Recommender {
 
     /// Deterministic scoring used by `recommend`. Higher is better.
     ///
-    /// Weights (§2.9 open question 3 — these match the recommended
+    /// Weights (§2.9 open question 3 - these match the recommended
     /// defaults and stay easy to tune later):
     ///   - support tier: production_native = +3, compatible_fallback
     ///     = +1, experimental = 0, unsupported = -10.

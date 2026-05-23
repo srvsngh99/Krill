@@ -72,7 +72,7 @@ final class HardwareInfoTests: XCTestCase {
             hw.classifyFit(modelSizeBytes: 6 * 1_073_741_824),
             .tight)
 
-        // 8 GB model: need 12.8 GB, in (12.8, 15.2) — boundary;
+        // 8 GB model: need 12.8 GB, in (12.8, 15.2) - boundary;
         // 12.8 < 15.2 → risky
         XCTAssertEqual(
             hw.classifyFit(modelSizeBytes: 8 * 1_073_741_824),
@@ -101,12 +101,12 @@ final class HardwareInfoTests: XCTestCase {
         XCTAssertEqual(
             hw.classifyFit(modelSizeBytes: 3 * 1_073_741_824),
             .tight)
-        // 4 GB: need 6.4 GB, in (6.4, 7.6) — 6.4 not strictly < 6.4
+        // 4 GB: need 6.4 GB, in (6.4, 7.6) - 6.4 not strictly < 6.4
         // so falls to risky
         XCTAssertEqual(
             hw.classifyFit(modelSizeBytes: 4 * 1_073_741_824),
             .risky)
-        // 40 GB (a 70B 4-bit model) — wontFit
+        // 40 GB (a 70B 4-bit model) - wontFit
         XCTAssertEqual(
             hw.classifyFit(modelSizeBytes: 40 * 1_073_741_824),
             .wontFit)

@@ -89,7 +89,7 @@ public extension HardwareInfo {
     /// Capture the current machine state by shelling out to sysctl /
     /// uname / vm_stat / system_profiler / statfs. Each individual probe
     /// falls back to a conservative default on failure rather than
-    /// throwing — the operator agent works degraded rather than refuses
+    /// throwing - the operator agent works degraded rather than refuses
     /// to launch on a weird host.
     static func current() -> HardwareInfo {
         let probe = SysctlProbe.posix
@@ -240,10 +240,22 @@ internal struct SysctlProbe: Sendable {
         p.arguments = args
         let pipe = Pipe()
         p.standardOutput = pipe
-        p.standardError = Pipe()
+        // Drop stderr to /dev/null rather than an undrained Pipe(): the
+        // OS pipe buffer is ~64 KB, and if the subprocess writes more
+        // than that to stderr without anyone reading, the subprocess
+        // blocks on write and waitUntilExit deadlocks. None of the
+        // sysctl/uname/vm_stat/system_profiler/statfs probes need
+        // stderr.
+        p.standardError = FileHandle.nullDevice
         do { try p.run() } catch { return nil }
-        p.waitUntilExit()
+        // Drain stdout BEFORE waitUntilExit. readDataToEndOfFile reads
+        // until the write end closes (when the subprocess exits), so
+        // the pipe is continuously drained instead of filling. The
+        // earlier "wait, then read" ordering deadlocked any probe
+        // whose stdout exceeded the pipe buffer (real risk:
+        // system_profiler on multi-display / eGPU hosts).
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
         return String(data: data, encoding: .utf8)
     }
 }

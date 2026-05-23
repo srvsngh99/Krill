@@ -3,7 +3,7 @@ import Foundation
 /// A single operator-agent tool.
 ///
 /// The operator agent's tool surface is **deliberately scoped to KrillLM
-/// itself** — no shell, no file_read, no file_write, no web_fetch. Every
+/// itself** - no shell, no file_read, no file_write, no web_fetch. Every
 /// conforming tool wraps an existing CLI command or HTTP endpoint (the
 /// registry, the catalog, the running server). New tools that would touch
 /// the user's filesystem or shell do NOT belong here; users who want a

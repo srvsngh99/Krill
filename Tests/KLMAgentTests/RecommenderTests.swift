@@ -113,7 +113,7 @@ final class RecommenderTests: XCTestCase {
             catalog: catalog,
             hardware: hw)
         XCTAssertFalse(ranked.isEmpty)
-        // The 8x7B MoE won't fit on 16 GB — should be filtered.
+        // The 8x7B MoE won't fit on 16 GB - should be filtered.
         XCTAssertFalse(ranked.contains { $0.alias == "mixtral-8x7b" })
         // 1B is below the [1.5, 14] sweet-spot band, so it should rank
         // below the 3B and 8B (both production-native, both comfortable,

@@ -47,6 +47,11 @@ public enum OperatorEvent: Equatable, Sendable {
 
     /// The loop was cancelled (Ctrl-C or external cancel).
     case cancelled
+
+    /// The loop terminated because the underlying generator threw.
+    /// Distinct from `goalCompleted` so `--json` consumers can tell a
+    /// successful answer apart from an aborted run.
+    case failed(reason: String)
 }
 
 /// Severity tier for `OperatorEvent.warning`. Maps onto the
@@ -73,6 +78,7 @@ public extension OperatorEvent {
         case .stuck: return "stuck"
         case .budgetExhausted: return "budget_exhausted"
         case .cancelled: return "cancelled"
+        case .failed: return "failed"
         }
     }
 
@@ -111,6 +117,8 @@ public extension OperatorEvent {
             obj["detail"] = detail
         case .cancelled:
             break
+        case .failed(let reason):
+            obj["reason"] = reason
         }
         guard let data = try? JSONSerialization.data(
             withJSONObject: obj, options: [.sortedKeys])
@@ -126,7 +134,7 @@ public extension OperatorEvent {
 /// The defaults match §2.6 of the strategic plan: operator-agent goals
 /// are short ("pull this model and load it", "tell me what fits"), so
 /// the loop bails after a small number of steps. Long autonomous runs
-/// are an explicit non-goal — they belong in a coding agent.
+/// are an explicit non-goal - they belong in a coding agent.
 public struct OperatorBudget: Equatable, Sendable {
     /// Maximum number of model turns (one prompt + one decode = one step).
     public let maxSteps: Int
