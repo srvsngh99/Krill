@@ -94,6 +94,10 @@ let package = Package(
             name: "KLMAgent",
             dependencies: [
                 "KLMRegistry",
+                "KLMEngine",
+                "KLMServer",
+                "KLMSampler",
+                .product(name: "MLX", package: "mlx-swift"),
             ]
         ),
         .executableTarget(

@@ -16,8 +16,9 @@ public struct OperatorTurn: Equatable, Sendable {
 /// Pluggable "give me one assistant turn for these messages" surface.
 ///
 /// The loop is engine-agnostic so it can be unit-tested with a fixture
-/// generator that scripts a fixed sequence of replies. Sub-PR B wires
-/// a `KLMEngine.InferenceEngine`-backed generator on top of this.
+/// generator that scripts a fixed sequence of replies, and so the
+/// production driver (`InferenceEngineGenerator`) can wrap any loaded
+/// `KLMEngine.InferenceEngine`.
 public protocol OperatorGenerator: Sendable {
     /// Run one full turn against `messages` and return the assistant
     /// text. The implementation owns its own EOS / max-tokens cutoff;
@@ -25,13 +26,20 @@ public protocol OperatorGenerator: Sendable {
     func generate(messages: [[String: String]]) async throws -> OperatorTurn
 }
 
-/// Tool-call extraction strategy. The operator loop defaults to
-/// `.hermes`, which is the wire format the pinned router model
-/// (`qwen2.5-1.5b`) emits natively. Sub-PR B will switch to the
-/// family-aware `KLMServer.ToolCalling.extractToolCalls` once the
-/// loop is wired to a real `InferenceEngine`.
+/// Tool-call extraction strategy.
+///
+/// - `.hermes`: the generic `<tool_call>{...}</tool_call>` parser
+///   built into KLMAgent. Acceptable across most dense families and
+///   the right default for unit tests + the pinned router model
+///   (Qwen 2.5 1.5B, whose native wire format IS Hermes).
+/// - `.familyAware`: dispatches into `KLMServer.AgentToolBridge`,
+///   which routes per-family (Llama native, Gemma 4 native, Qwen
+///   Hermes-with-fallback, else Hermes). Use this when a non-Qwen
+///   family is loaded; pass the loaded model's `ModelFamily` so the
+///   bridge picks the right adapter.
 public enum OperatorToolFormat: Equatable, Sendable {
     case hermes
+    case familyAware(family: String?)
 }
 
 /// Minimal Hermes-style `<tool_call>{...}</tool_call>` extractor.

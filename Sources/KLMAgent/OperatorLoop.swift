@@ -199,6 +199,9 @@ public final class OperatorLoop: @unchecked Sendable {
         switch toolFormat {
         case .hermes:
             return HermesToolCallExtractor.extract(from: text)
+        case .familyAware(let family):
+            return FamilyAwareToolCallExtractor.extract(
+                from: text, family: family)
         }
     }
 
