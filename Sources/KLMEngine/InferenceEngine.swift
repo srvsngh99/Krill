@@ -682,7 +682,16 @@ public final class InferenceEngine: @unchecked Sendable {
                     let dCaches = makeKVCaches(numLayers: draftModel.numLayers)
                     let draftInput = MLXArray(promptTokens.map { Int32($0) })
                         .reshaped(1, promptTokens.count)
-                    let draftPrefillLogits = draftModel.forward(
+                    // Draft prefill's logits are never sampled or
+                    // returned - it exists only to fill the draft
+                    // KV cache. The cache is populated by the
+                    // attention layers above the lm_head, so slicing
+                    // the head output to the last position is bit
+                    // exact and skips the full vocab matmul. Fall
+                    // back to `forward` for drafts that have not
+                    // wired `prefillForward` yet.
+                    let draftPrefillFn = draftModel.prefillForward ?? draftModel.forward
+                    let draftPrefillLogits = draftPrefillFn(
                         draftInput, dCaches)
                     MLX.eval(draftPrefillLogits)
                     specDec.reset()
