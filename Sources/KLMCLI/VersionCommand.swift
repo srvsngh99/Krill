@@ -8,7 +8,7 @@ struct VersionCommand: ParsableCommand {
     )
 
     func run() throws {
-        print("KrillLM v0.2.0")
+        print("KrillLM v0.3.0")
         print("By Sourav Singh / Sourav AI Labs")
         print("https://github.com/srvsngh99/KrillLM")
         print()
