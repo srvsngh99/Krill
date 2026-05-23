@@ -4,6 +4,7 @@ import KLMEngine
 import KLMCore
 import KLMSampler
 import KLMRegistry
+import KLMServer
 
 struct RunCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -74,6 +75,20 @@ struct RunCommand: AsyncParsableCommand {
         }
         if let audio {
             try validateInputFile(audio, flagName: "--audio")
+        }
+
+        // Detect-only daemon mode (ladder rung 1): if a krillm serve is
+        // already up on the configured port AND has this model loaded
+        // AND the request is text-only single-shot with no draft model,
+        // route through HTTP and skip the per-call model load entirely.
+        // A failed probe (default 200 ms timeout) falls through silently
+        // to the in-process path. Set KRILL_NO_AUTO_DAEMON=1 to disable.
+        if let prompt,
+           image == nil, audio == nil, draftModel == nil,
+           ProcessInfo.processInfo.environment["KRILL_NO_AUTO_DAEMON"] != "1" {
+            if try await tryDaemonRoute(modelName: modelPath, prompt: prompt) {
+                return
+            }
         }
 
         // Check if this is a Gemma 4 model
@@ -147,6 +162,46 @@ struct RunCommand: AsyncParsableCommand {
                 params: params, maxTokens: maxTokens
             )
         }
+    }
+
+    /// Probe a locally running daemon and, if it has `modelName`
+    /// loaded, stream the chat through it. Returns true when the
+    /// request was served by the daemon, false when the probe
+    /// did not match and the caller should fall through to the
+    /// in-process path. A mid-stream failure throws so the user
+    /// gets a clear error instead of a silent partial output.
+    private func tryDaemonRoute(modelName: String, prompt: String) async throws -> Bool {
+        let port = Int(ProcessInfo.processInfo.environment["KRILL_PORT"] ?? "") ?? 11435
+        guard let status = await DaemonClient.probeStatus(port: port) else { return false }
+        guard status.modelLoaded, status.model == modelName else { return false }
+
+        var messages: [(role: String, content: String)] = []
+        if let system, !system.isEmpty {
+            messages.append((role: "system", content: system))
+        }
+        messages.append((role: "user", content: prompt))
+
+        let result = try await DaemonClient.streamChat(
+            port: port,
+            model: modelName,
+            messages: messages,
+            temperature: temp,
+            topP: topP,
+            maxTokens: maxTokens,
+            seed: seed,
+            onToken: { token in
+                print(token, terminator: "")
+                fflush(stdout)
+            }
+        )
+        print()
+        let tokPerSec = result.wallTimeSec > 0
+            ? Double(result.tokenCount) / result.wallTimeSec : 0
+        print(String(
+            format: "--- (via daemon @ :%d) %d tokens at %.1f tok/s, wall %.2fs",
+            port, result.tokenCount, tokPerSec, result.wallTimeSec
+        ))
+        return true
     }
 }
 

@@ -200,6 +200,17 @@ krillm pull mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 | `krillm quantize <hf-path>` | Convert HF model to MLX format |
 | `krillm version` | Print version and system info |
 
+### Speed up CLI with a background daemon
+
+`krillm run "<prompt>"` reloads the model on every invocation. Run `krillm serve` in the background once and subsequent `krillm run` calls detect it (probes `/v1/status` on `$KRILL_PORT` or 11435), route through `/v1/chat/completions`, and skip the per-call model load entirely. TTFT drops from seconds to tens of milliseconds.
+
+```bash
+krillm serve --keep-alive 24h --model qwen2.5-3b &
+krillm run qwen2.5-3b "hi"   # auto-routed; prints "(via daemon @ :11435)"
+```
+
+Text-only single-shot requests are routed; `--image`, `--audio`, `--draft-model`, and the interactive REPL still run in-process. Set `KRILL_NO_AUTO_DAEMON=1` to force in-process behavior.
+
 ## Gemma 4 Multimodal Support
 
 Gemma 4 supports text, image, and audio inputs, **all on the native Swift+MLX path** (text model + SigLIP2 vision encoder + USM Conformer audio). The legacy `mlx-vlm` Python bridge was removed in WS6 Step 4; combined `--image` + `--audio` requests run natively as well.
