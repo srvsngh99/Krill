@@ -81,17 +81,8 @@ public final class Puller: @unchecked Sendable {
         // List files in the HF repo
         let fileList = try await listRepoFiles(repo: resolved.repo)
 
-        // Filter to essential files (safetensors, configs, tokenizer)
-        let essentialFiles = fileList.filter { file in
-            let name = file.name.lowercased()
-            return name.hasSuffix(".safetensors")
-                || name == "config.json"
-                || name == "tokenizer.json"
-                || name == "tokenizer_config.json"
-                || name == "special_tokens_map.json"
-                || name == "generation_config.json"
-                || name == "tokenizer.model"
-        }
+        // Filter to essential files (safetensors, configs, tokenizer).
+        let essentialFiles = fileList.filter { Puller.isEssentialFile($0.name) }
 
         let totalSize = essentialFiles.reduce(0) { $0 + $1.size }
         var downloadedBytes: Int64 = 0
@@ -183,6 +174,50 @@ private struct URLSessionPullerHTTPClient: PullerHTTPClient {
 struct HFFileInfo {
     let name: String
     let size: Int64
+}
+
+extension Puller {
+    /// Files we pull from a HuggingFace repo. Anything not on this
+    /// list is skipped (READMEs, sample images, `original/` PyTorch
+    /// duplicates, license PDFs, etc.).
+    ///
+    /// Kept as an allowlist rather than a denylist because HF repos
+    /// can ship arbitrary clutter; a denylist would have to grow with
+    /// every new junk file. New entries here track conventions the
+    /// loaders actually need.
+    static func isEssentialFile(_ filename: String) -> Bool {
+        let name = filename.lowercased()
+        // Sharded or single-file weights.
+        if name.hasSuffix(".safetensors") { return true }
+        // Shard map for multi-file safetensors. Without this the
+        // loader can't find weights split across model-00001-of-N
+        // shards.
+        if name == "model.safetensors.index.json" { return true }
+        switch name {
+        // Core model + generation config.
+        case "config.json", "generation_config.json":
+            return true
+        // Tokenizer payloads. `tokenizer.json` is the merged HF form;
+        // `vocab.json` + `merges.txt` is the older BPE form some
+        // repos still ship without the merged file. `added_tokens.json`
+        // carries tokens added on top of the base vocab (Qwen / Gemma
+        // tool tokens, special chat tokens). `tokenizer.model` is the
+        // sentencepiece blob.
+        case "tokenizer.json", "tokenizer_config.json",
+             "tokenizer.model", "special_tokens_map.json",
+             "added_tokens.json", "vocab.json", "merges.txt":
+            return true
+        // Newer HF convention (mid-2025+): chat template ships as a
+        // separate Jinja file alongside `tokenizer_config.json`
+        // instead of being embedded in it. Qwen 3 MoE (Coder,
+        // Instruct-2507) and recent Gemma releases use this form, and
+        // their tokenizers raise "chat_template is not set" without it.
+        case "chat_template.jinja":
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 extension Puller {
