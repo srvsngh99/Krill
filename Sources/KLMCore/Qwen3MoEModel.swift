@@ -182,108 +182,244 @@ public struct Qwen3MoEConfig: ModelConfig, Codable, Sendable {
     }
 }
 
-// MARK: - Single Expert (gate/up/down FFN)
+// MARK: - Quantized stacked switched linear (one projection, all experts)
 
-/// One expert FFN inside a Qwen 3 MoE layer. Same SwiGLU shape as
-/// the dense `QwenMLP`, but with `moeIntermediateSize` as the hidden
-/// width and indexed under `mlp.experts.{i}.*` in the checkpoint.
-class Qwen3MoEExpert: Module {
-    @ModuleInfo(key: "gate_proj") var gateProj: Linear
-    @ModuleInfo(key: "up_proj") var upProj: Linear
-    @ModuleInfo(key: "down_proj") var downProj: Linear
+/// One stacked quantized SwitchLinear inside the Qwen3 `SwitchGLU`
+/// block. Holds the `[numExperts, outputDims, inputDims_packed]`
+/// quantized weight plus per-expert scales and biases, and dispatches
+/// across the chosen top-K experts in a single `gatherQuantizedMM`
+/// call instead of a Swift `for` loop over per-expert matmuls.
+///
+/// This mirrors `Gemma4QuantizedSwitchedLinear` (PR #82). The earlier
+/// Qwen3-MoE runtime used a scatter dispatch that walked the experts
+/// in a Swift loop, forcing a per-layer host sync (the loop bounds
+/// came from a CPU read of per-expert token counts); decoding one
+/// token per step paid that sync once per layer and dominated the FFN
+/// math, leaving 30B-A3B behind Ollama. `gather_qmm` keeps the whole
+/// dispatch on the GPU and matches `mlx_lm/models/switch_layers.
+/// QuantizedSwitchLinear` bit for bit.
+///
+/// Parameter layout matches mlx-community's packed Qwen3-MoE format
+/// directly, so the loader binds `mlp.switch_mlp.{proj}.*` with no
+/// per-expert unpacking:
+///   - `weight: [E, O, I/(32/bits)]` int-packed
+///   - `scales: [E, O, I/groupSize]`
+///   - `biases: [E, O, I/groupSize]`
+class Qwen3QuantizedSwitchedLinear: Module {
+    @ParameterInfo(key: "weight") var weight: MLXArray
+    @ParameterInfo(key: "scales") var scales: MLXArray
+    @ParameterInfo(key: "biases") var biases: MLXArray
 
-    init(_ config: Qwen3MoEConfig) {
-        _gateProj = ModuleInfo(
-            wrappedValue: Linear(config.hiddenSize, config.moeIntermediateSize, bias: false),
-            key: "gate_proj")
-        _upProj = ModuleInfo(
-            wrappedValue: Linear(config.hiddenSize, config.moeIntermediateSize, bias: false),
-            key: "up_proj")
-        _downProj = ModuleInfo(
-            wrappedValue: Linear(config.moeIntermediateSize, config.hiddenSize, bias: false),
-            key: "down_proj")
+    let inputDims: Int
+    let outputDims: Int
+    let numExperts: Int
+    let groupSize: Int
+    let bits: Int
+
+    init(
+        inputDims: Int, outputDims: Int, numExperts: Int,
+        groupSize: Int, bits: Int
+    ) {
+        self.inputDims = inputDims
+        self.outputDims = outputDims
+        self.numExperts = numExperts
+        self.groupSize = groupSize
+        self.bits = bits
+
+        // Pre-allocate the parameter tensors with the SAME shape the
+        // mlx-community checkpoint ships so the loader's
+        // `model.update(parameters:)` binds them by shape match. The
+        // fill values are placeholders overwritten at load time.
+        let packedIn = inputDims * bits / 32
+        let groupsIn = inputDims / groupSize
+        _weight = ParameterInfo(
+            wrappedValue: MLXArray.zeros([numExperts, outputDims, packedIn], dtype: .uint32),
+            key: "weight")
+        _scales = ParameterInfo(
+            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
+            key: "scales")
+        _biases = ParameterInfo(
+            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
+            key: "biases")
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(silu(gateProj(x)) * upProj(x))
+    /// Per-token expert dispatch. `x` is shaped so the last two dims
+    /// feed `gather_qmm`'s `[..., M, K]` matmul slot (the SwitchGLU
+    /// caller expands to `[..., 1, 1, I]`); `indices` is `[..., K]`
+    /// Int32 expert ids into the weight tensor's leading batch dim.
+    func callAsFunction(_ x: MLXArray, indices: MLXArray) -> MLXArray {
+        return gatherQuantizedMM(
+            x, weight,
+            scales: scales, biases: biases,
+            rhsIndices: indices,
+            transpose: true,
+            groupSize: groupSize, bits: bits, mode: .affine,
+            sortedIndices: false)
     }
 }
 
-// MARK: - Sparse MoE MLP (router + experts)
+// MARK: - SwitchGLU (router-dispatched SwiGLU experts)
+
+/// Qwen3 experts as three stacked quantized switched linears
+/// (`gate_proj`, `up_proj`, `down_proj`) plus the SwiGLU activation.
+/// Mirrors mlx-lm's `switch_layers.SwitchGLU` (with `silu`, unlike
+/// Gemma 4's GeGLU). The in-checkpoint key path
+/// `switch_mlp.{proj}.{weight,scales,biases}` lines up with this
+/// module hierarchy directly.
+///
+/// Forward:
+///   1. Reshape `[N, H]` to `[N, 1, 1, H]` so each row participates in
+///      `topK` expert matmuls (one per chosen expert).
+///   2. `gate_proj` / `up_proj` via `gatherQuantizedMM` -> `[N, topK,
+///      1, moeIntermediate]` in a single device kernel each.
+///   3. SwiGLU activation: `silu(gate) * up`.
+///   4. `down_proj` back to `[N, topK, 1, H]`.
+///   5. Squeeze the M=1 axis to `[N, topK, H]`. The caller does the
+///      topK weighted sum.
+class Qwen3SwitchGLU: Module {
+    @ModuleInfo(key: "gate_proj") var gateProj: Qwen3QuantizedSwitchedLinear
+    @ModuleInfo(key: "up_proj") var upProj: Qwen3QuantizedSwitchedLinear
+    @ModuleInfo(key: "down_proj") var downProj: Qwen3QuantizedSwitchedLinear
+
+    init(
+        inputDims: Int, hiddenDims: Int, numExperts: Int,
+        groupSize: Int, bits: Int
+    ) {
+        _gateProj = ModuleInfo(
+            wrappedValue: Qwen3QuantizedSwitchedLinear(
+                inputDims: inputDims, outputDims: hiddenDims,
+                numExperts: numExperts, groupSize: groupSize, bits: bits),
+            key: "gate_proj")
+        _upProj = ModuleInfo(
+            wrappedValue: Qwen3QuantizedSwitchedLinear(
+                inputDims: inputDims, outputDims: hiddenDims,
+                numExperts: numExperts, groupSize: groupSize, bits: bits),
+            key: "up_proj")
+        _downProj = ModuleInfo(
+            wrappedValue: Qwen3QuantizedSwitchedLinear(
+                inputDims: hiddenDims, outputDims: inputDims,
+                numExperts: numExperts, groupSize: groupSize, bits: bits),
+            key: "down_proj")
+    }
+
+    /// - Parameters:
+    ///   - x: `[N, H]` flattened token activations.
+    ///   - indices: `[N, topK]` Int32 expert ids per token (router
+    ///     score order).
+    /// - Returns: `[N, topK, H]` per-expert outputs; the caller does
+    ///   the topK weighted sum.
+    func callAsFunction(_ x: MLXArray, indices: MLXArray) -> MLXArray {
+        let N = x.dim(0)
+        let H = x.dim(1)
+
+        // Expand to [N, 1, 1, H] so each (token, slot) sees an M=1 row
+        // inside the gather. [N, 1] outer batch x [N, topK] indices ->
+        // [N, topK, 1, H_out] per projection: no Swift loop, no
+        // per-layer host sync, one device kernel per projection.
+        let xExp = x.reshaped(N, 1, 1, H)
+        let idx = indices.asType(.int32)
+
+        let xGate = gateProj(xExp, indices: idx)
+        let xUp = upProj(xExp, indices: idx)
+        let activated = silu(xGate) * xUp
+        let out = downProj(activated, indices: idx)
+
+        // out: [N, topK, 1, H_out] -- squeeze the M=1 inner axis.
+        return out.squeezed(axis: -2)
+    }
+}
+
+// MARK: - Expert-utilization accumulator (off the compute path)
+
+/// Reference box for the on-device per-expert assignment tally. Held
+/// as a plain class (not an `MLXArray` property) so MLXNN's Mirror
+/// walk does NOT treat it as a model parameter -- the counts must
+/// never appear in the parameter cache or the strict-verify loader
+/// would demand a checkpoint key for them.
+final class ExpertCountAccumulator {
+    var counts: MLXArray
+    init(numExperts: Int) {
+        counts = MLXArray.zeros([numExperts], dtype: .int32)
+    }
+}
+
+// MARK: - Sparse MoE MLP (router + SwitchGLU experts)
 
 /// Replaces the dense `QwenMLP` at MoE layers. Loaded keys:
-///   - `mlp.gate.weight`           [num_experts, hidden_size]
-///   - `mlp.experts.{e}.gate_proj.weight`   [moe_intermediate_size, hidden]
-///   - `mlp.experts.{e}.up_proj.weight`     [moe_intermediate_size, hidden]
-///   - `mlp.experts.{e}.down_proj.weight`   [hidden, moe_intermediate_size]
+///   - `mlp.gate.weight` (+ scales/biases when quantized) [E, hidden]
+///   - `mlp.switch_mlp.{gate_proj,up_proj,down_proj}.{weight,scales,biases}`
+///     stacked `[E, O, I_packed]` quantized expert tensors.
 ///
 /// Forward pass (router):
 ///   1. Router logits = `gate(x)` -> `[N, E]`.
-///   2. Compute top-K experts per token using a rank derived from
-///      argSort (no native top_k op in mlx-swift today; the
-///      argSort+argSort rank trick gives the same selection in two
-///      vectorized passes).
+///   2. Top-K experts per token via the argSort+argSort rank trick
+///      (no native top_k op in mlx-swift).
 ///   3. Softmax over the top-K logits only; optionally renormalize.
 ///
-/// Forward pass (expert dispatch), `callAsFunction`:
-///   The default path is a **scatter dispatch**: it builds the
-///   `N * topK` (token, expert) assignment list, sorts the
-///   assignments by expert id, runs each expert ONCE on the
-///   contiguous slice of tokens routed to it, then un-sorts and
-///   weight-sums back per token. Each expert sees only `count_e`
-///   tokens, so total FFN work is `N * topK` token-passes instead
-///   of the brute-force `N * numExperts`. For Qwen3-30B-A3B
-///   (128 experts, top-8) that is a 16x reduction.
-///
-///   The brute-force reference (`referenceForward`), every expert
-///   on every token weighted by a dense `[N, E]` dispatch matrix,
-///   is retained for the parity test: `callAsFunction` must
-///   produce numerically equal output (within fp tolerance; the
-///   two differ only in summation order).
-///
-/// The scatter dispatch performs ONE host sync per layer to read
-/// the per-expert token counts (needed to slice the sorted
-/// assignment array). That is a per-layer cost, not per-token, and
-/// is the price of exact (non-capacity-dropping) routing without a
-/// fused gather-matmul kernel.
-///
-/// The forward is deterministic and family-agnostic; the same
-/// implementation would work for Mixtral or OLMoE with a different
-/// expert count and module-name mapping.
+/// Forward pass (expert dispatch):
+///   `Qwen3SwitchGLU` runs all top-K experts for every token in a
+///   single `gatherQuantizedMM` per projection -- no Swift loop, no
+///   per-layer host sync. The earlier scatter dispatch read per-expert
+///   token counts on the host each layer to slice a sorted assignment
+///   array; that host round-trip dominated decode and is gone (PR
+///   mirroring Gemma 4's #82 SwitchGLU rewrite).
 class Qwen3MoESparseMLP: Module {
     @ModuleInfo(key: "gate") var gate: Linear
-    @ModuleInfo(key: "experts") var experts: [Qwen3MoEExpert]
+    @ModuleInfo(key: "switch_mlp") var switchMLP: Qwen3SwitchGLU
 
     let numExperts: Int
     let topK: Int
     let hiddenSize: Int
     let normTopK: Bool
 
-    /// Cumulative count of `(token, slot)` assignments each expert has
-    /// served since the last `resetUtilizationStats()`. Index `e` is
-    /// expert `e`'s running total. Updated off the compute path from
-    /// the scatter dispatch's per-layer host count read, so it adds no
-    /// kernel work. Used only for expert-load / utilization reporting
-    /// (`Qwen3MoEForCausalLM.moeUtilization()`); it never feeds the
-    /// forward. Mutated sequentially within a generation - the server
-    /// serializes generation, so no locking is needed.
-    private(set) var cumulativeExpertCounts: [Int]
+    /// On-device cumulative `(token, slot)` assignment tally `[E]`.
+    /// Accumulated each forward from the routing output WITHOUT a host
+    /// sync -- the SwitchGLU dispatch no longer needs the counts on the
+    /// host, so reading them per layer would re-introduce exactly the
+    /// stall this rewrite removed. Materialized to `[Int]` lazily in
+    /// `cumulativeExpertCounts`, off the compute path. The engine
+    /// resets before a generation and reads once after, so the
+    /// accumulator's graph is bounded by the generation length.
+    private let accumulator: ExpertCountAccumulator
+
+    /// Per-expert assignment totals since the last
+    /// `resetUtilizationStats()`. Reading this forces a single
+    /// host sync of the small `[E]` accumulator; used only for
+    /// expert-load reporting (`moeUtilization()`), never the forward.
+    var cumulativeExpertCounts: [Int] {
+        eval(accumulator.counts)
+        return accumulator.counts.asArray(Int32.self).map(Int.init)
+    }
 
     init(_ config: Qwen3MoEConfig) {
         self.numExperts = config.numExperts
         self.topK = config.numExpertsPerToken
         self.hiddenSize = config.hiddenSize
         self.normTopK = config.normTopKProb
-        self.cumulativeExpertCounts = [Int](repeating: 0, count: config.numExperts)
+        self.accumulator = ExpertCountAccumulator(numExperts: config.numExperts)
 
-        // Router. Qwen3-MoE router has no bias and no quantization
-        // (the checkpoint stores it as a fp16/bf16 Linear weight).
+        // Router. A Linear; the loader's quantize pass converts it to
+        // a QuantizedLinear when the checkpoint quantizes it (the
+        // Qwen3-Coder checkpoint ships an 8-bit router via a per-module
+        // override). The experts are born quantized below.
         _gate = ModuleInfo(
             wrappedValue: Linear(config.hiddenSize, config.numExperts, bias: false),
             key: "gate")
-        _experts = ModuleInfo(
-            wrappedValue: (0 ..< config.numExperts).map { _ in Qwen3MoEExpert(config) },
-            key: "experts")
+
+        // Expert quantization comes from the config's top-level
+        // (groupSize, bits). On 30B-A3B that is 4-bit / group-64; the
+        // 8-bit override applies only to `mlp.gate` (the router),
+        // never the experts. Fall back to (64, 4) so unit-test
+        // fixtures without a quantization block stay instantiable.
+        let groupSize = config.quantization?.groupSize ?? 64
+        let bits = config.quantization?.bits ?? 4
+        _switchMLP = ModuleInfo(
+            wrappedValue: Qwen3SwitchGLU(
+                inputDims: config.hiddenSize,
+                hiddenDims: config.moeIntermediateSize,
+                numExperts: config.numExperts,
+                groupSize: groupSize, bits: bits),
+            key: "switch_mlp")
     }
 
     /// Router top-K. Returns the per-token top-K expert ids
@@ -317,9 +453,6 @@ class Qwen3MoESparseMLP: Module {
         return (topKExperts, dispatch)
     }
 
-    /// Scatter dispatch: each expert runs once on the contiguous
-    /// slice of tokens routed to it. See the type doc for the
-    /// algorithm and the per-layer host-sync note.
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
@@ -329,96 +462,29 @@ class Qwen3MoESparseMLP: Module {
 
         let (topKExperts, dispatch) = route(flat)  // [N, topK], [N, E]
 
-        // Build the flat (token, expert) assignment list of length
-        // N * topK. `assignExpert[i]` is the expert id; `tokenIds[i]`
-        // the source token.
-        let assignExpert = topKExperts.reshaped(N * topK)            // [N*topK]
-        let tokenIdsCol = MLXArray(Int32(0) ..< Int32(N)).reshaped(N, 1)
-        let tokenIds = MLX.broadcast(tokenIdsCol, to: [N, topK])
-            .reshaped(N * topK)                                       // [N*topK]
+        // Off-path utilization: per-expert assignment counts via a
+        // one-hot sum over the routing output, accumulated ON DEVICE.
+        // No `eval` / host read here -- materialized lazily in
+        // `cumulativeExpertCounts`, so the decode path pays no sync.
+        let expertRange = MLXArray(Int32(0) ..< Int32(numExperts))      // [E]
+        let oneHot = topKExperts.reshaped(N * topK, 1) .== expertRange  // [N*topK, E]
+        accumulator.counts = accumulator.counts + oneHot.asType(.int32).sum(axis: 0)
 
-        // Sort the assignments by expert id so each expert's tokens
-        // form one contiguous run.
-        let order = argSort(assignExpert, axis: -1)                   // [N*topK]
-        let sortedExpert = MLX.take(assignExpert, order, axis: 0)     // [N*topK]
-        let sortedToken = MLX.take(tokenIds, order, axis: 0)         // [N*topK]
-        let gathered = MLX.take(flat, sortedToken, axis: 0)          // [N*topK, H]
-
-        // Per-expert token counts via a one-hot sum. ONE host sync
-        // per layer: the counts are needed on the host to slice the
-        // sorted assignment array into per-expert chunks.
-        let expertRange = MLXArray(Int32(0) ..< Int32(numExperts))   // [E]
-        let oneHot = sortedExpert.reshaped(N * topK, 1) .== expertRange  // [N*topK, E]
-        let counts = oneHot.asType(.int32).sum(axis: 0)               // [E]
-        eval(counts)
-        let countsHost = counts.asArray(Int32.self)
-
-        // Off-path instrumentation: fold this forward's per-expert
-        // assignment counts into the cumulative tally. `countsHost`
-        // already sums to N * topK (every (token, slot) assignment),
-        // and it is read here for the dispatch anyway, so this adds
-        // no extra host sync.
-        for e in 0 ..< numExperts {
-            cumulativeExpertCounts[e] += Int(countsHost[e])
-        }
-
-        // Run each non-empty expert on its slice and concatenate the
-        // results back in sorted-assignment order.
-        var parts: [MLXArray] = []
-        var offset = 0
-        for e in 0 ..< numExperts {
-            let c = Int(countsHost[e])
-            if c == 0 { continue }
-            let chunk = gathered[offset ..< (offset + c)]   // [c, H]
-            parts.append(experts[e](chunk))                 // [c, H]
-            offset += c
-        }
-        let sortedOut: MLXArray = parts.isEmpty
-            ? MLXArray.zeros([N * topK, H]).asType(flat.dtype)
-            : MLX.concatenated(parts, axis: 0)              // [N*topK, H]
-
-        // Un-sort: argSort(order) is the inverse permutation, so
-        // taking sortedOut by it restores token-major order
-        // [token0 slot0, token0 slot1, ..., token1 slot0, ...].
-        let inverseOrder = argSort(order, axis: -1)          // [N*topK]
-        let perSlot = MLX.take(sortedOut, inverseOrder, axis: 0)
-            .reshaped(N, topK, H)                            // [N, topK, H]
-
-        // Weight each slot by its router probability and sum the
-        // topK contributions per token. The slot weight is
-        // dispatch[token, chosen_expert]; gather it along the expert
-        // axis with the per-token topK expert ids.
-        let slotWeights = takeAlong(dispatch, topKExperts, axis: 1)   // [N, topK]
-        let weighted = perSlot * slotWeights.reshaped(N, topK, 1)
-        let result = weighted.sum(axis: 1)                            // [N, H]
+        // SwitchGLU: all topK experts per token in one gather_qmm per
+        // projection. Returns [N, topK, H]; weight each slot by its
+        // router probability and sum the topK contributions per token.
+        let expertOut = switchMLP(flat, indices: topKExperts)          // [N, topK, H]
+        let slotWeights = takeAlong(dispatch, topKExperts, axis: 1)     // [N, topK]
+        let weighted = expertOut * slotWeights.reshaped(N, topK, 1)
+        let result = weighted.sum(axis: 1)                             // [N, H]
         return result.reshaped(B, L, H)
-    }
-
-    /// Brute-force reference: every expert on every token, combined
-    /// by a dense `[N, E]` dispatch matrix. Retained ONLY as the
-    /// parity oracle for `callAsFunction` (the scatter dispatch).
-    /// O(numExperts) FFN passes per layer; not used in production.
-    func referenceForward(_ x: MLXArray) -> MLXArray {
-        let B = x.dim(0)
-        let L = x.dim(1)
-        let H = x.dim(2)
-        let flat = x.reshaped(B * L, H)
-        let (_, dispatch) = route(flat)  // [N, E]
-
-        var out = MLXArray.zeros([B * L, H]).asType(flat.dtype)
-        for e in 0 ..< numExperts {
-            let weight = dispatch[0..., e ..< (e + 1)]  // [N, 1]
-            let expertOut = experts[e](flat)            // [N, H]
-            out = out + expertOut * weight
-        }
-        return out.reshaped(B, L, H)
     }
 
     /// Zero the cumulative per-expert assignment tally. Call before a
     /// generation to scope `cumulativeExpertCounts` (and the model's
     /// `moeUtilization()`) to that run.
     func resetUtilizationStats() {
-        cumulativeExpertCounts = [Int](repeating: 0, count: numExperts)
+        accumulator.counts = MLXArray.zeros([numExperts], dtype: .int32)
     }
 }
 

@@ -48,6 +48,17 @@ final class Qwen3MoENativeTests: XCTestCase {
             "norm_topk_prob": true,
             "tie_word_embeddings": tieEmbeddings,
             "attention_bias": false,
+            // The SwitchGLU experts are quantized-only modules
+            // (`Qwen3QuantizedSwitchedLinear` allocates packed uint32
+            // weights + scales/biases at init). A quantization block is
+            // therefore required for the module to assemble. group_size
+            // 16 divides every tiny dim used in these tests (16/32/64/
+            // 128), and bits 4 keeps the packed/group shapes integral.
+            // The synthetic forwards run gather_qmm over placeholder
+            // (zero) expert weights, so expert output is zero -- enough
+            // to pin shapes, finiteness, and routing/utilization, which
+            // is all these no-weight-load tests assert.
+            "quantization": ["group_size": 16, "bits": 4],
         ]
     }
 
@@ -199,18 +210,26 @@ final class Qwen3MoENativeTests: XCTestCase {
         let flat = model.parameters().flattened()
         let names = Set(flat.map { $0.0 })
 
-        // Sparse layer 0 must expose router + expert weights.
+        // Sparse layer 0 must expose the router weight plus the three
+        // stacked SwitchGLU projections (the in-checkpoint key layout:
+        // one `[E, O, I_packed]` tensor per projection, not per-expert
+        // keys). All three of weight/scales/biases must appear so the
+        // strict-verify loader can bind the quantized expert tensors.
         XCTAssertTrue(names.contains("model.layers.0.mlp.gate.weight"),
             "Sparse router weight missing from parameter cache - "
             + "dual @ModuleInfo(key: \"mlp\") collision regression")
-        XCTAssertTrue(names.contains("model.layers.0.mlp.experts.0.gate_proj.weight"),
-            "Expert 0 gate_proj missing from parameter cache")
-        XCTAssertTrue(names.contains("model.layers.0.mlp.experts.0.up_proj.weight"),
-            "Expert 0 up_proj missing from parameter cache")
-        XCTAssertTrue(names.contains("model.layers.0.mlp.experts.0.down_proj.weight"),
-            "Expert 0 down_proj missing from parameter cache")
-        XCTAssertTrue(names.contains("model.layers.0.mlp.experts.3.gate_proj.weight"),
-            "Last expert gate_proj missing - all numExperts FFNs must be loadable")
+        XCTAssertTrue(names.contains("model.layers.0.mlp.switch_mlp.gate_proj.weight"),
+            "SwitchGLU gate_proj weight missing from parameter cache")
+        XCTAssertTrue(names.contains("model.layers.0.mlp.switch_mlp.gate_proj.scales"),
+            "SwitchGLU gate_proj scales missing - quantized expert tensor")
+        XCTAssertTrue(names.contains("model.layers.0.mlp.switch_mlp.up_proj.weight"),
+            "SwitchGLU up_proj weight missing from parameter cache")
+        XCTAssertTrue(names.contains("model.layers.0.mlp.switch_mlp.down_proj.weight"),
+            "SwitchGLU down_proj weight missing from parameter cache")
+        // The old per-expert key layout must NOT reappear (regression
+        // guard: a reverted loader would silently drop the stacked keys).
+        XCTAssertFalse(names.contains("model.layers.0.mlp.experts.0.gate_proj.weight"),
+            "Per-expert keys are gone; SwitchGLU uses stacked switch_mlp tensors")
     }
 
     func testDenseFallbackMLPWeightsAreVisibleInParameterCache() throws {
@@ -233,9 +252,9 @@ final class Qwen3MoENativeTests: XCTestCase {
             "Dense fallback up_proj missing from parameter cache")
         XCTAssertTrue(names.contains("model.layers.0.mlp.down_proj.weight"),
             "Dense fallback down_proj missing from parameter cache")
-        // Layer 1: sparse router + experts.
+        // Layer 1: sparse router + stacked SwitchGLU experts.
         XCTAssertTrue(names.contains("model.layers.1.mlp.gate.weight"))
-        XCTAssertTrue(names.contains("model.layers.1.mlp.experts.0.gate_proj.weight"))
+        XCTAssertTrue(names.contains("model.layers.1.mlp.switch_mlp.gate_proj.weight"))
 
         // And the two layers must NOT cross-leak: a dense layer
         // must not expose `mlp.gate` (the sparse router key), and
@@ -247,119 +266,15 @@ final class Qwen3MoENativeTests: XCTestCase {
             "Sparse layer 1 must not expose the dense gate_proj key")
     }
 
-    // MARK: - Scatter dispatch parity + benchmark
-
-    /// Build a sparse MLP, freeze its random weights, run BOTH the
-    /// production scatter dispatch (`callAsFunction`) and the
-    /// brute-force reference (`referenceForward`) on the same
-    /// input, and assert the outputs are numerically equal. The
-    /// two differ only in summation order, so the result must
-    /// agree within a small fp tolerance. This is the load-bearing
-    /// correctness test for the scatter optimization: a wrong
-    /// sort / un-sort / index mapping would diverge here.
-    private func assertScatterMatchesReference(
-        numExperts: Int, topK: Int, hidden: Int, moeIntermediate: Int,
-        batch: Int, seqLen: Int, file: StaticString = #filePath, line: UInt = #line
-    ) throws {
-        let cfg = try decode(tinyConfigJSON(
-            hidden: hidden, heads: 2, kvHeads: 1, layers: 1, headDim: 16,
-            numExperts: numExperts, topK: topK, moeIntermediate: moeIntermediate))
-        let mlp = Qwen3MoESparseMLP(cfg)
-        // Deterministic-ish input; the random module weights are
-        // shared between the two forwards so any divergence is the
-        // dispatch logic, not the weights.
-        let x = MLXRandom.normal([batch, seqLen, hidden]).asType(.float32)
-        let scatter = mlp(x)
-        let reference = mlp.referenceForward(x)
-        eval(scatter, reference)
-        XCTAssertEqual(scatter.shape, reference.shape, file: file, line: line)
-        let diff = abs(scatter - reference).max().item(Float.self)
-        XCTAssertLessThan(diff, 2e-3,
-            "Scatter dispatch must match the brute-force reference "
-            + "within fp tolerance; max abs diff was \(diff)",
-            file: file, line: line)
-    }
-
-    func testScatterMatchesReferenceSmall() throws {
-        // 4 experts, top-2, single token.
-        try assertScatterMatchesReference(
-            numExperts: 4, topK: 2, hidden: 32, moeIntermediate: 16,
-            batch: 1, seqLen: 1)
-    }
-
-    func testScatterMatchesReferenceMultiToken() throws {
-        // 8 experts, top-2, a prefill-sized batch (24 tokens) so
-        // multiple tokens route to the same expert.
-        try assertScatterMatchesReference(
-            numExperts: 8, topK: 2, hidden: 64, moeIntermediate: 32,
-            batch: 2, seqLen: 12)
-    }
-
-    func testScatterMatchesReferenceManyExperts() throws {
-        // 32 experts, top-4 - closer to the Qwen3-30B-A3B
-        // sparsity ratio. Some experts will receive zero tokens;
-        // the scatter path must skip them and still match.
-        try assertScatterMatchesReference(
-            numExperts: 32, topK: 4, hidden: 64, moeIntermediate: 32,
-            batch: 4, seqLen: 8)
-    }
-
-    func testScatterMatchesReferenceTopKEqualsExperts() throws {
-        // Degenerate case: top-K == numExperts. Every token routes
-        // to every expert; the scatter must still equal the
-        // reference (all experts non-empty, full assignment list).
-        try assertScatterMatchesReference(
-            numExperts: 4, topK: 4, hidden: 32, moeIntermediate: 16,
-            batch: 1, seqLen: 6)
-    }
-
-    /// Micro-benchmark: time the scatter dispatch against the
-    /// brute-force reference on a sparsity ratio that mirrors
-    /// Qwen3-30B-A3B (top-K much smaller than numExperts). The
-    /// scatter path runs each expert on only its routed tokens,
-    /// so total expert-FFN work scales with `topK` instead of
-    /// `numExperts`. This is not a hard assertion on wall time
-    /// (CI timing is noisy); it prints both timings and asserts
-    /// the scatter path is not pathologically slower.
-    func testScatterDispatchBenchmark() throws {
-        let numExperts = 64
-        let topK = 8
-        let hidden = 128
-        let moeIntermediate = 64
-        let cfg = try decode(tinyConfigJSON(
-            hidden: hidden, heads: 4, kvHeads: 2, layers: 1, headDim: 16,
-            numExperts: numExperts, topK: topK, moeIntermediate: moeIntermediate))
-        let mlp = Qwen3MoESparseMLP(cfg)
-        // Prefill-sized input: 64 tokens.
-        let x = MLXRandom.normal([1, 64, hidden]).asType(.float32)
-
-        // Warm up both paths (first call compiles MLX kernels).
-        eval(mlp(x))
-        eval(mlp.referenceForward(x))
-
-        let iterations = 20
-        let scatterStart = Date()
-        for _ in 0 ..< iterations { eval(mlp(x)) }
-        let scatterMs = Date().timeIntervalSince(scatterStart) / Double(iterations) * 1000
-
-        let refStart = Date()
-        for _ in 0 ..< iterations { eval(mlp.referenceForward(x)) }
-        let refMs = Date().timeIntervalSince(refStart) / Double(iterations) * 1000
-
-        print("[WS6 scatter benchmark] experts=\(numExperts) topK=\(topK) "
-            + "tokens=64 | scatter=\(String(format: "%.3f", scatterMs))ms "
-            + "reference=\(String(format: "%.3f", refMs))ms "
-            + "ratio=\(String(format: "%.2fx", refMs / max(scatterMs, 1e-6)))")
-        // The scatter path does more index bookkeeping but far
-        // fewer expert-FFN flops. On a 64-expert / top-8 shape it
-        // should not be more than ~1.5x slower even in the worst
-        // case (tiny test FFNs make the fixed overhead dominate);
-        // on the real 128-expert checkpoint the FFN flops dominate
-        // and the scatter path wins decisively.
-        XCTAssertLessThan(scatterMs, refMs * 1.5,
-            "Scatter dispatch should not be pathologically slower "
-            + "than the brute-force reference")
-    }
+    // Note: the brute-force `referenceForward` scatter-parity and
+    // micro-benchmark tests were removed with the scatter dispatch
+    // itself. Expert dispatch is now a single `gatherQuantizedMM` per
+    // projection (`Qwen3SwitchGLU`); its numerical correctness is
+    // verified end-to-end against the real Qwen3-Coder-30B-A3B
+    // checkpoint (coherent generation + decode benchmark), the same
+    // way Gemma 4's SwitchGLU (PR #82) is validated. A quantized-only
+    // switched linear cannot be meaningfully exercised with the random
+    // fp weights these no-weight-load unit tests use.
 
     // MARK: - Expert-utilization instrumentation
 
@@ -454,76 +369,12 @@ final class Qwen3MoENativeTests: XCTestCase {
         XCTAssertEqual(util.totalExpertSlots, 4)
     }
 
-    // MARK: - switch_mlp -> per-expert key rewrite (#75 regression)
-
-    /// mlx-community Qwen3-MoE checkpoints ship expert weights as
-    /// stacked `mlp.switch_mlp.{proj}.{field}` tensors with leading
-    /// dim `numExperts`. `Qwen3MoESparseMLP` allocates per-expert
-    /// modules at `mlp.experts.{e}.{proj}.{field}`. Without the
-    /// rewrite, `model.update(parameters: verify: [])` silently drops
-    /// every expert weight and leaves them at random init - the
-    /// generation collapses to looping special tokens, the original
-    /// #75 symptom.
-    ///
-    /// This test pins the rewrite shape so a future loader refactor
-    /// that drops it (or breaks the slicing axis) regresses loudly.
-    func testUnpackSwitchMLPRewritesStackedExpertKeys() throws {
-        let numExperts = 4
-        let outDim = 3
-        let inDim = 2
-        let stacked = MLXArray(0 ..< Int32(numExperts * outDim * inDim))
-            .reshaped(numExperts, outDim, inDim)
-        var weights: [String: MLXArray] = [
-            "model.layers.0.mlp.switch_mlp.gate_proj.weight": stacked,
-            "model.layers.0.mlp.switch_mlp.up_proj.scales": stacked,
-            "model.layers.0.mlp.switch_mlp.down_proj.biases": stacked,
-            "model.layers.0.self_attn.q_proj.weight":
-                MLXArray.zeros([outDim, inDim]),
-        ]
-        unpackSwitchMLPWeights(&weights, numExperts: numExperts)
-
-        // Source keys must be gone, attention key untouched.
-        XCTAssertNil(weights["model.layers.0.mlp.switch_mlp.gate_proj.weight"])
-        XCTAssertNil(weights["model.layers.0.mlp.switch_mlp.up_proj.scales"])
-        XCTAssertNil(weights["model.layers.0.mlp.switch_mlp.down_proj.biases"])
-        XCTAssertNotNil(weights["model.layers.0.self_attn.q_proj.weight"],
-            "Non-MoE keys must pass through unchanged")
-
-        for e in 0 ..< numExperts {
-            for (proj, field) in [
-                ("gate_proj", "weight"),
-                ("up_proj", "scales"),
-                ("down_proj", "biases"),
-            ] {
-                let key = "model.layers.0.mlp.experts.\(e).\(proj).\(field)"
-                guard let w = weights[key] else {
-                    XCTFail("Missing rewritten key \(key)"); return
-                }
-                XCTAssertEqual(w.shape, [outDim, inDim],
-                    "Per-expert tensor must be the inner [out, in] slice")
-                // Slice content must equal stacked[e] - confirms the
-                // slicing axis is 0 (not 1) and no transpose snuck in.
-                let expected = stacked[e]
-                let diff = abs(w - expected).max().item(Float.self)
-                XCTAssertEqual(diff, 0,
-                    "Expert \(e)'s slice must equal stacked[\(e)] exactly")
-            }
-        }
-    }
-
-    /// Per-expert checkpoints (the format our internal `Qwen3MoEExpert`
-    /// matches directly) must round-trip through `unpackSwitchMLPWeights`
-    /// unchanged. The rewrite is keyed on `.switch_mlp.` presence, so a
-    /// checkpoint shipped as `mlp.experts.{e}.*` already is a no-op.
-    func testUnpackSwitchMLPLeavesPerExpertCheckpointsAlone() throws {
-        let one = MLXArray.zeros([3, 2])
-        var weights: [String: MLXArray] = [
-            "model.layers.0.mlp.experts.0.gate_proj.weight": one,
-            "model.layers.0.mlp.experts.1.gate_proj.weight": one,
-        ]
-        let before = weights.keys.sorted()
-        unpackSwitchMLPWeights(&weights, numExperts: 4)
-        XCTAssertEqual(weights.keys.sorted(), before,
-            "Per-expert checkpoints must round-trip unchanged")
-    }
+    // Note: the `unpackSwitchMLPWeights` key-rewrite tests were removed
+    // with the helper itself. The mlx-community stacked
+    // `mlp.switch_mlp.{proj}.{weight,scales,biases}` tensors now bind
+    // directly to the `Qwen3SwitchGLU` module hierarchy (no per-expert
+    // unpacking), and the strict-verify loader (.noUnusedKeys,
+    // .allModelKeysSet, .shapeMismatch) is the regression guard against
+    // a silent key-drop -- a load that does not cover every stacked
+    // tensor now crashes at load time rather than decoding garbage.
 }

@@ -134,24 +134,24 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
     } else if arch.contains("chatglm") || arch.contains("glm") || modelType == "chatglm" {
         return try loadGLM(configData: configData, directory: directory)
     } else if arch.contains("qwen3moe") || modelType == "qwen3_moe" {
-        // Qwen 3 MoE: native Swift+MLX runtime exists, but the
-        // forward currently evaluates ALL experts on ALL tokens
-        // (correctness-first; the scatter dispatch that runs only
-        // the assigned experts per token is the follow-up). For
-        // Qwen3-30B-A3B (128 experts, top-8) that is 16x more FFN
-        // compute per layer than mlx-lm. Until the scatter
-        // dispatch lands and a benchmark confirms parity, the
-        // native path is OPT-IN via `KRILL_NATIVE_MOE=1`. Default
-        // routes through the Python bridge so existing users keep
-        // mlx-lm throughput.
+        // Qwen 3 MoE: native Swift+MLX runtime. Expert dispatch is a
+        // single `gatherQuantizedMM` per projection (`Qwen3SwitchGLU`,
+        // mirroring Gemma 4's PR #82) -- no Swift per-expert loop, no
+        // per-layer host sync. Decode benches 2.7x faster than the old
+        // scatter dispatch (24 -> 66 tok/s on 30B-A3B). The path stays
+        // OPT-IN via `KRILL_NATIVE_MOE=1` for one more step: the
+        // unsorted gather regresses long-prompt prefill (M=1 per
+        // (token, expert) pair), so promoting native to the default
+        // waits on the sort-path prefill-parity follow-up. Until then
+        // the default routes through the bridge.
         if ProcessInfo.processInfo.environment["KRILL_NATIVE_MOE"] == "1" {
             return try loadQwen3MoE(configData: configData, directory: directory)
         }
         throw ModelLoadError.unsupportedArchitecture(
-            "Qwen 3 MoE native Swift+MLX runtime is opt-in until the "
-            + "scatter-dispatch optimization lands. Set KRILL_NATIVE_MOE=1 "
-            + "to enable; default routes through the MoE bridge "
-            + "(compatible_fallback tier via mlx-lm). Use POST /api/chat "
+            "Qwen 3 MoE native Swift+MLX runtime is opt-in (decode is 2.7x "
+            + "faster via SwitchGLU; default flip pends prefill parity). Set "
+            + "KRILL_NATIVE_MOE=1 to enable; default routes through the MoE "
+            + "bridge (compatible_fallback tier via mlx-lm). Use POST /api/chat "
             + "or /v1/chat/completions - the server routes MoE manifests "
             + "to MoEEngine. Detected arch=\(arch), model_type=\(modelType).")
     } else if arch.contains("mixtral") || arch.contains("qwen2moe")
@@ -540,14 +540,23 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
 private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(Qwen3MoEConfig.self, from: configData)
     let model = Qwen3MoEForCausalLM(config)
-    let numExperts = config.numExperts
+    // No key rewrite: the mlx-community checkpoint ships its experts as
+    // stacked `mlp.switch_mlp.{gate_proj,up_proj,down_proj}.*` tensors,
+    // and the module hierarchy now mirrors that shape directly via
+    // `Qwen3MoESparseMLP.switchMLP` (a `Qwen3SwitchGLU` of stacked
+    // `Qwen3QuantizedSwitchedLinear`s), dispatched in a single
+    // `gatherQuantizedMM` per projection. The earlier path unpacked
+    // those keys into per-expert `mlp.experts.{e}.*` form to feed a
+    // Swift `for` loop with a per-layer host sync; that stall dominated
+    // decode and is gone (mirrors Gemma 4's PR #82 rewrite). The router
+    // `mlp.gate` stays a `Linear` and is quantized by `loadWeights`'
+    // quantize pass (8-bit per the checkpoint's per-module override);
+    // the switched linears are not `Linear`, so that pass skips them and
+    // they load their quantized parameters directly.
     try loadWeights(
         into: model, from: directory,
         quantization: config.quantization,
         tieWordEmbeddings: config.tieWordEmbeddings,
-        keyRewrite: { weights in
-            unpackSwitchMLPWeights(&weights, numExperts: numExperts)
-        },
         strictVerify: true)
 
     // `family` returned here must round-trip through
@@ -568,74 +577,6 @@ private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedMode
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
-}
-
-/// Slice mlx-community style stacked Qwen3-MoE expert tensors into
-/// per-expert tensors. Source keys look like
-/// `mlp.switch_mlp.{gate_proj,up_proj,down_proj}.{weight,scales,biases}`
-/// with leading dim equal to `numExperts`; we rewrite each entry to
-/// `mlp.experts.{e}.{proj}.{field}` matching the per-expert
-/// `Qwen3MoEExpert` modules `Qwen3MoESparseMLP` allocates.
-///
-/// Why this rewrite exists: `model.update(parameters:, verify: [])`
-/// silently drops weights whose key has no matching parameter in the
-/// model. Without rewriting, every expert stays at its random init and
-/// generation collapses to looping special tokens - root cause of #75.
-///
-/// Gemma 4 26B-A4B used to share this helper, but the SwitchGLU MoE
-/// runtime introduced in PR #82 loads `experts.switch_glu.{proj}.*`
-/// stacked tensors directly into `Gemma4QuantizedSwitchedLinear`
-/// parameters via `gatherQuantizedMM`. There is no longer any
-/// per-expert key path on the Gemma 4 side, so this unpacker is now
-/// Qwen3-MoE-only. The `marker` parameter is kept so a future MoE
-/// family with the same per-expert layout (Mixtral, OLMoE, etc.) can
-/// reuse the helper without a code change.
-///
-/// No-op for checkpoints that already ship per-expert keys; only
-/// entries with the marker substring and the expected leading dim
-/// are touched.
-///
-/// Exposed `internal` (not private) so the regression test in
-/// `Qwen3MoENativeTests` can call it directly without spinning up a
-/// full ~16 GB MoE checkpoint.
-func unpackStackedMoEWeights(
-    _ weights: inout [String: MLXArray],
-    marker: String,
-    numExperts: Int
-) {
-    let switchKeys = weights.keys.filter { $0.contains(marker) }
-    guard !switchKeys.isEmpty else { return }
-
-    let validProjs: Set<String> = ["gate_proj", "up_proj", "down_proj"]
-    let validFields: Set<String> = ["weight", "scales", "biases"]
-
-    for key in switchKeys {
-        let parts = key.split(separator: ".")
-        guard parts.count >= 2 else { continue }
-        let field = String(parts[parts.count - 1])
-        let proj = String(parts[parts.count - 2])
-        guard validProjs.contains(proj), validFields.contains(field) else { continue }
-        guard let stacked = weights[key], stacked.shape.first == numExperts else { continue }
-        guard let r = key.range(of: marker) else { continue }
-        let prefix = String(key[..<r.lowerBound])
-
-        let chunks = MLX.split(stacked, parts: numExperts, axis: 0)
-        for (e, chunk) in chunks.enumerated() {
-            let newKey = "\(prefix).experts.\(e).\(proj).\(field)"
-            weights[newKey] = chunk.squeezed(axis: 0)
-        }
-        weights.removeValue(forKey: key)
-    }
-}
-
-/// Back-compat wrapper for the Qwen3-MoE call site (PR #78). Tests in
-/// `Qwen3MoENativeTests` invoke this directly with the `.switch_mlp.`
-/// marker; keeping the name preserves the prior contract.
-func unpackSwitchMLPWeights(
-    _ weights: inout [String: MLXArray],
-    numExperts: Int
-) {
-    unpackStackedMoEWeights(&weights, marker: ".switch_mlp.", numExperts: numExperts)
 }
 
 private func loadGLM(configData: Data, directory: URL) throws -> LoadedModel {

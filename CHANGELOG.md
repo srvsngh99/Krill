@@ -58,6 +58,16 @@ drop-in.
   (#74): the decode path no longer falls back to silent defaults when a
   checkpoint omits quant metadata; it now requires the values be
   present, surfacing malformed quant configs instead of guessing.
+- **Qwen3-MoE SwitchGLU dispatch** (opt-in via `KRILL_NATIVE_MOE=1`):
+  the native Qwen3-MoE runtime now dispatches the top-K experts with a
+  single `gatherQuantizedMM` per projection (`Qwen3SwitchGLU`), the same
+  pattern PR #82 applied to Gemma 4. The stacked
+  `mlp.switch_mlp.{proj}.*` checkpoint tensors bind directly (no
+  per-expert unpacking), and the per-layer host sync that drove the old
+  scatter dispatch is gone. Decode on Qwen3-Coder-30B-A3B benches **2.7x
+  faster (24 -> 66 tok/s)**. The path stays opt-in for now: the unsorted
+  gather regresses long-prompt prefill, so promoting native MoE to the
+  default waits on the sort-path prefill-parity follow-up.
 
 ### Fixed
 
