@@ -76,9 +76,10 @@ drop-in.
   `mlp.switch_mlp.{proj}.*` checkpoint tensors bind directly (no
   per-expert unpacking), and the per-layer host sync that drove the old
   scatter dispatch is gone. Decode on Qwen3-Coder-30B-A3B benches **2.7x
-  faster (24 -> 66 tok/s)**. The path stays opt-in for now: the unsorted
-  gather regresses long-prompt prefill, so promoting native MoE to the
-  default waits on the sort-path prefill-parity follow-up.
+  faster (24 -> 66 tok/s)**. (At the time this landed the unsorted gather
+  still regressed long-prompt prefill, so the path was opt-in; the #87
+  sort path fixed prefill and #88 then made native the default - see
+  those entries below.)
 - **SwitchGLU sort path recovers prefill parity** (#87): the unsorted
   `gatherQuantizedMM` dispatch (#82, #85) does an `M=1` matmul per
   `(token, expert)` with experts gathered in router-score order, which
