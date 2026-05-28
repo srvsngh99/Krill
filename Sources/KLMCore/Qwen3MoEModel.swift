@@ -247,14 +247,19 @@ class Qwen3QuantizedSwitchedLinear: Module {
     /// feed `gather_qmm`'s `[..., M, K]` matmul slot (the SwitchGLU
     /// caller expands to `[..., 1, 1, I]`); `indices` is `[..., K]`
     /// Int32 expert ids into the weight tensor's leading batch dim.
-    func callAsFunction(_ x: MLXArray, indices: MLXArray) -> MLXArray {
+    /// - Parameter sortedIndices: When true the caller has pre-sorted
+    ///   `indices` by expert id so MLX's gather kernel can use the
+    ///   faster sorted-indices path (the prefill sort path).
+    func callAsFunction(
+        _ x: MLXArray, indices: MLXArray, sortedIndices: Bool = false
+    ) -> MLXArray {
         return gatherQuantizedMM(
             x, weight,
             scales: scales, biases: biases,
             rhsIndices: indices,
             transpose: true,
             groupSize: groupSize, bits: bits, mode: .affine,
-            sortedIndices: false)
+            sortedIndices: sortedIndices)
     }
 }
 
@@ -311,8 +316,27 @@ class Qwen3SwitchGLU: Module {
     func callAsFunction(_ x: MLXArray, indices: MLXArray) -> MLXArray {
         let N = x.dim(0)
         let H = x.dim(1)
+        let topK = indices.dim(indices.ndim - 1)
 
-        // Expand to [N, 1, 1, H] so each (token, slot) sees an M=1 row
+        // Prefill (many assignments): sort (token, expert) by expert id
+        // so each expert's gather slice is contiguous and the gather_qmm
+        // `sortedIndices` fast path applies, recovering long-prompt
+        // throughput the unsorted dispatch regresses. Output is unsorted
+        // back to (token, slot) order so the caller's weighted sum is
+        // unchanged. See `MoESortPath.swift`.
+        if moeShouldSort(n: N, topK: topK) {
+            let (xs, idx, invOrder) = moeGatherSort(x, indices: indices)
+            // xs: [N*topK, 1, H] -- one M=1 row per assignment, sorted.
+            let xGate = gateProj(xs, indices: idx, sortedIndices: true)
+            let xUp = upProj(xs, indices: idx, sortedIndices: true)
+            let activated = silu(xGate) * xUp
+            let out = downProj(activated, indices: idx, sortedIndices: true)
+            // out: [N*topK, 1, H_out] -- unsort to [N, topK, H].
+            return moeScatterUnsort(out, invOrder: invOrder, n: N, topK: topK)
+        }
+
+        // Decode / short prompts (assignments below the sort threshold):
+        // expand to [N, 1, 1, H] so each (token, slot) sees an M=1 row
         // inside the gather. [N, 1] outer batch x [N, topK] indices ->
         // [N, topK, 1, H_out] per projection: no Swift loop, no
         // per-layer host sync, one device kernel per projection.

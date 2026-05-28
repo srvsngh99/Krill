@@ -685,14 +685,14 @@ class Gemma4QuantizedSwitchedLinear: Module {
 ///   5. Squeeze the M=1 axis to `[N, topK, H]`. The caller does the
 ///      topK weighted sum.
 ///
-/// Note: mlx-lm's `SwitchGLU` adds an optional sort step at high
-/// token counts (`indices.size >= 64`) that pre-arranges
-/// `(token, expert)` assignments by expert id, so each expert's
-/// kernel slice is contiguous in the gather op. The unsorted path
-/// already beats Ollama by ~38% wall-time on 26B-A4B (see the
-/// 2026-05-28 benchmark report) and the sort path requires figuring
-/// out a gather_qmm shape contract that differs between mlx-swift
-/// and the Python reference; left as a follow-up perf delta.
+/// At high token counts (`indices.size >= moeSortThreshold`, i.e.
+/// prefill) the forward sorts the `(token, expert)` assignments by
+/// expert id so each expert's gather slice is contiguous and MLX's
+/// `gather_qmm` `sortedIndices` fast path applies, recovering the
+/// long-prompt prefill throughput the unsorted dispatch regresses.
+/// Decode (`indices.size` below the threshold) stays on the unsorted
+/// path so its win is untouched. See `MoESortPath.swift` for the sort
+/// helpers and the mlx-swift vs Python shape-contract notes.
 class Gemma4SwitchGLU: Module {
     @ModuleInfo(key: "gate_proj") var gateProj: Gemma4QuantizedSwitchedLinear
     @ModuleInfo(key: "up_proj") var upProj: Gemma4QuantizedSwitchedLinear
@@ -729,10 +729,29 @@ class Gemma4SwitchGLU: Module {
     func callAsFunction(_ x: MLXArray, indices: MLXArray) -> MLXArray {
         let N = x.dim(0)
         let H = x.dim(1)
+        let topK = indices.dim(indices.ndim - 1)
 
-        // Expand to [N, 1, 1, H] so each (token, slot) sees an M=1
-        // row inside the gather. The [N, 1] outer batch combined with
-        // the [N, topK] indices yields [N, topK, 1, H_out] for each
+        // Prefill (many assignments): sort (token, expert) by expert id
+        // so each expert's gather slice is contiguous and the gather_qmm
+        // `sortedIndices` fast path applies, recovering long-prompt
+        // throughput the unsorted dispatch regresses. Output is unsorted
+        // back to (token, slot) order so the caller's weighted sum is
+        // unchanged. See `MoESortPath.swift`.
+        if moeShouldSort(n: N, topK: topK) {
+            let (xs, idx, invOrder) = moeGatherSort(x, indices: indices)
+            // xs: [N*topK, 1, H] -- one M=1 row per assignment, sorted.
+            let xUp = upProj(xs, indices: idx, sortedIndices: true)
+            let xGate = gateProj(xs, indices: idx, sortedIndices: true)
+            let activated = geluApproximate(xGate) * xUp
+            let out = downProj(activated, indices: idx, sortedIndices: true)
+            // out: [N*topK, 1, H_out] -- unsort to [N, topK, H].
+            return moeScatterUnsort(out, invOrder: invOrder, n: N, topK: topK)
+        }
+
+        // Decode / short prompts (assignments below the sort threshold):
+        // expand to [N, 1, 1, H] so each (token, slot) sees an M=1 row
+        // inside the gather. The [N, 1] outer batch combined with the
+        // [N, topK] indices yields [N, topK, 1, H_out] for each
         // projection -- no Swift loop, no per-layer host sync, the
         // entire dispatch lands in one device kernel per projection.
         let xExp = x.reshaped(N, 1, 1, H)
