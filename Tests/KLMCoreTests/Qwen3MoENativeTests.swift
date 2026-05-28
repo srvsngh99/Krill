@@ -453,4 +453,77 @@ final class Qwen3MoENativeTests: XCTestCase {
             "Only the one sparse layer must be counted")
         XCTAssertEqual(util.totalExpertSlots, 4)
     }
+
+    // MARK: - switch_mlp -> per-expert key rewrite (#75 regression)
+
+    /// mlx-community Qwen3-MoE checkpoints ship expert weights as
+    /// stacked `mlp.switch_mlp.{proj}.{field}` tensors with leading
+    /// dim `numExperts`. `Qwen3MoESparseMLP` allocates per-expert
+    /// modules at `mlp.experts.{e}.{proj}.{field}`. Without the
+    /// rewrite, `model.update(parameters: verify: [])` silently drops
+    /// every expert weight and leaves them at random init — the
+    /// generation collapses to looping special tokens, the original
+    /// #75 symptom.
+    ///
+    /// This test pins the rewrite shape so a future loader refactor
+    /// that drops it (or breaks the slicing axis) regresses loudly.
+    func testUnpackSwitchMLPRewritesStackedExpertKeys() throws {
+        let numExperts = 4
+        let outDim = 3
+        let inDim = 2
+        let stacked = MLXArray(0 ..< Int32(numExperts * outDim * inDim))
+            .reshaped(numExperts, outDim, inDim)
+        var weights: [String: MLXArray] = [
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight": stacked,
+            "model.layers.0.mlp.switch_mlp.up_proj.scales": stacked,
+            "model.layers.0.mlp.switch_mlp.down_proj.biases": stacked,
+            "model.layers.0.self_attn.q_proj.weight":
+                MLXArray.zeros([outDim, inDim]),
+        ]
+        unpackSwitchMLPWeights(&weights, numExperts: numExperts)
+
+        // Source keys must be gone, attention key untouched.
+        XCTAssertNil(weights["model.layers.0.mlp.switch_mlp.gate_proj.weight"])
+        XCTAssertNil(weights["model.layers.0.mlp.switch_mlp.up_proj.scales"])
+        XCTAssertNil(weights["model.layers.0.mlp.switch_mlp.down_proj.biases"])
+        XCTAssertNotNil(weights["model.layers.0.self_attn.q_proj.weight"],
+            "Non-MoE keys must pass through unchanged")
+
+        for e in 0 ..< numExperts {
+            for (proj, field) in [
+                ("gate_proj", "weight"),
+                ("up_proj", "scales"),
+                ("down_proj", "biases"),
+            ] {
+                let key = "model.layers.0.mlp.experts.\(e).\(proj).\(field)"
+                guard let w = weights[key] else {
+                    XCTFail("Missing rewritten key \(key)"); return
+                }
+                XCTAssertEqual(w.shape, [outDim, inDim],
+                    "Per-expert tensor must be the inner [out, in] slice")
+                // Slice content must equal stacked[e] - confirms the
+                // slicing axis is 0 (not 1) and no transpose snuck in.
+                let expected = stacked[e]
+                let diff = abs(w - expected).max().item(Float.self)
+                XCTAssertEqual(diff, 0,
+                    "Expert \(e)'s slice must equal stacked[\(e)] exactly")
+            }
+        }
+    }
+
+    /// Per-expert checkpoints (the format our internal `Qwen3MoEExpert`
+    /// matches directly) must round-trip through `unpackSwitchMLPWeights`
+    /// unchanged. The rewrite is keyed on `.switch_mlp.` presence, so a
+    /// checkpoint shipped as `mlp.experts.{e}.*` already is a no-op.
+    func testUnpackSwitchMLPLeavesPerExpertCheckpointsAlone() throws {
+        let one = MLXArray.zeros([3, 2])
+        var weights: [String: MLXArray] = [
+            "model.layers.0.mlp.experts.0.gate_proj.weight": one,
+            "model.layers.0.mlp.experts.1.gate_proj.weight": one,
+        ]
+        let before = weights.keys.sorted()
+        unpackSwitchMLPWeights(&weights, numExperts: 4)
+        XCTAssertEqual(weights.keys.sorted(), before,
+            "Per-expert checkpoints must round-trip unchanged")
+    }
 }

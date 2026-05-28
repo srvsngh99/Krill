@@ -494,10 +494,31 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
 private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(Qwen3MoEConfig.self, from: configData)
     let model = Qwen3MoEForCausalLM(config)
-    try loadWeights(
-        into: model, from: directory,
-        quantization: config.quantization,
-        tieWordEmbeddings: config.tieWordEmbeddings)
+
+    // Quantize first so each per-expert Linear becomes a QuantizedLinear at
+    // the right bits / group_size before weights land in it. Per-module
+    // overrides keep the router gates at their own precision (Qwen3-Coder:
+    // 8-bit router, 4-bit everything else).
+    if let q = config.quantization {
+        if q.moduleOverrides.isEmpty {
+            quantize(model: model, groupSize: q.groupSize, bits: q.bits)
+        } else {
+            quantize(model: model) { path, _ in
+                let eff = q.effective(for: path)
+                return (eff.groupSize, eff.bits, .affine)
+            }
+        }
+    }
+
+    var flatWeights = try loadWeightArrays(from: directory)
+    unpackSwitchMLPWeights(&flatWeights, numExperts: config.numExperts)
+
+    let tuples = flatWeights.map { ($0.key, $0.value) }
+    let nested = ModuleParameters.unflattened(tuples)
+    // Strict verify: the silent skip of unmatched keys (verify: []) was
+    // what hid the original switch_mlp/per-expert key mismatch for #75.
+    // Catch any regression of the same class loudly at load time.
+    try model.update(parameters: nested, verify: [.allModelKeysSet, .shapeMismatch])
 
     // `family` returned here must round-trip through
     // `ModelFamily(rawValue:)` so that `InferenceEngine.capabilities`
@@ -517,6 +538,54 @@ private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedMode
         multimodalForward: nil,
         vocabSize: config.vocabSize
     )
+}
+
+/// Slice mlx-community style stacked MoE expert tensors into per-expert
+/// tensors. Source keys look like
+/// `model.layers.{L}.mlp.switch_mlp.{gate_proj|up_proj|down_proj}.{weight|scales|biases}`
+/// with leading dim equal to `numExperts`; we rewrite each entry to
+/// `model.layers.{L}.mlp.experts.{e}.{proj}.{field}` matching the
+/// per-expert `Qwen3MoEExpert` modules our `Qwen3MoESparseMLP` allocates.
+///
+/// Why this rewrite exists: `model.update(parameters:, verify: [])`
+/// silently drops weights whose key has no matching parameter in the
+/// model. Without rewriting, every expert stays at its random init and
+/// generation collapses to looping special tokens — root cause of #75.
+///
+/// No-op for checkpoints that already ship per-expert keys; only
+/// `switch_mlp` entries with the expected leading dim are touched.
+///
+/// Exposed `internal` (not private) so the regression test in
+/// `Qwen3MoENativeTests` can call it directly without spinning up a
+/// full ~16 GB Qwen3-MoE checkpoint.
+func unpackSwitchMLPWeights(
+    _ weights: inout [String: MLXArray],
+    numExperts: Int
+) {
+    let marker = ".switch_mlp."
+    let switchKeys = weights.keys.filter { $0.contains(marker) }
+    guard !switchKeys.isEmpty else { return }
+
+    let validProjs: Set<String> = ["gate_proj", "up_proj", "down_proj"]
+    let validFields: Set<String> = ["weight", "scales", "biases"]
+
+    for key in switchKeys {
+        let parts = key.split(separator: ".")
+        guard parts.count >= 2 else { continue }
+        let field = String(parts[parts.count - 1])
+        let proj = String(parts[parts.count - 2])
+        guard validProjs.contains(proj), validFields.contains(field) else { continue }
+        guard let stacked = weights[key], stacked.shape.first == numExperts else { continue }
+        guard let r = key.range(of: marker) else { continue }
+        let prefix = String(key[..<r.lowerBound])
+
+        let chunks = MLX.split(stacked, parts: numExperts, axis: 0)
+        for (e, chunk) in chunks.enumerated() {
+            let newKey = "\(prefix).experts.\(e).\(proj).\(field)"
+            weights[newKey] = chunk.squeezed(axis: 0)
+        }
+        weights.removeValue(forKey: key)
+    }
 }
 
 private func loadGLM(configData: Data, directory: URL) throws -> LoadedModel {
