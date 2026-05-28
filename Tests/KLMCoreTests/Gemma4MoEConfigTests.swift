@@ -112,73 +112,12 @@ final class Gemma4MoEConfigTests: XCTestCase {
 
     // MARK: - switch_glu unpacker
 
-    /// Stacked `experts.switch_glu.{proj}.{weight,scales,biases}` keys
-    /// must rewrite to `experts.{e}.{proj}.{field}` -- NOT to
-    /// `experts.experts.{e}.{proj}.{field}`. The doubled-`experts.`
-    /// form was the original failure when the rewrite reused the
-    /// Qwen3-MoE template that prepends `experts.` to the prefix; on
-    /// Gemma 4 the prefix already ends in `.experts` so the
-    /// per-marker branch in `unpackStackedMoEWeights` writes the
-    /// shorter target.
-    func testUnpackSwitchGLUWritesSingleExpertsLevel() throws {
-        let numExperts = 4
-        let outDim = 3
-        let inDim = 2
-        let stacked = MLXArray(0 ..< Int32(numExperts * outDim * inDim))
-            .reshaped(numExperts, outDim, inDim)
-        var weights: [String: MLXArray] = [
-            "language_model.model.layers.0.experts.switch_glu.gate_proj.weight": stacked,
-            "language_model.model.layers.0.experts.switch_glu.up_proj.scales": stacked,
-            "language_model.model.layers.0.experts.switch_glu.down_proj.biases": stacked,
-            "language_model.model.layers.0.self_attn.q_proj.weight":
-                MLXArray.zeros([outDim, inDim]),
-            "language_model.model.layers.0.mlp.gate_proj.weight":
-                MLXArray.zeros([outDim, inDim]),
-        ]
-
-        unpackStackedMoEWeights(
-            &weights, marker: ".switch_glu.", numExperts: numExperts)
-
-        // Original stacked keys must be gone.
-        XCTAssertNil(weights["language_model.model.layers.0.experts.switch_glu.gate_proj.weight"])
-        XCTAssertNil(weights["language_model.model.layers.0.experts.switch_glu.up_proj.scales"])
-        XCTAssertNil(weights["language_model.model.layers.0.experts.switch_glu.down_proj.biases"])
-
-        // Non-MoE keys untouched.
-        XCTAssertNotNil(weights["language_model.model.layers.0.self_attn.q_proj.weight"])
-        XCTAssertNotNil(weights["language_model.model.layers.0.mlp.gate_proj.weight"])
-
-        for e in 0 ..< numExperts {
-            for (proj, field) in [
-                ("gate_proj", "weight"),
-                ("up_proj", "scales"),
-                ("down_proj", "biases"),
-            ] {
-                // The "single experts" target. A doubled
-                // `experts.experts.\(e)` would mismatch the model's
-                // `[Gemma4MoEExpert]` submodule list and trigger the
-                // `.incompatibleItems` failure that originally blocked
-                // 26B-A4B loading.
-                let key = "language_model.model.layers.0.experts.\(e).\(proj).\(field)"
-                guard let w = weights[key] else {
-                    XCTFail("Missing rewritten key \(key)"); return
-                }
-                XCTAssertEqual(w.shape, [outDim, inDim])
-                XCTAssertNil(
-                    weights["language_model.model.layers.0.experts.experts.\(e).\(proj).\(field)"],
-                    "switch_glu rewrite must NOT emit a doubled `experts.experts.\(e).*` key")
-
-                // Sanity: the slice content matches the stacked source.
-                let diff = abs(w - stacked[e]).max().item(Float.self)
-                XCTAssertEqual(diff, 0)
-            }
-        }
-    }
-
     /// Qwen3-MoE's `switch_mlp` path must continue to prepend
     /// `experts.` since the parent of the marker there (`mlp`) is NOT
-    /// the experts container. Regression test for the marker-based
-    /// template selection in `unpackStackedMoEWeights`.
+    /// the experts container. The Gemma 4 `switch_glu` path no longer
+    /// goes through this unpacker -- the SwitchGLU module hierarchy
+    /// matches the in-checkpoint stacked-key layout directly -- so
+    /// this pinning is now Qwen3-MoE-only.
     func testUnpackSwitchMLPStillPrependsExperts() throws {
         let numExperts = 2
         let stacked = MLXArray(0 ..< Int32(numExperts * 6)).reshaped(numExperts, 3, 2)
