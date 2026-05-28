@@ -483,25 +483,23 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
             // is stripped from the weight keys, the model's module path
             // is e.g. `model.layers.0.mlp.gate_proj`; override keys in
             // `q` may still carry the `language_model.` prefix from the
-            // raw checkpoint config. `effective(for:)` tries the
-            // de-prefixed path first; we fall back to the prefixed form
-            // so per-module overrides hit either way.
+            // raw checkpoint config. Look up the de-prefixed path first
+            // (this is what the multimodal path also sees because that
+            // path does not strip the prefix); if no override exists
+            // there, try the prefixed form so 26B-A4B's `language_model.
+            // model.layers.0.mlp.gate_proj` override still binds when
+            // the same checkpoint is loaded text-only.
             if path.contains("per_layer_model_projection")
                 || path.contains("per_layer_projection_norm") { return nil }
-            let direct = q.effective(for: path)
-            let prefixed = q.effective(for: "language_model." + path)
-            // If a per-module override exists under the prefixed form
-            // but not the direct form, the prefixed lookup will return
-            // a tuple that differs from the top-level (group, bits);
-            // prefer it. Otherwise both calls return the top-level
-            // defaults and either is fine.
-            let useTuple: (groupSize: Int, bits: Int)
-            if direct.groupSize != q.groupSize || direct.bits != q.bits {
-                useTuple = direct
+            let eff: (groupSize: Int, bits: Int)
+            if q.moduleOverrides[path] != nil {
+                eff = q.effective(for: path)
+            } else if q.moduleOverrides["language_model." + path] != nil {
+                eff = q.effective(for: "language_model." + path)
             } else {
-                useTuple = prefixed
+                eff = (q.groupSize, q.bits)
             }
-            return (useTuple.groupSize, useTuple.bits, .affine)
+            return (eff.groupSize, eff.bits, .affine)
         }
     }
 
@@ -582,14 +580,14 @@ private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedMode
 /// Supported marker shapes (both produce the per-expert keys the
 /// model expects):
 ///
-///   - `.switch_mlp.` — Qwen3-MoE (mlx-community SwiGLU pack). The
+///   - `.switch_mlp.` for Qwen3-MoE (mlx-community SwiGLU pack). The
 ///     in-checkpoint key is `mlp.switch_mlp.{proj}.{field}` and the
 ///     parent `mlp` IS the expert container, so we emit
 ///     `mlp.experts.{e}.{proj}.{field}` -- i.e. prepend `experts.`
 ///     because the parent path lacks it. The Qwen3 model's block has
 ///     `mlp = Qwen3MoESparseMLP` which owns `experts: [Qwen3MoEExpert]`.
 ///
-///   - `.switch_glu.` — Gemma 4 26B-A4B (mlx-lm GeGLU pack). The
+///   - `.switch_glu.` for Gemma 4 26B-A4B (mlx-lm GeGLU pack). The
 ///     in-checkpoint key is `experts.switch_glu.{proj}.{field}` and the
 ///     parent IS already the experts list, so we emit
 ///     `experts.{e}.{proj}.{field}` -- DO NOT prepend another
