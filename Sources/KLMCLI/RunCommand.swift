@@ -188,7 +188,7 @@ struct RunCommand: AsyncParsableCommand {
     /// in-process path. A mid-stream failure throws so the user
     /// gets a clear error instead of a silent partial output.
     private func tryDaemonRoute(modelName: String, prompt: String) async throws -> Bool {
-        let port = Int(ProcessInfo.processInfo.environment["KRILL_PORT"] ?? "") ?? 11435
+        let port = Int(ProcessInfo.processInfo.environment["KRILL_PORT"] ?? "") ?? 11434
         guard let status = await DaemonClient.probeStatus(port: port) else { return false }
         guard status.modelLoaded, status.model == modelName else { return false }
 

@@ -60,7 +60,7 @@ public struct KrillConfig: Sendable {
         self.prefixCacheSizeGB = 2.0
         self.speculativeDecoding = false
         self.modelsDir = nil
-        self.serverPort = 11435
+        self.serverPort = 11434
         self.serverHost = "127.0.0.1"
         self.idleTimeout = 300
         self.contextLength = nil

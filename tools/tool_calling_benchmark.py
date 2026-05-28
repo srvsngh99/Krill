@@ -116,7 +116,7 @@ SUITE: list[dict[str, Any]] = [
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--krillm-url", default="http://127.0.0.1:11435",
+    p.add_argument("--krillm-url", default="http://127.0.0.1:11434",
                    help="Running KrillLM server base URL.")
     p.add_argument("--ollama-host", default="http://127.0.0.1:11434",
                    help="Ollama API host.")

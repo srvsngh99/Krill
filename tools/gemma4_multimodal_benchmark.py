@@ -433,7 +433,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audio-max-tokens", type=int, default=24)
     parser.add_argument("--image", help="Optional image asset path.")
     parser.add_argument("--audio", help="Optional audio asset path.")
-    parser.add_argument("--krillm-url", help="KrillLM server URL for native-path benchmarking (e.g. http://127.0.0.1:11435).")
+    parser.add_argument("--krillm-url", help="KrillLM server URL for native-path benchmarking (e.g. http://127.0.0.1:11434).")
     parser.add_argument(
         "--krillm-image-mode",
         choices=["native_cli", "native_server"],

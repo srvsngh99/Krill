@@ -10,8 +10,8 @@ make release
 make bench-compare KRILL_MODEL=llama-3.2-1b OLLAMA_MODEL=llama3.2:1b
 
 # Server-mode (warm vs warm, eliminates process startup)
-krillm serve --model llama-3.2-1b --port 11435 &
-make bench-compare KRILLM_URL=http://127.0.0.1:11435
+krillm serve --model llama-3.2-1b --port 11434 &
+make bench-compare KRILLM_URL=http://127.0.0.1:11434
 
 # Gemma4 multimodal (text/image/audio — all native, no Python bridge)
 make bench-gemma4-multimodal
