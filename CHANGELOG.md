@@ -94,7 +94,7 @@ drop-in.
   with decode held (~59 tok/s). Applied to both `Gemma4SwitchGLU` and
   `Qwen3SwitchGLU`; shared helpers in `MoESortPath.swift`. This unblocks
   promoting native Qwen3-MoE to the default.
-- **Native Qwen3-MoE runtime is now the DEFAULT** (#PR10): with #85
+- **Native Qwen3-MoE runtime is now the DEFAULT** (#88): with #85
   decode (2.7x) and #87 prefill parity both landed, the native Swift+MLX
   Qwen3-MoE runtime no longer waits behind the `KRILL_NATIVE_MOE=1`
   opt-in. Qwen3-MoE checkpoints now load, serve, and tool-call on the
