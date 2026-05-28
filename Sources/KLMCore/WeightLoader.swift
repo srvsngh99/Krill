@@ -51,12 +51,27 @@ public func loadWeightArrays(from directory: URL) throws -> [String: MLXArray] {
 ///   similar tied checkpoints, so we do not try to assign weights
 ///   into a property that does not exist. Defaults to false to keep
 ///   prior callers unchanged.
+/// - Parameter keyRewrite: Optional caller-defined hook to mutate the
+///   flat `[key: MLXArray]` weights dict AFTER prefix stripping +
+///   tied-embedding duplication and BEFORE the `model.update` call.
+///   Used by `loadQwen3MoE` to unpack mlx-community's stacked
+///   `mlp.switch_mlp.{proj}` expert tensors into the per-expert keys
+///   our `Qwen3MoESparseMLP` allocates. Defaults to nil (no rewrite).
+/// - Parameter strictVerify: When true, the `model.update` call uses
+///   `.allModelKeysSet, .shapeMismatch, .noUnusedKeys` so loader bugs
+///   in this class (silent-dropped checkpoint keys, missing model
+///   params, shape mismatches) crash at load time instead of producing
+///   garbage tokens at decode time. The historical default
+///   (`verify: []`) is preserved for callers that haven't audited their
+///   key conventions; new families should adopt strict verify.
 public func loadWeights(
     into model: Module,
     from directory: URL,
     quantization: QuantizationConfig? = nil,
     keyPrefix: String? = nil,
-    tieWordEmbeddings: Bool = false
+    tieWordEmbeddings: Bool = false,
+    keyRewrite: ((inout [String: MLXArray]) -> Void)? = nil,
+    strictVerify: Bool = false
 ) throws {
     // Quantize the model if needed (converts Linear -> QuantizedLinear).
     // The mixed-precision branch routes through MLX's per-layer filter
@@ -118,12 +133,30 @@ public func loadWeights(
         }
     }
 
+    // Caller hook: rewrite keys after prefix-strip and tied-embed
+    // duplication, before update. Used by Qwen3-MoE to slice
+    // mlx-community's stacked switch_mlp tensors into the per-expert
+    // keys the model allocates.
+    keyRewrite?(&flatWeights)
+
     // Use mlx-swift's built-in unflattened() to convert flat dict -> ModuleParameters
     let tuples = flatWeights.map { ($0.key, $0.value) }
     let nested = ModuleParameters.unflattened(tuples)
 
-    // Use noUnusedKeys to allow extra keys from tied weight duplication
-    try model.update(parameters: nested, verify: [])
+    // Strict mode catches three classes of loader bug at load time:
+    //   .allModelKeysSet -> a module param the checkpoint did not cover
+    //                       (would leave that weight at random init)
+    //   .shapeMismatch   -> a key matched but the shape disagrees
+    //   .noUnusedKeys    -> a checkpoint key with no matching param
+    //                       (this is what hid the original #75: the
+    //                       silent-drop of mlx-community's stacked
+    //                       switch_mlp keys was invisible until decode)
+    // Lax mode preserves the historical `verify: []` for callers that
+    // have not been audited.
+    let verify: Module.VerifyUpdate = strictVerify
+        ? [.allModelKeysSet, .shapeMismatch, .noUnusedKeys]
+        : []
+    try model.update(parameters: nested, verify: verify)
 }
 
 // MARK: - Errors

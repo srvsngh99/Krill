@@ -494,31 +494,15 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
 private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(Qwen3MoEConfig.self, from: configData)
     let model = Qwen3MoEForCausalLM(config)
-
-    // Quantize first so each per-expert Linear becomes a QuantizedLinear at
-    // the right bits / group_size before weights land in it. Per-module
-    // overrides keep the router gates at their own precision (Qwen3-Coder:
-    // 8-bit router, 4-bit everything else).
-    if let q = config.quantization {
-        if q.moduleOverrides.isEmpty {
-            quantize(model: model, groupSize: q.groupSize, bits: q.bits)
-        } else {
-            quantize(model: model) { path, _ in
-                let eff = q.effective(for: path)
-                return (eff.groupSize, eff.bits, .affine)
-            }
-        }
-    }
-
-    var flatWeights = try loadWeightArrays(from: directory)
-    unpackSwitchMLPWeights(&flatWeights, numExperts: config.numExperts)
-
-    let tuples = flatWeights.map { ($0.key, $0.value) }
-    let nested = ModuleParameters.unflattened(tuples)
-    // Strict verify: the silent skip of unmatched keys (verify: []) was
-    // what hid the original switch_mlp/per-expert key mismatch for #75.
-    // Catch any regression of the same class loudly at load time.
-    try model.update(parameters: nested, verify: [.allModelKeysSet, .shapeMismatch])
+    let numExperts = config.numExperts
+    try loadWeights(
+        into: model, from: directory,
+        quantization: config.quantization,
+        tieWordEmbeddings: config.tieWordEmbeddings,
+        keyRewrite: { weights in
+            unpackSwitchMLPWeights(&weights, numExperts: numExperts)
+        },
+        strictVerify: true)
 
     // `family` returned here must round-trip through
     // `ModelFamily(rawValue:)` so that `InferenceEngine.capabilities`
@@ -550,7 +534,7 @@ private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedMode
 /// Why this rewrite exists: `model.update(parameters:, verify: [])`
 /// silently drops weights whose key has no matching parameter in the
 /// model. Without rewriting, every expert stays at its random init and
-/// generation collapses to looping special tokens — root cause of #75.
+/// generation collapses to looping special tokens - root cause of #75.
 ///
 /// No-op for checkpoints that already ship per-expert keys; only
 /// `switch_mlp` entries with the expected leading dim are touched.

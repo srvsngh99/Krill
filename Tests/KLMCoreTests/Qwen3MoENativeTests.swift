@@ -461,7 +461,7 @@ final class Qwen3MoENativeTests: XCTestCase {
     /// dim `numExperts`. `Qwen3MoESparseMLP` allocates per-expert
     /// modules at `mlp.experts.{e}.{proj}.{field}`. Without the
     /// rewrite, `model.update(parameters: verify: [])` silently drops
-    /// every expert weight and leaves them at random init — the
+    /// every expert weight and leaves them at random init - the
     /// generation collapses to looping special tokens, the original
     /// #75 symptom.
     ///
