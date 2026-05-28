@@ -79,7 +79,7 @@ drop-in.
   faster (24 -> 66 tok/s)**. The path stays opt-in for now: the unsorted
   gather regresses long-prompt prefill, so promoting native MoE to the
   default waits on the sort-path prefill-parity follow-up.
-- **SwitchGLU sort path recovers prefill parity** (#PR7): the unsorted
+- **SwitchGLU sort path recovers prefill parity** (#87): the unsorted
   `gatherQuantizedMM` dispatch (#82, #85) does an `M=1` matmul per
   `(token, expert)` with experts gathered in router-score order, which
   regresses long-prompt prefill. Mirroring mlx-lm's `switch_layers` sort
