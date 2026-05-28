@@ -204,7 +204,7 @@ public enum ModelCapabilities {
 /// Returns false (route through bridge) when `KRILL_NATIVE_MOE=0`, when
 /// the checkpoint is a non-Qwen3 MoE family (Mixtral / Qwen2-MoE /
 /// OLMoE / DeepSeek-V3 have no native runtime yet), or when the
-/// directory has no readable config.json — the native loader would
+/// directory has no readable config.json - the native loader would
 /// fail anyway, and the bridge handler emits a clearer error for that
 /// case.
 public func nativeMoEDispatchSupported(at directory: URL) -> Bool {
