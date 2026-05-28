@@ -182,12 +182,10 @@ private let aliases: [String: ResolvedModel] = [
     "gemma-4-e4b": ResolvedModel(
         repo: "mlx-community/gemma-4-e4b-it-4bit",
         name: "gemma-4-e4b", family: .gemma4, params: "4B", quant: "4bit", context: 131072),
-    "gemma-4-12b": ResolvedModel(
-        repo: "mlx-community/gemma-4-12b-it-4bit",
-        name: "gemma-4-12b", family: .gemma4, params: "12B", quant: "4bit", context: 131072),
-    "gemma-4-27b": ResolvedModel(
-        repo: "mlx-community/gemma-4-27b-it-4bit",
-        name: "gemma-4-27b", family: .gemma4, params: "27B", quant: "4bit", context: 131072),
+    // Google's Gemma 4 lineup is E2B / E4B / 26B-A4B / 31B; no 12B or
+    // 27B SKU exists. 26B-A4B and 31B are not aliased here yet because
+    // the loader (`Gemma4Model`) is currently e2b-shape-specific - see
+    // docs/FOLLOWUPS_AGENT_DOGFOOD.md §1.
 
     // GLM-4
     "glm-4-9b": ResolvedModel(
