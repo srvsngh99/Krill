@@ -20,18 +20,119 @@ public protocol ModelConfig: Sendable {
 // MARK: - Quantization
 
 /// Quantization parameters (present in 4-bit / 8-bit mlx-community models).
-public struct QuantizationConfig: Codable, Sendable {
+///
+/// Two on-disk shapes coexist:
+///
+/// - **Uniform**: every quantized module shares the same `(group_size, bits)`:
+///   ```json
+///   "quantization": { "group_size": 64, "bits": 4 }
+///   ```
+/// - **Mixed precision** (newer mlx-community quants, e.g. Qwen3-Coder MoE):
+///   top-level defaults plus per-module overrides keyed by full dotted name:
+///   ```json
+///   "quantization": {
+///     "group_size": 64, "bits": 4,
+///     "model.layers.0.mlp.gate": { "group_size": 64, "bits": 8 },
+///     ...
+///   }
+///   ```
+///   Qwen3-Coder ships 4-bit base with the MoE gates promoted to 8-bit; loading
+///   the gates as 4-bit (the prior behaviour) crashes MLX with a scales-shape
+///   mismatch in `quantized_matmul`.
+///
+/// `moduleOverrides` is the parsed per-module map; `effective(for:)` returns
+/// the right `(groupSize, bits)` for a module path (override if present, top
+/// level otherwise).
+public struct QuantizationConfig: Sendable {
     public let groupSize: Int
     public let bits: Int
+    /// Per-module overrides keyed by the module's full dotted name.
+    /// Empty for uniform-precision checkpoints.
+    public let moduleOverrides: [String: ModuleQuant]
 
-    enum CodingKeys: String, CodingKey {
-        case groupSize = "group_size"
-        case bits
+    public struct ModuleQuant: Codable, Sendable, Equatable {
+        public let groupSize: Int
+        public let bits: Int
+
+        enum CodingKeys: String, CodingKey {
+            case groupSize = "group_size"
+            case bits
+        }
+
+        public init(groupSize: Int, bits: Int) {
+            self.groupSize = groupSize
+            self.bits = bits
+        }
     }
 
-    public init(groupSize: Int, bits: Int) {
+    public init(
+        groupSize: Int, bits: Int,
+        moduleOverrides: [String: ModuleQuant] = [:]
+    ) {
         self.groupSize = groupSize
         self.bits = bits
+        self.moduleOverrides = moduleOverrides
+    }
+
+    /// Effective `(groupSize, bits)` for a module at the given dotted path.
+    /// Falls back to the top-level defaults when no override is registered.
+    public func effective(
+        for modulePath: String
+    ) -> (groupSize: Int, bits: Int) {
+        if let o = moduleOverrides[modulePath] {
+            return (o.groupSize, o.bits)
+        }
+        return (groupSize, bits)
+    }
+}
+
+extension QuantizationConfig: Codable {
+    /// Dynamic keys so we can iterate every entry in the JSON object - the
+    /// per-module override keys are arbitrary dotted names, not a fixed set.
+    private struct DynamicKey: CodingKey {
+        var stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: DynamicKey.self)
+        var groupSize = 64
+        var bits = 4
+        var overrides: [String: ModuleQuant] = [:]
+        for key in c.allKeys {
+            switch key.stringValue {
+            case "group_size":
+                groupSize = try c.decode(Int.self, forKey: key)
+            case "bits":
+                bits = try c.decode(Int.self, forKey: key)
+            case "mode", "method":
+                // Top-level mode / method labels (e.g. `"mode": "affine"`)
+                // are informational; the MLX quantize call uses .affine
+                // and the per-module overrides do not carry these.
+                continue
+            default:
+                // Nested object => module override. If the entry is not
+                // a `ModuleQuant`-shaped object, leave it alone for
+                // forwards-compat with newer config fields.
+                if let mq = try? c.decode(ModuleQuant.self, forKey: key) {
+                    overrides[key.stringValue] = mq
+                }
+            }
+        }
+        self.groupSize = groupSize
+        self.bits = bits
+        self.moduleOverrides = overrides
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: DynamicKey.self)
+        try c.encode(groupSize, forKey: DynamicKey(stringValue: "group_size")!)
+        try c.encode(bits, forKey: DynamicKey(stringValue: "bits")!)
+        for (path, mq) in moduleOverrides {
+            try c.encode(mq, forKey: DynamicKey(stringValue: path)!)
+        }
     }
 }
 
