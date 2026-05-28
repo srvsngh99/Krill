@@ -121,6 +121,45 @@ final class QuantizationConfigOverridesTests: XCTestCase {
         XCTAssertEqual(r.bits, 4)
     }
 
+    // MARK: - Strict decoding
+
+    func testDecoderThrowsWhenGroupSizeMissing() {
+        // The mlx-community contract is that a `"quantization"` block
+        // declares both scalars. A block missing `group_size` is
+        // malformed; surface it instead of silently using a default
+        // that may not match what the weight files were packed with.
+        XCTAssertThrowsError(
+            try decode("""
+            { "bits": 4 }
+            """)
+        ) { err in
+            guard case DecodingError.keyNotFound(let key, _) = err else {
+                return XCTFail("expected keyNotFound, got \(err)")
+            }
+            XCTAssertEqual(key.stringValue, "group_size")
+        }
+    }
+
+    func testDecoderThrowsWhenBitsMissing() {
+        XCTAssertThrowsError(
+            try decode("""
+            { "group_size": 64 }
+            """)
+        ) { err in
+            guard case DecodingError.keyNotFound(let key, _) = err else {
+                return XCTFail("expected keyNotFound, got \(err)")
+            }
+            XCTAssertEqual(key.stringValue, "bits")
+        }
+    }
+
+    func testDecoderThrowsOnEmptyObject() {
+        // The empty-object footgun: prior to this guard the decoder
+        // silently returned (groupSize: 64, bits: 4) for `{}`, which
+        // could mask a malformed checkpoint. Make it loud.
+        XCTAssertThrowsError(try decode("{}"))
+    }
+
     // MARK: - Round-trip
 
     func testEncodeDecodeRoundTrips() throws {
