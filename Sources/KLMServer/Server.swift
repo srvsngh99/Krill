@@ -454,8 +454,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     /// Apply a created model's Modelfile `SYSTEM` override (WS-C): if the
     /// loaded model has a system override and the request carries no system
-    /// message, prepend it. `TEMPLATE` round-trips via `show`/`/api/show`;
-    /// runtime template application is a tracked follow-up.
+    /// message, prepend it.
     private func applyModelSystemOverride(
         _ messages: [[String: String]]
     ) -> [[String: String]] {
@@ -465,6 +464,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
               !messages.contains(where: { $0["role"] == "system" })
         else { return messages }
         return [["role": "system", "content": sys]] + messages
+    }
+
+    /// The loaded model's Modelfile `TEMPLATE` override (WS-C), if any.
+    /// Passed to `engine.generate(promptTemplateOverride:)` so the engine
+    /// renders the prompt with the author's Go text/template instead of
+    /// the model's built-in chat template. `nil` when no override exists,
+    /// leaving the default rendering path untouched.
+    private func modelTemplateOverride() -> String? {
+        guard let name = engine.modelName,
+              let tmpl = registry.getModel(name)?.overrides?.template,
+              !tmpl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        return tmpl
     }
 
     /// 404 with a clear reason when an endpoint exists but its compat family
@@ -699,7 +711,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             defer { self.leaveQueue() }
             let (tokenStream, getStats) = eng.generate(
                 messages: msgs, params: params, maxTokens: maxTokens,
-                contextLimit: ctxLimit)
+                contextLimit: ctxLimit,
+                promptTemplateOverride: modelTemplateOverride())
             var full = ""
             for await ev in tokenStream { if ev.isEnd { break }; full += ev.text }
 
@@ -812,7 +825,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 messages: messages, params: params,
                 maxTokens: maxTokens, imageData: imageData,
                 audioData: audioData,
-                contextLimit: toolCtx)
+                contextLimit: toolCtx,
+                promptTemplateOverride: modelTemplateOverride())
 
             var full = ""
             for await event in tokenStream {
@@ -1020,7 +1034,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 messages: messages,
                 params: params, maxTokens: maxTokens,
                 imageData: imageData, audioData: audioData,
-                contextLimit: contextLimit)
+                contextLimit: contextLimit,
+                promptTemplateOverride: modelTemplateOverride())
 
             let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
             // Strip <think>/<thinking> from streamed chunks. Holds
@@ -1085,7 +1100,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 messages: messages,
                 params: params, maxTokens: maxTokens,
                 imageData: imageData, audioData: audioData,
-                contextLimit: contextLimit)
+                contextLimit: contextLimit,
+                promptTemplateOverride: modelTemplateOverride())
 
             var fullContent = ""
             for await event in tokenStream {
@@ -1159,7 +1175,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             let (tokenStream, getStats) = eng.generate(
                 prompt: request.prompt,
                 params: request.sampling.samplingParams,
-                maxTokens: request.maxTokens)
+                maxTokens: request.maxTokens,
+                promptTemplateOverride: modelTemplateOverride())
 
             var fullText = ""
             for await event in tokenStream {
@@ -1378,7 +1395,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 maxTokens: ocMax,
                 imageData: imageData,
                 audioData: audioData,
-                contextLimit: ocCtx)
+                contextLimit: ocCtx,
+                promptTemplateOverride: modelTemplateOverride())
 
             if request.stream {
                 var firstTokenTime: Double?
@@ -1582,7 +1600,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 maxTokens: ogMax,
                 imageData: imageData,
                 audioData: audioData,
-                contextLimit: ogCtx)
+                contextLimit: ogCtx,
+                promptTemplateOverride: modelTemplateOverride())
 
             if request.stream {
                 var firstTokenTime: Double?
