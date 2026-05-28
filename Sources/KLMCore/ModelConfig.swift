@@ -98,8 +98,8 @@ extension QuantizationConfig: Codable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: DynamicKey.self)
-        var groupSize = 64
-        var bits = 4
+        var groupSize: Int?
+        var bits: Int?
         var overrides: [String: ModuleQuant] = [:]
         for key in c.allKeys {
             switch key.stringValue {
@@ -121,8 +121,26 @@ extension QuantizationConfig: Codable {
                 }
             }
         }
-        self.groupSize = groupSize
-        self.bits = bits
+        // Strict on the top-level scalars: an mlx-community quant block
+        // without `group_size` or `bits` is a malformed config we'd
+        // rather surface immediately than paper over with silent
+        // defaults. The earlier synthesized Codable threw here too;
+        // this matches that contract while still supporting the new
+        // per-module overrides.
+        guard let resolvedGroupSize = groupSize else {
+            throw DecodingError.keyNotFound(
+                DynamicKey(stringValue: "group_size")!,
+                .init(codingPath: decoder.codingPath,
+                      debugDescription: "QuantizationConfig requires `group_size`"))
+        }
+        guard let resolvedBits = bits else {
+            throw DecodingError.keyNotFound(
+                DynamicKey(stringValue: "bits")!,
+                .init(codingPath: decoder.codingPath,
+                      debugDescription: "QuantizationConfig requires `bits`"))
+        }
+        self.groupSize = resolvedGroupSize
+        self.bits = resolvedBits
         self.moduleOverrides = overrides
     }
 
