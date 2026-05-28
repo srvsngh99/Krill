@@ -58,24 +58,34 @@ Q/K/V projections at `Gemma4Model.swift:213, 228-229`.
 
 ---
 
-## 2. AliasMap points at non-existent `gemma-4-12b` repo
+## 2. AliasMap points at non-existent `gemma-4-12b` and `gemma-4-27b` repos
 
-**Symptom.** `krillm pull gemma-4-12b` → `HTTP 401: Failed to list repo files`.
+**Symptom.** `krillm pull gemma-4-12b` and `krillm pull gemma-4-27b`
+both fail with `HTTP 401: Failed to list repo files`.
 
-**Root cause.** `Sources/KLMRegistry/AliasMap.swift:185-187`:
+**Root cause.** `Sources/KLMRegistry/AliasMap.swift:185-190`:
 
 ```swift
 "gemma-4-12b": ResolvedModel(
     repo: "mlx-community/gemma-4-12b-it-4bit",
     ...
+"gemma-4-27b": ResolvedModel(
+    repo: "mlx-community/gemma-4-27b-it-4bit",
+    ...
 ```
 
-This repo does not exist. Google's Gemma 4 lineup is **E2B / E4B /
-26B-A4B / 31B** — there is no 12B SKU. HF returns 401 (which it
-uses uniformly for "not found or private") rather than 404, which made
-this look like a license-gate at first.
+Neither repo exists. Google's Gemma 4 lineup is **E2B / E4B /
+26B-A4B / 31B** - there is no 12B SKU and no 27B SKU. (27B was the
+Gemma *3* large variant; the 12B size never shipped on the Gemma 4
+family.) HF returns 401 (which it uses uniformly for "not found or
+private") rather than 404, which made these look like license-gates
+at first.
 
-**Suggested fix.** Remove the `gemma-4-12b` entry. Optionally add
+`Sources/KLMEngine/SpeculativeDecoder.swift:271-272` has matching
+`draftPairs` entries pointing at the same dead aliases.
+
+**Suggested fix.** Remove both `gemma-4-12b` and `gemma-4-27b` from
+AliasMap and from the SpeculativeDecoder draft pairs. Optionally add
 `gemma-4-26b-a4b` and `gemma-4-31b` once §1 is fixed and they actually
 load. The 31B at 4-bit (~16 GB) is too tight for 16/24 GB Macs; flag
 appropriately in `Recommender`.
@@ -122,7 +132,7 @@ which the sharded weight loader needs for any multi-shard checkpoint.
 
 Or invert the policy: pull everything except a small denylist
 (`README.md`, `.gitattributes`, `*.png`, `*.md`, `original/`, sample
-images). Inversion is more future-proof — every new HF convention so
+images). Inversion is more future-proof - every new HF convention so
 far has added files, not removed them.
 
 Add a tokenizer-load smoke test that asserts `chat_template` is present
@@ -168,14 +178,14 @@ scales tensor shape mismatches.
 2. At expert/router/linear instantiation time in `Qwen3MoEModel.swift`,
    look up the module's full dotted name against the override map and
    use the per-module bits/group_size when present.
-3. Treat this as a generic mechanism — Qwen3-Coder is the trigger but
+3. Treat this as a generic mechanism - Qwen3-Coder is the trigger but
    the same pattern (per-module overrides) is increasingly common across
    MLX-community quants. Wire it through `Gemma4Model` and `QwenModel`
    too while you're there.
 
 Adding the override path also lifts the artificial `KRILL_NATIVE_MOE=1`
 gate, since the next blocker (scatter-dispatch perf) is correctness-
-orthogonal — the runtime can ship now and optimize dispatch later.
+orthogonal - the runtime can ship now and optimize dispatch later.
 
 ---
 
@@ -198,14 +208,14 @@ the Qwen 2.5-VL bridge for the same reason. Once §3 and §4 land:
 
 ---
 
-## Verification path once §1–§4 land
+## Verification path once §1-§4 land
 
 1. `krillm pull mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`
 2. `krillm serve --model Qwen3-Coder-30B-A3B-Instruct-4bit`
 3. Plain-text smoke against `/v1/messages` (Anthropic shape).
-4. Tool-calling smoke with one `tools` entry — assert the response
+4. Tool-calling smoke with one `tools` entry - assert the response
    `content[0].type == "tool_use"` with parsed `input`.
-5. SSE streaming smoke — assert event order `message_start`,
+5. SSE streaming smoke - assert event order `message_start`,
    `content_block_start`, `content_block_delta`, `content_block_stop`,
    `message_delta`, `message_stop`.
 6. Drive an external Claude Code instance via `ANTHROPIC_BASE_URL` on
