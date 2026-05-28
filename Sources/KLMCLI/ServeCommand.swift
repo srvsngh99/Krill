@@ -13,13 +13,13 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Model to pre-load (name or path)")
     var model: String?
 
-    @Option(name: .long, help: "Port to listen on (default: $OLLAMA_HOST port / config / 11435)")
+    @Option(name: .long, help: "Port to listen on (default: $OLLAMA_HOST port / config / 11434)")
     var port: Int?
 
     @Option(name: .long, help: "Host to bind to (default: $OLLAMA_HOST / config / 127.0.0.1)")
     var host: String?
 
-    @Option(name: .long, help: "Client compat surface: ollama | openai | both (default both). For an Ollama drop-in also pass --port 11434.")
+    @Option(name: .long, help: "Client compat surface: ollama | openai | both (default both). Default port is 11434, so no extra flags are needed for an Ollama drop-in.")
     var compat: String = "both"
 
     @Option(name: .long, help: "Draft model for speculative decoding (alias, path, or 'auto'). Also reads KRILL_DRAFT_MODEL.")

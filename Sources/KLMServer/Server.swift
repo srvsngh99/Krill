@@ -32,7 +32,7 @@ public final class KLMServer: Sendable {
     private let defaultContextLimit: Int?
     private let genQueue: GenerationQueue
 
-    public init(host: String = "127.0.0.1", port: Int = 11435,
+    public init(host: String = "127.0.0.1", port: Int = 11434,
                 compat: CompatMode = .both,
                 engine: InferenceEngine, registry: Registry,
                 embedEngine: EmbeddingEngine = EmbeddingEngine(),
