@@ -79,6 +79,21 @@ drop-in.
   faster (24 -> 66 tok/s)**. The path stays opt-in for now: the unsorted
   gather regresses long-prompt prefill, so promoting native MoE to the
   default waits on the sort-path prefill-parity follow-up.
+- **SwitchGLU sort path recovers prefill parity** (#87): the unsorted
+  `gatherQuantizedMM` dispatch (#82, #85) does an `M=1` matmul per
+  `(token, expert)` with experts gathered in router-score order, which
+  regresses long-prompt prefill. Mirroring mlx-lm's `switch_layers` sort
+  step, the SwitchGLU now sorts the flattened `(token, slot)`
+  assignments by expert id once `indices.size >= 64` (prefill) so each
+  expert's gather slice is contiguous and `gather_qmm`'s sorted-indices
+  fast path applies, then unsorts the output back to `(token, slot)`
+  order. Decode (`N=1`, below the threshold) stays on the unsorted fast
+  path, so the #85 decode win is untouched. Measured on a 256-token
+  prompt: Qwen3-Coder-30B-A3B prefill **229 -> 536 tok/s (+134%)** with
+  decode held (65 tok/s); gemma-4-26b-a4b prefill **~230 -> 494 tok/s**
+  with decode held (~59 tok/s). Applied to both `Gemma4SwitchGLU` and
+  `Qwen3SwitchGLU`; shared helpers in `MoESortPath.swift`. This unblocks
+  promoting native Qwen3-MoE to the default.
 
 ### Fixed
 
