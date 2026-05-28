@@ -470,7 +470,21 @@ public final class InferenceEngine: @unchecked Sendable {
         var promptTokensBuilt: [Int]
         if loadedModel.family == "gemma4" {
             promptTokensBuilt = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
+        } else if let direct = tokenizer.applyChatTemplateTokens(messages: preparedMessages) {
+            // Same loss-avoidance principle as the Gemma 4 branch, but
+            // for every other family whose tokenizer can render via the
+            // swift-transformers Jinja engine (embedded template or the
+            // newer separate `chat_template.jinja`): keep the IDs the
+            // library already produced instead of decoding to text and
+            // re-encoding, which silently drops ChatML / FIM / tool
+            // special tokens on Qwen 3 Coder and similar checkpoints
+            // and rots generation into pure special-token loops.
+            promptTokensBuilt = direct
         } else {
+            // Last resort: the wrapper's manual Llama 3 fallback path,
+            // for checkpoints with neither an embedded nor an external
+            // template. Lossy round-trip but the alternative is no
+            // chat formatting at all.
             let formatted = tokenizer.applyChatTemplate(messages: preparedMessages)
             promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(formatted)
         }
