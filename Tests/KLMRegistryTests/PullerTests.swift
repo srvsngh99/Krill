@@ -149,6 +149,72 @@ final class PullerTests: XCTestCase {
                       "registry must not be touched by a rejected pull")
     }
 
+    func testIsEssentialFileAcceptsCoreAndShardedWeights() {
+        // Weight shards and the shard map both ride along.
+        XCTAssertTrue(Puller.isEssentialFile("model.safetensors"))
+        XCTAssertTrue(Puller.isEssentialFile("model-00001-of-00004.safetensors"))
+        XCTAssertTrue(Puller.isEssentialFile("model.safetensors.index.json"))
+        // Core model + generation config.
+        XCTAssertTrue(Puller.isEssentialFile("config.json"))
+        XCTAssertTrue(Puller.isEssentialFile("generation_config.json"))
+    }
+
+    func testIsEssentialFileAcceptsAllTokenizerArtifacts() {
+        // Merged tokenizer form.
+        XCTAssertTrue(Puller.isEssentialFile("tokenizer.json"))
+        XCTAssertTrue(Puller.isEssentialFile("tokenizer_config.json"))
+        XCTAssertTrue(Puller.isEssentialFile("special_tokens_map.json"))
+        XCTAssertTrue(Puller.isEssentialFile("tokenizer.model"))
+        // Older BPE form (Qwen, GPT-2 style) and the added-token sidecar
+        // that ships tool / chat special tokens.
+        XCTAssertTrue(Puller.isEssentialFile("added_tokens.json"))
+        XCTAssertTrue(Puller.isEssentialFile("vocab.json"))
+        XCTAssertTrue(Puller.isEssentialFile("merges.txt"))
+    }
+
+    func testIsEssentialFileAcceptsExternalChatTemplateInBothForms() {
+        // Two co-existing on-disk forms today, both must ride along
+        // or the tokenizer raises "chat_template is not set":
+        //   .jinja: Qwen 3 (Coder, Instruct-2507), Gemma 4 (e2b, e4b).
+        //   .json:  Gemma 3, Qwen 2.5-VL.
+        XCTAssertTrue(Puller.isEssentialFile("chat_template.jinja"))
+        XCTAssertTrue(Puller.isEssentialFile("chat_template.json"))
+    }
+
+    func testIsEssentialFileAcceptsMultimodalPreprocessorConfigs() {
+        // Qwen 2.5-VL ships `preprocessor_config.json`; Gemma 3 / 4
+        // ship `processor_config.json` (Gemma 3 ships both). Image-mean
+        // / patch-size / dtype live there; the puller captures them
+        // even when the runtime loader currently hardcodes the values.
+        XCTAssertTrue(Puller.isEssentialFile("preprocessor_config.json"))
+        XCTAssertTrue(Puller.isEssentialFile("processor_config.json"))
+    }
+
+    func testIsEssentialFileRejectsRepoClutter() {
+        // Repo READMEs / metadata: skipped.
+        XCTAssertFalse(Puller.isEssentialFile("README.md"))
+        XCTAssertFalse(Puller.isEssentialFile(".gitattributes"))
+        // Sample assets and license PDFs that mlx-community sometimes ships.
+        XCTAssertFalse(Puller.isEssentialFile("sample.png"))
+        XCTAssertFalse(Puller.isEssentialFile("LICENSE"))
+        // Original PyTorch checkpoints. HF returns paths inside
+        // `original/`; the suffix check rejects them since they're
+        // .bin/.pth rather than .safetensors. A bare `pytorch_model.bin`
+        // is the bigger risk and is also rejected.
+        XCTAssertFalse(Puller.isEssentialFile("pytorch_model.bin"))
+        XCTAssertFalse(Puller.isEssentialFile("original/consolidated.pth"))
+        // Adjacent tool-parsing scripts (Qwen3-Coder ships one) - the
+        // model serves without them.
+        XCTAssertFalse(Puller.isEssentialFile("qwen3coder_tool_parser.py"))
+    }
+
+    func testIsEssentialFileMatchesCaseInsensitively() {
+        // HF filenames are case-stable but the loader treats them
+        // case-insensitively. Make sure both forms work.
+        XCTAssertTrue(Puller.isEssentialFile("Chat_Template.JINJA"))
+        XCTAssertTrue(Puller.isEssentialFile("Model.Safetensors"))
+    }
+
     private func makeTempDir() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("krillm-puller-test-\(UUID().uuidString)")
