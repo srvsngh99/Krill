@@ -369,8 +369,6 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
     let imageTokenId = rawConfig?["image_token_id"] as? Int ?? 258880
     let audioTokenId = rawConfig?["audio_token_id"] as? Int ?? 258881
     let hasVisionConfig = rawConfig?["vision_config"] != nil
-    let numExperts = config.numExperts ?? 0
-
     // Use multimodal model if vision config is present
     if hasVisionConfig {
         let audioConfig = AudioConfig(from: rawConfig?["audio_config"] as? [String: Any])
@@ -383,16 +381,23 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
         // MLP + 8-bit router projection, encoded as per-module entries
         // in `config.quantization`). The closure-based form lets each
         // module land on its own (groupSize, bits, mode).
+        //
+        // Also skip the MoE experts (`experts.switch_glu.*`): each
+        // `Gemma4QuantizedSwitchedLinear` already owns its quantized
+        // parameter tensors at the right shape from
+        // `Gemma4MoEExpertsHolder.init`, and MLX's `quantize` walks
+        // leaf modules (Linear / Embedding). The switched linears are
+        // not `Linear`, so without this skip the call would no-op on
+        // them anyway -- the explicit `nil` makes the intent obvious
+        // and saves the path-string match.
         if let q = config.quantization {
             quantize(model: model) { path, _ in
                 let isLangModel = path.contains("language_model.")
                 let isPLE = path.contains("per_layer_model_projection") || path.contains("per_layer_projection_norm")
                 let isEmbedProj = path.contains("embed_vision.embedding_projection") || path.contains("embed_audio.embedding_projection")
-                let shouldQuant = (isLangModel && !isPLE) || isEmbedProj
+                let isMoEExpert = path.contains(".experts.switch_glu.")
+                let shouldQuant = (isLangModel && !isPLE && !isMoEExpert) || isEmbedProj
                 guard shouldQuant else { return nil }
-                // Override map keys are the dotted checkpoint paths
-                // (e.g. `language_model.model.layers.0.mlp.gate_proj`)
-                // which match the in-memory module path 1:1.
                 let eff = q.effective(for: path)
                 return (eff.groupSize, eff.bits, .affine)
             }
@@ -412,15 +417,14 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
         }
         flatWeights = cleaned
 
-        // Unpack mlx-community's stacked MoE expert tensors into per-expert
-        // keys. 26B-A4B ships `.experts.switch_glu.{gate,up,down}_proj.*`
-        // with leading dim = `num_experts`; the model expects
-        // `.experts.{e}.{proj}.{field}` matching its `[Gemma4MoEExpert]`
-        // submodule list. No-op for e2b/e4b (which have no MoE).
-        if config.enableMoeBlock, numExperts > 0 {
-            unpackStackedMoEWeights(
-                &flatWeights, marker: ".switch_glu.", numExperts: numExperts)
-        }
+        // The 26B-A4B checkpoint ships its experts as stacked tensors
+        // under `experts.switch_glu.{gate_proj,up_proj,down_proj}.*`.
+        // The module hierarchy now mirrors that shape exactly via
+        // `Gemma4MoEExpertsHolder.switchGLU` -- no unpacking required.
+        // (The original implementation rewrote those keys into
+        // per-expert `.experts.{e}.{proj}.{field}` form to match an
+        // older `[Gemma4MoEExpert]` array module; that path had a
+        // per-layer host sync that dominated decode and is gone.)
 
         // Tied embeddings: Gemma4 uses embed_tokens.as_linear() as the LM head.
         // No separate lm_head weights needed — the model reuses embed_tokens directly.
@@ -512,15 +516,9 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
     }
     if !stripped.isEmpty { flatWeights = stripped }
 
-    // Unpack stacked MoE expert tensors when this is a text-only Gemma 4
-    // MoE SKU (none exist today; future text-only 26B-A4B variants would
-    // hit this branch). Same unpacker as the multimodal path.
-    if config.enableMoeBlock, numExperts > 0 {
-        unpackStackedMoEWeights(
-            &flatWeights, marker: ".switch_glu.", numExperts: numExperts)
-    }
-
     // Tied embeddings: Gemma4 uses embed_tokens.as_linear() as the LM head.
+    // The MoE experts (when present) match the in-checkpoint
+    // `experts.switch_glu.*` shape directly; no key rewrite needed.
 
     let tuples = flatWeights.map { ($0.key, $0.value) }
     let nested = ModuleParameters.unflattened(tuples)
