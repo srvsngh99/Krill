@@ -58,13 +58,21 @@ public func loadWeights(
     keyPrefix: String? = nil,
     tieWordEmbeddings: Bool = false
 ) throws {
-    // Quantize the model if needed (converts Linear -> QuantizedLinear)
+    // Quantize the model if needed (converts Linear -> QuantizedLinear).
+    // The mixed-precision branch routes through MLX's per-layer filter
+    // overload so per-module (groupSize, bits) overrides land on the
+    // right layers - Qwen3-Coder ships 4-bit base + 8-bit MoE gates,
+    // and loading the gates as 4-bit crashes `quantized_matmul` with a
+    // scales-shape mismatch.
     if let q = quantization {
-        quantize(
-            model: model,
-            groupSize: q.groupSize,
-            bits: q.bits
-        )
+        if q.moduleOverrides.isEmpty {
+            quantize(model: model, groupSize: q.groupSize, bits: q.bits)
+        } else {
+            quantize(model: model) { path, _ in
+                let eff = q.effective(for: path)
+                return (eff.groupSize, eff.bits, .affine)
+            }
+        }
     }
 
     var flatWeights = try loadWeightArrays(from: directory)
