@@ -781,9 +781,12 @@ class Gemma4MoEExpertsHolder: Module {
 ///   3. **MoE + PLE** (hypothetical future SKU): both branches active.
 ///
 /// The shared 4-norm scaffolding plus the conditional `Optional`
-/// submodules let one `Gemma4Block` cover all three; the per-SKU module
-/// hierarchy lines up bit-exact with the checkpoint keys after the
-/// `switch_glu` unpacker rewrites the stacked expert tensors.
+/// submodules let one `Gemma4Block` cover all three; the per-SKU
+/// module hierarchy lines up bit-exact with the in-checkpoint keys
+/// without any rewrite. The MoE branch's `experts.switch_glu.{proj}.*`
+/// stacked tensors load directly into `Gemma4QuantizedSwitchedLinear`
+/// parameters, dispatched in a single `gatherQuantizedMM` per
+/// projection (no Swift-side per-expert loop, no per-layer host sync).
 class Gemma4Block: Module {
     @ModuleInfo(key: "self_attn") var selfAttn: Gemma4Attention
     @ModuleInfo(key: "mlp") var mlp: Gemma4MLP
@@ -816,18 +819,19 @@ class Gemma4Block: Module {
     @ParameterInfo(key: "layer_scalar") var layerScalar: MLXArray
 
     /// Cached config-driven flags so the forward avoids reading them
-    /// off the Module property bag every token.
+    /// off the Module property bag every token. `topK` is used by
+    /// `moeForward` for the per-token weighted-sum reshape; the
+    /// per-expert count lives inside the router and the SwitchGLU and
+    /// the block does not need its own copy.
     let moeEnabled: Bool
     let pleEnabled: Bool
     let topK: Int
-    let numExperts: Int
 
     init(_ config: Gemma4Config, layerIdx: Int) {
         let dim = config.hiddenSize
         self.moeEnabled = config.enableMoeBlock
         self.pleEnabled = config.hasPerLayerInputs
         self.topK = config.topKExperts ?? 0
-        self.numExperts = config.numExperts ?? 0
 
         _selfAttn = ModuleInfo(
             wrappedValue: Gemma4Attention(config, layerIdx: layerIdx),

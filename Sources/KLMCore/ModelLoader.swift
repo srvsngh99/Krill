@@ -570,33 +570,26 @@ private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedMode
     )
 }
 
-/// Slice mlx-community style stacked MoE expert tensors into per-expert
-/// tensors. Source keys carry a `marker` substring whose immediate
-/// parent is the expert container; we replace the `marker` slot with
-/// `.{e}.` for each expert index `e`.
-///
-/// Supported marker shapes (both produce the per-expert keys the
-/// model expects):
-///
-///   - `.switch_mlp.` for Qwen3-MoE (mlx-community SwiGLU pack). The
-///     in-checkpoint key is `mlp.switch_mlp.{proj}.{field}` and the
-///     parent `mlp` IS the expert container, so we emit
-///     `mlp.experts.{e}.{proj}.{field}` -- i.e. prepend `experts.`
-///     because the parent path lacks it. The Qwen3 model's block has
-///     `mlp = Qwen3MoESparseMLP` which owns `experts: [Qwen3MoEExpert]`.
-///
-///   - `.switch_glu.` for Gemma 4 26B-A4B (mlx-lm GeGLU pack). The
-///     in-checkpoint key is `experts.switch_glu.{proj}.{field}` and the
-///     parent IS already the experts list, so we emit
-///     `experts.{e}.{proj}.{field}` -- DO NOT prepend another
-///     `experts.` or we land on a non-existent
-///     `experts.experts.{e}.*` key and `model.update` rejects the
-///     array.
+/// Slice mlx-community style stacked Qwen3-MoE expert tensors into
+/// per-expert tensors. Source keys look like
+/// `mlp.switch_mlp.{gate_proj,up_proj,down_proj}.{weight,scales,biases}`
+/// with leading dim equal to `numExperts`; we rewrite each entry to
+/// `mlp.experts.{e}.{proj}.{field}` matching the per-expert
+/// `Qwen3MoEExpert` modules `Qwen3MoESparseMLP` allocates.
 ///
 /// Why this rewrite exists: `model.update(parameters:, verify: [])`
 /// silently drops weights whose key has no matching parameter in the
 /// model. Without rewriting, every expert stays at its random init and
 /// generation collapses to looping special tokens - root cause of #75.
+///
+/// Gemma 4 26B-A4B used to share this helper, but the SwitchGLU MoE
+/// runtime introduced in PR #82 loads `experts.switch_glu.{proj}.*`
+/// stacked tensors directly into `Gemma4QuantizedSwitchedLinear`
+/// parameters via `gatherQuantizedMM`. There is no longer any
+/// per-expert key path on the Gemma 4 side, so this unpacker is now
+/// Qwen3-MoE-only. The `marker` parameter is kept so a future MoE
+/// family with the same per-expert layout (Mixtral, OLMoE, etc.) can
+/// reuse the helper without a code change.
 ///
 /// No-op for checkpoints that already ship per-expert keys; only
 /// entries with the marker substring and the expected leading dim
@@ -610,9 +603,6 @@ func unpackStackedMoEWeights(
     marker: String,
     numExperts: Int
 ) {
-    // Per-marker target template selection. Documented above.
-    let parentIsExperts = (marker == ".switch_glu.")
-
     let switchKeys = weights.keys.filter { $0.contains(marker) }
     guard !switchKeys.isEmpty else { return }
 
@@ -631,14 +621,7 @@ func unpackStackedMoEWeights(
 
         let chunks = MLX.split(stacked, parts: numExperts, axis: 0)
         for (e, chunk) in chunks.enumerated() {
-            let newKey: String
-            if parentIsExperts {
-                // prefix already ends in `.experts` -- write directly
-                // to `<prefix>.<e>.<proj>.<field>`
-                newKey = "\(prefix).\(e).\(proj).\(field)"
-            } else {
-                newKey = "\(prefix).experts.\(e).\(proj).\(field)"
-            }
+            let newKey = "\(prefix).experts.\(e).\(proj).\(field)"
             weights[newKey] = chunk.squeezed(axis: 0)
         }
         weights.removeValue(forKey: key)
