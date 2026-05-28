@@ -31,7 +31,8 @@ Shipped:
   string args; Ollama `done_reason:tool_calls` with object args;
   multi-turn tool-result round-trip.
 
-Default port stays `11435` (T0-1 deferral intact; flip is Phase 4 / DoD).
+Default port flipped to `11434` in 0.4.0 (T0-1 done; `mac_parity` gate
+green 18/18 on 2026-05-28). `11435` honored for one release.
 
 Also shipped (2026-05-17, same branch):
 - WS-G: CORS (`KRILL_ORIGINS`/`OLLAMA_ORIGINS`, OPTIONS preflight +
@@ -177,7 +178,7 @@ Tiers reflect "how badly this breaks a drop-in Ollama replacement on Mac."
 
 | ID | Gap | Ollama | KrillLM today | Gate |
 |----|-----|--------|---------------|------|
-| T0-1 | Default port | `11434` | `11435` (flip deferred — see §4 WS-A1) | H |
+| T0-1 | Default port | `11434` | `11434` (flipped in 0.4.0; `11435` honored one release) | H ✓ |
 | T0-2 | Embeddings | `/api/embed`, `/api/embeddings`, `/v1/embeddings` | none | H |
 | T0-3 | Discovery endpoints | `/api/version`, `/api/ps`, `/api/show` | none | H |
 | T0-4 | Tool / function calling | native + OpenAI/Anthropic compat | `--tools` rejected, parser stubbed | H |
@@ -227,7 +228,7 @@ File paths are current as of `c17356d` — verify before editing.
 
 ### WS-A — Wire compatibility (Tier 0, unblocks everything)
 
-**A1. Ollama-compat mode (port flip DEFERRED).**
+**A1. Ollama-compat mode (port flip DONE in 0.4.0).**
 
 **Owner decision (2026-05-16): the default port stays `11435` until full
 Mac parity is reached.** Flipping the default to `11434` early would make
@@ -238,10 +239,11 @@ a half-working "Ollama impostor" is worse than a clean opt-in. So:
   work so early adopters can opt in and we can run the parity gate against
   `:11434`. Document in `README.md`/`docs/SERVER_API.md` that the default
   flip is intentionally deferred and tracked here (T0-1).
-- *Final activation (Phase 4 / DoD):* once the `mac_parity` gate is green,
-  flip the `serve` default to `11434` in one PR with a loud release note
-  and a one-release deprecation path for `11435`. This is the single
-  "drop-in is now real" switch.
+- *Final activation (Phase 4 / DoD) — DONE in 0.4.0:* the `mac_parity`
+  gate went green (18/18, 2026-05-28), so the `serve` default flipped to
+  `11434` with a loud release note and a one-release deprecation path for
+  `11435` (`--port 11435` / `KRILL_PORT=11435` still honored). This was the
+  single "drop-in is now real" switch.
 
 Also add `--compat ollama|openai|both` (default `both`) now — this is
 independent of the port and safe to ship in Phase 1.
