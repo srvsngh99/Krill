@@ -4,6 +4,98 @@ All notable changes to KrillLM are recorded here. Entries are in
 reverse chronological order. Versioning follows
 [SemVer](https://semver.org/).
 
+## [0.4.0] - 2026-05-28
+
+Headline: Gemma 4 26B-A4B native MoE serves on Apple Silicon and beats
+Ollama on every published Gemma 4 SKU (decode, prefill, and total wall
+time). Plus Qwen3-MoE coherence, a vision_config-driven Gemma 4
+encoder, daemon-mode CLI routing, the KLMAgent skeleton, and the
+default-port flip to `11434` that makes KrillLM a zero-config Ollama
+drop-in.
+
+### Added
+
+- **Gemma 4 26B-A4B native text MoE** (#81): first native inference of
+  the sparse 26B-A4B variant on Apple Silicon. Router + top-K expert
+  dispatch in Swift+MLX. Closes #80.
+- **KLMAgent skeleton** (#65): `OperatorLoop`, `OperatorTool`,
+  `OperatorEvent`, `HardwareInfo`, and `Recommender` land the structural
+  foundation for agent mode (slice 3 sub-PR A). Tool wiring + CLI follow
+  in later sub-PRs.
+- **Daemon-mode CLI routing for `krillm run`** (#63): when a `krillm
+  serve` daemon is already running, `krillm run` detects it (probes
+  `/v1/status`), routes the request through `/v1/chat/completions`, and
+  skips the per-call model load. TTFT drops from seconds to tens of
+  milliseconds (~5x warm-daemon speedup). Text-only single-shot
+  requests are routed; multimodal, draft-model, Modelfile-override, and
+  REPL paths stay in-process. `KRILL_NO_AUTO_DAEMON=1` forces
+  in-process.
+- **SDK usage docs** (#64): verified end-to-end snippets for the OpenAI
+  Python SDK, LangChain, LlamaIndex, and the Anthropic SDK pointing at
+  the local server.
+
+### Changed
+
+- **SwitchGLU MoE dispatch replaces scatter** (#82): the per-layer
+  scatter dispatch (a Swift loop driven by a host read of per-expert
+  token counts) is gone. A new `Gemma4SwitchGLU` /
+  `Gemma4QuantizedSwitchedLinear` runs one `gatherQuantizedMM` kernel
+  per (gate, up, down) projection across all top-K experts with zero
+  host syncs in the layer loop. Decode (N=1) pays no Swift loop. This
+  flipped 26B-A4B from 9% behind Ollama to 43% ahead on total wall time.
+- **Gemma 4 vision encoder reads `vision_config` from the checkpoint**
+  (#79): the SigLIP2 tower shapes are parsed from the model's own
+  config instead of hardcoded, so checkpoints with different vision
+  dimensions load correctly.
+- **Default server port flipped `11435` -> `11434`** (#83): KrillLM now
+  listens on the same port stock Ollama uses, so existing Ollama
+  clients connect with no configuration. The previous default `11435`
+  still works for one release when set explicitly (`--port 11435` or
+  `KRILL_PORT=11435`). This activates the T0-1 flip that
+  `docs/OLLAMA_MAC_PARITY_PLAN.md` deferred until the `mac_parity` gate
+  went green (18/18, 2026-05-28).
+- **Quantization config requires explicit `group_size` and `bits`**
+  (#74): the decode path no longer falls back to silent defaults when a
+  checkpoint omits quant metadata; it now requires the values be
+  present, surfacing malformed quant configs instead of guessing.
+
+### Fixed
+
+- **Qwen3-MoE coherence** (#78): mlx-community ships stacked
+  `switch_mlp` expert weights; KrillLM now unpacks them into per-expert
+  keys, so Qwen3-Coder-30B-A3B serves coherent text and tool calls
+  instead of garbage.
+- **Gemma 4 e4b / 26B-A4B crash on load** (#72): `layer_types` is now
+  parsed from the checkpoint config; the previous hardcoded assumption
+  crashed these variants.
+- **Mixed-precision quant support** (#73): per-module `bits` /
+  `group_size` overrides let checkpoints that quantize different modules
+  at different precisions load correctly.
+- **External `chat_template.jinja` loading** (#77): the tokenizer loads
+  an external chat template file when present and bypasses a lossy
+  round-trip that corrupted some templates.
+- **Model puller HF file allowlist** (#71): extended to cover newer
+  tokenizer file conventions so recent HF repos pull completely.
+- **Removed fake `gemma-4-12b` / `gemma-4-27b` aliases** (#70): these
+  SKUs do not exist; the aliases pointed at nothing and are gone.
+
+### Performance vs Ollama
+
+Median across 5 runs, warmed servers, 128-token generation, on the M4
+target (full report + raw JSONs archived with the release). KrillLM
+wins decode, prefill, and total wall time on every published Gemma 4
+SKU:
+
+| Variant | KrillLM decode | Ollama decode | KrillLM total | Ollama total | Total delta |
+|---|---:|---:|---:|---:|---:|
+| e2b (dense, ~2B, 4-bit) | 110.1 tok/s | 88.4 tok/s | 1.18s | 1.65s | +40% |
+| e4b (dense, ~4B, 4-bit) | 62.6 tok/s | 55.2 tok/s | 2.07s | 2.53s | +22% |
+| 26B-A4B (sparse MoE, 4-bit) | 61.6 tok/s | 49.0 tok/s | 2.11s | 3.02s | +43% |
+
+The 26B-A4B SwitchGLU rewrite (#82) drove the headline gain: decode
+41.2 -> 61.6 tok/s (+50%), prefill 3516 -> 5193 tok/s (+48%), total
+3.17s -> 2.11s, flipping it from 9% behind Ollama to 43% ahead.
+
 ## [0.3.1] - 2026-05-24
 
 Headline: cold-path multimodal prefill on Gemma 4 drops the per-position
