@@ -93,7 +93,7 @@ Output (CLI print / SSE stream / JSON response)
 
 ## HTTP API
 
-Default port: 11435
+Default port: 11434
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|

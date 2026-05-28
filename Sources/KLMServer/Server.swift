@@ -107,8 +107,8 @@ public final class KLMServer: Sendable {
         if compat.ollamaEnabled {
             print("Ollama API: http://\(host):\(port)/api/chat")
         }
-        if port != 11434 {
-            print("Note: default port is \(port). For Ollama drop-in, run with --port 11434 (default flip to 11434 deferred until full parity - see docs/OLLAMA_MAC_PARITY_PLAN.md).")
+        if port == 11435 {
+            print("Note: 11435 was the pre-0.4.0 default and is deprecated; it still works for one release. The default is now 11434 (the Ollama port), so you can drop --port 11435 for a zero-config Ollama drop-in.")
         }
         print("Press Ctrl+C to stop.")
 

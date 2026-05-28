@@ -252,8 +252,8 @@ landing details.
 > `OLLAMA_HOST`/`OLLAMA_MODELS`, `/api/copy` preserves Modelfile overrides,
 > and streaming responses carry the CORS grant. The remaining
 > production-tag blocker is the fresh multimodal benchmark artifact
-> (Section 3.1). The `11435→11434` default-port flip remains deferred until
-> that artifact is attached.
+> (Section 3.1). The `11435→11434` default-port flip shipped in 0.4.0 once
+> the `mac_parity` gate went green (18/18, 2026-05-28).
 
 ### 3.1 Release benchmark gate
 
