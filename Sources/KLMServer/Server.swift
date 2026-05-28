@@ -2170,7 +2170,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
         sendJSON(context: context, status: .ok,
-                 body: OllamaCompat.showPayload(for: manifest, verbose: verbose))
+                 body: OllamaCompat.showPayload(
+                    for: manifest, verbose: verbose,
+                    directory: registry.modelPath(manifest.name)))
     }
 
     // MARK: - OpenAI: GET /v1/models/{id}

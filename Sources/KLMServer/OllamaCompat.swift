@@ -90,7 +90,8 @@ public enum OllamaCompat {
     /// `expires_at`-adjacent runtime hints some clients expect.
     public static func showPayload(
         for m: ModelManifest,
-        verbose: Bool = false
+        verbose: Bool = false,
+        directory: URL? = nil
     ) -> [String: Any] {
         var modelInfo: [String: Any] = [
             "general.architecture": m.family.rawValue,
@@ -114,7 +115,8 @@ public enum OllamaCompat {
             "details": details(for: m),
             "model_info": modelInfo,
             "capabilities": capabilities(for: m),
-            "support_tier": ModelCapabilities.supportTier(for: m.family).rawValue,
+            "support_tier": ModelCapabilities.supportTier(
+                for: m.family, at: directory).rawValue,
             "modified_at": ISO8601DateFormatter().string(from: m.pulledAt),
         ]
     }

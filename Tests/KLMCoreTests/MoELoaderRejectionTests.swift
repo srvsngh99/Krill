@@ -85,19 +85,19 @@ final class MoELoaderRejectionTests: XCTestCase {
         try body()
     }
 
-    func testQwen3MoENativeOptInReachesNativeArm() throws {
-        // With KRILL_NATIVE_MOE=1 set, the loader takes the native
-        // arm; with an empty config dir (no safetensors) the
-        // failure is specifically `WeightLoadError.noSafetensorsFiles`,
-        // which proves the family routed past the bridge rejection
-        // and into the native loader. Asserting the SPECIFIC error
-        // type is what discriminates "reached native arm and failed
-        // there" from "got an unrelated runtime trap that the test
-        // would have swallowed".
-        let dir = try writeQwen3MoEConfig(dirSlug: "qwen3moe-optin")
+    func testQwen3MoENativeIsTheDefault() throws {
+        // Native is now the default: with KRILL_NATIVE_MOE unset (and
+        // also when explicitly "1"), the loader takes the native arm.
+        // With an empty config dir (no safetensors) the failure is
+        // specifically `WeightLoadError.noSafetensorsFiles`, which proves
+        // the family routed past the bridge rejection and into the native
+        // loader. Asserting the SPECIFIC error type is what discriminates
+        // "reached native arm and failed there" from "got an unrelated
+        // runtime trap that the test would have swallowed".
+        let dir = try writeQwen3MoEConfig(dirSlug: "qwen3moe-default-native")
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        try withEnv("KRILL_NATIVE_MOE", "1") {
+        func assertReachesNativeArm() throws {
             do {
                 _ = try loadModel(from: dir)
                 XCTFail("Expected WeightLoadError.noSafetensorsFiles "
@@ -111,24 +111,25 @@ final class MoELoaderRejectionTests: XCTestCase {
             } catch let error as ModelLoadError {
                 if case .unsupportedArchitecture(let msg) = error {
                     XCTFail("Native arm must not throw "
-                        + "unsupportedArchitecture when KRILL_NATIVE_MOE=1; "
-                        + "got: \(msg)")
+                        + "unsupportedArchitecture by default; got: \(msg)")
                 } else {
                     XCTFail("Unexpected ModelLoadError: \(error)")
                 }
             }
         }
+
+        try withEnv("KRILL_NATIVE_MOE", nil) { try assertReachesNativeArm() }
+        try withEnv("KRILL_NATIVE_MOE", "1") { try assertReachesNativeArm() }
     }
 
-    func testQwen3MoEDefaultRoutesToBridge() throws {
-        // Without KRILL_NATIVE_MOE set, the native arm refuses
-        // and emits the documented redirect. Pins the "default
-        // is bridge" contract so the env-gate cannot silently
-        // flip without updating this test.
-        let dir = try writeQwen3MoEConfig(dirSlug: "qwen3moe-default")
+    func testQwen3MoEOptOutRoutesToBridge() throws {
+        // KRILL_NATIVE_MOE=0 is the opt-out: the native arm refuses
+        // and emits the documented redirect to the legacy bridge. Pins
+        // the opt-out contract so the env-gate cannot silently drop it.
+        let dir = try writeQwen3MoEConfig(dirSlug: "qwen3moe-optout")
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        try withEnv("KRILL_NATIVE_MOE", nil) {
+        try withEnv("KRILL_NATIVE_MOE", "0") {
             XCTAssertThrowsError(try loadModel(from: dir)) { error in
                 guard let modelError = error as? ModelLoadError,
                       case .unsupportedArchitecture(let msg) = modelError else {
@@ -136,10 +137,10 @@ final class MoELoaderRejectionTests: XCTestCase {
                     return
                 }
                 XCTAssertTrue(msg.contains("KRILL_NATIVE_MOE"),
-                    "Default Qwen 3 MoE rejection must name the opt-in "
-                    + "env var so users know how to enable native")
+                    "Opt-out rejection must name the env var so users "
+                    + "know how to restore the native default")
                 XCTAssertTrue(msg.contains("MoE bridge") || msg.contains("MoEEngine"),
-                    "Default rejection must redirect to the bridge")
+                    "Opt-out rejection must redirect to the bridge")
             }
         }
     }
