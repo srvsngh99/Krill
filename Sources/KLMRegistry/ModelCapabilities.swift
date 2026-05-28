@@ -175,12 +175,13 @@ public enum ModelCapabilities {
 /// their native ports land in follow-up WS6 PRs.
 ///
 /// Native dispatch is gated behind the `KRILL_NATIVE_MOE=1`
-/// environment variable for the WS6 runtime PR: the native
-/// forward is correctness-first and evaluates every expert on
-/// every token (16x the necessary compute on Qwen3-30B-A3B's
-/// 128-expert / top-8 shape). Until the scatter dispatch lands,
-/// the default routes through the Python bridge so existing users
-/// keep mlx-lm throughput. Setting `KRILL_NATIVE_MOE=1` opts in.
+/// environment variable. The native forward now dispatches the
+/// top-K experts in a single `gatherQuantizedMM` per projection
+/// (`Qwen3SwitchGLU`), 2.7x faster on decode than the old scatter
+/// path. It stays opt-in for one more step because the unsorted
+/// gather regresses long-prompt prefill; the default flip pends the
+/// sort-path prefill-parity follow-up. Until then the default routes
+/// through the Python bridge. Setting `KRILL_NATIVE_MOE=1` opts in.
 ///
 /// Returns false (route through bridge) when the directory has no
 /// readable config.json — the dense loader would fail anyway, and
