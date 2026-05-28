@@ -260,6 +260,21 @@ final class GoTemplateTests: XCTestCase {
         }
     }
 
+    /// A long `else if` chain self-recurses through `parseIfBody`; it
+    /// must hit the depth cap and throw, not pile native frames into a
+    /// stack overflow.
+    func testDeepElseIfChainThrowsNotCrash() {
+        let n = 5000
+        var src = "{{ if eq .R \"r0\" }}0"
+        for i in 1..<n { src += "{{ else if eq .R \"r\(i)\" }}\(i)" }
+        src += "{{ else }}none{{ end }}"
+        XCTAssertThrowsError(try render(src, .dict(["R": .string("rNope")]))) { err in
+            guard case GoTemplateError.parse = err else {
+                return XCTFail("expected parse error, got \(err)")
+            }
+        }
+    }
+
     /// A normal template nesting a handful of levels must still render
     /// (the cap is far above realistic nesting).
     func testModerateNestingStillRenders() throws {

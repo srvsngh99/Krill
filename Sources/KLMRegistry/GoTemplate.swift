@@ -391,6 +391,10 @@ private struct Parser {
     /// recurse without double-advancing `pos` past the first node of its
     /// then-branch.
     private mutating func parseIfBody(_ body: String) throws -> Node {
+        // `else if` self-recurses here; guard the depth too, or a long
+        // else-if chain piles native frames while the counter stays flat
+        // (parsePipeline's bump resets via defer before the recursion).
+        try enter(); defer { leave() }
         let cond = try parsePipeline(String(body.dropFirst(2)))  // drop "if"
         let thenNodes = try parseTemplate(stopAt: ["else", "end"])
         var elseNodes: [Node] = []
