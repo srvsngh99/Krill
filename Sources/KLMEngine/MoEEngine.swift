@@ -22,9 +22,12 @@ import Glibc
 ///
 /// Built on the shared `PythonSidecar` plumbing (`LineReader`,
 /// `VLMError`, the venv interpreter path). WS5 retired the sibling
-/// Qwen 2.5-VL bridge once that family went native Swift+MLX; this
-/// MoE bridge remains until the native MoE runtime fully replaces
-/// it (the experimental `KRILL_NATIVE_MOE` path).
+/// Qwen 2.5-VL bridge once that family went native Swift+MLX. The
+/// native Qwen 3 MoE runtime is now the DEFAULT (PR #85 decode + #87
+/// prefill parity), reachable with `KRILL_NATIVE_MOE` unset; this
+/// bridge now serves only the still-unmigrated MoE families (Mixtral /
+/// Qwen2-MoE / OLMoE / DeepSeek-V3) and the `KRILL_NATIVE_MOE=0`
+/// opt-out for Qwen 3 MoE, until those families go native too.
 public final class MoEEngine: @unchecked Sendable {
     public static var defaultPython: String {
         ProcessInfo.processInfo.environment["KRILLM_MOE_PYTHON"]

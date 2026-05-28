@@ -123,34 +123,77 @@ final class MoEFoundationTests: XCTestCase {
         try body()
     }
 
-    func testNativeDispatchSupportedForQwen3MoEWhenOptedIn() throws {
+    func testNativeDispatchSupportedForQwen3MoEByDefault() throws {
         let dir = try writeConfig([
             "architectures": ["Qwen3MoeForCausalLM"],
             "model_type": "qwen3_moe",
         ])
         defer { try? FileManager.default.removeItem(at: dir) }
+        // Native is the default now: an unset KRILL_NATIVE_MOE and an
+        // explicit "1" both claim native support for a Qwen 3 MoE
+        // checkpoint.
+        try withEnv("KRILL_NATIVE_MOE", nil) {
+            XCTAssertTrue(nativeMoEDispatchSupported(at: dir),
+                "Qwen 3 MoE native runtime is the default; an unset "
+                + "KRILL_NATIVE_MOE must claim native support")
+        }
         try withEnv("KRILL_NATIVE_MOE", "1") {
             XCTAssertTrue(nativeMoEDispatchSupported(at: dir),
-                "Qwen 3 MoE has a native runtime in this build; with "
-                + "KRILL_NATIVE_MOE=1 the helper must claim native support")
+                "KRILL_NATIVE_MOE=1 must also claim native support")
         }
     }
 
-    func testNativeDispatchOptInGateIsHonored() throws {
-        // Without the opt-in env var, the helper returns false
-        // even for Qwen 3 MoE so the server keeps routing to the
-        // bridge by default. Pins the gate so the default cannot
-        // silently flip.
+    func testNativeDispatchOptOutGateIsHonored() throws {
+        // KRILL_NATIVE_MOE=0 is the opt-out: even for Qwen 3 MoE the
+        // helper returns false so the server routes to the legacy
+        // bridge. Pins the opt-out so it cannot silently disappear.
         let dir = try writeConfig([
             "architectures": ["Qwen3MoeForCausalLM"],
             "model_type": "qwen3_moe",
         ])
         defer { try? FileManager.default.removeItem(at: dir) }
-        try withEnv("KRILL_NATIVE_MOE", nil) {
+        try withEnv("KRILL_NATIVE_MOE", "0") {
             XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
-                "Default (no KRILL_NATIVE_MOE) must route MoE through "
-                + "the bridge; native dispatch is opt-in until the "
-                + "scatter optimization lands")
+                "KRILL_NATIVE_MOE=0 must opt out of the native runtime "
+                + "and route Qwen 3 MoE through the bridge")
+        }
+    }
+
+    func testQwen3MoECheckpointPromotesToProductionNative() throws {
+        // The family-only tier stays the conservative floor (the .moe
+        // family spans bridge-only members too), but a Qwen 3 MoE
+        // checkpoint the native runtime serves promotes to
+        // productionNative; the opt-out drops it back to the bridge
+        // tier; a non-native MoE family stays on the floor regardless.
+        let qwen3 = try writeConfig([
+            "architectures": ["Qwen3MoeForCausalLM"],
+            "model_type": "qwen3_moe",
+        ])
+        defer { try? FileManager.default.removeItem(at: qwen3) }
+        let mixtral = try writeConfig([
+            "architectures": ["MixtralForCausalLM"],
+            "model_type": "mixtral",
+        ])
+        defer { try? FileManager.default.removeItem(at: mixtral) }
+
+        XCTAssertEqual(ModelCapabilities.supportTier(for: .moe), .compatibleFallback)
+        try withEnv("KRILL_NATIVE_MOE", nil) {
+            XCTAssertEqual(
+                ModelCapabilities.supportTier(for: .moe, at: qwen3),
+                .productionNative,
+                "A Qwen 3 MoE checkpoint on the native default must "
+                + "report productionNative")
+            XCTAssertEqual(
+                ModelCapabilities.supportTier(for: .moe, at: mixtral),
+                .compatibleFallback,
+                "A non-native MoE family stays on the bridge floor")
+        }
+        try withEnv("KRILL_NATIVE_MOE", "0") {
+            XCTAssertEqual(
+                ModelCapabilities.supportTier(for: .moe, at: qwen3),
+                .compatibleFallback,
+                "The opt-out drops a Qwen 3 MoE checkpoint back to the "
+                + "bridge tier")
         }
     }
 

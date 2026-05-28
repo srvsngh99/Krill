@@ -76,9 +76,10 @@ drop-in.
   `mlp.switch_mlp.{proj}.*` checkpoint tensors bind directly (no
   per-expert unpacking), and the per-layer host sync that drove the old
   scatter dispatch is gone. Decode on Qwen3-Coder-30B-A3B benches **2.7x
-  faster (24 -> 66 tok/s)**. The path stays opt-in for now: the unsorted
-  gather regresses long-prompt prefill, so promoting native MoE to the
-  default waits on the sort-path prefill-parity follow-up.
+  faster (24 -> 66 tok/s)**. (At the time this landed the unsorted gather
+  still regressed long-prompt prefill, so the path was opt-in; the #87
+  sort path fixed prefill and #88 then made native the default - see
+  those entries below.)
 - **SwitchGLU sort path recovers prefill parity** (#87): the unsorted
   `gatherQuantizedMM` dispatch (#82, #85) does an `M=1` matmul per
   `(token, expert)` with experts gathered in router-score order, which
@@ -94,6 +95,21 @@ drop-in.
   with decode held (~59 tok/s). Applied to both `Gemma4SwitchGLU` and
   `Qwen3SwitchGLU`; shared helpers in `MoESortPath.swift`. This unblocks
   promoting native Qwen3-MoE to the default.
+- **Native Qwen3-MoE runtime is now the DEFAULT** (#88): with #85
+  decode (2.7x) and #87 prefill parity both landed, the native Swift+MLX
+  Qwen3-MoE runtime no longer waits behind the `KRILL_NATIVE_MOE=1`
+  opt-in. Qwen3-MoE checkpoints now load, serve, and tool-call on the
+  native path with no env var; `KRILL_NATIVE_MOE=0` is the opt-out that
+  forces the legacy mlx-lm bridge for one release. The model loader,
+  `nativeMoEDispatchSupported`, and the server MoE routing all default to
+  native; the still-unmigrated MoE families (Mixtral / Qwen2-MoE / OLMoE
+  / DeepSeek-V3) continue to route to the bridge. `/api/show` reports a
+  checkpoint-aware `support_tier`: a served Qwen3-MoE checkpoint is now
+  `production_native` (the new `supportTier(for:at:)` resolves it from the
+  installed config), while the bridge-only members and the family-level
+  floor stay `compatible_fallback`. Verified end-to-end on
+  Qwen3-Coder-30B-A3B: coherent generation and OpenAI tool calling
+  (`finish_reason: tool_calls`) on the native default.
 
 ### Fixed
 
