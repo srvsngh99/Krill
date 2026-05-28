@@ -14,6 +14,16 @@ public final class KLMTokenizer: @unchecked Sendable {
     /// guessing from the encoded special-token ids. Empty when
     /// the file is missing or unparseable.
     public let tokenizerModelKind: String
+    /// Contents of `chat_template.jinja` from the model directory, if
+    /// present. Newer HF checkpoints (Qwen 3 Coder, Qwen 3 Instruct-2507,
+    /// Gemma 4) ship the chat template as a separate Jinja file instead
+    /// of embedding it under `tokenizer_config.json["chat_template"]`;
+    /// swift-transformers only reads the embedded form, so we load the
+    /// file here once and pass it through to the library as a literal
+    /// argument on every `applyChatTemplate(messages:)` call when the
+    /// embedded path is empty. Nil for checkpoints that don't ship
+    /// the file (the older embedded-template repos work unchanged).
+    private let externalChatTemplate: String?
 
     /// Load tokenizer from a model directory containing tokenizer.json.
     public init(from directory: URL) async throws {
@@ -67,6 +77,21 @@ public final class KLMTokenizer: @unchecked Sendable {
         // behavior without guessing from token IDs. Best-effort:
         // empty string when the file is missing or unreadable.
         self.tokenizerModelKind = Self.readModelKind(directory: directory)
+
+        // Capture a separate `chat_template.jinja` if the checkpoint
+        // ships one. Best-effort, no-op when absent.
+        self.externalChatTemplate = Self.readExternalChatTemplate(directory: directory)
+    }
+
+    internal static func readExternalChatTemplate(directory: URL) -> String? {
+        let url = directory.appendingPathComponent("chat_template.jinja")
+        guard FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8),
+              !text.isEmpty else {
+            return nil
+        }
+        return text
     }
 
     private static func readModelKind(directory: URL) -> String {
@@ -296,9 +321,46 @@ public final class KLMTokenizer: @unchecked Sendable {
     /// - Gemma 4: uses token IDs 105/106/107 for turn markers
     /// - Llama 3: uses <|begin_of_text|> style markers
     /// - Others: delegates to tokenizer's built-in template
-    public func applyChatTemplate(messages: [[String: String]]) -> String {
-        // Try using the tokenizer's built-in chat template (returns token IDs)
+    /// Render `messages` directly to token IDs via the embedded or
+    /// external chat template, skipping the lossy decode -> re-encode
+    /// round-trip that the legacy `applyChatTemplate(messages:) ->
+    /// String` path takes (which silently mangles ChatML / FIM /
+    /// tool special tokens when their text form does not survive
+    /// re-tokenization).
+    ///
+    /// Returns nil when no chat template is available; callers fall
+    /// back to the string path, which still drives the Gemma 4 manual
+    /// path (direct IDs) and the Llama 3 manual fallback.
+    public func applyChatTemplateTokens(messages: [[String: String]]) -> [Int]? {
         if let tokenIds = try? tokenizer.applyChatTemplate(messages: messages) {
+            return tokenIds
+        }
+        if let template = externalChatTemplate,
+           let tokenIds = try? tokenizer.applyChatTemplate(
+               messages: messages, chatTemplate: template) {
+            return tokenIds
+        }
+        return nil
+    }
+
+    public func applyChatTemplate(messages: [[String: String]]) -> String {
+        // First preference: the tokenizer's embedded `chat_template`
+        // (whatever shipped in `tokenizer_config.json`).
+        if let tokenIds = try? tokenizer.applyChatTemplate(messages: messages) {
+            return tokenizer.decode(tokens: tokenIds)
+        }
+
+        // Newer HF convention (mid-2025+, Qwen 3 Coder / Instruct-2507,
+        // Gemma 4): the chat template ships as a separate
+        // `chat_template.jinja` file that swift-transformers does NOT
+        // read. Without this branch the next two fallbacks would kick
+        // in (Gemma 4 manual path; Llama 3 manual path), which apply
+        // the wrong special-token convention - on a Qwen checkpoint
+        // that produces a prompt the model has never seen, and the
+        // model degenerates into FIM tokens / repetition.
+        if let template = externalChatTemplate,
+           let tokenIds = try? tokenizer.applyChatTemplate(
+               messages: messages, chatTemplate: template) {
             return tokenizer.decode(tokens: tokenIds)
         }
 
