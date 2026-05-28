@@ -229,4 +229,45 @@ final class GoTemplateTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - recursion-depth guard (DoS on user-supplied Modelfiles)
+
+    /// Deeply nested blocks must throw a catchable parse error rather than
+    /// overflowing the stack (an uncatchable SIGSEGV would crash the
+    /// server past the engine's catch-and-fallback contract). The
+    /// template is user-supplied via a Modelfile, so this is a DoS guard.
+    func testDeeplyNestedBlocksThrowNotCrash() {
+        let n = 5000
+        let src = String(repeating: "{{ if true }}", count: n)
+            + "x" + String(repeating: "{{ end }}", count: n)
+        XCTAssertThrowsError(try render(src, .null)) { err in
+            guard case GoTemplateError.parse = err else {
+                return XCTFail("expected parse error, got \(err)")
+            }
+        }
+    }
+
+    /// Deeply nested parenthesized sub-pipelines must likewise throw, not
+    /// overflow the stack.
+    func testDeeplyNestedParensThrowNotCrash() {
+        let n = 5000
+        let src = "{{ " + String(repeating: "(", count: n) + "len .L"
+            + String(repeating: ")", count: n) + " }}"
+        XCTAssertThrowsError(try render(src, .dict(["L": .list([.int(1)])]))) { err in
+            guard case GoTemplateError.parse = err else {
+                return XCTFail("expected parse error, got \(err)")
+            }
+        }
+    }
+
+    /// A normal template nesting a handful of levels must still render
+    /// (the cap is far above realistic nesting).
+    func testModerateNestingStillRenders() throws {
+        let src = "{{ if .A }}{{ if .B }}{{ range .L }}{{ . }}{{ end }}{{ end }}{{ end }}"
+        let ctx = GoValue.dict([
+            "A": .bool(true), "B": .bool(true),
+            "L": .list([.string("x"), .string("y")]),
+        ])
+        XCTAssertEqual(try render(src, ctx), "xy")
+    }
 }

@@ -305,9 +305,28 @@ private struct Parser {
     let tokens: [Lexer.Token]
     var pos = 0
 
+    /// Recursion-depth guard. The parser is recursive descent (block
+    /// bodies and parenthesized sub-pipelines recurse), and the template
+    /// is user-supplied (a Modelfile), so adversarially deep nesting like
+    /// `{{ if }}`xN or `(((...)))` would overflow the stack. A stack
+    /// overflow is an uncatchable trap -- it would crash the server
+    /// instead of falling back to the built-in template -- so we cap the
+    /// depth and throw a catchable `GoTemplateError.parse` instead. Real
+    /// TEMPLATEs nest only a few levels deep; the cap is far above that.
+    var depth = 0
+    static let maxDepth = 200
+
     init(_ tokens: [Lexer.Token]) { self.tokens = tokens }
 
     var atEnd: Bool { pos >= tokens.count }
+
+    private mutating func enter() throws {
+        depth += 1
+        if depth > Parser.maxDepth {
+            throw GoTemplateError.parse("template nesting too deep (>\(Parser.maxDepth))")
+        }
+    }
+    private mutating func leave() { depth -= 1 }
 
     /// Peek the leading keyword of the next action token (if/else/range/
     /// with/end), used to terminate block parsing.
@@ -321,6 +340,7 @@ private struct Parser {
     /// Parse nodes until one of `stopAt` keywords is the next action.
     /// Leaves the terminating action UNconsumed.
     mutating func parseTemplate(stopAt: Set<String>) throws -> [Node] {
+        try enter(); defer { leave() }
         var nodes: [Node] = []
         while pos < tokens.count {
             switch tokens[pos] {
@@ -451,7 +471,8 @@ private struct Parser {
     /// Parse a pipeline body string (the text inside `{{ }}` minus any
     /// leading control keyword). `alreadyStripped` means the keyword was
     /// already removed (range case).
-    private func parsePipeline(_ raw: String, alreadyStripped: Bool = false) throws -> Pipeline {
+    private mutating func parsePipeline(_ raw: String, alreadyStripped: Bool = false) throws -> Pipeline {
+        try enter(); defer { leave() }
         var s = raw.trimmingCharacters(in: .whitespaces)
         var assignVar: String?
         var declare = false
@@ -499,7 +520,7 @@ private struct Parser {
         return nil
     }
 
-    private func parseCommand(_ raw: String) throws -> Command {
+    private mutating func parseCommand(_ raw: String) throws -> Command {
         let operands = try tokenizeOperands(raw.trimmingCharacters(in: .whitespaces))
         return Command(args: operands)
     }
@@ -537,7 +558,7 @@ private struct Parser {
 
     /// Split a command into operand tokens (whitespace-separated at top
     /// level, respecting quotes and parens), then classify each.
-    private func tokenizeOperands(_ s: String) throws -> [Operand] {
+    private mutating func tokenizeOperands(_ s: String) throws -> [Operand] {
         var rawTokens: [String] = []
         var depth = 0
         var inStr: Character? = nil
@@ -569,7 +590,7 @@ private struct Parser {
         return try rawTokens.map { try classifyOperand($0) }
     }
 
-    private func classifyOperand(_ tok: String) throws -> Operand {
+    private mutating func classifyOperand(_ tok: String) throws -> Operand {
         if tok.hasPrefix("(") && tok.hasSuffix(")") {
             let inner = String(tok.dropFirst().dropLast())
             return .pipeline(try parsePipeline(inner))
@@ -632,6 +653,14 @@ private struct Evaluator {
     let root: GoValue
     var scopes: [[String: GoValue]] = [[:]]
 
+    /// Render-time recursion guard, mirroring the parser's. A valid but
+    /// deeply nested AST (the parser caps nesting, but a paren-pipeline
+    /// chain or a hand-built tree could still recurse) must not overflow
+    /// the stack and crash the process past the catch-and-fallback. Cap
+    /// and throw a catchable `GoTemplateError.eval` instead.
+    var depth = 0
+    static let maxDepth = 200
+
     init(root: GoValue) { self.root = root }
 
     mutating func run(_ nodes: [Node]) throws -> String {
@@ -643,6 +672,11 @@ private struct Evaluator {
     }
 
     private mutating func render(_ node: Node, dot: GoValue, into out: inout String) throws {
+        depth += 1
+        defer { depth -= 1 }
+        if depth > Evaluator.maxDepth {
+            throw GoTemplateError.eval("template render nesting too deep (>\(Evaluator.maxDepth))")
+        }
         switch node {
         case .text(let t):
             out += t
@@ -691,6 +725,11 @@ private struct Evaluator {
     // MARK: pipeline / command evaluation
 
     private mutating func evalPipeline(_ pipe: Pipeline, dot: GoValue) throws -> GoValue {
+        depth += 1
+        defer { depth -= 1 }
+        if depth > Evaluator.maxDepth {
+            throw GoTemplateError.eval("template pipeline nesting too deep (>\(Evaluator.maxDepth))")
+        }
         var carry: GoValue? = nil
         for cmd in pipe.commands {
             carry = try evalCommand(cmd, dot: dot, piped: carry)
