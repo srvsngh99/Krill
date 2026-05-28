@@ -106,7 +106,9 @@ public struct Gemma4VisionConfig: Decodable, Sendable {
 // MARK: - Gemma 4 Config
 
 /// Configuration for Gemma 4 model family (E2B, E4B, 12B, 27B, 31B).
-/// Complex architecture: PLE, dual head_dim, KV sharing, 4-norm blocks.
+/// Complex architecture: PLE, dual head_dim, KV sharing, 4-norm blocks,
+/// and (26B-A4B only) a per-layer sparse MoE branch alongside the dense
+/// MLP plus K-eq-V global attention.
 public struct Gemma4Config: Decodable, Sendable {
     public let hiddenSize: Int
     public let intermediateSize: Int
@@ -131,8 +133,8 @@ public struct Gemma4Config: Decodable, Sendable {
     /// the modulo alone gets the wrong head_dim on every non-e2b
     /// variant and the attention reshape crashes at first inference.
     public let layerTypes: [String]?
-    public let hiddenSizePerLayerInput: Int  // PLE dimension (256)
-    public let numKVSharedLayers: Int    // layers sharing KV from earlier layers
+    public let hiddenSizePerLayerInput: Int  // PLE dimension (256); 0 disables PLE (26B-A4B)
+    public let numKVSharedLayers: Int    // layers sharing KV from earlier layers; 0 disables (26B-A4B)
     public let useDoubleWideMlp: Bool
     public let finalLogitSoftcapping: Float
     public let tieWordEmbeddings: Bool
@@ -141,6 +143,20 @@ public struct Gemma4Config: Decodable, Sendable {
     /// Multimodal Gemma 4 checkpoints (e2b/e4b/26B-A4B) ship this;
     /// text-only checkpoints (12B/27B) do not.
     public let visionConfig: Gemma4VisionConfig?
+
+    // MoE fields (26B-A4B only; defaults disable the MoE branch).
+    /// Toggles the per-layer sparse MoE branch in parallel with the
+    /// dense MLP. True on Gemma 4 26B-A4B, false everywhere else.
+    public let enableMoeBlock: Bool
+    public let numExperts: Int?
+    public let topKExperts: Int?
+    public let moeIntermediateSize: Int?
+
+    // K-eq-V global attention (26B-A4B only). When true, full-attention
+    // layers reuse the K projection as V and use
+    // `numGlobalKeyValueHeads` heads instead of `numKeyValueHeads`.
+    public let attentionKEqV: Bool
+    public let numGlobalKeyValueHeads: Int?
 
     enum CodingKeys: String, CodingKey {
         case hiddenSize = "hidden_size"
@@ -165,6 +181,12 @@ public struct Gemma4Config: Decodable, Sendable {
         case quantizationConfig = "quantization_config"
         case textConfig = "text_config"
         case visionConfig = "vision_config"
+        case enableMoeBlock = "enable_moe_block"
+        case numExperts = "num_experts"
+        case topKExperts = "top_k_experts"
+        case moeIntermediateSize = "moe_intermediate_size"
+        case attentionKEqV = "attention_k_eq_v"
+        case numGlobalKeyValueHeads = "num_global_key_value_heads"
     }
 
     public init(from decoder: Decoder) throws {
@@ -200,6 +222,13 @@ public struct Gemma4Config: Decodable, Sendable {
         // Quantization at top level
         quantization = try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantization)
             ?? (try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantizationConfig))
+
+        enableMoeBlock = try tc.decodeIfPresent(Bool.self, forKey: .enableMoeBlock) ?? false
+        numExperts = try tc.decodeIfPresent(Int.self, forKey: .numExperts)
+        topKExperts = try tc.decodeIfPresent(Int.self, forKey: .topKExperts)
+        moeIntermediateSize = try tc.decodeIfPresent(Int.self, forKey: .moeIntermediateSize)
+        attentionKEqV = try tc.decodeIfPresent(Bool.self, forKey: .attentionKEqV) ?? false
+        numGlobalKeyValueHeads = try tc.decodeIfPresent(Int.self, forKey: .numGlobalKeyValueHeads)
 
         // vision_config is at top level for all Gemma 4 multimodal SKUs.
         // A Bool sentinel (some text-only checkpoints use literal `false`
@@ -240,6 +269,30 @@ public struct Gemma4Config: Decodable, Sendable {
     /// First layer index that shares KV.
     public var firstKVSharedLayer: Int { numHiddenLayers - numKVSharedLayers }
 
+    /// Whether this checkpoint enables per-layer-input (PLE) embeddings.
+    /// True for Gemma 4 e2b/e4b (`hidden_size_per_layer_input=256`),
+    /// false for 26B-A4B (`hidden_size_per_layer_input=0`).
+    public var hasPerLayerInputs: Bool { hiddenSizePerLayerInput > 0 }
+
+    /// KV head count for a given layer. Full-attention layers on
+    /// 26B-A4B use `num_global_key_value_heads=2` (versus 8 for sliding
+    /// layers) when `attention_k_eq_v` is set; everywhere else returns
+    /// the per-config `numKeyValueHeads`.
+    public func kvHeads(layerIdx: Int) -> Int {
+        if attentionKEqV, isFullAttention(layerIdx: layerIdx),
+           let g = numGlobalKeyValueHeads {
+            return g
+        }
+        return numKeyValueHeads
+    }
+
+    /// True for layers where K is reused as V (no v_proj weights ship
+    /// in the checkpoint). Only Gemma 4 26B-A4B with
+    /// `attention_k_eq_v` and a full-attention layer.
+    public func useKEqV(layerIdx: Int) -> Bool {
+        attentionKEqV && isFullAttention(layerIdx: layerIdx)
+    }
+
     // Conform to ModelConfig
     public var ropeTheta: Float { 10_000.0 }
 }
@@ -254,10 +307,16 @@ class Gemma4Attention: Module {
     let numKVHeads: Int
     let layerHeadDim: Int
     let isFullAttn: Bool
+    /// True on 26B-A4B full-attention layers when the checkpoint sets
+    /// `attention_k_eq_v`. In that mode v_proj is absent and we reuse
+    /// the K projection as V (matching the mlx-lm reference at
+    /// `gemma4_text.Attention.has_kv / use_k_eq_v`).
+    let useKEqV: Bool
 
     @ModuleInfo(key: "q_proj") var qProj: Linear
     @ModuleInfo(key: "k_proj") var kProj: Linear
-    @ModuleInfo(key: "v_proj") var vProj: Linear
+    /// Optional: omitted when `useKEqV` is true.
+    @ModuleInfo(key: "v_proj") var vProj: Linear?
     @ModuleInfo(key: "o_proj") var oProj: Linear
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
@@ -268,17 +327,22 @@ class Gemma4Attention: Module {
     init(_ config: Gemma4Config, layerIdx: Int) {
         let dim = config.hiddenSize
         self.numHeads = config.numAttentionHeads
-        self.numKVHeads = config.numKeyValueHeads
+        self.numKVHeads = config.kvHeads(layerIdx: layerIdx)
         self.isFullAttn = config.isFullAttention(layerIdx: layerIdx)
         self.layerHeadDim = isFullAttn ? config.globalHeadDim : config.headDim
         self.rmsNormEps = config.rmsNormEps
+        self.useKEqV = config.useKEqV(layerIdx: layerIdx)
 
         let qSize = numHeads * layerHeadDim
         let kvSize = numKVHeads * layerHeadDim
 
         _qProj = ModuleInfo(wrappedValue: Linear(dim, qSize, bias: false), key: "q_proj")
         _kProj = ModuleInfo(wrappedValue: Linear(dim, kvSize, bias: false), key: "k_proj")
-        _vProj = ModuleInfo(wrappedValue: Linear(dim, kvSize, bias: false), key: "v_proj")
+        if !useKEqV {
+            _vProj = ModuleInfo(wrappedValue: Linear(dim, kvSize, bias: false), key: "v_proj")
+        } else {
+            _vProj = ModuleInfo(wrappedValue: nil, key: "v_proj")
+        }
         _oProj = ModuleInfo(wrappedValue: Linear(qSize, dim, bias: false), key: "o_proj")
         _qNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: layerHeadDim, eps: config.rmsNormEps), key: "q_norm")
         _kNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: layerHeadDim, eps: config.rmsNormEps), key: "k_norm")
@@ -364,9 +428,21 @@ class Gemma4Attention: Module {
             k = sharedSnap.keys
             v = sharedSnap.values
         } else {
-            // Normal layer: compute K/V and write to own cache
+            // Normal layer: compute K/V and write to own cache.
+            // K-eq-V mode (26B-A4B full layers): no v_proj weight ships
+            // in the checkpoint; values are derived from the same
+            // projection as keys before k_norm / RoPE are applied. The
+            // reference normalizes V with a scale-less RMSNorm, then
+            // skips RoPE on V (positional info lives only on Q/K).
             var newK = kProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
-            var newV = vProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
+            var newV: MLXArray
+            if useKEqV {
+                newV = newK
+            } else if let vProj {
+                newV = vProj(x).reshaped(B, L, numKVHeads, layerHeadDim).transposed(0, 2, 1, 3)
+            } else {
+                fatalError("Gemma4Attention: v_proj is nil but useKEqV is false (layer \(numKVHeads) kv heads)")
+            }
             newK = kNorm(newK)
             let vVar = MLX.mean(newV * newV, axis: -1, keepDims: true)
             newV = newV * MLX.rsqrt(vVar + MLXArray(rmsNormEps).asType(newV.dtype))
@@ -414,8 +490,135 @@ class Gemma4MLP: Module {
     }
 }
 
-// MARK: - Gemma 4 Transformer Block (4 norms + PLE gating)
+// MARK: - Gemma 4 MoE Router (26B-A4B)
 
+/// Router for the Gemma 4 26B-A4B MoE block. Forward:
+///
+///   1. Apply RMSNorm with weight = `scale * hidden_size^(-0.5)` (the
+///      reference fuses the 1/sqrt(H) factor into the weight; reproduced
+///      here so the math matches bit for bit).
+///   2. Linear `proj`: hidden -> num_experts. The projection is
+///      quantized in 26B-A4B; the standard `Linear` module is replaced
+///      by `QuantizedLinear` during `quantize(...)` at load time.
+///   3. Top-K via `argPartition` (kth = -topK, last topK columns), then
+///      softmax over the topK logits.
+///   4. Multiply by `per_expert_scale[topK_indices]` (Gemma-specific
+///      learned per-expert multiplicative term applied to the topK
+///      softmax output).
+///
+/// Returns the topK expert ids and the per-token topK routing weights.
+/// Both shaped `[N, topK]` where `N = B*L` after flattening upstream.
+class Gemma4MoERouter: Module {
+    @ModuleInfo(key: "proj") var proj: Linear
+    @ParameterInfo(key: "scale") var scale: MLXArray
+    @ParameterInfo(key: "per_expert_scale") var perExpertScale: MLXArray
+
+    let topK: Int
+    let numExperts: Int
+    let hiddenSize: Int
+    let rmsNormEps: Float
+    /// `hidden_size^(-0.5)` cached as a host scalar; mixed into the RMS
+    /// norm weight at forward time so the kernel sees a single fused
+    /// scale vector instead of an extra elementwise multiply.
+    let rootScale: Float
+
+    init(_ config: Gemma4Config) {
+        guard let numExperts = config.numExperts, numExperts > 0,
+              let topK = config.topKExperts, topK > 0 else {
+            fatalError(
+                "Gemma4MoERouter requires `num_experts` and `top_k_experts` "
+                + "in the checkpoint config; got "
+                + "num_experts=\(String(describing: config.numExperts)) "
+                + "top_k_experts=\(String(describing: config.topKExperts))")
+        }
+        self.numExperts = numExperts
+        self.topK = topK
+        self.hiddenSize = config.hiddenSize
+        self.rmsNormEps = config.rmsNormEps
+        self.rootScale = 1.0 / Float(config.hiddenSize).squareRoot()
+
+        _proj = ModuleInfo(
+            wrappedValue: Linear(config.hiddenSize, numExperts, bias: false),
+            key: "proj")
+        _scale = ParameterInfo(
+            wrappedValue: MLXArray.ones([config.hiddenSize]),
+            key: "scale")
+        _perExpertScale = ParameterInfo(
+            wrappedValue: MLXArray.ones([numExperts]),
+            key: "per_expert_scale")
+    }
+
+    /// - Parameter flat: Hidden states reshaped to `[N, H]` (caller
+    ///   already flattened batch/sequence).
+    /// - Returns: `(topKIdx [N, topK] Int32, topKWeight [N, topK])`.
+    func callAsFunction(_ flat: MLXArray) -> (topKIdx: MLXArray, topKWeight: MLXArray) {
+        // RMSNorm with weight = scale * 1/sqrt(H), eps = config.rms_norm_eps.
+        let fusedWeight = scale * MLXArray(rootScale).asType(scale.dtype)
+        let normed = MLXFast.rmsNorm(flat, weight: fusedWeight, eps: rmsNormEps)
+
+        // Router logits: [N, E].
+        let logits = proj(normed)
+
+        // Top-K via argPartition (kth = -topK pivots so the last topK
+        // entries along axis -1 are the top scores; their internal
+        // ordering is undefined, matching the mlx-lm reference).
+        let partIdx = argPartition(logits, kth: numExperts - topK, axis: -1)
+        let topKIdx = partIdx[0..., (numExperts - topK)..<numExperts]   // [N, topK]
+        let topKLogits = takeAlong(logits, topKIdx, axis: -1)            // [N, topK]
+        var topKWeight = softmax(topKLogits, axis: -1)                   // [N, topK]
+
+        // Gemma-specific per-expert scale on the routed weights.
+        let gathered = perExpertScale.take(topKIdx.flattened(), axis: 0)
+            .reshaped(topKIdx.shape)                                     // [N, topK]
+        topKWeight = topKWeight * gathered.asType(topKWeight.dtype)
+
+        return (topKIdx, topKWeight)
+    }
+}
+
+// MARK: - Gemma 4 MoE Experts (26B-A4B)
+
+/// Single expert FFN inside a Gemma 4 26B-A4B MoE layer. Same
+/// gate/up/down shape as the dense `Gemma4MLP`, narrower hidden
+/// (`moeIntermediateSize`), and **GeGLU** activation (`gelu(gate) * up`)
+/// instead of the SiLU used by Qwen MoE.
+class Gemma4MoEExpert: Module {
+    @ModuleInfo(key: "gate_proj") var gateProj: Linear
+    @ModuleInfo(key: "up_proj") var upProj: Linear
+    @ModuleInfo(key: "down_proj") var downProj: Linear
+
+    init(_ config: Gemma4Config) {
+        let dim = config.hiddenSize
+        let inter = config.moeIntermediateSize ?? 704
+
+        _gateProj = ModuleInfo(
+            wrappedValue: Linear(dim, inter, bias: false), key: "gate_proj")
+        _upProj = ModuleInfo(
+            wrappedValue: Linear(dim, inter, bias: false), key: "up_proj")
+        _downProj = ModuleInfo(
+            wrappedValue: Linear(inter, dim, bias: false), key: "down_proj")
+    }
+
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        downProj(geluApproximate(gateProj(x)) * upProj(x))
+    }
+}
+
+// MARK: - Gemma 4 Transformer Block (4 norms + optional PLE / MoE)
+
+/// Per-layer block. Three modes share this class via Optional submodules:
+///
+///   1. **PLE-only** (e2b / e4b): dense GeGLU MLP with
+///      `pre_feedforward_layernorm` + `post_feedforward_layernorm`,
+///      followed by per-layer-input gating. No router/experts.
+///   2. **MoE + no PLE** (26B-A4B): parallel dense MLP + sparse MoE
+///      paths summed inside the 4-norm block, no PLE gating.
+///   3. **MoE + PLE** (hypothetical future SKU): both branches active.
+///
+/// The shared 4-norm scaffolding plus the conditional `Optional`
+/// submodules let one `Gemma4Block` cover all three; the per-SKU module
+/// hierarchy lines up bit-exact with the checkpoint keys after the
+/// `switch_glu` unpacker rewrites the stacked expert tensors.
 class Gemma4Block: Module {
     @ModuleInfo(key: "self_attn") var selfAttn: Gemma4Attention
     @ModuleInfo(key: "mlp") var mlp: Gemma4MLP
@@ -423,43 +626,195 @@ class Gemma4Block: Module {
     @ModuleInfo(key: "post_attention_layernorm") var postAttnNorm: RMSNorm
     @ModuleInfo(key: "pre_feedforward_layernorm") var preFfnNorm: RMSNorm
     @ModuleInfo(key: "post_feedforward_layernorm") var postFfnNorm: RMSNorm
-    @ModuleInfo(key: "per_layer_input_gate") var pleGate: Linear
-    @ModuleInfo(key: "per_layer_projection") var pleProj: Linear
-    @ModuleInfo(key: "post_per_layer_input_norm") var pleNorm: RMSNorm
-    @ModuleInfo(key: "layer_scalar") var layerScalar: MLXArray
+    // MoE-only norms (26B-A4B).
+    @ModuleInfo(key: "pre_feedforward_layernorm_2") var preFfnNorm2: RMSNorm?
+    @ModuleInfo(key: "post_feedforward_layernorm_1") var postFfnNorm1: RMSNorm?
+    @ModuleInfo(key: "post_feedforward_layernorm_2") var postFfnNorm2: RMSNorm?
+    // PLE-only modules (e2b / e4b).
+    @ModuleInfo(key: "per_layer_input_gate") var pleGate: Linear?
+    @ModuleInfo(key: "per_layer_projection") var pleProj: Linear?
+    @ModuleInfo(key: "post_per_layer_input_norm") var pleNorm: RMSNorm?
+    // MoE-only submodule (router + experts). The experts array is
+    // declared non-optional so that `update(modules:)`'s `[Module] ->
+    // [T]` element-wise cast works without going through an Optional
+    // wrapper (which mlx-swift's `as? T` cannot unwrap for nested
+    // arrays). Non-MoE blocks leave the array empty so the checkpoint
+    // has nothing to bind there.
+    @ModuleInfo(key: "router") var moeRouter: Gemma4MoERouter?
+    @ModuleInfo(key: "experts") var moeExperts: [Gemma4MoEExpert]
+    @ParameterInfo(key: "layer_scalar") var layerScalar: MLXArray
+
+    /// Cached config-driven flags so the forward avoids reading them
+    /// off the Module property bag every token.
+    let moeEnabled: Bool
+    let pleEnabled: Bool
+    let topK: Int
+    let numExperts: Int
 
     init(_ config: Gemma4Config, layerIdx: Int) {
         let dim = config.hiddenSize
-        let pleDim = config.hiddenSizePerLayerInput
+        self.moeEnabled = config.enableMoeBlock
+        self.pleEnabled = config.hasPerLayerInputs
+        self.topK = config.topKExperts ?? 0
+        self.numExperts = config.numExperts ?? 0
 
-        _selfAttn = ModuleInfo(wrappedValue: Gemma4Attention(config, layerIdx: layerIdx), key: "self_attn")
-        _mlp = ModuleInfo(wrappedValue: Gemma4MLP(config, layerIdx: layerIdx), key: "mlp")
-        _inputLayernorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps), key: "input_layernorm")
-        _postAttnNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps), key: "post_attention_layernorm")
-        _preFfnNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps), key: "pre_feedforward_layernorm")
-        _postFfnNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps), key: "post_feedforward_layernorm")
-        _pleGate = ModuleInfo(wrappedValue: Linear(dim, pleDim, bias: false), key: "per_layer_input_gate")
-        _pleProj = ModuleInfo(wrappedValue: Linear(pleDim, dim, bias: false), key: "per_layer_projection")
-        _pleNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps), key: "post_per_layer_input_norm")
+        _selfAttn = ModuleInfo(
+            wrappedValue: Gemma4Attention(config, layerIdx: layerIdx),
+            key: "self_attn")
+        _mlp = ModuleInfo(
+            wrappedValue: Gemma4MLP(config, layerIdx: layerIdx), key: "mlp")
+        _inputLayernorm = ModuleInfo(
+            wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps),
+            key: "input_layernorm")
+        _postAttnNorm = ModuleInfo(
+            wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps),
+            key: "post_attention_layernorm")
+        _preFfnNorm = ModuleInfo(
+            wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps),
+            key: "pre_feedforward_layernorm")
+        _postFfnNorm = ModuleInfo(
+            wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps),
+            key: "post_feedforward_layernorm")
+
+        if moeEnabled {
+            _preFfnNorm2 = ModuleInfo(
+                wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps),
+                key: "pre_feedforward_layernorm_2")
+            _postFfnNorm1 = ModuleInfo(
+                wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps),
+                key: "post_feedforward_layernorm_1")
+            _postFfnNorm2 = ModuleInfo(
+                wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps),
+                key: "post_feedforward_layernorm_2")
+            _moeRouter = ModuleInfo(
+                wrappedValue: Gemma4MoERouter(config), key: "router")
+            _moeExperts = ModuleInfo(
+                wrappedValue: (0 ..< (config.numExperts ?? 0))
+                    .map { _ in Gemma4MoEExpert(config) },
+                key: "experts")
+        } else {
+            _preFfnNorm2 = ModuleInfo(wrappedValue: nil, key: "pre_feedforward_layernorm_2")
+            _postFfnNorm1 = ModuleInfo(wrappedValue: nil, key: "post_feedforward_layernorm_1")
+            _postFfnNorm2 = ModuleInfo(wrappedValue: nil, key: "post_feedforward_layernorm_2")
+            _moeRouter = ModuleInfo(wrappedValue: nil, key: "router")
+            _moeExperts = ModuleInfo(wrappedValue: [], key: "experts")
+        }
+
+        if pleEnabled {
+            let pleDim = config.hiddenSizePerLayerInput
+            _pleGate = ModuleInfo(
+                wrappedValue: Linear(dim, pleDim, bias: false),
+                key: "per_layer_input_gate")
+            _pleProj = ModuleInfo(
+                wrappedValue: Linear(pleDim, dim, bias: false),
+                key: "per_layer_projection")
+            _pleNorm = ModuleInfo(
+                wrappedValue: RMSNorm(dimensions: dim, eps: config.rmsNormEps),
+                key: "post_per_layer_input_norm")
+        } else {
+            _pleGate = ModuleInfo(wrappedValue: nil, key: "per_layer_input_gate")
+            _pleProj = ModuleInfo(wrappedValue: nil, key: "per_layer_projection")
+            _pleNorm = ModuleInfo(wrappedValue: nil, key: "post_per_layer_input_norm")
+        }
+
         // Learned per-layer scalar (ranges from ~0.018 to ~0.87)
-        _layerScalar = ModuleInfo(wrappedValue: MLXArray([Float(1.0)]), key: "layer_scalar")
+        _layerScalar = ParameterInfo(
+            wrappedValue: MLXArray([Float(1.0)]), key: "layer_scalar")
+    }
+
+    /// Dispatch the MoE branch by reading the router/experts modules
+    /// directly so the parent's forward stays compact. `h` is the
+    /// post-attention residual stream; this returns the summed
+    /// dense+sparse FFN output ready to add back onto the residual.
+    private func moeForward(_ h: MLXArray) -> MLXArray {
+        guard let router = moeRouter,
+              let preFfnNorm2 = preFfnNorm2,
+              let postFfnNorm1 = postFfnNorm1,
+              let postFfnNorm2 = postFfnNorm2 else {
+            fatalError("Gemma4Block: moeEnabled but MoE submodules are nil")
+        }
+        let experts = moeExperts
+
+        // Dense branch (same gate/up/down weights as e2b/e4b path).
+        var h1 = preFfnNorm(h)
+        h1 = mlp(h1)
+        h1 = postFfnNorm1(h1)
+
+        // Sparse branch: router input is the pre-pre-norm hidden state.
+        let B = h.dim(0); let L = h.dim(1); let H = h.dim(2)
+        let routerFlat = h.reshaped(B * L, H)
+        let (topKIdx, topKWeight) = router(routerFlat)   // [N, topK] each
+
+        // Expert input goes through its own layernorm.
+        let h2In = preFfnNorm2(h)
+
+        // Scatter dispatch (matches Qwen3MoESparseMLP).
+        let N = B * L
+        let expertsFlat = h2In.reshaped(N, H)
+        let assignExpert = topKIdx.reshaped(N * topK)
+        let tokenIdsCol = MLXArray(Int32(0) ..< Int32(N)).reshaped(N, 1)
+        let tokenIds = MLX.broadcast(tokenIdsCol, to: [N, topK])
+            .reshaped(N * topK)
+        let order = argSort(assignExpert, axis: -1)
+        let sortedExpert = MLX.take(assignExpert, order, axis: 0)
+        let sortedToken = MLX.take(tokenIds, order, axis: 0)
+        let gathered = MLX.take(expertsFlat, sortedToken, axis: 0)
+
+        let expertRange = MLXArray(Int32(0) ..< Int32(numExperts))
+        let oneHot = sortedExpert.reshaped(N * topK, 1) .== expertRange
+        let counts = oneHot.asType(.int32).sum(axis: 0)
+        eval(counts)
+        let countsHost = counts.asArray(Int32.self)
+
+        var parts: [MLXArray] = []
+        var offset = 0
+        for e in 0 ..< numExperts {
+            let c = Int(countsHost[e])
+            if c == 0 { continue }
+            let chunk = gathered[offset ..< (offset + c)]
+            parts.append(experts[e](chunk))
+            offset += c
+        }
+        let sortedOut: MLXArray = parts.isEmpty
+            ? MLXArray.zeros([N * topK, H]).asType(expertsFlat.dtype)
+            : MLX.concatenated(parts, axis: 0)
+        let inverseOrder = argSort(order, axis: -1)
+        let perSlot = MLX.take(sortedOut, inverseOrder, axis: 0)
+            .reshaped(N, topK, H)
+        let weighted = perSlot * topKWeight
+            .reshaped(N, topK, 1).asType(perSlot.dtype)
+        var h2 = weighted.sum(axis: 1).reshaped(B, L, H)
+        h2 = postFfnNorm2(h2)
+
+        return h1 + h2
     }
 
     func callAsFunction(
         _ x: MLXArray, maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .none,
-        cache: KVCacheProtocol? = nil, sharedCache: KVCacheProtocol? = nil, perLayerInput: MLXArray? = nil
+        cache: KVCacheProtocol? = nil, sharedCache: KVCacheProtocol? = nil,
+        perLayerInput: MLXArray? = nil
     ) -> MLXArray {
         // Attention with post-norm
-        var h = x + postAttnNorm(selfAttn(inputLayernorm(x), maskMode: maskMode, cache: cache, sharedCache: sharedCache))
+        var h = x + postAttnNorm(
+            selfAttn(
+                inputLayernorm(x), maskMode: maskMode,
+                cache: cache, sharedCache: sharedCache))
 
-        // FFN with pre+post norm
-        h = h + postFfnNorm(mlp(preFfnNorm(h)))
+        // FFN: either parallel dense+sparse (MoE) or dense-only.
+        let ffnOut: MLXArray
+        if moeEnabled {
+            ffnOut = moeForward(h)
+        } else {
+            ffnOut = mlp(preFfnNorm(h))
+        }
+        h = h + postFfnNorm(ffnOut)
 
-        // PLE gating
-        if let ple = perLayerInput {
-            let gate = geluApproximate(pleGate(h))  // [B, L, 256]
-            let gated = gate * ple        // element-wise with PLE slice
-            let projected = pleProj(gated) // [B, L, 1536]
+        // PLE gating (e2b / e4b only)
+        if pleEnabled, let ple = perLayerInput,
+           let pleGate = pleGate, let pleProj = pleProj, let pleNorm = pleNorm {
+            let gate = geluApproximate(pleGate(h))   // [B, L, pleDim]
+            let gated = gate * ple
+            let projected = pleProj(gated)           // [B, L, hidden]
             h = h + pleNorm(projected)
         }
 
@@ -472,9 +827,11 @@ class Gemma4Block: Module {
 
 class Gemma4TextModel: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
-    @ModuleInfo(key: "embed_tokens_per_layer") var embedPerLayer: Embedding
-    @ModuleInfo(key: "per_layer_model_projection") var perLayerProj: Linear
-    @ModuleInfo(key: "per_layer_projection_norm") var perLayerNorm: RMSNorm
+    // PLE-only sub-modules (e2b/e4b). Absent on 26B-A4B which sets
+    // `hidden_size_per_layer_input=0`.
+    @ModuleInfo(key: "embed_tokens_per_layer") var embedPerLayer: Embedding?
+    @ModuleInfo(key: "per_layer_model_projection") var perLayerProj: Linear?
+    @ModuleInfo(key: "per_layer_projection_norm") var perLayerNorm: RMSNorm?
     @ModuleInfo(key: "layers") var layers: [Gemma4Block]
     @ModuleInfo(key: "norm") var norm: RMSNorm
 
@@ -489,20 +846,33 @@ class Gemma4TextModel: Module {
     // KV sharing: donor layer indices (computed once at init)
     let lastSlidingDonor: Int
     let lastFullDonor: Int
+    let hasPLE: Bool
+    let kvSharingEnabled: Bool
 
     init(_ config: Gemma4Config) {
         self.config = config
         let dim = config.hiddenSize
         let pleDim = config.hiddenSizePerLayerInput
         let pleTotal = config.numHiddenLayers * pleDim
+        self.hasPLE = config.hasPerLayerInputs
+        self.kvSharingEnabled = config.numKVSharedLayers > 0
 
-        // Pre-compute BF16 scalars
+        // Pre-compute BF16 scalars. `pleScale` is unused when PLE is
+        // disabled but `MLXArray(0)` is cheap to allocate; we still
+        // honor the same hidden_size^0.5 / hidden_size^-0.5 factors so
+        // the e2b/e4b path is unchanged.
         self.embedScale = MLXArray(Float(dim).squareRoot()).asType(.bfloat16)
-        self.pleScale = MLXArray(Float(pleDim).squareRoot()).asType(.bfloat16)
+        self.pleScale = MLXArray(
+            hasPLE ? Float(pleDim).squareRoot() : 1.0
+        ).asType(.bfloat16)
         self.projScale = MLXArray(1.0 / Float(dim).squareRoot()).asType(.bfloat16)
         self.combineScale = MLXArray(Float(0.7071067811865476)).asType(.bfloat16)
 
-        // Pre-compute KV sharing donor indices
+        // Pre-compute KV sharing donor indices. `firstKVSharedLayer ==
+        // numHiddenLayers` (i.e. `num_kv_shared_layers == 0`) leaves
+        // the donor indices at 0 unused; the forward gates the sharing
+        // path on `kvSharingEnabled` so 26B-A4B (no KV sharing) takes
+        // the dense per-layer KV path.
         let firstShared = config.firstKVSharedLayer
         var slidingDonor = 0
         var fullDonor = 0
@@ -519,15 +889,21 @@ class Gemma4TextModel: Module {
         _embedTokens = ModuleInfo(
             wrappedValue: Embedding(embeddingCount: config.vocabSize, dimensions: dim),
             key: "embed_tokens")
-        _embedPerLayer = ModuleInfo(
-            wrappedValue: Embedding(embeddingCount: config.vocabSize, dimensions: pleTotal),
-            key: "embed_tokens_per_layer")
-        _perLayerProj = ModuleInfo(
-            wrappedValue: Linear(dim, pleTotal, bias: false),
-            key: "per_layer_model_projection")
-        _perLayerNorm = ModuleInfo(
-            wrappedValue: RMSNorm(dimensions: pleDim, eps: config.rmsNormEps),
-            key: "per_layer_projection_norm")
+        if hasPLE {
+            _embedPerLayer = ModuleInfo(
+                wrappedValue: Embedding(embeddingCount: config.vocabSize, dimensions: pleTotal),
+                key: "embed_tokens_per_layer")
+            _perLayerProj = ModuleInfo(
+                wrappedValue: Linear(dim, pleTotal, bias: false),
+                key: "per_layer_model_projection")
+            _perLayerNorm = ModuleInfo(
+                wrappedValue: RMSNorm(dimensions: pleDim, eps: config.rmsNormEps),
+                key: "per_layer_projection_norm")
+        } else {
+            _embedPerLayer = ModuleInfo(wrappedValue: nil, key: "embed_tokens_per_layer")
+            _perLayerProj = ModuleInfo(wrappedValue: nil, key: "per_layer_model_projection")
+            _perLayerNorm = ModuleInfo(wrappedValue: nil, key: "per_layer_projection_norm")
+        }
         _layers = ModuleInfo(
             wrappedValue: (0 ..< config.numHiddenLayers).map { i in Gemma4Block(config, layerIdx: i) },
             key: "layers")
@@ -566,29 +942,37 @@ class Gemma4TextModel: Module {
             h = injectEmbeddings(h, tokens: tokens, embeddings: audEmb, tokenId: audioTokenId)
         }
 
-        // PLE: compute per-layer inputs
+        // PLE: compute per-layer inputs (e2b/e4b only).
         // For multimodal: zero out image/audio token IDs so PLE only computes
         // for text tokens. Image/audio positions get zero PLE contribution.
-        let pleTokens: MLXArray
-        if imageEmbeddings != nil || audioEmbeddings != nil {
-            let imgMask = tokens .== MLXArray(Int32(imageTokenId))
-            let audMask = tokens .== MLXArray(Int32(audioTokenId))
-            let mmMask = (imgMask.asType(.int32) + audMask.asType(.int32)) .> MLXArray(Int32(0))
-            pleTokens = MLX.where(mmMask, MLXArray(Int32(0)), tokens)
-        } else {
-            pleTokens = tokens
+        var combinedPLE: MLXArray? = nil
+        if hasPLE, let embedPerLayer = embedPerLayer,
+           let perLayerProj = perLayerProj, let perLayerNorm = perLayerNorm {
+            let pleTokens: MLXArray
+            if imageEmbeddings != nil || audioEmbeddings != nil {
+                let imgMask = tokens .== MLXArray(Int32(imageTokenId))
+                let audMask = tokens .== MLXArray(Int32(audioTokenId))
+                let mmMask = (imgMask.asType(.int32) + audMask.asType(.int32)) .> MLXArray(Int32(0))
+                pleTokens = MLX.where(mmMask, MLXArray(Int32(0)), tokens)
+            } else {
+                pleTokens = tokens
+            }
+            let pleEmbed = embedPerLayer(pleTokens) * pleScale
+            let projection = perLayerProj(h) * projScale
+            let projNormed = perLayerNorm(projection.reshaped(B * L * numLayers, pleDim))
+                .reshaped(B, L, numLayers * pleDim)
+            combinedPLE = (projNormed + pleEmbed) * combineScale
         }
-        let pleEmbed = embedPerLayer(pleTokens) * pleScale
-        let projection = perLayerProj(h) * projScale
-        let projNormed = perLayerNorm(projection.reshaped(B * L * numLayers, pleDim))
-            .reshaped(B, L, numLayers * pleDim)
-        let combinedPLE = (projNormed + pleEmbed) * combineScale
 
         // Evaluate embedding and PLE computation before entering layer loop.
         // This flushes the graph so each layer starts with materialized inputs,
         // preventing quadratic graph growth during prefill.
         if L > 1 {
-            MLX.eval(h, combinedPLE)
+            if let combinedPLE = combinedPLE {
+                MLX.eval(h, combinedPLE)
+            } else {
+                MLX.eval(h)
+            }
         }
 
         // Causal mask. Same shape rules as the dense models: empty cache
@@ -605,14 +989,16 @@ class Gemma4TextModel: Module {
         // KV sharing donor indices (pre-computed at init)
         let firstShared = config.firstKVSharedLayer
 
-        // Forward through layers with KV sharing for layers >= firstShared.
-        // Shared layers pass the donor's cache as sharedCache so attention sees
-        // the same context as the donor layer, reducing redundant KV storage.
+        // Forward through layers. Shared layers pass the donor's cache
+        // as sharedCache so attention reuses the donor's accumulated
+        // K/V (e2b/e4b). 26B-A4B has `num_kv_shared_layers=0` so this
+        // branch is never taken.
         for (i, layer) in layers.enumerated() {
-            let pleSlice = combinedPLE[0..., 0..., (i * pleDim) ..< ((i + 1) * pleDim)]
+            let pleSlice: MLXArray? = combinedPLE.map { ple in
+                ple[0..., 0..., (i * pleDim) ..< ((i + 1) * pleDim)]
+            }
 
-            if i >= firstShared, let caches {
-                // KV-shared layer: pass donor cache
+            if kvSharingEnabled, i >= firstShared, let caches {
                 let donorIdx = config.isFullAttention(layerIdx: i) ? lastFullDonor : lastSlidingDonor
                 h = layer(h, maskMode: maskMode, cache: caches[i],
                          sharedCache: caches[donorIdx], perLayerInput: pleSlice)

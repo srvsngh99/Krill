@@ -369,6 +369,7 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
     let imageTokenId = rawConfig?["image_token_id"] as? Int ?? 258880
     let audioTokenId = rawConfig?["audio_token_id"] as? Int ?? 258881
     let hasVisionConfig = rawConfig?["vision_config"] != nil
+    let numExperts = config.numExperts ?? 0
 
     // Use multimodal model if vision config is present
     if hasVisionConfig {
@@ -377,14 +378,23 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
             config, imageTokenId: imageTokenId, audioTokenId: audioTokenId,
             audioConfig: audioConfig)
 
-        // Quantize language model layers (exclude PLE and vision/audio towers)
+        // Quantization: skip PLE projection and the non-LM towers; honor
+        // per-module overrides (26B-A4B ships 4-bit experts + 8-bit dense
+        // MLP + 8-bit router projection, encoded as per-module entries
+        // in `config.quantization`). The closure-based form lets each
+        // module land on its own (groupSize, bits, mode).
         if let q = config.quantization {
-            quantize(model: model, groupSize: q.groupSize, bits: q.bits) { name, _ in
-                let isLangModel = name.contains("language_model.")
-                let isPLE = name.contains("per_layer_model_projection") || name.contains("per_layer_projection_norm")
-                let isEmbedProj = name.contains("embed_vision.embedding_projection") || name.contains("embed_audio.embedding_projection")
-                // Quantize: language model (except PLE) and embedding projections
-                return (isLangModel && !isPLE) || isEmbedProj
+            quantize(model: model) { path, _ in
+                let isLangModel = path.contains("language_model.")
+                let isPLE = path.contains("per_layer_model_projection") || path.contains("per_layer_projection_norm")
+                let isEmbedProj = path.contains("embed_vision.embedding_projection") || path.contains("embed_audio.embedding_projection")
+                let shouldQuant = (isLangModel && !isPLE) || isEmbedProj
+                guard shouldQuant else { return nil }
+                // Override map keys are the dotted checkpoint paths
+                // (e.g. `language_model.model.layers.0.mlp.gate_proj`)
+                // which match the in-memory module path 1:1.
+                let eff = q.effective(for: path)
+                return (eff.groupSize, eff.bits, .affine)
             }
         }
 
@@ -401,6 +411,16 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
             }
         }
         flatWeights = cleaned
+
+        // Unpack mlx-community's stacked MoE expert tensors into per-expert
+        // keys. 26B-A4B ships `.experts.switch_glu.{gate,up,down}_proj.*`
+        // with leading dim = `num_experts`; the model expects
+        // `.experts.{e}.{proj}.{field}` matching its `[Gemma4MoEExpert]`
+        // submodule list. No-op for e2b/e4b (which have no MoE).
+        if config.enableMoeBlock, numExperts > 0 {
+            unpackStackedMoEWeights(
+                &flatWeights, marker: ".switch_glu.", numExperts: numExperts)
+        }
 
         // Tied embeddings: Gemma4 uses embed_tokens.as_linear() as the LM head.
         // No separate lm_head weights needed — the model reuses embed_tokens directly.
@@ -458,8 +478,30 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
     // Fallback: text-only Gemma4 (no vision_config in checkpoint)
     let model = Gemma4ForCausalLM(config)
     if let q = config.quantization {
-        quantize(model: model, groupSize: q.groupSize, bits: q.bits) { name, _ in
-            !name.contains("per_layer_model_projection") && !name.contains("per_layer_projection_norm")
+        quantize(model: model) { path, _ in
+            // Skip PLE in the text-only path too. After `language_model.`
+            // is stripped from the weight keys, the model's module path
+            // is e.g. `model.layers.0.mlp.gate_proj`; override keys in
+            // `q` may still carry the `language_model.` prefix from the
+            // raw checkpoint config. `effective(for:)` tries the
+            // de-prefixed path first; we fall back to the prefixed form
+            // so per-module overrides hit either way.
+            if path.contains("per_layer_model_projection")
+                || path.contains("per_layer_projection_norm") { return nil }
+            let direct = q.effective(for: path)
+            let prefixed = q.effective(for: "language_model." + path)
+            // If a per-module override exists under the prefixed form
+            // but not the direct form, the prefixed lookup will return
+            // a tuple that differs from the top-level (group, bits);
+            // prefer it. Otherwise both calls return the top-level
+            // defaults and either is fine.
+            let useTuple: (groupSize: Int, bits: Int)
+            if direct.groupSize != q.groupSize || direct.bits != q.bits {
+                useTuple = direct
+            } else {
+                useTuple = prefixed
+            }
+            return (useTuple.groupSize, useTuple.bits, .affine)
         }
     }
 
@@ -471,6 +513,14 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
         }
     }
     if !stripped.isEmpty { flatWeights = stripped }
+
+    // Unpack stacked MoE expert tensors when this is a text-only Gemma 4
+    // MoE SKU (none exist today; future text-only 26B-A4B variants would
+    // hit this branch). Same unpacker as the multimodal path.
+    if config.enableMoeBlock, numExperts > 0 {
+        unpackStackedMoEWeights(
+            &flatWeights, marker: ".switch_glu.", numExperts: numExperts)
+    }
 
     // Tied embeddings: Gemma4 uses embed_tokens.as_linear() as the LM head.
 
@@ -525,11 +575,27 @@ private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedMode
 }
 
 /// Slice mlx-community style stacked MoE expert tensors into per-expert
-/// tensors. Source keys look like
-/// `model.layers.{L}.mlp.switch_mlp.{gate_proj|up_proj|down_proj}.{weight|scales|biases}`
-/// with leading dim equal to `numExperts`; we rewrite each entry to
-/// `model.layers.{L}.mlp.experts.{e}.{proj}.{field}` matching the
-/// per-expert `Qwen3MoEExpert` modules our `Qwen3MoESparseMLP` allocates.
+/// tensors. Source keys carry a `marker` substring whose immediate
+/// parent is the expert container; we replace the `marker` slot with
+/// `.{e}.` for each expert index `e`.
+///
+/// Supported marker shapes (both produce the per-expert keys the
+/// model expects):
+///
+///   - `.switch_mlp.` — Qwen3-MoE (mlx-community SwiGLU pack). The
+///     in-checkpoint key is `mlp.switch_mlp.{proj}.{field}` and the
+///     parent `mlp` IS the expert container, so we emit
+///     `mlp.experts.{e}.{proj}.{field}` -- i.e. prepend `experts.`
+///     because the parent path lacks it. The Qwen3 model's block has
+///     `mlp = Qwen3MoESparseMLP` which owns `experts: [Qwen3MoEExpert]`.
+///
+///   - `.switch_glu.` — Gemma 4 26B-A4B (mlx-lm GeGLU pack). The
+///     in-checkpoint key is `experts.switch_glu.{proj}.{field}` and the
+///     parent IS already the experts list, so we emit
+///     `experts.{e}.{proj}.{field}` -- DO NOT prepend another
+///     `experts.` or we land on a non-existent
+///     `experts.experts.{e}.*` key and `model.update` rejects the
+///     array.
 ///
 /// Why this rewrite exists: `model.update(parameters:, verify: [])`
 /// silently drops weights whose key has no matching parameter in the
@@ -537,16 +603,20 @@ private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedMode
 /// generation collapses to looping special tokens - root cause of #75.
 ///
 /// No-op for checkpoints that already ship per-expert keys; only
-/// `switch_mlp` entries with the expected leading dim are touched.
+/// entries with the marker substring and the expected leading dim
+/// are touched.
 ///
 /// Exposed `internal` (not private) so the regression test in
 /// `Qwen3MoENativeTests` can call it directly without spinning up a
-/// full ~16 GB Qwen3-MoE checkpoint.
-func unpackSwitchMLPWeights(
+/// full ~16 GB MoE checkpoint.
+func unpackStackedMoEWeights(
     _ weights: inout [String: MLXArray],
+    marker: String,
     numExperts: Int
 ) {
-    let marker = ".switch_mlp."
+    // Per-marker target template selection. Documented above.
+    let parentIsExperts = (marker == ".switch_glu.")
+
     let switchKeys = weights.keys.filter { $0.contains(marker) }
     guard !switchKeys.isEmpty else { return }
 
@@ -565,11 +635,28 @@ func unpackSwitchMLPWeights(
 
         let chunks = MLX.split(stacked, parts: numExperts, axis: 0)
         for (e, chunk) in chunks.enumerated() {
-            let newKey = "\(prefix).experts.\(e).\(proj).\(field)"
+            let newKey: String
+            if parentIsExperts {
+                // prefix already ends in `.experts` -- write directly
+                // to `<prefix>.<e>.<proj>.<field>`
+                newKey = "\(prefix).\(e).\(proj).\(field)"
+            } else {
+                newKey = "\(prefix).experts.\(e).\(proj).\(field)"
+            }
             weights[newKey] = chunk.squeezed(axis: 0)
         }
         weights.removeValue(forKey: key)
     }
+}
+
+/// Back-compat wrapper for the Qwen3-MoE call site (PR #78). Tests in
+/// `Qwen3MoENativeTests` invoke this directly with the `.switch_mlp.`
+/// marker; keeping the name preserves the prior contract.
+func unpackSwitchMLPWeights(
+    _ weights: inout [String: MLXArray],
+    numExperts: Int
+) {
+    unpackStackedMoEWeights(&weights, marker: ".switch_mlp.", numExperts: numExperts)
 }
 
 private func loadGLM(configData: Data, directory: URL) throws -> LoadedModel {
