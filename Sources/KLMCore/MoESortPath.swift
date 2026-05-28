@@ -58,7 +58,7 @@ func moeShouldSort(n: Int, topK: Int) -> Bool {
 ///   - indices: `[N, topK]` expert ids per token (router-score order).
 /// - Returns:
 ///   - x: `[N*topK, 1, H]` gathered `M = 1` rows in ascending-expert
-///     order — one row per `(token, slot)` assignment.
+///     order -- one row per `(token, slot)` assignment.
 ///   - idx: `[N*topK]` flat Int32 expert ids, ascending (so the
 ///     `gather_qmm` `sortedIndices` fast path is valid).
 ///   - invOrder: `[N*topK]` inverse permutation that restores the

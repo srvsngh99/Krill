@@ -1,9 +1,10 @@
 import XCTest
 import MLX
+import MLXNN
 import MLXRandom
 @testable import KLMCore
 
-/// PR #7: the SwitchGLU prefill sort path.
+/// PR #87: the SwitchGLU prefill sort path.
 ///
 /// At prefill the SwitchGLU sorts its `(token, expert)` assignments by
 /// expert id (`moeGatherSort`), runs the `gather_qmm` `sortedIndices`
@@ -12,7 +13,7 @@ import MLXRandom
 /// that safe:
 ///
 ///   1. The sort path is *numerically identical* to the unsorted
-///      dispatch — verified with a float `gatherMM` surrogate that has
+///      dispatch -- verified with a float `gatherMM` surrogate that has
 ///      the exact same shape contract and `sortedIndices` semantics as
 ///      the quantized `gather_qmm` used in production, but over non-zero
 ///      weights (the no-weight-load synthetic MoE tests run over zero
@@ -66,7 +67,7 @@ final class MoESortPathTests: XCTestCase {
 
     /// The sort path must reproduce the unsorted dispatch bit-for-bit
     /// (within fp tolerance) across many tokens, repeated experts, and a
-    /// non-trivial routing — this is the core safety property.
+    /// non-trivial routing -- this is the core safety property.
     func testSortPathMatchesUnsortedDispatch() {
         MLXRandom.seed(0)
         let N = 40, topK = 4, H = 16, O = 12, E = 6  // N*topK = 160 >= 64 -> sorts
@@ -138,6 +139,64 @@ final class MoESortPathTests: XCTestCase {
         let restored = moeScatterUnsort(xs, invOrder: invOrder, n: N, topK: topK)
         let expected = broadcast(x.reshaped(N, 1, H), to: [N, topK, H])
         assertAllClose(expected, restored, "round-trip identity")
+    }
+
+    /// End-to-end cover for the *production* quantized kernel path: build
+    /// a real `Qwen3SwitchGLU` with quantized random weights and assert
+    /// that the sorted-batch dispatch (`N*topK >= 64`, the prefill path
+    /// through `gatherQuantizedMM(sortedIndices: true)`) produces the
+    /// same per-`(token, slot)` output as running each token alone
+    /// (`indices.size = topK < 64`, the unsorted decode path). This
+    /// exercises the quantized `gather_qmm` sorted-indices kernel that
+    /// the float `gatherMM` surrogate above does not, over non-zero
+    /// expert weights (the no-weight-load synthetic MoE tests run over
+    /// zero quantized placeholders).
+    func testQuantizedSwitchGLUSortedMatchesUnsorted() throws {
+        MLXRandom.seed(7)
+        // group size must be one of {32, 64, 128} for mlx's quantize op;
+        // both projection input dims (H and I) must be divisible by it.
+        let H = 64, I = 64, E = 8, gs = 32, bits = 4, topK = 8
+        let glu = Qwen3SwitchGLU(
+            inputDims: H, hiddenDims: I, numExperts: E,
+            groupSize: gs, bits: bits)
+
+        // The module is born with zero packed placeholders; fill the
+        // three stacked projections with quantized random weights via
+        // the same update(parameters:) path the real loader uses.
+        var flat: [(String, MLXArray)] = []
+        func addProj(_ name: String, outDim: Int, inDim: Int) {
+            let wf = MLXRandom.normal([E, outDim, inDim]).asType(.float32) * 0.1
+            let (wq, scales, biases) = quantized(wf, groupSize: gs, bits: bits)
+            flat.append(("\(name).weight", wq))
+            flat.append(("\(name).scales", scales.asType(.bfloat16)))
+            flat.append((
+                "\(name).biases",
+                (biases ?? MLXArray.zeros(scales.shape)).asType(.bfloat16)))
+        }
+        addProj("gate_proj", outDim: I, inDim: H)
+        addProj("up_proj", outDim: I, inDim: H)
+        addProj("down_proj", outDim: H, inDim: I)
+        try glu.update(
+            parameters: ModuleParameters.unflattened(flat), verify: [.all])
+
+        // N=8, topK=8 -> indices.size = 64 -> the sorted path engages.
+        let N = 8
+        let x = MLXRandom.normal([N, H]).asType(.float32)
+        let indices = MLXRandom.randInt(0 ..< Int32(E), [N, topK])
+        XCTAssertTrue(moeShouldSort(n: N, topK: topK))
+
+        let sorted = glu(x, indices: indices)  // [N, topK, H] via sort path
+
+        // Per-token unsorted reference: each token alone is below the
+        // threshold, so it dispatches through the unsorted kernel.
+        var rows = [MLXArray]()
+        for i in 0..<N {
+            XCTAssertFalse(moeShouldSort(n: 1, topK: topK))
+            rows.append(glu(x[i ..< (i + 1)], indices: indices[i ..< (i + 1)]))
+        }
+        let unsorted = concatenated(rows, axis: 0)  // [N, topK, H]
+        assertAllClose(sorted, unsorted, tol: 5e-3,
+            "quantized sorted kernel vs unsorted per-token dispatch")
     }
 
     /// Decode (`N = 1`) stays below the sort threshold so the unsorted
