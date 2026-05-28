@@ -202,10 +202,18 @@ public struct Gemma4Config: Decodable, Sendable {
             ?? (try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantizationConfig))
 
         // vision_config is at top level for all Gemma 4 multimodal SKUs.
-        // Decoding to a Bool (the sentinel some checkpoints use to mean
-        // "no vision tower") fails the typed Gemma4VisionConfig decode and
-        // returns nil — same as a missing key.
-        visionConfig = try? c.decodeIfPresent(Gemma4VisionConfig.self, forKey: .visionConfig)
+        // A Bool sentinel (some text-only checkpoints use literal `false`
+        // to signal "no vision tower") is treated as missing. An object
+        // form must decode STRICTLY so a malformed vision_config surfaces
+        // an error rather than silently falling back to the SigLIP-base
+        // defaults. The latter would re-introduce the original #76 crash
+        // class on a partly-malformed 26B-A4B vision_config.
+        if (try? c.decode(Bool.self, forKey: .visionConfig)) != nil {
+            visionConfig = nil
+        } else {
+            visionConfig = try c.decodeIfPresent(
+                Gemma4VisionConfig.self, forKey: .visionConfig)
+        }
     }
 
     /// Whether a layer uses full attention (vs sliding window).

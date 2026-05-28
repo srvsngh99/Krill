@@ -191,6 +191,57 @@ final class Gemma4ConfigLayerTypesTests: XCTestCase {
         XCTAssertEqual(vc.ropeTheta, 100.0)
     }
 
+    /// A vision_config that ships neither `rope_theta` (flat) nor a
+    /// nested `rope_parameters.rope_theta` must still decode and fall
+    /// back to the canonical Gemma 4 base of 100.0. This guards the
+    /// outer `else` branch of the rope decode in `Gemma4VisionConfig`.
+    func testVisionConfigRopeThetaFallbackWhenAbsent() throws {
+        let json = """
+        {
+          "text_config": {
+            "hidden_size": 16, "intermediate_size": 32,
+            "num_attention_heads": 2, "num_key_value_heads": 1,
+            "num_hidden_layers": 1, "vocab_size": 100,
+            "head_dim": 8, "global_head_dim": 16,
+            "layer_types": ["full_attention"]
+          },
+          "vision_config": {
+            "hidden_size": 768, "num_attention_heads": 12, "head_dim": 64
+          }
+        }
+        """
+        let cfg = try JSONDecoder().decode(
+            Gemma4Config.self, from: Data(json.utf8))
+        let vc = try XCTUnwrap(cfg.visionConfig)
+        XCTAssertEqual(vc.ropeTheta, 100.0,
+            "rope_theta must default to 100.0 when neither flat nor "
+            + "nested form is present")
+    }
+
+    /// A `vision_config: false` sentinel (used by some text-only
+    /// checkpoints to signal "no vision tower") must decode to nil
+    /// without raising, while a malformed object-shaped vision_config
+    /// must NOT silently fall through to the SigLIP-base defaults -
+    /// that silent fall-through was the original #76 crash class.
+    func testVisionConfigBoolSentinelDecodesAsNil() throws {
+        let json = """
+        {
+          "text_config": {
+            "hidden_size": 16, "intermediate_size": 32,
+            "num_attention_heads": 2, "num_key_value_heads": 1,
+            "num_hidden_layers": 1, "vocab_size": 100,
+            "head_dim": 8, "global_head_dim": 16,
+            "layer_types": ["full_attention"]
+          },
+          "vision_config": false
+        }
+        """
+        let cfg = try JSONDecoder().decode(
+            Gemma4Config.self, from: Data(json.utf8))
+        XCTAssertNil(cfg.visionConfig,
+            "false sentinel must be treated as no vision tower")
+    }
+
     /// Defaults are the e2b/e4b SigLIP-base shapes so an older
     /// checkpoint with no `vision_config` (or a partial one) still
     /// constructs a workable tower instead of crashing at init.
