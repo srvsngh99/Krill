@@ -22,7 +22,16 @@ public struct Gemma4Config: Decodable, Sendable {
     public let headDim: Int              // 256 for sliding layers
     public let globalHeadDim: Int        // 512 for full attention layers
     public let slidingWindow: Int
-    public let slidingWindowPattern: Int  // every Nth layer is full attention
+    public let slidingWindowPattern: Int  // every Nth layer is full attention (fallback only)
+    /// Canonical per-layer attention type list from `config.json`
+    /// (`"full_attention"` or `"sliding_attention"`). Authoritative when
+    /// present; we fall back to the `slidingWindowPattern` modulo only
+    /// when it isn't. All Gemma 4 SKUs released today (e2b, e4b,
+    /// 26B-A4B, 31B) publish this list and use *different* full-layer
+    /// strides (e2b: every 5th; e4b / 26B-A4B: every 6th), so trusting
+    /// the modulo alone gets the wrong head_dim on every non-e2b
+    /// variant and the attention reshape crashes at first inference.
+    public let layerTypes: [String]?
     public let hiddenSizePerLayerInput: Int  // PLE dimension (256)
     public let numKVSharedLayers: Int    // layers sharing KV from earlier layers
     public let useDoubleWideMlp: Bool
@@ -43,6 +52,7 @@ public struct Gemma4Config: Decodable, Sendable {
         case globalHeadDim = "global_head_dim"
         case slidingWindow = "sliding_window"
         case slidingWindowPattern = "sliding_window_pattern"
+        case layerTypes = "layer_types"
         case hiddenSizePerLayerInput = "hidden_size_per_layer_input"
         case numKVSharedLayers = "num_kv_shared_layers"
         case useDoubleWideMlp = "use_double_wide_mlp"
@@ -76,6 +86,7 @@ public struct Gemma4Config: Decodable, Sendable {
         globalHeadDim = try tc.decodeIfPresent(Int.self, forKey: .globalHeadDim) ?? 512
         slidingWindow = try tc.decodeIfPresent(Int.self, forKey: .slidingWindow) ?? 512
         slidingWindowPattern = try tc.decodeIfPresent(Int.self, forKey: .slidingWindowPattern) ?? 5
+        layerTypes = try tc.decodeIfPresent([String].self, forKey: .layerTypes)
         hiddenSizePerLayerInput = try tc.decodeIfPresent(Int.self, forKey: .hiddenSizePerLayerInput) ?? 256
         numKVSharedLayers = try tc.decodeIfPresent(Int.self, forKey: .numKVSharedLayers) ?? 20
         useDoubleWideMlp = try tc.decodeIfPresent(Bool.self, forKey: .useDoubleWideMlp) ?? true
@@ -88,8 +99,19 @@ public struct Gemma4Config: Decodable, Sendable {
     }
 
     /// Whether a layer uses full attention (vs sliding window).
+    ///
+    /// Prefers the canonical `layer_types` list from `config.json` and
+    /// falls back to the `(idx + 1) % slidingWindowPattern == 0` modulo
+    /// only when that key is missing. The modulo default of 5 matched
+    /// Gemma 4 e2b by coincidence; e4b and 26B-A4B publish the same
+    /// `layer_types` shape but skip the modulo key entirely, and their
+    /// actual pattern is every 6th layer.
     public func isFullAttention(layerIdx: Int) -> Bool {
-        (layerIdx + 1) % slidingWindowPattern == 0
+        if let types = layerTypes,
+           layerIdx >= 0, layerIdx < types.count {
+            return types[layerIdx] == "full_attention"
+        }
+        return (layerIdx + 1) % slidingWindowPattern == 0
     }
 
     /// Whether a layer shares KV from an earlier layer.
