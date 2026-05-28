@@ -113,6 +113,103 @@ final class Gemma4ConfigLayerTypesTests: XCTestCase {
         _ = cfg.isFullAttention(layerIdx: -1)
     }
 
+    // MARK: - vision_config parsing (#76 prep)
+
+    /// 26B-A4B ships a non-SigLIP-base vision tower (hidden 1152, 16
+    /// heads, head_dim 72) and the prior loader hardcoded e2b shapes
+    /// (768, 12, 64) at `Gemma4Model.swift` so the vision tower
+    /// crashed loading with a 1.5x reshape mismatch. This test pins
+    /// the decoder so the loader instantiates `VisionEncoder` at the
+    /// shapes the checkpoint actually ships.
+    func testVisionConfigDecodesFrom26BA4BShape() throws {
+        let json = """
+        {
+          "text_config": {
+            "hidden_size": 16, "intermediate_size": 32,
+            "num_attention_heads": 2, "num_key_value_heads": 1,
+            "num_hidden_layers": 1, "vocab_size": 100,
+            "head_dim": 8, "global_head_dim": 16,
+            "layer_types": ["full_attention"]
+          },
+          "vision_config": {
+            "hidden_size": 1152, "intermediate_size": 4304,
+            "num_hidden_layers": 27, "num_attention_heads": 16,
+            "num_key_value_heads": 16, "head_dim": 72,
+            "patch_size": 16, "pooling_kernel_size": 3,
+            "position_embedding_size": 10240, "default_output_length": 280,
+            "rms_norm_eps": 0.000001,
+            "rope_parameters": {"rope_theta": 100.0, "rope_type": "default"}
+          }
+        }
+        """
+        let cfg = try JSONDecoder().decode(
+            Gemma4Config.self, from: Data(json.utf8))
+        let vc = try XCTUnwrap(cfg.visionConfig,
+            "vision_config must decode when present at top level")
+        XCTAssertEqual(vc.hiddenSize, 1152)
+        XCTAssertEqual(vc.intermediateSize, 4304)
+        XCTAssertEqual(vc.numHiddenLayers, 27)
+        XCTAssertEqual(vc.numAttentionHeads, 16)
+        XCTAssertEqual(vc.numKeyValueHeads, 16)
+        XCTAssertEqual(vc.headDim, 72)
+        // rope_theta nested under rope_parameters must be honored.
+        XCTAssertEqual(vc.ropeTheta, 100.0)
+    }
+
+    /// e2b/e4b configs MUST round-trip into the exact constants the
+    /// loader used to hardcode at `Gemma4MultimodalModel.init`. This
+    /// guards against a future refactor that drops a default or
+    /// changes the field semantics.
+    func testVisionConfigDecodesFromE2BE4BShape() throws {
+        let json = """
+        {
+          "text_config": {
+            "hidden_size": 16, "intermediate_size": 32,
+            "num_attention_heads": 2, "num_key_value_heads": 1,
+            "num_hidden_layers": 1, "vocab_size": 100,
+            "head_dim": 8, "global_head_dim": 16,
+            "layer_types": ["full_attention"]
+          },
+          "vision_config": {
+            "hidden_size": 768, "intermediate_size": 3072,
+            "num_hidden_layers": 16, "num_attention_heads": 12,
+            "num_key_value_heads": 12, "head_dim": 64,
+            "patch_size": 16, "pooling_kernel_size": 3,
+            "position_embedding_size": 10240, "default_output_length": 280,
+            "rms_norm_eps": 0.000001, "rope_theta": 100.0
+          }
+        }
+        """
+        let cfg = try JSONDecoder().decode(
+            Gemma4Config.self, from: Data(json.utf8))
+        let vc = try XCTUnwrap(cfg.visionConfig)
+        XCTAssertEqual(vc.hiddenSize, 768)
+        XCTAssertEqual(vc.numAttentionHeads, 12)
+        XCTAssertEqual(vc.headDim, 64)
+        XCTAssertEqual(vc.intermediateSize, 3072)
+        XCTAssertEqual(vc.numHiddenLayers, 16)
+        XCTAssertEqual(vc.ropeTheta, 100.0)
+    }
+
+    /// Defaults are the e2b/e4b SigLIP-base shapes so an older
+    /// checkpoint with no `vision_config` (or a partial one) still
+    /// constructs a workable tower instead of crashing at init.
+    func testVisionConfigDefaultsAreSigLIPBase() {
+        let d = Gemma4VisionConfig.defaults
+        XCTAssertEqual(d.hiddenSize, 768)
+        XCTAssertEqual(d.intermediateSize, 3072)
+        XCTAssertEqual(d.numHiddenLayers, 16)
+        XCTAssertEqual(d.numAttentionHeads, 12)
+        XCTAssertEqual(d.numKeyValueHeads, 12)
+        XCTAssertEqual(d.headDim, 64)
+        XCTAssertEqual(d.patchSize, 16)
+        XCTAssertEqual(d.poolingKernelSize, 3)
+        XCTAssertEqual(d.positionEmbeddingSize, 10240)
+        XCTAssertEqual(d.defaultOutputLength, 280)
+        XCTAssertEqual(d.ropeTheta, 100.0)
+        XCTAssertEqual(d.rmsNormEps, 1e-6)
+    }
+
     // MARK: - Helpers
 
     /// Decode a `Gemma4Config` from a JSON snippet wrapped under

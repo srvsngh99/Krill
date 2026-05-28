@@ -4,6 +4,105 @@ import MLXNN
 import MLXFast
 import KLMCache
 
+// MARK: - Gemma 4 Vision Config
+
+/// Vision tower config parsed from `config.json["vision_config"]`.
+/// Gemma 4 e2b/e4b ship a SigLIP-base tower (hidden 768, 12 heads, 64
+/// head_dim); 26B-A4B ships a larger tower (hidden 1152, 16 heads, 72
+/// head_dim). Prior to PR #79 the `VisionEncoder` instance was built
+/// with hardcoded e2b shapes, so 26B-A4B crashed at load with a 1.5x
+/// reshape mismatch in the patch embed (#76). All values come from the
+/// checkpoint; defaults match the prior hardcoded e2b shapes so an
+/// older checkpoint with missing fields still loads.
+public struct Gemma4VisionConfig: Decodable, Sendable {
+    public let hiddenSize: Int
+    public let intermediateSize: Int
+    public let numHiddenLayers: Int
+    public let numAttentionHeads: Int
+    public let numKeyValueHeads: Int
+    public let headDim: Int
+    public let patchSize: Int
+    public let poolingKernelSize: Int
+    public let positionEmbeddingSize: Int
+    public let defaultOutputLength: Int
+    public let ropeTheta: Float
+    public let rmsNormEps: Float
+
+    enum CodingKeys: String, CodingKey {
+        case hiddenSize = "hidden_size"
+        case intermediateSize = "intermediate_size"
+        case numHiddenLayers = "num_hidden_layers"
+        case numAttentionHeads = "num_attention_heads"
+        case numKeyValueHeads = "num_key_value_heads"
+        case headDim = "head_dim"
+        case patchSize = "patch_size"
+        case poolingKernelSize = "pooling_kernel_size"
+        case positionEmbeddingSize = "position_embedding_size"
+        case defaultOutputLength = "default_output_length"
+        case ropeTheta = "rope_theta"
+        case rmsNormEps = "rms_norm_eps"
+        case ropeParameters = "rope_parameters"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        hiddenSize = try c.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? 768
+        intermediateSize = try c.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? 3072
+        numHiddenLayers = try c.decodeIfPresent(Int.self, forKey: .numHiddenLayers) ?? 16
+        numAttentionHeads = try c.decodeIfPresent(Int.self, forKey: .numAttentionHeads) ?? 12
+        numKeyValueHeads = try c.decodeIfPresent(Int.self, forKey: .numKeyValueHeads) ?? numAttentionHeads
+        headDim = try c.decodeIfPresent(Int.self, forKey: .headDim) ?? 64
+        patchSize = try c.decodeIfPresent(Int.self, forKey: .patchSize) ?? 16
+        poolingKernelSize = try c.decodeIfPresent(Int.self, forKey: .poolingKernelSize) ?? 3
+        positionEmbeddingSize = try c.decodeIfPresent(Int.self, forKey: .positionEmbeddingSize) ?? 10240
+        defaultOutputLength = try c.decodeIfPresent(Int.self, forKey: .defaultOutputLength) ?? 280
+        rmsNormEps = try c.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-6
+
+        // `rope_theta` can be either a flat field or nested under
+        // `rope_parameters.rope_theta`. Gemma 4 e2b/e4b use the flat
+        // form; 26B-A4B uses the nested form. Honor both.
+        if let theta = try c.decodeIfPresent(Float.self, forKey: .ropeTheta) {
+            ropeTheta = theta
+        } else if let nested = try? c.nestedContainer(
+                keyedBy: CodingKeys.self, forKey: .ropeParameters),
+                let theta = try? nested.decode(Float.self, forKey: .ropeTheta) {
+            ropeTheta = theta
+        } else {
+            ropeTheta = 100.0
+        }
+    }
+
+    /// e2b / e4b SigLIP-base defaults, used as the fallback when a
+    /// checkpoint has no parseable `vision_config` block.
+    public static let defaults = Gemma4VisionConfig(
+        hiddenSize: 768, intermediateSize: 3072,
+        numHiddenLayers: 16, numAttentionHeads: 12,
+        numKeyValueHeads: 12, headDim: 64,
+        patchSize: 16, poolingKernelSize: 3,
+        positionEmbeddingSize: 10240, defaultOutputLength: 280,
+        ropeTheta: 100.0, rmsNormEps: 1e-6)
+
+    public init(
+        hiddenSize: Int, intermediateSize: Int, numHiddenLayers: Int,
+        numAttentionHeads: Int, numKeyValueHeads: Int, headDim: Int,
+        patchSize: Int, poolingKernelSize: Int, positionEmbeddingSize: Int,
+        defaultOutputLength: Int, ropeTheta: Float, rmsNormEps: Float
+    ) {
+        self.hiddenSize = hiddenSize
+        self.intermediateSize = intermediateSize
+        self.numHiddenLayers = numHiddenLayers
+        self.numAttentionHeads = numAttentionHeads
+        self.numKeyValueHeads = numKeyValueHeads
+        self.headDim = headDim
+        self.patchSize = patchSize
+        self.poolingKernelSize = poolingKernelSize
+        self.positionEmbeddingSize = positionEmbeddingSize
+        self.defaultOutputLength = defaultOutputLength
+        self.ropeTheta = ropeTheta
+        self.rmsNormEps = rmsNormEps
+    }
+}
+
 // MARK: - Gemma 4 Config
 
 /// Configuration for Gemma 4 model family (E2B, E4B, 12B, 27B, 31B).
@@ -38,6 +137,10 @@ public struct Gemma4Config: Decodable, Sendable {
     public let finalLogitSoftcapping: Float
     public let tieWordEmbeddings: Bool
     public let quantization: QuantizationConfig?
+    /// Parsed `vision_config` from the checkpoint, when present.
+    /// Multimodal Gemma 4 checkpoints (e2b/e4b/26B-A4B) ship this;
+    /// text-only checkpoints (12B/27B) do not.
+    public let visionConfig: Gemma4VisionConfig?
 
     enum CodingKeys: String, CodingKey {
         case hiddenSize = "hidden_size"
@@ -61,6 +164,7 @@ public struct Gemma4Config: Decodable, Sendable {
         case quantization
         case quantizationConfig = "quantization_config"
         case textConfig = "text_config"
+        case visionConfig = "vision_config"
     }
 
     public init(from decoder: Decoder) throws {
@@ -96,6 +200,12 @@ public struct Gemma4Config: Decodable, Sendable {
         // Quantization at top level
         quantization = try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantization)
             ?? (try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantizationConfig))
+
+        // vision_config is at top level for all Gemma 4 multimodal SKUs.
+        // Decoding to a Bool (the sentinel some checkpoints use to mean
+        // "no vision tower") fails the typed Gemma4VisionConfig decode and
+        // returns nil — same as a missing key.
+        visionConfig = try? c.decodeIfPresent(Gemma4VisionConfig.self, forKey: .visionConfig)
     }
 
     /// Whether a layer uses full attention (vs sliding window).
@@ -678,19 +788,30 @@ public class Gemma4MultimodalModel: Module {
                 eps: audioConfig.rmsNormEps),
             key: "embed_audio")
 
-        // Vision tower with config from vision_config
+        // Vision tower shapes come from the checkpoint's `vision_config`
+        // when present. Falling back to the e2b/e4b SigLIP-base defaults
+        // keeps a `visionConfig: nil` checkpoint loadable (legacy
+        // text-only path with a stub vision tower); 26B-A4B ships a
+        // larger tower (hidden 1152, 16 heads, head_dim 72) that the
+        // prior hardcoded constructor crashed loading (#76).
+        let vc = config.visionConfig ?? Gemma4VisionConfig.defaults
         _visionTower = ModuleInfo(
             wrappedValue: VisionEncoder(
-                hiddenSize: 768, intermediateSize: 3072,
-                numLayers: 16, numHeads: 12, numKVHeads: 12,
-                headDim: 64, patchSize: 16, poolingKernelSize: 3,
-                defaultOutputLength: 280, positionEmbeddingSize: 10240,
-                ropeTheta: 100.0, eps: 1e-6),
+                hiddenSize: vc.hiddenSize, intermediateSize: vc.intermediateSize,
+                numLayers: vc.numHiddenLayers, numHeads: vc.numAttentionHeads,
+                numKVHeads: vc.numKeyValueHeads, headDim: vc.headDim,
+                patchSize: vc.patchSize, poolingKernelSize: vc.poolingKernelSize,
+                defaultOutputLength: vc.defaultOutputLength,
+                positionEmbeddingSize: vc.positionEmbeddingSize,
+                ropeTheta: vc.ropeTheta, eps: vc.rmsNormEps),
             key: "vision_tower")
 
+        // Vision -> language projection input dim must match the tower's
+        // hidden_size, not the hardcoded 768.
         _embedVision = ModuleInfo(
             wrappedValue: MultimodalEmbedder(
-                embeddingDim: 768, textHiddenSize: config.hiddenSize, eps: 1e-6),
+                embeddingDim: vc.hiddenSize, textHiddenSize: config.hiddenSize,
+                eps: vc.rmsNormEps),
             key: "embed_vision")
     }
 
