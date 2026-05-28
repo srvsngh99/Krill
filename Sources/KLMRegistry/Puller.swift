@@ -207,12 +207,24 @@ extension Puller {
              "tokenizer.model", "special_tokens_map.json",
              "added_tokens.json", "vocab.json", "merges.txt":
             return true
-        // Newer HF convention (mid-2025+): chat template ships as a
-        // separate Jinja file alongside `tokenizer_config.json`
-        // instead of being embedded in it. Qwen 3 MoE (Coder,
-        // Instruct-2507) and recent Gemma releases use this form, and
-        // their tokenizers raise "chat_template is not set" without it.
-        case "chat_template.jinja":
+        // Chat template shipped as a separate file alongside
+        // `tokenizer_config.json` instead of embedded in it. Two
+        // co-existing on-disk forms today:
+        //   - `.jinja`: Qwen 3 (Coder, Instruct-2507) and Gemma 4
+        //     (e2b, e4b) use the raw Jinja form.
+        //   - `.json`:  Gemma 3 and Qwen 2.5-VL ship the same template
+        //     wrapped as JSON.
+        // Tokenizers raise "chat_template is not set" without either,
+        // so the allowlist accepts both rather than picking sides.
+        case "chat_template.jinja", "chat_template.json":
+            return true
+        // Multimodal preprocessor configs. Qwen 2.5-VL ships
+        // `preprocessor_config.json`; Gemma 3/4 ship `processor_config.json`
+        // (and sometimes both). Image-mean / patch-size / dtype live
+        // here. Today the native VL loaders hardcode these, but the
+        // puller is still meant to be the on-disk source-of-truth for
+        // a model, so they ride along.
+        case "preprocessor_config.json", "processor_config.json":
             return true
         default:
             return false
