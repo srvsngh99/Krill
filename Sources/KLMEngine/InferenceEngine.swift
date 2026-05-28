@@ -370,6 +370,25 @@ public final class InferenceEngine: @unchecked Sendable {
     }
 
     /// Generate tokens from a single prompt string (convenience wrapper).
+    /// Render a created model's Modelfile `TEMPLATE` override (an Ollama
+    /// Go text/template) against the chat messages. Returns the rendered
+    /// prompt string, or `nil` if the template fails to parse/evaluate --
+    /// in which case the caller falls back to the model's built-in chat
+    /// template so an exotic override never hard-fails a request.
+    private func renderWithOverrideTemplate(
+        _ template: String, messages: [[String: String]]
+    ) -> String? {
+        do {
+            let context = OllamaTemplateContext.build(messages: messages)
+            return try GoTemplate.render(template, context)
+        } catch {
+            FileHandle.standardError.write(Data((
+                "[KrillLM] TEMPLATE override render failed (\(error)); "
+                + "falling back to the built-in chat template.\n").utf8))
+            return nil
+        }
+    }
+
     public func generate(
         prompt: String,
         systemPrompt: String? = nil,
@@ -379,7 +398,8 @@ public final class InferenceEngine: @unchecked Sendable {
         usePrefixCache: Bool = true,
         imageData: Data? = nil,
         audioData: Data? = nil,
-        contextLimit: Int? = nil
+        contextLimit: Int? = nil,
+        promptTemplateOverride: String? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
@@ -391,7 +411,8 @@ public final class InferenceEngine: @unchecked Sendable {
         return generate(messages: messages, params: params, maxTokens: maxTokens,
                         useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
                         imageData: imageData, audioData: audioData,
-                        contextLimit: contextLimit)
+                        contextLimit: contextLimit,
+                        promptTemplateOverride: promptTemplateOverride)
     }
 
     /// Generate tokens from a full conversation history, streaming results.
@@ -415,7 +436,8 @@ public final class InferenceEngine: @unchecked Sendable {
         usePrefixCache: Bool = true,
         imageData: Data? = nil,
         audioData: Data? = nil,
-        contextLimit: Int? = nil
+        contextLimit: Int? = nil,
+        promptTemplateOverride: String? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         guard let loadedModel, let tokenizer else {
             let emptyStream = AsyncStream<TokenEvent> { $0.finish() }
@@ -468,7 +490,19 @@ public final class InferenceEngine: @unchecked Sendable {
         // Use direct token ID path for Gemma4 to avoid decode→re-encode
         // round-trip that loses special tokens (105, 106, 107).
         var promptTokensBuilt: [Int]
-        if loadedModel.family == "gemma4" {
+        if let overrideTemplate = promptTemplateOverride,
+           !overrideTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let rendered = renderWithOverrideTemplate(
+               overrideTemplate, messages: preparedMessages) {
+            // A created model's Modelfile `TEMPLATE` override. Ollama
+            // TEMPLATEs are Go text/templates and embed their own special
+            // tokens as literal text, so encode the rendered string
+            // without injecting an extra BOS (the template owns the
+            // structure). `renderWithOverrideTemplate` returns nil on a
+            // parse/eval failure, falling through to the built-in path so
+            // an exotic Modelfile never hard-fails a request.
+            promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(rendered)
+        } else if loadedModel.family == "gemma4" {
             promptTokensBuilt = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
         } else if let direct = tokenizer.applyChatTemplateTokens(messages: preparedMessages) {
             // Same loss-avoidance principle as the Gemma 4 branch, but

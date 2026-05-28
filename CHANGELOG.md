@@ -30,6 +30,17 @@ drop-in.
   requests are routed; multimodal, draft-model, Modelfile-override, and
   REPL paths stay in-process. `KRILL_NO_AUTO_DAEMON=1` forces
   in-process.
+- **Modelfile `TEMPLATE` override applied at decode**: created models
+  carrying a `TEMPLATE` directive now render their prompt with it
+  instead of the model's built-in chat template. Ollama `TEMPLATE`s are
+  Go `text/template`, so this ships a from-scratch Go-template engine
+  (`GoTemplate`: actions, pipelines, `if`/`range`/`with`, `{{- -}}`
+  trimming, and the `eq`/`and`/`len`/`index`/`slice`/`printf`/... builtin
+  set) plus the `OllamaTemplateContext` bridge from chat messages to the
+  `.System`/`.Messages`/`.Prompt` render context. The override was
+  already parsed and round-tripped through `/api/show`; the renderer was
+  the missing piece. A template that fails to parse/evaluate falls back
+  to the built-in chat template rather than failing the request.
 - **SDK usage docs** (#64): verified end-to-end snippets for the OpenAI
   Python SDK, LangChain, LlamaIndex, and the Anthropic SDK pointing at
   the local server.
