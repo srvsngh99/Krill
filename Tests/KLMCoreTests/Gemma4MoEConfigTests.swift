@@ -110,27 +110,12 @@ final class Gemma4MoEConfigTests: XCTestCase {
         XCTAssertFalse(cfg.useKEqV(layerIdx: 1))
     }
 
-    // MARK: - switch_glu unpacker
-
-    /// Qwen3-MoE's `switch_mlp` path must continue to prepend
-    /// `experts.` since the parent of the marker there (`mlp`) is NOT
-    /// the experts container. The Gemma 4 `switch_glu` path no longer
-    /// goes through this unpacker -- the SwitchGLU module hierarchy
-    /// matches the in-checkpoint stacked-key layout directly -- so
-    /// this pinning is now Qwen3-MoE-only.
-    func testUnpackSwitchMLPStillPrependsExperts() throws {
-        let numExperts = 2
-        let stacked = MLXArray(0 ..< Int32(numExperts * 6)).reshaped(numExperts, 3, 2)
-        var weights: [String: MLXArray] = [
-            "model.layers.0.mlp.switch_mlp.gate_proj.weight": stacked,
-        ]
-        unpackStackedMoEWeights(
-            &weights, marker: ".switch_mlp.", numExperts: numExperts)
-
-        XCTAssertNil(weights["model.layers.0.mlp.switch_mlp.gate_proj.weight"])
-        XCTAssertNotNil(weights["model.layers.0.mlp.experts.0.gate_proj.weight"])
-        XCTAssertNotNil(weights["model.layers.0.mlp.experts.1.gate_proj.weight"])
-    }
+    // Note: the `unpackStackedMoEWeights` pinning test was removed with
+    // the helper. Neither MoE family unpacks stacked expert tensors any
+    // more -- both Gemma 4 (`switch_glu`, PR #82) and Qwen3-MoE
+    // (`switch_mlp`) bind the stacked `[E, O, I_packed]` checkpoint
+    // tensors directly to their SwitchGLU module hierarchies and
+    // dispatch via `gatherQuantizedMM`.
 
     // MARK: - Helpers
 
