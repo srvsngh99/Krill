@@ -610,6 +610,12 @@ private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedMode
             model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
         },
         multimodalForward: nil,
+        // Batched ragged-decode (Stage C3): attention is the proven
+        // QwenAttention per-row RoPE path and the sparse MoE MLP is N-parametric
+        // (same dispatch as prefill, at N=R), so batching reuses both unchanged.
+        batchedDecodeForward: { tokens, caches, mask, rowOffsets in
+            model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
         vocabSize: config.vocabSize
     )
 }

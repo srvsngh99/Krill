@@ -564,8 +564,9 @@ class Qwen3MoETransformerBlock: Module {
             key: "post_attention_layernorm")
     }
 
-    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil) -> MLXArray {
-        let h = x + selfAttn(inputLayernorm(x), mask: mask, cache: cache)
+    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil,
+                        rowOffsets: [Int]? = nil) -> MLXArray {
+        let h = x + selfAttn(inputLayernorm(x), mask: mask, cache: cache, rowOffsets: rowOffsets)
         let postAttn = postAttentionLayernorm(h)
         let mlpOut: MLXArray
         if let sparse = mlp as? Qwen3MoESparseMLP {
@@ -604,15 +605,25 @@ class Qwen3MoEModelInner: Module {
             key: "norm")
     }
 
-    func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
+    func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil,
+                        precomputedMask: MLXArray? = nil, rowOffsets: [Int]? = nil) -> MLXArray {
         var x = embedTokens(tokens)
-        let seqLen = x.dim(1)
-        let cacheLen = caches?.first?.sequenceLength ?? 0
-        let mask = createCachedCausalMask(
-            newLen: seqLen, cacheLen: cacheLen, dtype: x.dtype)
+        // The batched ragged-decode path supplies an explicit per-row additive
+        // mask; otherwise build the causal mask from the cache length. Mask
+        // dtype follows the embedding output (bf16 on Qwen3-MoE) so
+        // scaledDotProductAttention can promote it.
+        let mask: MLXArray?
+        if let precomputedMask {
+            mask = precomputedMask
+        } else {
+            let seqLen = x.dim(1)
+            let cacheLen = caches?.first?.sequenceLength ?? 0
+            mask = createCachedCausalMask(
+                newLen: seqLen, cacheLen: cacheLen, dtype: x.dtype)
+        }
 
         for (i, layer) in layers.enumerated() {
-            x = layer(x, mask: mask, cache: caches?[i])
+            x = layer(x, mask: mask, cache: caches?[i], rowOffsets: rowOffsets)
         }
         return norm(x)
     }
@@ -701,6 +712,21 @@ public class Qwen3MoEForCausalLM: Module {
         if let lmHead {
             return lmHead(hidden)
         }
+        return model.embedTokens.asLinear(hidden)
+    }
+
+    /// Batched ragged-decode step (Stage C3): one new token per row
+    /// (`tokens` is `[R, 1]`), each rotated at its own next position
+    /// (`rowOffsets[r]`), attending under the explicit per-row additive `mask`
+    /// that hides each row's left-padded prefix in the stacked cache. The
+    /// sparse MoE MLP is already token-count (`N = B*L`) parametric - the same
+    /// router + SwitchGLU dispatch the large-N prefill uses runs unchanged at
+    /// `N = R` here. Returns logits `[R, 1, vocab]`.
+    public func batchedDecode(
+        _ tokens: MLXArray, caches: [KVCache], mask: MLXArray, rowOffsets: [Int]
+    ) -> MLXArray {
+        let hidden = model(tokens, caches: caches, precomputedMask: mask, rowOffsets: rowOffsets)
+        if let lmHead { return lmHead(hidden) }
         return model.embedTokens.asLinear(hidden)
     }
 
