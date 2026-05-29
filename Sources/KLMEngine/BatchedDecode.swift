@@ -39,17 +39,30 @@ func stackCachesLeftPadded(perRow caches: [[KVCache]], lengths: [Int]) -> [KVCac
     var batched: [KVCache] = []
     batched.reserveCapacity(numLayers)
     for layer in 0 ..< numLayers {
+        // Snapshot every row's cache for this layer up front. A layer can be
+        // legitimately empty for ALL rows (Gemma 4 KV-shared layers never
+        // write their own cache - the donor layer holds the K/V and the
+        // shared layer reuses it). Such a uniformly-empty layer gets a fresh
+        // empty placeholder: the batched forward routes shared layers to the
+        // donor's stacked cache and never reads or updates the placeholder.
+        let snaps = (0 ..< R).map { caches[$0][layer].snapshot() }
+        let present = snaps.lazy.filter { $0 != nil }.count
+        if present == 0 {
+            batched.append(KVCache())
+            continue
+        }
+        // A PARTIALLY-empty layer (some rows have K/V, some don't) is a real
+        // batch desync: stacking would silently drop a row and shift live rows
+        // against the full-R mask/offsets - fail hard instead.
+        precondition(
+            present == R,
+            "partially-empty KV layer \(layer): \(present)/\(R) rows cached (batch desync)")
         var ks: [MLXArray] = []
         var vs: [MLXArray] = []
         ks.reserveCapacity(R)
         vs.reserveCapacity(R)
         for r in 0 ..< R {
-            // Every row was just prefilled, so its cache is non-empty. A nil
-            // snapshot would silently drop a row and desync the batch against
-            // the full-R mask/offsets (shifting live rows) - fail hard instead.
-            guard let snap = caches[r][layer].snapshot() else {
-                preconditionFailure("empty KV cache for row \(r) layer \(layer) in batched stack")
-            }
+            let snap = snaps[r]!
             let pad = sMax - lengths[r]
             if pad > 0 {
                 let zerosK = MLXArray.zeros(
@@ -154,6 +167,74 @@ extension InferenceEngine {
             if step > maxTokens + 4 { break }   // safety bound
         }
         return generated
+    }
+
+    /// Dtype-independent cross-row contamination gate: run `row` (teacher-forced
+    /// with its own greedy continuation) in TWO batches that share the same
+    /// width and the same neighbor LENGTHS but use different neighbor CONTENT,
+    /// and return the max-abs diff of `row`'s logits between them. Batched
+    /// matmul computes each batch row from its own inputs only, so `row`'s
+    /// logits must be BIT-IDENTICAL regardless of what the neighbors contain -
+    /// any nonzero result is a genuine cross-batch indexing/bleed bug. Unlike
+    /// `teacherForcedBatchedVsSerialMaxDiff` this is not confounded by the
+    /// batched-vs-solo GEMM kernel-width rounding (it compares batched-vs-
+    /// batched at a FIXED width), so it stays ~0 even for bf16 models. The
+    /// neighbors share `row`'s length-region geometry (kept equal across the
+    /// two batches), so the mask/pad layout `row` sees is identical in both -
+    /// isolating neighbor content as the only variable.
+    func crossRowContaminationMaxDiff(
+        row: [Int], neighborsA: [[Int]], neighborsB: [[Int]], steps: Int
+    ) -> Float? {
+        guard let model = loadedModelForBatching,
+              let batchedForward = model.batchedDecodeForward else { return nil }
+        precondition(
+            neighborsA.count == neighborsB.count
+                && zip(neighborsA, neighborsB).allSatisfy { $0.count == $1.count },
+            "contamination probe requires matching neighbor counts & lengths across A/B")
+        let prefill = model.prefillForward ?? model.forward
+        let cont = serialGreedyDecode(promptTokens: row, maxTokens: steps + 1) ?? []
+        let usableSteps = min(steps, cont.count - 1)
+        guard usableSteps >= 1 else { return nil }
+
+        // Run `row` at index 0 of [row] + neighbors; return its per-step logits.
+        func rowZeroLogits(_ neighbors: [[Int]]) -> [MLXArray] {
+            let prompts = [row] + neighbors
+            let R = prompts.count
+            var perRowCaches: [[KVCache]] = []
+            var lengths: [Int] = []
+            for tokens in prompts {
+                let bc = makeKVCaches(numLayers: model.numLayers)
+                let pl = prefill(MLXArray(tokens.map { Int32($0) }).reshaped(1, tokens.count), bc)
+                MLX.eval(pl)
+                perRowCaches.append(bc)
+                lengths.append(tokens.count)
+            }
+            let sMax = lengths.max() ?? 0
+            let caches = stackCachesLeftPadded(perRow: perRowCaches, lengths: lengths)
+            let kDtype = caches.first?.snapshot()?.keys.dtype ?? .float16
+            var out: [MLXArray] = []
+            for k in 0 ..< usableSteps {
+                let rowOffsets = (0 ..< R).map { lengths[$0] + k }
+                let mask = buildBatchedDecodeMask(
+                    lengths: lengths, sMax: sMax, totalLen: sMax + k + 1, dtype: kDtype)
+                // Row 0 gets its real continuation; neighbors get a filler token
+                // (any valid id - their logits are never read).
+                let toks = [cont[k]] + neighbors.map { $0.first ?? 0 }
+                let input = MLXArray(toks.map { Int32($0) }).reshaped(R, 1)
+                let bl = batchedForward(input, caches, mask, rowOffsets)
+                MLX.eval(bl)
+                out.append(bl[0 ..< 1].reshaped(-1))
+            }
+            return out
+        }
+
+        let a = rowZeroLogits(neighborsA)
+        let b = rowZeroLogits(neighborsB)
+        var maxDiff: Float = 0
+        for k in 0 ..< usableSteps {
+            maxDiff = Swift.max(maxDiff, MLX.max(MLX.abs(a[k] - b[k])).item(Float.self))
+        }
+        return maxDiff
     }
 
     /// Rigorous multi-step correctness gate: teacher-force each row with its
