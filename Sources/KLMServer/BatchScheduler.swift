@@ -93,7 +93,8 @@ actor BatchScheduler {
 
         let req = BatchGenRequest(
             messages: messages, params: params, maxTokens: maxTokens,
-            contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride)
+            contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
+            useSpeculative: useSpeculative, usePrefixCache: usePrefixCache)
         return await withCheckedContinuation { (cont: CheckedContinuation<GenResult, Never>) in
             pending.append(Waiter(req: req, cont: cont))
             if pending.count >= numParallel {
@@ -130,8 +131,27 @@ actor BatchScheduler {
         pending.removeFirst(take)
 
         let results = engine.generateBatched(cohort.map { $0.req })
-        for (i, w) in cohort.enumerated() {
-            w.cont.resume(returning: results[i])
+        // generateBatched returns exactly one result per request on every path,
+        // so this is positional. Guard defensively anyway: a count mismatch
+        // must never leave a waiter's continuation un-resumed (the HTTP request
+        // would hang with no timeout) — fall each unmatched waiter back to a
+        // direct serial generate so every continuation is resumed exactly once.
+        if results.count == cohort.count {
+            for (i, w) in cohort.enumerated() {
+                w.cont.resume(returning: results[i])
+            }
+        } else {
+            for (i, w) in cohort.enumerated() {
+                if i < results.count {
+                    w.cont.resume(returning: results[i])
+                } else {
+                    w.cont.resume(returning: engine.generate(
+                        messages: w.req.messages, params: w.req.params,
+                        maxTokens: w.req.maxTokens, useSpeculative: w.req.useSpeculative,
+                        usePrefixCache: w.req.usePrefixCache, contextLimit: w.req.contextLimit,
+                        promptTemplateOverride: w.req.promptTemplateOverride))
+                }
+            }
         }
 
         // Anything that arrived during assembly: fire again if a full cohort

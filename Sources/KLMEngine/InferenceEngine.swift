@@ -1248,16 +1248,26 @@ public struct BatchGenRequest: Sendable {
     public let maxTokens: Int
     public let contextLimit: Int?
     public let promptTemplateOverride: String?
+    /// Carried so the serial fallback (single-row cohort / ineligible model)
+    /// reproduces the request's exact non-batched behavior. The true batched
+    /// path (R > 1) bypasses both by design (Stage B: fp16 KV, no prefix
+    /// cache, no spec).
+    public let useSpeculative: Bool?
+    public let usePrefixCache: Bool
     public init(messages: [[String: String]],
                 params: SamplingParams = .greedy,
                 maxTokens: Int = 512,
                 contextLimit: Int? = nil,
-                promptTemplateOverride: String? = nil) {
+                promptTemplateOverride: String? = nil,
+                useSpeculative: Bool? = nil,
+                usePrefixCache: Bool = true) {
         self.messages = messages
         self.params = params
         self.maxTokens = maxTokens
         self.contextLimit = contextLimit
         self.promptTemplateOverride = promptTemplateOverride
+        self.useSpeculative = useSpeculative
+        self.usePrefixCache = usePrefixCache
     }
 }
 
@@ -1317,16 +1327,19 @@ extension InferenceEngine {
     public func generateBatched(_ requests: [BatchGenRequest])
         -> [(stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?)]
     {
-        // The batched path never uses the prefix cache or speculative decode,
-        // so a fallback row mirrors that (usePrefixCache:false,
-        // useSpeculative:false) to match the batched row it stands in for.
+        // A fallback row is NOT a batched row — it is the request running
+        // alone on the serial path — so it honors that request's own
+        // useSpeculative / usePrefixCache rather than forcing them off. This
+        // keeps a single-row cohort (or an ineligible model) byte-identical to
+        // calling generate() directly. (The true R>1 batched loop below never
+        // touches the prefix cache or spec, per Stage B scope.)
         func serialFallback()
             -> [(stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?)]
         {
             requests.map { r in
                 generate(messages: r.messages, params: r.params,
-                         maxTokens: r.maxTokens, useSpeculative: false,
-                         usePrefixCache: false, contextLimit: r.contextLimit,
+                         maxTokens: r.maxTokens, useSpeculative: r.useSpeculative,
+                         usePrefixCache: r.usePrefixCache, contextLimit: r.contextLimit,
                          promptTemplateOverride: r.promptTemplateOverride)
             }
         }
@@ -1438,7 +1451,7 @@ extension InferenceEngine {
         lengths.reserveCapacity(R)
         current.reserveCapacity(R)
         for (i, tokens) in c.promptRows.enumerated() {
-            let caches = c.engine.makeKVCaches(numLayers: c.numLayers)
+            let caches = makeKVCaches(numLayers: c.numLayers)
             let input = MLXArray(tokens.map { Int32($0) }).reshaped(1, tokens.count)
             let logits = c.prefill(input, caches)
             MLX.eval(logits)
