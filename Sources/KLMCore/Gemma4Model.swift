@@ -1240,7 +1240,7 @@ class Gemma4TextModel: Module {
     /// tolerance) to running that prompt alone.
     ///
     /// KV sharing (e2b/e4b): shared layers (`i >= firstKVSharedLayer`) reuse
-    /// the donor layer's stacked K/V and rotate Q at offset 0 — exactly the
+    /// the donor layer's stacked K/V and rotate Q at offset 0 - exactly the
     /// solo path, where a shared layer's own (empty) cache yields
     /// `sequenceLength == 0`. The stacked `caches` therefore hold real K/V only
     /// at the non-shared (donor-eligible) slots; shared slots are empty
@@ -1248,7 +1248,7 @@ class Gemma4TextModel: Module {
     ///
     /// Decode-only: no multimodal injection, no prefill graph-flushing (the
     /// step is a single token, the driver evals the logits). The causal
-    /// structure is plain left-pad for every layer — matching the solo path,
+    /// structure is plain left-pad for every layer - matching the solo path,
     /// which applies no sliding-window restriction (see `callAsFunction`'s
     /// `createCachedCausalMask`, which is plain causal). A future sliding-
     /// window-aware solo path would need the matching restriction here.
@@ -1265,7 +1265,7 @@ class Gemma4TextModel: Module {
 
         var h = embedTokens(tokens) * embedScale
 
-        // PLE per-layer inputs (e2b/e4b). Plain tokens — decode never carries
+        // PLE per-layer inputs (e2b/e4b). Plain tokens - decode never carries
         // image/audio placeholders. Identical math to the solo forward.
         var combinedPLE: MLXArray? = nil
         if hasPLE, let embedPerLayer = embedPerLayer,
@@ -1586,7 +1586,7 @@ public class Gemma4MultimodalModel: Module {
     }
 
     /// Stage B/C batched ragged-decode step over the text language model.
-    /// Forwards to `Gemma4ForCausalLM.batchedDecode` (text-only — the batched
+    /// Forwards to `Gemma4ForCausalLM.batchedDecode` (text-only - the batched
     /// path never carries image/audio placeholders).
     public func batchedDecode(
         _ tokens: MLXArray, caches: [KVCache], mask: MLXArray, rowOffsets: [Int]
