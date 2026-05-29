@@ -35,7 +35,6 @@ public final class KLMServer: Sendable {
     private let logger = Logger(label: "krillm.server")
 
     private let corsOrigins: [String]
-    private let keepAlive: KeepAliveController
     private let defaultContextLimit: Int?
     private let genQueue: GenerationQueue
 
@@ -47,7 +46,6 @@ public final class KLMServer: Sendable {
                 rerankEngine: RerankEngine = RerankEngine(),
                 moeEngine: MoEEngine = MoEEngine(),
                 corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
-                keepAliveDefaultSeconds: Int = 300,
                 defaultContextLimit: Int? = nil,
                 numParallel: Int = 1, maxQueue: Int = 512) {
         self.host = host
@@ -61,7 +59,6 @@ public final class KLMServer: Sendable {
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
         self.moeEngine = moeEngine
-        self.keepAlive = KeepAliveController(defaultSeconds: keepAliveDefaultSeconds)
         self.defaultContextLimit = defaultContextLimit
         self.genQueue = GenerationQueue(numParallel: numParallel, maxQueue: maxQueue)
     }
@@ -86,7 +83,6 @@ public final class KLMServer: Sendable {
                     embedEngine: embedEngine,
                     rerankEngine: rerankEngine,
                     moeEngine: moeEngine,
-                    keepAlive: KeepAliveController(defaultSeconds: 300),
                     genQueue: GenerationQueue(numParallel: 1, maxQueue: 512),
                     maxBodySizeOverride: maxBodySizeOverride)
     }
@@ -106,7 +102,6 @@ public final class KLMServer: Sendable {
                                     compat: self.compat, embedEngine: self.embedEngine,
                                     rerankEngine: self.rerankEngine,
                                     moeEngine: self.moeEngine,
-                                    keepAlive: self.keepAlive,
                                     corsOrigins: self.corsOrigins,
                                     defaultContextLimit: self.defaultContextLimit,
                                     genQueue: self.genQueue)
@@ -130,20 +125,18 @@ public final class KLMServer: Sendable {
         }
         print("Press Ctrl+C to stop.")
 
-        // WS-E: background auto-unload when the keep-alive deadline passes.
-        // Stage A: the global idle deadline evicts the whole resident pool
-        // (per-model keep-alive is the next PR); at MAX_LOADED_MODELS=1 this
-        // is byte-identical to the prior single-model behavior.
+        // WS-E: background auto-unload, now per model. Each resident model
+        // carries its own keep-alive deadline; this tick evicts exactly those
+        // whose deadline has passed and which are not in-flight, leaving other
+        // resident models loaded. At MAX_LOADED_MODELS=1 this matches the
+        // prior single-model behavior.
         let pool = engines
-        let ref = activeRef
-        let ka = keepAlive
         let evictor = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 10 * 1_000_000_000)
-                if ref.current != nil, await ka.shouldEvict() {
-                    await pool.unloadAll()
-                    await ka.markEvicted()
-                    self.logger.info("[KLMServer] auto-unloaded model(s) (keep_alive expired)")
+                let evicted = await pool.evictExpired()
+                if !evicted.isEmpty {
+                    self.logger.info("[KLMServer] auto-unloaded \(evicted.count) idle model(s): \(evicted.joined(separator: ", "))")
                 }
             }
         }
@@ -195,7 +188,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private var body: ByteBuffer = ByteBuffer()
 
     private let corsOrigins: [String]
-    private let keepAlive: KeepAliveController
     private let defaultContextLimit: Int?
     private let genQueue: GenerationQueue
     private var currentOrigin: String?
@@ -205,7 +197,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
          compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
          rerankEngine: RerankEngine = RerankEngine(),
          moeEngine: MoEEngine = MoEEngine(),
-         keepAlive: KeepAliveController = KeepAliveController(defaultSeconds: 300),
          corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
          defaultContextLimit: Int? = nil,
          genQueue: GenerationQueue = GenerationQueue(numParallel: 1, maxQueue: 512),
@@ -218,18 +209,20 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
         self.moeEngine = moeEngine
-        self.keepAlive = keepAlive
         self.corsOrigins = corsOrigins
         self.defaultContextLimit = defaultContextLimit
         self.genQueue = genQueue
         self.maxBodySize = maxBodySizeOverride ?? ServerLimits.maxBodySize
     }
 
-    /// Record activity for WS-E auto-unload; honors a per-request
-    /// `keep_alive` override (seconds; nil=default, <0=pin, 0=evict-after).
+    /// Record activity for the per-model auto-unload; honors a per-request
+    /// `keep_alive` override (seconds; nil=default, <0=pin, 0=evict-after) and
+    /// applies it to the model this request is bound to (the request-scoped
+    /// engine), so each resident model has its own idle deadline.
     private func touchKeepAlive(_ override: Int?) {
-        let ka = keepAlive
-        Task { await ka.touch(override: override) }
+        let pool = engines
+        let eng = engine
+        Task { await pool.touch(eng, keepAlive: override) }
     }
 
     /// Resolve the `Access-Control-Allow-Origin` value for a request Origin.
@@ -509,29 +502,20 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private func enterQueueOr503(_ ctx: ChannelHandlerContext,
                                  _ eventLoop: EventLoop,
                                  retaining eng: InferenceEngine? = nil) async -> Bool {
-        // Register the model hold BEFORE queueing (PR #20 review P1): a
-        // request accepted while the model is loaded must keep it loaded
-        // even while it waits behind another request. If beginRequest() ran
-        // only after genQueue.enter() returned, a waiter would not count as
-        // a hold; when the active request drained, inFlight could hit 0 with
-        // keep_alive:0 / an elapsed deadline armed and the background evictor
-        // could unload the model in the slot-handoff window — the resumed
-        // waiter would then generate against an unloaded engine. Holding
-        // from acceptance keeps inFlight >= 1 for the whole accepted set.
-        await keepAlive.beginRequest()
-        // In-flight hold on the resident engine taken BEFORE queueing (same
-        // ordering as keepAlive.beginRequest, and for the same reason): a
-        // request that is queued behind another generation must already
-        // protect its engine, or a concurrent activate() at the cap could
-        // evict and unload the model out from under it during the - possibly
-        // multi-second - queue wait. Balanced by release() in the catch below
-        // and in leaveQueue.
+        // Register the in-flight hold on the resident engine BEFORE queueing
+        // (PR #20 review P1, now per model via the registry): a request
+        // accepted while the model is loaded must keep it loaded even while it
+        // waits behind another request. retain() bumps both the eviction-
+        // safety refcount and the model's own keep-alive in-flight count, so
+        // neither LRU eviction nor idle eviction can unload the model in the
+        // slot-handoff/queue-wait window and leave the resumed waiter
+        // generating against an unloaded engine. Balanced by release() in the
+        // catch below and in leaveQueue.
         await engines.retain(eng)
         do {
             try await genQueue.enter()
             return true
         } catch {
-            await keepAlive.endRequest()   // rejected: balance the hold
             await engines.release(eng)     // rejected: balance the in-flight hold
             sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
                            status: .serviceUnavailable,
@@ -542,27 +526,24 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func leaveQueue(releasing eng: InferenceEngine? = nil) {
         let q = genQueue
-        let ka = keepAlive
         let pool = engines
         // Release the queue slot first so the next waiter resumes, then drop
-        // this request's hold. Any queued waiter already holds its own
-        // beginRequest()-registered hold (taken before it queued), so
-        // inFlight never transiently hits 0 during the handoff and the
-        // evictor can't unload between requests (PR #20 review P1).
-        Task { await q.leave(); await ka.endRequest(); await pool.release(eng) }
+        // this request's in-flight hold. Any queued waiter already holds its
+        // own retain()-registered hold (taken before it queued), so the
+        // model's in-flight count never transiently hits 0 during the handoff
+        // and the evictor can't unload between requests (PR #20 review P1).
+        Task { await q.leave(); await pool.release(eng) }
     }
 
     /// Slot acquire that just returns success/failure (for streaming paths
     /// whose 200 head is already on the wire, so a JSON 503 is impossible -
     /// the caller closes the stream with a terminal error instead).
     private func tryEnterQueue(retaining eng: InferenceEngine? = nil) async -> Bool {
-        await keepAlive.beginRequest()     // hold from acceptance (P1)
-        await engines.retain(eng)          // protect the engine while queued too
+        await engines.retain(eng)          // hold from acceptance (P1), per model
         do {
             try await genQueue.enter()
             return true
         } catch {
-            await keepAlive.endRequest()   // rejected: balance the hold
             await engines.release(eng)     // rejected: balance the in-flight hold
             return false
         }
@@ -2251,26 +2232,32 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func handleOllamaPS(context: ChannelHandlerContext) {
-        let active = displayEngine
-        guard active.isLoaded, let modelName = active.modelName else {
+        // Empty pool: respond synchronously (no resident models, no async
+        // hop). `activeRef.current == nil` iff nothing is resident - the
+        // registry keeps the active mirror in step on eviction.
+        guard activeRef.current != nil else {
             sendJSON(context: context, status: .ok, body: ["models": [[String: Any]]()])
             return
         }
-        let manifest = registry.getModel(modelName)
-        let size = manifest?.sizeBytes ?? 0
-        let fallback = (active.loadedAt ?? Date())
-            .addingTimeInterval(TimeInterval(KrillConfig.load().idleTimeout))
-        let ka = keepAlive
+        let pool = engines
+        let reg = registry
+        // A pinned model (keep_alive < 0) has no deadline; Ollama still
+        // returns an expires_at, so report a far-future sentinel for it.
+        let pinnedFallback = Date().addingTimeInterval(TimeInterval(KrillConfig.load().idleTimeout))
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         Task {
-            // Prefer the live keep-alive deadline; fall back to idle timeout.
-            let expiresAt = (await ka.expiresAt()) ?? fallback
-            let entry = OllamaCompat.psEntry(
-                manifest: manifest, modelName: modelName,
-                sizeBytes: size, expiresAt: expiresAt)
+            // List EVERY resident model (Stage A-2 multi-model pool), each with
+            // its own per-model keep-alive expiry, not just the active one.
+            let models = await pool.residentInfo().map { info -> [String: Any] in
+                let manifest = reg.getModel(info.name)
+                return OllamaCompat.psEntry(
+                    manifest: manifest, modelName: info.name,
+                    sizeBytes: manifest?.sizeBytes ?? 0,
+                    expiresAt: info.expiresAt ?? pinnedFallback)
+            }
             self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
-                                status: .ok, body: ["models": [entry]])
+                                status: .ok, body: ["models": models])
         }
     }
 

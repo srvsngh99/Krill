@@ -1,4 +1,8 @@
 import XCTest
+import Foundation
+import KLMEngine
+import KLMCache
+import KLMRegistry
 @testable import KLMServer
 
 /// Unit tests for the `EngineRegistry` eviction invariant — the most
@@ -47,5 +51,52 @@ final class EngineRegistryTests: XCTestCase {
         let victim = EngineRegistry.selectEvictionVictim(
             order: ["a", "b"], inFlight: ["a": 0])
         XCTAssertEqual(victim, "a")
+    }
+
+    // MARK: - Per-model keep-alive eviction (Stage A-2)
+
+    private func makeRegistry() -> EngineRegistry {
+        EngineRegistry(maxLoaded: 4, registry: Registry(),
+                       prefixCache: PrefixCache(), activeRef: ActiveEngineRef())
+    }
+
+    private func unloadedEngine(_ name: String) -> InferenceEngine {
+        // The init stores the directory only; no weights are loaded.
+        InferenceEngine(modelDirectory: URL(fileURLWithPath: "/tmp/krill-test-\(name)"))
+    }
+
+    func testEvictExpiredRemovesOnlyExpiredIdleModels() async {
+        let reg = makeRegistry()
+        // 'a' expires immediately (deadline = load time); 'b' has an hour left.
+        await reg._insertForTesting(key: "a", engine: unloadedEngine("a"),
+                                    keepAlive: KeepAliveController(defaultSeconds: 0))
+        await reg._insertForTesting(key: "b", engine: unloadedEngine("b"),
+                                    keepAlive: KeepAliveController(defaultSeconds: 3600))
+        let evicted = await reg.evictExpired(now: Date().addingTimeInterval(1))
+        XCTAssertEqual(evicted, ["a"])
+        let remaining = await reg.residentCount
+        XCTAssertEqual(remaining, 1, "the fresh model must stay resident")
+    }
+
+    func testEvictExpiredSkipsInFlightModelEvenIfDeadlinePassed() async {
+        let reg = makeRegistry()
+        let ka = KeepAliveController(defaultSeconds: 0)   // deadline already passed
+        await ka.beginRequest()                            // ...but it is generating
+        await reg._insertForTesting(key: "c", engine: unloadedEngine("c"), keepAlive: ka)
+        let evicted = await reg.evictExpired(now: Date().addingTimeInterval(1))
+        XCTAssertTrue(evicted.isEmpty, "an in-flight model is never auto-evicted")
+        let remaining = await reg.residentCount
+        XCTAssertEqual(remaining, 1)
+    }
+
+    func testPinnedModelIsNeverEvicted() async {
+        let reg = makeRegistry()
+        let ka = KeepAliveController(defaultSeconds: 0)
+        await ka.touch(override: -1)                       // keep_alive: -1 -> pinned
+        await reg._insertForTesting(key: "d", engine: unloadedEngine("d"), keepAlive: ka)
+        let evicted = await reg.evictExpired(now: Date().addingTimeInterval(100_000))
+        XCTAssertTrue(evicted.isEmpty, "a pinned model has no deadline")
+        let remaining = await reg.residentCount
+        XCTAssertEqual(remaining, 1)
     }
 }

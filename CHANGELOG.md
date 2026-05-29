@@ -21,8 +21,16 @@ reverse chronological order. Versioning follows
   (naming `KRILL_MAX_LOADED_MODELS`) rather than tearing a model down
   mid-stream. All resident engines share one prefix cache (keys already
   namespace by model). At the default `MAX_LOADED_MODELS=1` behavior is
-  unchanged. (Per-model keep-alive is the next PR; batched concurrent
-  decode is Stage B.)
+  unchanged. (Batched concurrent decode is Stage B.)
+- **Per-model keep-alive** (follow-up #8, Stage A-2): each resident model
+  carries its own idle deadline, so a request's `keep_alive` (default /
+  `-1` to pin / `0` to evict-after-drain) applies to that model alone. The
+  background evictor now unloads each model independently when its own
+  deadline passes and it is idle, leaving other resident models loaded
+  (previously a single global deadline unloaded the whole pool).
+  `GET /api/ps` lists every resident model with its own `expires_at`,
+  not just the active one. At `MAX_LOADED_MODELS=1` this matches the prior
+  single-model behavior.
 
 ## [0.4.0] - 2026-05-28
 
