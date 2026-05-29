@@ -498,11 +498,12 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
                       mediaHash: mediaHash,
                       lastTokenOnly: true)
             },
-            // Batched ragged-decode (Stage B/C) for the DENSE text path
-            // (e2b/e4b/12b). Left nil for the 26B-A4B MoE checkpoint: the
-            // sparse per-(row,slot) expert dispatch at R>1 is a separate
-            // change (follow-up #8 Stage C3), so MoE Gemma 4 still serializes.
-            batchedDecodeForward: config.enableMoeBlock ? nil : { tokens, caches, mask, rowOffsets in
+            // Batched ragged-decode (Stage B/C) for ALL Gemma 4 text paths
+            // (e2b/e4b/12b dense AND 26B-A4B MoE). The MoE branch reuses the
+            // same Gemma4Block.moeForward the prefill drives - it is token-count
+            // (N=B*L) parametric, so the SwitchGLU gather_qmm dispatch runs
+            // unchanged at N=R (follow-up #8 Stage C3, proven on Qwen3 MoE).
+            batchedDecodeForward: { tokens, caches, mask, rowOffsets in
                 model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
             },
             vocabSize: config.vocabSize
@@ -563,9 +564,9 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
             model(tokens, caches: caches, lastTokenOnly: true)
         },
         multimodalForward: nil,
-        // Batched ragged-decode (Stage B/C) for the dense text path; nil for
-        // the 26B-A4B MoE checkpoint (Stage C3). See the multimodal branch.
-        batchedDecodeForward: config.enableMoeBlock ? nil : { tokens, caches, mask, rowOffsets in
+        // Batched ragged-decode (Stage B/C) for all Gemma 4 text paths (dense
+        // and MoE). See the multimodal branch for the MoE rationale.
+        batchedDecodeForward: { tokens, caches, mask, rowOffsets in
             model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
         },
         vocabSize: config.vocabSize
