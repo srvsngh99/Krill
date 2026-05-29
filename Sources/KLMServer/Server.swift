@@ -549,6 +549,40 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
+    /// Run a generation through the engine's per-model ``BatchScheduler``
+    /// (follow-up #8, Stage B wiring) so concurrent same-model requests can be
+    /// coalesced into one batched forward. The scheduler returns the SAME
+    /// `(stream, stats)` contract as ``InferenceEngine/generate(messages:...)``
+    /// and itself falls through to the serial path for `KRILL_NUM_PARALLEL < 2`,
+    /// ineligible families, multimodal, or seeded sampling — so this is a
+    /// transparent swap for the direct `await self.runGenerate(eng,...)` call. If the engine
+    /// is somehow not pooled, fall back to calling it directly.
+    private func runGenerate(
+        _ eng: InferenceEngine,
+        messages: [[String: String]],
+        params: SamplingParams,
+        maxTokens: Int,
+        useSpeculative: Bool? = nil,
+        usePrefixCache: Bool = true,
+        imageData: Data? = nil,
+        audioData: Data? = nil,
+        contextLimit: Int? = nil,
+        promptTemplateOverride: String? = nil
+    ) async -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
+        if let sched = await engines.scheduler(for: eng) {
+            return await sched.submit(
+                messages: messages, params: params, maxTokens: maxTokens,
+                useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
+                imageData: imageData, audioData: audioData,
+                contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride)
+        }
+        return await self.runGenerate(eng,
+            messages: messages, params: params, maxTokens: maxTokens,
+            useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
+            imageData: imageData, audioData: audioData,
+            contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride)
+    }
+
     /// Apply a created model's Modelfile `PARAMETER` overrides (WS-C) as
     /// *defaults*: a value is taken from the Modelfile only when the request
     /// left that knob at its parse default, so an explicit client value
@@ -833,7 +867,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         Task {
             guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
             defer { self.leaveQueue(releasing: eng) }
-            let (tokenStream, getStats) = eng.generate(
+            let (tokenStream, getStats) = await self.runGenerate(eng,
                 messages: msgs, params: params, maxTokens: maxTokens,
                 contextLimit: ctxLimit,
                 promptTemplateOverride: modelTemplateOverride())
@@ -945,7 +979,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             defer { mediaCopy?.cleanup() }
             guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
             defer { self.leaveQueue(releasing: eng) }
-            let (tokenStream, getStats) = eng.generate(
+            let (tokenStream, getStats) = await self.runGenerate(eng,
                 messages: messages, params: params,
                 maxTokens: maxTokens, imageData: imageData,
                 audioData: audioData,
@@ -1154,7 +1188,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             defer { self.leaveQueue(releasing: eng) }
 
-            let (tokenStream, _) = eng.generate(
+            let (tokenStream, _) = await self.runGenerate(eng,
                 messages: messages,
                 params: params, maxTokens: maxTokens,
                 imageData: imageData, audioData: audioData,
@@ -1220,7 +1254,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             defer { mediaCopy?.cleanup() }
             guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
             defer { self.leaveQueue(releasing: eng) }
-            let (tokenStream, getStats) = eng.generate(
+            let (tokenStream, getStats) = await self.runGenerate(eng,
                 messages: messages,
                 params: params, maxTokens: maxTokens,
                 imageData: imageData, audioData: audioData,
@@ -1289,7 +1323,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             // WS-E: /v1/completions is engine-touching too - serialize it.
             guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
             defer { self.leaveQueue(releasing: eng) }
-            let (tokenStream, getStats) = eng.generate(
+            let (tokenStream, getStats) = await self.runGenerate(eng,
                 prompt: request.prompt,
                 params: request.sampling.samplingParams,
                 maxTokens: request.maxTokens,
@@ -1497,7 +1531,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
             }
             defer { self.leaveQueue(releasing: eng) }
-            let (tokenStream, getStats) = eng.generate(
+            let (tokenStream, getStats) = await self.runGenerate(eng,
                 messages: genMessages,
                 params: ocParams,
                 maxTokens: ocMax,
@@ -1692,7 +1726,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
             }
             defer { self.leaveQueue(releasing: eng) }
-            let (tokenStream, getStats) = eng.generate(
+            let (tokenStream, getStats) = await self.runGenerate(eng,
                 prompt: request.prompt,
                 systemPrompt: genSystem,
                 params: ogParams,

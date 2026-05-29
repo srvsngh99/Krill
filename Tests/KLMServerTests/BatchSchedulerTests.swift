@@ -1,0 +1,76 @@
+import XCTest
+@testable import KLMServer
+import KLMEngine
+import KLMSampler
+
+/// Unit tests for ``BatchScheduler``'s routing/eligibility and no-deadlock
+/// guarantees. True batched-decode correctness needs a real checkpoint and is
+/// covered by `BatchedDecodeLiveTests` (gated on `KLM_BATCH_MODEL_PATH`); here
+/// we use an unloaded engine, which is never batch-eligible, to prove every
+/// path still terminates and falls through to the serial contract.
+final class BatchSchedulerTests: XCTestCase {
+    private func unloadedEngine(_ name: String = "x") -> InferenceEngine {
+        InferenceEngine(modelDirectory: URL(fileURLWithPath: "/tmp/krill-batch-\(name)"))
+    }
+
+    private func submitOnce(_ sched: BatchScheduler) async
+        -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?)
+    {
+        await sched.submit(
+            messages: [["role": "user", "content": "hi"]],
+            params: .greedy, maxTokens: 8,
+            useSpeculative: nil, usePrefixCache: true,
+            imageData: nil, audioData: nil,
+            contextLimit: nil, promptTemplateOverride: nil)
+    }
+
+    /// `numParallel == 1` disables batching: submit passes straight to the
+    /// serial path and returns a finishing stream — never coalesces, never
+    /// waits on a window, never deadlocks.
+    func testNumParallelOneIsPassthrough() async {
+        let sched = BatchScheduler(engine: unloadedEngine(), numParallel: 1, windowMs: 0)
+        let (stream, _) = await submitOnce(sched)
+        var count = 0
+        for await _ in stream { count += 1; if count > 4 { break } }
+        XCTAssertLessThanOrEqual(count, 4)   // unloaded engine → empty, finishing stream
+    }
+
+    /// An engine that is not batch-eligible (here: unloaded) must fall through
+    /// to the serial path even at `numParallel >= 2`, rather than parking the
+    /// request waiting for a cohort that can never be batched.
+    func testIneligibleEngineFallsThroughAtHighParallelism() async {
+        let sched = BatchScheduler(engine: unloadedEngine(), numParallel: 4, windowMs: 50)
+        let (stream, _) = await submitOnce(sched)
+        var terminated = false
+        for await _ in stream { /* drain */ }
+        terminated = true
+        XCTAssertTrue(terminated)
+    }
+
+    /// Several concurrent submits to an ineligible engine all return promptly
+    /// (each on the serial path) — exercises the actor under concurrency with
+    /// no batching, ensuring no submit is lost or stuck.
+    func testConcurrentSubmitsAllReturn() async {
+        let sched = BatchScheduler(engine: unloadedEngine(), numParallel: 4, windowMs: 10)
+        await withTaskGroup(of: Bool.self) { group in
+            for _ in 0 ..< 6 {
+                group.addTask {
+                    let (stream, _) = await self.submitOnce(sched)
+                    for await _ in stream { /* drain */ }
+                    return true
+                }
+            }
+            var completed = 0
+            for await ok in group where ok { completed += 1 }
+            XCTAssertEqual(completed, 6)
+        }
+    }
+
+    /// The coalescing window default is used when the env var is unset.
+    func testWindowDefaultFromEnvironment() {
+        if ProcessInfo.processInfo.environment["KRILL_BATCH_WINDOW_MS"] == nil {
+            XCTAssertEqual(BatchScheduler.windowMsFromEnvironment(),
+                           BatchScheduler.defaultWindowMs)
+        }
+    }
+}

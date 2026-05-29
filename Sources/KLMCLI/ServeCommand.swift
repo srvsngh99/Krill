@@ -132,6 +132,7 @@ struct ServeCommand: AsyncParsableCommand {
             prefixCache: sharedPrefix,
             kvCacheDtype: config.kvCacheDtype,
             defaultKeepAliveSeconds: KeepAliveParse.duration(config.keepAlive) ?? 300,
+            numParallel: config.numParallel,
             activeRef: activeRef)
 
         let server = KLMServer(host: host, port: port, compat: compatMode,

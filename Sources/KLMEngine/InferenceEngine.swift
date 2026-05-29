@@ -1237,6 +1237,301 @@ public enum EngineError: Error, CustomStringConvertible {
     }
 }
 
+// MARK: - Batched concurrent decode (live streaming entry)
+
+/// One row's request for ``InferenceEngine/generateBatched(_:)`` — the
+/// text-only subset of `generate(...)` arguments the Stage B batched decode
+/// path supports.
+public struct BatchGenRequest: Sendable {
+    public let messages: [[String: String]]
+    public let params: SamplingParams
+    public let maxTokens: Int
+    public let contextLimit: Int?
+    public let promptTemplateOverride: String?
+    public init(messages: [[String: String]],
+                params: SamplingParams = .greedy,
+                maxTokens: Int = 512,
+                contextLimit: Int? = nil,
+                promptTemplateOverride: String? = nil) {
+        self.messages = messages
+        self.params = params
+        self.maxTokens = maxTokens
+        self.contextLimit = contextLimit
+        self.promptTemplateOverride = promptTemplateOverride
+    }
+}
+
+/// Tiny thread-safe live-stream counter: when every row's consumer has gone
+/// away the shared decode Task can stop early. `NSLock`-backed to avoid
+/// pulling in another dependency just for one counter.
+private final class BatchLiveCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n: Int
+    init(_ n: Int) { self.n = n }
+    func decrementReachedZero() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        n -= 1
+        return n <= 0
+    }
+}
+
+extension InferenceEngine {
+    /// Everything the batched-decode Task needs, bundled into one
+    /// `@unchecked Sendable` struct so the Task closure captures a single
+    /// value rather than ~12 individual nonisolated ones — the same workaround
+    /// `generate(...)`'s `Captures` uses for the Swift 6.2.4 SIL
+    /// SendNonSendable crash under `-O`.
+    private struct BatchedCaptures: @unchecked Sendable {
+        typealias ForwardFn = (MLXArray, [KVCacheProtocol]?) -> MLXArray
+        typealias BatchedFn = (MLXArray, [KVCache], MLXArray, [Int]) -> MLXArray
+        let engine: InferenceEngine
+        let prefill: ForwardFn
+        let batchedForward: BatchedFn
+        let numLayers: Int
+        let tokenizer: KLMTokenizer
+        let stopIds: Set<Int>
+        let promptRows: [[Int]]
+        let samplers: [Sampler]
+        let perRowMax: [Int]
+        let conts: [AsyncStream<TokenEvent>.Continuation]
+        let statsHolders: [StatsHolder]
+    }
+
+    /// Decode several ragged-length, **text-only** prompts for a plain-causal
+    /// family (Llama 3.x / Qwen 2.5-3 dense) in ONE batched forward per step,
+    /// streaming each row's tokens to its own `AsyncStream`. The correctness
+    /// core — per-row RoPE offsets, left-padded KV stacking, and the additive
+    /// pad mask — is the verified Stage B path (`batchedGreedyDecode` /
+    /// `teacherForcedBatchedVsSerialMaxDiff`); this adds per-row sampling,
+    /// per-row stop/maxTokens, and live streaming on top of it.
+    ///
+    /// Returns one `(stream, stats)` per request, in request order. Falls back
+    /// to per-row serial `generate(...)` when the batched path cannot apply
+    /// (unsupported family, nothing loaded, an empty prompt, or a single row)
+    /// so the entry is always total-correct regardless of how it is called.
+    ///
+    /// v1 scope (Stage B): fp16 KV, no prefix cache, no speculative decode;
+    /// finished rows stay in the batch (they simply stop emitting) until every
+    /// row completes. Shrinking the batch mid-flight and continuous admission
+    /// are Stage C.
+    public func generateBatched(_ requests: [BatchGenRequest])
+        -> [(stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?)]
+    {
+        // The batched path never uses the prefix cache or speculative decode,
+        // so a fallback row mirrors that (usePrefixCache:false,
+        // useSpeculative:false) to match the batched row it stands in for.
+        func serialFallback()
+            -> [(stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?)]
+        {
+            requests.map { r in
+                generate(messages: r.messages, params: r.params,
+                         maxTokens: r.maxTokens, useSpeculative: false,
+                         usePrefixCache: false, contextLimit: r.contextLimit,
+                         promptTemplateOverride: r.promptTemplateOverride)
+            }
+        }
+
+        guard !requests.isEmpty else { return [] }
+        guard requests.count > 1,
+              let model = loadedModelForBatching,
+              let batchedForward = model.batchedDecodeForward,
+              let tokenizer, let eosId = tokenizerEOS
+        else { return serialFallback() }
+
+        // Per-row prompt tokens, built with the SAME text-path logic as
+        // generate() so a batched row reproduces that prompt's solo run.
+        var promptRows: [[Int]] = []
+        promptRows.reserveCapacity(requests.count)
+        for r in requests {
+            let toks = buildBatchedPromptTokens(
+                messages: r.messages, contextLimit: r.contextLimit,
+                promptTemplateOverride: r.promptTemplateOverride, tokenizer: tokenizer)
+            guard !toks.isEmpty else { return serialFallback() }
+            promptRows.append(toks)
+        }
+
+        let R = requests.count
+        let stopIds = Self.stopTokenIds(
+            modelDirectory: modelDirectory, tokenizerEOS: eosId)
+
+        var conts: [AsyncStream<TokenEvent>.Continuation] = []
+        var streams: [AsyncStream<TokenEvent>] = []
+        conts.reserveCapacity(R)
+        streams.reserveCapacity(R)
+        for _ in 0 ..< R {
+            var captured: AsyncStream<TokenEvent>.Continuation!
+            let s = AsyncStream<TokenEvent> { captured = $0 }
+            conts.append(captured)
+            streams.append(s)
+        }
+        let statsHolders = (0 ..< R).map { _ in StatsHolder() }
+
+        let caps = BatchedCaptures(
+            engine: self,
+            prefill: model.prefillForward ?? model.forward,
+            batchedForward: batchedForward,
+            numLayers: model.numLayers,
+            tokenizer: tokenizer,
+            stopIds: stopIds,
+            promptRows: promptRows,
+            samplers: requests.map { Sampler(params: $0.params) },
+            perRowMax: requests.map { $0.maxTokens },
+            conts: conts,
+            statsHolders: statsHolders)
+
+        // The decode loop runs off the caller's (event-loop) context.
+        let task = Task(priority: .userInitiated) { Self.runBatchedDecode(caps) }
+        let live = BatchLiveCounter(R)
+        for c in conts {
+            c.onTermination = { _ in if live.decrementReachedZero() { task.cancel() } }
+        }
+
+        return (0 ..< R).map { r in
+            (streams[r], { [statsHolders] in statsHolders[r].stats })
+        }
+    }
+
+    /// Build one row's prompt tokens. This is the non-Gemma-4 (plain-causal)
+    /// subset of `generate(...)`'s prompt-prep: a created model's `TEMPLATE`
+    /// override, else the tokenizer's chat template (token-id path, no lossy
+    /// decode→re-encode), else the manual fallback — then the same num_ctx
+    /// suffix truncation. The batched path is text-only, so generate()'s
+    /// media-placeholder injection (a no-op without media) and its Gemma 4 / VL
+    /// branches (never batch-eligible) are intentionally omitted; for a
+    /// text-only Llama/Qwen prompt this yields the identical token stream.
+    private func buildBatchedPromptTokens(
+        messages: [[String: String]], contextLimit: Int?,
+        promptTemplateOverride: String?, tokenizer: KLMTokenizer
+    ) -> [Int] {
+        var built: [Int]
+        if let overrideTemplate = promptTemplateOverride,
+           !overrideTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let rendered = renderWithOverrideTemplate(overrideTemplate, messages: messages) {
+            built = tokenizer.encodeWithoutExtraBOS(rendered)
+        } else if let direct = tokenizer.applyChatTemplateTokens(messages: messages) {
+            built = direct
+        } else {
+            built = tokenizer.encodeWithoutExtraBOS(
+                tokenizer.applyChatTemplate(messages: messages))
+        }
+        if let limit = contextLimit, limit > 0, built.count > limit {
+            built = Array(built.suffix(limit))
+        }
+        return built
+    }
+
+    /// The shared batched decode loop: per-row prefill, left-padded KV stack,
+    /// then one batched forward per step advancing every row by a token, with
+    /// per-row sampling / stop / maxTokens and live per-row streaming. Mirrors
+    /// the serial standard-decode loop's emit semantics (check the current
+    /// token, emit-or-end, then forward to the next) so each row equals its
+    /// solo run.
+    private static func runBatchedDecode(_ c: BatchedCaptures) {
+        let R = c.promptRows.count
+        let startTime = CFAbsoluteTimeGetCurrent()
+
+        // Per-row prefill (unchanged B=1 path) → per-row cache + first token.
+        var perRowCaches: [[KVCache]] = []
+        var lengths: [Int] = []
+        var current: [Int] = []
+        perRowCaches.reserveCapacity(R)
+        lengths.reserveCapacity(R)
+        current.reserveCapacity(R)
+        for (i, tokens) in c.promptRows.enumerated() {
+            let caches = c.engine.makeKVCaches(numLayers: c.numLayers)
+            let input = MLXArray(tokens.map { Int32($0) }).reshaped(1, tokens.count)
+            let logits = c.prefill(input, caches)
+            MLX.eval(logits)
+            perRowCaches.append(caches)
+            lengths.append(tokens.count)
+            current.append(c.samplers[i].sample(logits))
+        }
+        let prefillDuration = CFAbsoluteTimeGetCurrent() - startTime
+
+        let sMax = lengths.max() ?? 0
+        let caches = stackCachesLeftPadded(perRow: perRowCaches, lengths: lengths)
+        let kDtype = caches.first?.snapshot()?.keys.dtype ?? .float16
+
+        var generated = [Int](repeating: 0, count: R)
+        var done = [Bool](repeating: false, count: R)
+        var recent: [[Int]] = (0 ..< R).map {
+            c.samplers[$0].needsHistory ? Array(c.promptRows[$0].suffix(512)) : []
+        }
+        let decodeStart = CFAbsoluteTimeGetCurrent()
+
+        // Emit `current[r]` for one row, applying the serial loop's
+        // top-of-iteration semantics: maxTokens terminal, stop-token terminal,
+        // or a normal text token (with an inline maxTokens terminal when the
+        // just-emitted token was the last one).
+        func emit(_ r: Int, now: Double) {
+            guard !done[r] else { return }
+            if generated[r] >= c.perRowMax[r] {
+                c.conts[r].yield(TokenEvent(tokenId: -1, text: "", elapsed: now, isEnd: true))
+                done[r] = true
+                return
+            }
+            if c.stopIds.contains(current[r]) {
+                c.conts[r].yield(TokenEvent(
+                    tokenId: current[r], text: "", elapsed: now, isEnd: true))
+                done[r] = true
+                return
+            }
+            let text = c.tokenizer.decode(token: current[r])
+            c.conts[r].yield(TokenEvent(tokenId: current[r], text: text, elapsed: now))
+            generated[r] += 1
+            if generated[r] >= c.perRowMax[r] {
+                c.conts[r].yield(TokenEvent(tokenId: -1, text: "", elapsed: now, isEnd: true))
+                done[r] = true
+            }
+        }
+
+        var step = 0
+        let maxStep = (c.perRowMax.max() ?? 0) + 4   // safety bound
+        while !done.allSatisfy({ $0 }) {
+            if Task.isCancelled { break }
+            let now = CFAbsoluteTimeGetCurrent() - startTime
+            for r in 0 ..< R { emit(r, now: now) }
+            if done.allSatisfy({ $0 }) { break }
+
+            // One batched forward advances every row by one token. Done rows
+            // stay in the batch (their output is ignored) — the v1 no-shrink
+            // simplification — so the stacked layout / offsets stay aligned.
+            let rowOffsets = (0 ..< R).map { lengths[$0] + step }
+            let totalLen = sMax + step + 1
+            let mask = buildBatchedDecodeMask(
+                lengths: lengths, sMax: sMax, totalLen: totalLen, dtype: kDtype)
+            let input = MLXArray(current.map { Int32($0) }).reshaped(R, 1)
+            let logits = c.batchedForward(input, caches, mask, rowOffsets)
+            MLX.eval(logits)
+            for r in 0 ..< R {
+                let rowLogits = logits[r ..< (r + 1)]
+                if c.samplers[r].needsHistory {
+                    if !done[r] { recent[r].append(current[r]) }
+                    current[r] = c.samplers[r].sample(rowLogits, recent: recent[r])
+                } else {
+                    current[r] = c.samplers[r].sample(rowLogits)
+                }
+            }
+            step += 1
+            if step > maxStep { break }
+        }
+        let decodeDuration = CFAbsoluteTimeGetCurrent() - decodeStart
+
+        let end = CFAbsoluteTimeGetCurrent() - startTime
+        for r in 0 ..< R {
+            // A row that did not reach a natural terminal (cancel / safety
+            // bound) still gets a terminal event so consumers always see one.
+            if !done[r] {
+                c.conts[r].yield(TokenEvent(tokenId: -1, text: "", elapsed: end, isEnd: true))
+            }
+            c.statsHolders[r].stats = GenerationStats(
+                promptTokens: lengths[r], generatedTokens: generated[r],
+                prefillTime: prefillDuration, decodeTime: decodeDuration)
+            c.conts[r].finish()
+        }
+    }
+}
+
 // MARK: - Internal Helpers
 
 /// Thread-safe holder for generation statistics.
