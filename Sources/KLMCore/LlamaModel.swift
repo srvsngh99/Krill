@@ -27,7 +27,8 @@ class LlamaModelInner: Module {
     func callAsFunction(
         _ tokens: MLXArray,
         mask: MLXArray? = nil,
-        caches: [KVCache]? = nil
+        caches: [KVCache]? = nil,
+        rowOffsets: [Int]? = nil
     ) -> MLXArray {
         var x = embedTokens(tokens)
 
@@ -35,6 +36,8 @@ class LlamaModelInner: Module {
         // classic (seqLen, seqLen) lower-triangular mask. For multi-token
         // forward against a non-empty cache (e.g. speculative-decode
         // verify) the mask must extend across the cached prefix too.
+        // On the batched ragged-decode path an explicit per-row mask is
+        // passed in (and rowOffsets carries each row's position).
         let seqLen = x.dim(1)
         let cacheLen = caches?.first?.sequenceLength ?? 0
         let effectiveMask: MLXArray?
@@ -47,7 +50,7 @@ class LlamaModelInner: Module {
 
         for (i, layer) in layers.enumerated() {
             let cache = caches?[i]
-            x = layer(x, mask: effectiveMask, cache: cache)
+            x = layer(x, mask: effectiveMask, cache: cache, rowOffsets: rowOffsets)
         }
 
         return norm(x)
@@ -107,6 +110,18 @@ public class LlamaForCausalLM: Module {
             let last = hidden.dim(1) - 1
             hidden = hidden[0..., last ..< (last + 1), 0...]
         }
+        return lmHead(hidden)
+    }
+
+    /// Batched ragged-decode step (Stage B): one new token per row
+    /// (`tokens` is `[R, 1]`), each rotated at its own next position
+    /// (`rowOffsets[r]`), attending under the explicit per-row additive
+    /// `mask` that hides each row's left-padded prefix in the stacked cache.
+    /// Returns logits `[R, 1, vocab]`.
+    public func batchedDecode(
+        _ tokens: MLXArray, caches: [KVCache], mask: MLXArray, rowOffsets: [Int]
+    ) -> MLXArray {
+        let hidden = model(tokens, mask: mask, caches: caches, rowOffsets: rowOffsets)
         return lmHead(hidden)
     }
 }
