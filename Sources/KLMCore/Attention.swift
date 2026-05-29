@@ -3,6 +3,22 @@ import MLXNN
 import MLXFast
 import KLMCache
 
+/// Apply RoPE to a decode-step tensor `[R, heads, 1, headDim]` using a
+/// DISTINCT position offset per batch row. MLX's `RoPE` takes a single scalar
+/// offset, so for the ragged batched-decode path (Stage B) each row is rotated
+/// at its own next position and the results are re-concatenated. `R` is the
+/// (small) concurrency width, so the per-row loop is acceptable for a
+/// correctness-first v1. Used only on the batched decode path; the B=1 and
+/// prefill paths keep the scalar-offset call unchanged.
+public func applyRoPEPerRow(_ rope: RoPE, _ x: MLXArray, offsets: [Int]) -> MLXArray {
+    var rows: [MLXArray] = []
+    rows.reserveCapacity(offsets.count)
+    for (r, off) in offsets.enumerated() {
+        rows.append(rope(x[r ..< (r + 1)], offset: off))
+    }
+    return concatenated(rows, axis: 0)
+}
+
 /// Grouped-Query Attention with Rotary Position Embeddings.
 ///
 /// Supports GQA where num_kv_heads < num_attention_heads. Key and value heads
@@ -43,7 +59,8 @@ public class Attention: Module {
     public func callAsFunction(
         _ x: MLXArray,
         mask: MLXArray? = nil,
-        cache: KVCache? = nil
+        cache: KVCache? = nil,
+        rowOffsets: [Int]? = nil
     ) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
@@ -57,10 +74,17 @@ public class Attention: Module {
         keys = keys.reshaped(B, L, numKVHeads, headDim).transposed(0, 2, 1, 3)
         values = values.reshaped(B, L, numKVHeads, headDim).transposed(0, 2, 1, 3)
 
-        // Rotary position embeddings
-        let offset = cache?.sequenceLength ?? 0
-        queries = rope(queries, offset: offset)
-        keys = rope(keys, offset: offset)
+        // Rotary position embeddings. On the batched ragged-decode path each
+        // row carries its own next position; otherwise a single scalar offset
+        // (cache length) applies to the whole tensor (B=1 / prefill).
+        if let rowOffsets {
+            queries = applyRoPEPerRow(rope, queries, offsets: rowOffsets)
+            keys = applyRoPEPerRow(rope, keys, offsets: rowOffsets)
+        } else {
+            let offset = cache?.sequenceLength ?? 0
+            queries = rope(queries, offset: offset)
+            keys = rope(keys, offset: offset)
+        }
 
         // Accumulate into KV cache
         if let cache {

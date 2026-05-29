@@ -151,7 +151,8 @@ class QwenAttention: Module {
             dimensions: headDim, traditional: false, base: config.ropeTheta)
     }
 
-    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil) -> MLXArray {
+    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil,
+                        rowOffsets: [Int]? = nil) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
 
@@ -169,9 +170,16 @@ class QwenAttention: Module {
         queries = queries.transposed(0, 2, 1, 3)
         keys = keys.transposed(0, 2, 1, 3)
 
-        let offset = cache?.sequenceLength ?? 0
-        queries = rope(queries, offset: offset)
-        keys = rope(keys, offset: offset)
+        // Per-row positions on the batched ragged-decode path; otherwise a
+        // single scalar offset (cache length) for B=1 / prefill.
+        if let rowOffsets {
+            queries = applyRoPEPerRow(rope, queries, offsets: rowOffsets)
+            keys = applyRoPEPerRow(rope, keys, offsets: rowOffsets)
+        } else {
+            let offset = cache?.sequenceLength ?? 0
+            queries = rope(queries, offset: offset)
+            keys = rope(keys, offset: offset)
+        }
 
         if let cache {
             (keys, values) = cache.update(keys: keys, values: values)
@@ -203,8 +211,9 @@ class QwenTransformerBlock: Module {
             key: "post_attention_layernorm")
     }
 
-    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil) -> MLXArray {
-        let h = x + selfAttn(inputLayernorm(x), mask: mask, cache: cache)
+    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil,
+                        rowOffsets: [Int]? = nil) -> MLXArray {
+        let h = x + selfAttn(inputLayernorm(x), mask: mask, cache: cache, rowOffsets: rowOffsets)
         return h + mlp(postAttentionLayernorm(h))
     }
 }
@@ -259,21 +268,28 @@ class QwenModelInner: Module {
             key: "norm")
     }
 
-    func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
+    func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil,
+                        precomputedMask: MLXArray? = nil, rowOffsets: [Int]? = nil) -> MLXArray {
         var x = embedTokens(tokens)
-        let seqLen = x.dim(1)
-        let cacheLen = caches?.first?.sequenceLength ?? 0
         // Mask must promote to the hidden state's dtype. Qwen 3
         // checkpoints run inference in bf16 (configs declare
         // `torch_dtype: "bfloat16"`); Qwen 2.5 4-bit MLX checkpoints
         // run in fp16. `MLXFast.scaledDotProductAttention` errors if
         // the mask dtype cannot be promoted, so we source the dtype
         // from the embedding output itself rather than guessing.
-        let mask = createCachedCausalMask(
-            newLen: seqLen, cacheLen: cacheLen, dtype: x.dtype)
+        // The batched ragged-decode path supplies an explicit per-row mask.
+        let mask: MLXArray?
+        if let precomputedMask {
+            mask = precomputedMask
+        } else {
+            let seqLen = x.dim(1)
+            let cacheLen = caches?.first?.sequenceLength ?? 0
+            mask = createCachedCausalMask(
+                newLen: seqLen, cacheLen: cacheLen, dtype: x.dtype)
+        }
 
         for (i, layer) in layers.enumerated() {
-            x = layer(x, mask: mask, cache: caches?[i])
+            x = layer(x, mask: mask, cache: caches?[i], rowOffsets: rowOffsets)
         }
         return norm(x)
     }
@@ -327,6 +343,19 @@ public class QwenForCausalLM: Module {
         }
         // Tied embeddings: reuse embed_tokens. `asLinear` does
         // matmul(hidden, embed_tokens.weight.T) and respects quantization.
+        return model.embedTokens.asLinear(hidden)
+    }
+
+    /// Batched ragged-decode step (Stage B): one new token per row
+    /// (`tokens` is `[R, 1]`), each rotated at its own next position
+    /// (`rowOffsets[r]`), attending under the explicit per-row additive
+    /// `mask` that hides each row's left-padded prefix in the stacked cache.
+    /// Returns logits `[R, 1, vocab]`.
+    public func batchedDecode(
+        _ tokens: MLXArray, caches: [KVCache], mask: MLXArray, rowOffsets: [Int]
+    ) -> MLXArray {
+        let hidden = model(tokens, caches: caches, precomputedMask: mask, rowOffsets: rowOffsets)
+        if let lmHead { return lmHead(hidden) }
         return model.embedTokens.asLinear(hidden)
     }
 }

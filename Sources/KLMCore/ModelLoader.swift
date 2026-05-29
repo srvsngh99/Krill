@@ -53,6 +53,16 @@ public struct LoadedModel: @unchecked Sendable {
     /// prefill when present; falls back to `multimodalForward`.
     public let multimodalPrefillForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, MLXArray?, String?) -> MLXArray)?
 
+    /// Optional batched ragged-decode forward (Stage B). Arguments:
+    /// `(tokens [R,1], caches, mask, rowOffsets)` -> logits `[R, 1, vocab]`.
+    /// One new token per row, each rotated at its own next position
+    /// (`rowOffsets[r]`), attending under an explicit per-row additive mask
+    /// that hides each row's left-padded prefix in the stacked KV cache. Set
+    /// ONLY for plain-causal families that support true KV-batched concurrent
+    /// decode (Llama, Qwen 2.5/3 dense); nil means the family falls back to
+    /// serialized generation. fp16 `KVCache` only.
+    public let batchedDecodeForward: ((MLXArray, [KVCache], MLXArray, [Int]) -> MLXArray)?
+
     /// Vocab size for validation
     public let vocabSize: Int
 
@@ -68,6 +78,7 @@ public struct LoadedModel: @unchecked Sendable {
         prefillForward: ((MLXArray, [KVCacheProtocol]?) -> MLXArray)? = nil,
         multimodalForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, MLXArray?, String?) -> MLXArray)? = nil,
         multimodalPrefillForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, MLXArray?, String?) -> MLXArray)? = nil,
+        batchedDecodeForward: ((MLXArray, [KVCache], MLXArray, [Int]) -> MLXArray)? = nil,
         vocabSize: Int
     ) {
         self.module = module
@@ -77,6 +88,7 @@ public struct LoadedModel: @unchecked Sendable {
         self.prefillForward = prefillForward
         self.multimodalForward = multimodalForward
         self.multimodalPrefillForward = multimodalPrefillForward
+        self.batchedDecodeForward = batchedDecodeForward
         self.vocabSize = vocabSize
     }
 }
@@ -227,6 +239,9 @@ private func loadLlama(configData: Data, directory: URL) throws -> LoadedModel {
             model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
         },
         multimodalForward: nil,
+        batchedDecodeForward: { tokens, caches, mask, rowOffsets in
+            model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
         vocabSize: config.vocabSize
     )
 }
@@ -248,6 +263,9 @@ private func loadQwen(configData: Data, directory: URL) throws -> LoadedModel {
             model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
         },
         multimodalForward: nil,
+        batchedDecodeForward: { tokens, caches, mask, rowOffsets in
+            model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
         vocabSize: config.vocabSize
     )
 }
