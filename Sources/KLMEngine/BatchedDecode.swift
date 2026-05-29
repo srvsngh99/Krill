@@ -19,10 +19,13 @@ import KLMSampler
 /// correctness-first simplification; shrinking the batch mid-flight is a
 /// follow-up.
 
-/// Large negative additive-mask value. In fp16 this saturates to -inf, so a
-/// masked (left-pad) key contributes exactly zero after softmax - making a
-/// batched row's attention identical to the unpadded single-row case.
-private let maskNegInf: Float = -1e9
+/// Large negative additive-mask value, matching the codebase's causal-mask
+/// convention (`createAdditiveCausalMask` uses the same magnitude). Added to a
+/// left-pad key's attention score, it drives that key's softmax weight to
+/// underflow to exactly zero in fp16, bf16, and fp32 alike (the valid scores
+/// are O(10), so `exp(score - 10000)` is 0 in every supported dtype) - making
+/// a batched row's attention identical to the unpadded single-row case.
+private let maskNegInf: Float = -10000.0
 
 /// Stack R per-row KV caches (one `[KVCache]` per row, each of shape
 /// `[1, kvHeads, L_r, headDim]` per layer) into one batched `[KVCache]` per
@@ -41,7 +44,12 @@ func stackCachesLeftPadded(perRow caches: [[KVCache]], lengths: [Int]) -> [KVCac
         ks.reserveCapacity(R)
         vs.reserveCapacity(R)
         for r in 0 ..< R {
-            guard let snap = caches[r][layer].snapshot() else { continue }
+            // Every row was just prefilled, so its cache is non-empty. A nil
+            // snapshot would silently drop a row and desync the batch against
+            // the full-R mask/offsets (shifting live rows) - fail hard instead.
+            guard let snap = caches[r][layer].snapshot() else {
+                preconditionFailure("empty KV cache for row \(r) layer \(layer) in batched stack")
+            }
             let pad = sMax - lengths[r]
             if pad > 0 {
                 let zerosK = MLXArray.zeros(
@@ -92,7 +100,7 @@ extension InferenceEngine {
     ///
     /// This is the correctness entry: a test asserts each row equals the
     /// serialized single-prompt run token-for-token (cross-row isolation).
-    public func batchedGreedyDecode(promptTokens: [[Int]], maxTokens: Int) -> [[Int]]? {
+    func batchedGreedyDecode(promptTokens: [[Int]], maxTokens: Int) -> [[Int]]? {
         guard let model = loadedModelForBatching,
               let batchedForward = model.batchedDecodeForward,
               let eosId = tokenizerEOS else { return nil }
@@ -156,7 +164,7 @@ extension InferenceEngine {
     /// proves there is no cross-row bleed and no per-step position/mask error
     /// across the whole decode - the property exact-token matching cannot
     /// assert under fp16 batched-GEMM rounding.
-    public func teacherForcedBatchedVsSerialMaxDiff(
+    func teacherForcedBatchedVsSerialMaxDiff(
         promptTokens: [[Int]], steps: Int
     ) -> [Float]? {
         guard let model = loadedModelForBatching,
@@ -223,7 +231,7 @@ extension InferenceEngine {
     /// exactly, both at R=1 (the batched forward equals the canonical one) and
     /// for each row of an R=N batch (no cross-row interference). Returns nil
     /// if no model is loaded.
-    public func serialGreedyDecode(promptTokens: [Int], maxTokens: Int) -> [Int]? {
+    func serialGreedyDecode(promptTokens: [Int], maxTokens: Int) -> [Int]? {
         guard let model = loadedModelForBatching, let eosId = tokenizerEOS else { return nil }
         let caches = makeKVCaches(numLayers: model.numLayers)
         let sampler = Sampler(params: .greedy)

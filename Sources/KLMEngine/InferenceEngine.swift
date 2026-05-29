@@ -54,7 +54,7 @@ public final class InferenceEngine: @unchecked Sendable {
     var loadedModelForBatching: LoadedModel? { loadedModel }
     var tokenizerEOS: Int? { tokenizer?.eosTokenId }
     /// Tokenize raw text for the Stage B batched-decode tests.
-    public func encodeForBatchTest(_ text: String) -> [Int]? { tokenizer?.encode(text) }
+    func encodeForBatchTest(_ text: String) -> [Int]? { tokenizer?.encode(text) }
 
     /// The loaded model's directory name (useful for display/status).
     public var modelName: String? { isLoaded ? modelDirectory.lastPathComponent : nil }
