@@ -8,6 +8,20 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **Live batched serving (`BatchScheduler`)** (follow-up #8, Stage B —
+  wiring): concurrent same-model requests are now coalesced into ONE batched
+  forward, turning the verified Stage B engine into a live throughput feature.
+  A per-model `BatchScheduler` gathers eligible requests into a static cohort
+  (up to `KRILL_NUM_PARALLEL`, within a small `KRILL_BATCH_WINDOW_MS` window,
+  default 8 ms) and drives a new streaming `InferenceEngine.generateBatched`
+  entry that demuxes each row to its own token stream — with per-row sampling
+  (temperature / top-p / top-k / penalties), per-row stop/maxTokens, and
+  ragged prefill. `KRILL_NUM_PARALLEL < 2`, ineligible families, multimodal
+  requests, seeded non-greedy sampling, and explicit speculative opt-ins fall
+  through to today's serial path **byte-identically**. fp16 KV only; the
+  prefix cache and speculative decode stay bypassed on the batched path;
+  finished rows remain in the batch until the cohort completes (mid-flight
+  shrinking and continuous admission are Stage C).
 - **Batched concurrent decode engine** (follow-up #8, Stage B - core): the
   inference engine can now decode several ragged-length prompts in ONE
   batched forward for plain-causal families (Llama 3.x, Qwen 2.5/3 dense).

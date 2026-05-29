@@ -69,6 +69,9 @@ public actor EngineRegistry {
         var lastUsed: Date
         /// Per-model idle deadline / keep-alive state.
         let keepAlive: KeepAliveController
+        /// Per-model batch scheduler (follow-up #8, Stage B wiring): coalesces
+        /// this model's concurrent requests into one batched forward.
+        let scheduler: BatchScheduler
     }
 
     /// Resident engines keyed by canonical model directory path.
@@ -89,6 +92,10 @@ public actor EngineRegistry {
     private let activeRef: ActiveEngineRef
     /// Default idle keep-alive (seconds) for a newly-loaded model.
     private let defaultKeepAliveSeconds: Int
+    /// `KRILL_NUM_PARALLEL`: max cohort size for each model's batch scheduler.
+    private let numParallel: Int
+    /// `KRILL_BATCH_WINDOW_MS`: coalescing window for each batch scheduler.
+    private let batchWindowMs: Int
     private let logger = Logger(label: "krillm.engine-registry")
 
     /// - Parameters:
@@ -105,18 +112,24 @@ public actor EngineRegistry {
                 prefixCache: PrefixCache,
                 kvCacheDtype: String? = nil,
                 defaultKeepAliveSeconds: Int = 300,
+                numParallel: Int = 1,
                 activeRef: ActiveEngineRef) {
         self.maxLoaded = max(1, maxLoaded)
         self.registry = registry
         self.prefixCache = prefixCache
         self.kvCacheDtype = kvCacheDtype
         self.defaultKeepAliveSeconds = defaultKeepAliveSeconds
+        self.numParallel = numParallel
+        self.batchWindowMs = BatchScheduler.windowMsFromEnvironment()
         self.activeRef = activeRef
         if let preloaded {
             let key = Self.key(forName: preloadedName, registry: registry,
                                fallbackPath: preloaded.modelDirectoryPath)
             entries[key] = Entry(engine: preloaded, lastUsed: Date(),
-                                 keepAlive: KeepAliveController(defaultSeconds: defaultKeepAliveSeconds))
+                                 keepAlive: KeepAliveController(defaultSeconds: defaultKeepAliveSeconds),
+                                 scheduler: BatchScheduler(engine: preloaded,
+                                                           numParallel: numParallel,
+                                                           windowMs: self.batchWindowMs))
             order.append(key)
             if preloaded.isLoaded { activeRef.set(preloaded) }
         }
@@ -172,7 +185,10 @@ public actor EngineRegistry {
         try await engine.load()
         await engine.warmup()
         entries[key] = Entry(engine: engine, lastUsed: Date(),
-                             keepAlive: KeepAliveController(defaultSeconds: defaultKeepAliveSeconds))
+                             keepAlive: KeepAliveController(defaultSeconds: defaultKeepAliveSeconds),
+                             scheduler: BatchScheduler(engine: engine,
+                                                       numParallel: numParallel,
+                                                       windowMs: batchWindowMs))
         order.append(key)
         activeRef.set(engine)
         logger.info("loaded model '\(name)' (resident=\(self.entries.count)/\(self.maxLoaded))")
@@ -260,6 +276,15 @@ public actor EngineRegistry {
     /// The active engine (mirror of ``ActiveEngineRef/current``).
     public func current() -> InferenceEngine? { activeRef.current }
 
+    /// The per-model ``BatchScheduler`` for a resident engine (by identity),
+    /// or nil if the engine is not in the pool. Handlers route generation
+    /// through this so concurrent same-model requests can be batched.
+    /// Internal: `BatchScheduler` is a server-private type.
+    func scheduler(for engine: InferenceEngine) -> BatchScheduler? {
+        guard let key = key(for: engine) else { return nil }
+        return entries[key]?.scheduler
+    }
+
     /// Unload every resident model and clear the active pointer. Used by
     /// `POST /v1/models/unload` (a deliberate, immediate force-unload).
     public func unloadAll() {
@@ -288,7 +313,10 @@ public actor EngineRegistry {
     /// against controllers in known states. Compiled out of release builds.
     func _insertForTesting(key: String, engine: InferenceEngine,
                            keepAlive: KeepAliveController) {
-        entries[key] = Entry(engine: engine, lastUsed: Date(), keepAlive: keepAlive)
+        entries[key] = Entry(engine: engine, lastUsed: Date(), keepAlive: keepAlive,
+                             scheduler: BatchScheduler(engine: engine,
+                                                       numParallel: numParallel,
+                                                       windowMs: batchWindowMs))
         order.append(key)
         activeRef.set(engine)
     }

@@ -1,5 +1,6 @@
 import XCTest
 @testable import KLMEngine
+import KLMSampler
 
 /// Stage B correctness gate: a batched (B>1) decode of several DIFFERENT,
 /// ragged-length prompts must produce, for every row, exactly the tokens that
@@ -77,5 +78,64 @@ final class BatchedDecodeLiveTests: XCTestCase {
         let serial = try XCTUnwrap(engine.serialGreedyDecode(promptTokens: prompt, maxTokens: 24))
         let batched = try XCTUnwrap(engine.batchedGreedyDecode(promptTokens: [prompt], maxTokens: 24))
         XCTAssertEqual(batched[0], serial)
+    }
+
+    /// End-to-end test of the live streaming entry `generateBatched(_:)` (the
+    /// path the BatchScheduler drives): three different chat prompts batched,
+    /// each streamed to its own `AsyncStream`. Every row must terminate, emit
+    /// at least one token, and — critically — produce the SAME first token as
+    /// its serial `generate(...)` run. The first token comes from per-row B=1
+    /// prefill (identical math in both paths), so it must match exactly; this
+    /// is the strongest non-flaky cross-row-isolation signal. Later tokens can
+    /// tie-flip under fp16 batched GEMM (documented in #91, asserted rigorously
+    /// by the teacher-forced logit test above), so they are not compared here.
+    func testBatchedStreamingMatchesSerialFirstToken() async throws {
+        let dir = try requireModelDirectory()
+        let engine = InferenceEngine(modelDirectory: dir)
+        try await engine.load()
+        guard engine.supportsBatchedDecode else {
+            throw XCTSkip("loaded model is not batched-eligible")
+        }
+
+        let prompts = [
+            "Write one short sentence about the ocean.",
+            "List three primary colors.",
+            "What is two plus two?"
+        ]
+
+        // Serial greedy reference (no spec / no prefix cache, exactly what the
+        // batched path uses), capturing each prompt's first generated token.
+        var serialFirst: [Int] = []
+        for p in prompts {
+            let (s, _) = engine.generate(
+                messages: [["role": "user", "content": p]],
+                params: .greedy, maxTokens: 24,
+                useSpeculative: false, usePrefixCache: false)
+            var first: Int?
+            for await ev in s where !ev.isEnd { first = ev.tokenId; break }
+            serialFirst.append(try XCTUnwrap(first))
+        }
+
+        let reqs = prompts.map {
+            BatchGenRequest(messages: [["role": "user", "content": $0]],
+                            params: .greedy, maxTokens: 24)
+        }
+        let results = engine.generateBatched(reqs)
+        XCTAssertEqual(results.count, reqs.count)
+
+        for (i, res) in results.enumerated() {
+            var first: Int?
+            var count = 0
+            var sawEnd = false
+            for await ev in res.stream {
+                if ev.isEnd { sawEnd = true; break }
+                if first == nil { first = ev.tokenId }
+                count += 1
+            }
+            XCTAssertTrue(sawEnd, "row \(i) stream never terminated")
+            XCTAssertGreaterThan(count, 0, "row \(i) produced no tokens")
+            XCTAssertEqual(first, serialFirst[i],
+                           "row \(i) first token diverged from its serial run")
+        }
     }
 }
