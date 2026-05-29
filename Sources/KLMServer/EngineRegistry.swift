@@ -47,13 +47,17 @@ public final class ActiveEngineRef: @unchecked Sendable {
 /// 503. Without this guard, a concurrent request for a new model could
 /// `unload()` a model that another request is still decoding against.
 ///
-/// Scope note (Stage A / "routing first"): per-model keep-alive and the
-/// full set of eviction policies are still the next PR; the idle evictor
-/// here unloads the whole pool. (Known narrow boundary: a model is
-/// protected from eviction only once its generation has entered the queue
-/// slot and retained; the microsecond window between activation and that
-/// retain is closed by an atomic reservation in the follow-up. Model loads
-/// take far longer than that window, so it is not reachable in practice.)
+/// Keep-alive is **per model**: each resident `Entry` owns its own
+/// ``KeepAliveController``, so a request's `keep_alive` (default / pin / 0)
+/// sets that one model's idle deadline, and the background evictor unloads
+/// each model independently when its own deadline passes and it is idle
+/// (see ``evictExpired(now:)``). A model is never evicted while in-flight.
+///
+/// (Known narrow boundary: a model is protected from eviction only once its
+/// generation has entered the queue slot and retained; the microsecond
+/// window between activation and that retain is closed by an atomic
+/// reservation in a follow-up. Model loads take far longer than that
+/// window, so it is not reachable in practice.)
 public actor EngineRegistry {
     public struct ModelNotFound: Error { public let name: String }
     /// Thrown when a new model must be loaded but every resident model is at
@@ -63,6 +67,8 @@ public actor EngineRegistry {
     private struct Entry {
         let engine: InferenceEngine
         var lastUsed: Date
+        /// Per-model idle deadline / keep-alive state.
+        let keepAlive: KeepAliveController
     }
 
     /// Resident engines keyed by canonical model directory path.
@@ -71,7 +77,9 @@ public actor EngineRegistry {
     private var order: [String] = []
     /// Live-generation refcount per key; a key with count > 0 is never
     /// evicted. Bracketed by ``retain(_:)``/``release(_:)`` around the
-    /// generation-queue slot.
+    /// generation-queue slot. (Kept alongside each model's KeepAliveController
+    /// in-flight count so the synchronous, pure ``selectEvictionVictim`` does
+    /// not have to await each controller.)
     private var inFlight: [String: Int] = [:]
 
     private let maxLoaded: Int
@@ -79,6 +87,8 @@ public actor EngineRegistry {
     private let prefixCache: PrefixCache
     private let kvCacheDtype: String?
     private let activeRef: ActiveEngineRef
+    /// Default idle keep-alive (seconds) for a newly-loaded model.
+    private let defaultKeepAliveSeconds: Int
     private let logger = Logger(label: "krillm.engine-registry")
 
     /// - Parameters:
@@ -86,22 +96,27 @@ public actor EngineRegistry {
     ///     register as the initial resident/active model, if any.
     ///   - preloadedName: the name `--model` was given (used to derive the key).
     ///   - maxLoaded: `MAX_LOADED_MODELS` (clamped to >= 1).
+    ///   - defaultKeepAliveSeconds: idle TTL applied to each loaded model
+    ///     until a request overrides it via `keep_alive`.
     public init(preloaded: InferenceEngine? = nil,
                 preloadedName: String? = nil,
                 maxLoaded: Int,
                 registry: Registry,
                 prefixCache: PrefixCache,
                 kvCacheDtype: String? = nil,
+                defaultKeepAliveSeconds: Int = 300,
                 activeRef: ActiveEngineRef) {
         self.maxLoaded = max(1, maxLoaded)
         self.registry = registry
         self.prefixCache = prefixCache
         self.kvCacheDtype = kvCacheDtype
+        self.defaultKeepAliveSeconds = defaultKeepAliveSeconds
         self.activeRef = activeRef
         if let preloaded {
             let key = Self.key(forName: preloadedName, registry: registry,
                                fallbackPath: preloaded.modelDirectoryPath)
-            entries[key] = Entry(engine: preloaded, lastUsed: Date())
+            entries[key] = Entry(engine: preloaded, lastUsed: Date(),
+                                 keepAlive: KeepAliveController(defaultSeconds: defaultKeepAliveSeconds))
             order.append(key)
             if preloaded.isLoaded { activeRef.set(preloaded) }
         }
@@ -156,7 +171,8 @@ public actor EngineRegistry {
                                      kvCacheDtype: kvCacheDtype)
         try await engine.load()
         await engine.warmup()
-        entries[key] = Entry(engine: engine, lastUsed: Date())
+        entries[key] = Entry(engine: engine, lastUsed: Date(),
+                             keepAlive: KeepAliveController(defaultSeconds: defaultKeepAliveSeconds))
         order.append(key)
         activeRef.set(engine)
         logger.info("loaded model '\(name)' (resident=\(self.entries.count)/\(self.maxLoaded))")
@@ -173,24 +189,79 @@ public actor EngineRegistry {
     }
 
     /// Mark `engine`'s live generation as started (call once a generation
-    /// queue slot is held). No-op for engines not in the pool (e.g. the
-    /// unloaded display fallback).
-    public func retain(_ engine: InferenceEngine?) {
+    /// queue slot is held, or just before queueing - see the server). Bumps
+    /// the eviction-safety refcount AND the model's own keep-alive in-flight
+    /// count so neither LRU eviction nor idle eviction tears it down. No-op
+    /// for engines not in the pool (e.g. the unloaded display fallback).
+    public func retain(_ engine: InferenceEngine?) async {
         guard let engine, let key = key(for: engine) else { return }
         inFlight[key, default: 0] += 1
+        await entries[key]?.keepAlive.beginRequest()
     }
 
     /// Release a live-generation hold taken by ``retain(_:)``.
-    public func release(_ engine: InferenceEngine?) {
-        guard let engine, let key = key(for: engine), let n = inFlight[key] else { return }
-        if n <= 1 { inFlight.removeValue(forKey: key) } else { inFlight[key] = n - 1 }
+    public func release(_ engine: InferenceEngine?) async {
+        guard let engine, let key = key(for: engine) else { return }
+        if let n = inFlight[key] {
+            if n <= 1 { inFlight.removeValue(forKey: key) } else { inFlight[key] = n - 1 }
+        }
+        await entries[key]?.keepAlive.endRequest()
+    }
+
+    /// Apply a request's `keep_alive` (seconds; nil = default, < 0 = pin
+    /// loaded, 0 = evict once this request drains) to the given model's
+    /// per-model deadline. No-op for engines not in the pool.
+    public func touch(_ engine: InferenceEngine?, keepAlive override: Int?) async {
+        guard let engine, let key = key(for: engine) else { return }
+        await entries[key]?.keepAlive.touch(override: override)
+    }
+
+    /// Unload every resident model whose per-model keep-alive deadline has
+    /// passed and which is not in-flight. Returns the display names (last
+    /// path component) of the models evicted this tick, for logging.
+    public func evictExpired(now: Date = Date()) async -> [String] {
+        var evicted: [String] = []
+        for (key, entry) in entries {
+            if await entry.keepAlive.shouldEvict(now: now) {
+                entry.engine.unload()
+                entries.removeValue(forKey: key)
+                order.removeAll { $0 == key }
+                inFlight.removeValue(forKey: key)
+                evicted.append(entry.engine.modelName ?? (key as NSString).lastPathComponent)
+            }
+        }
+        if let active = activeRef.current, key(for: active) == nil {
+            // The active model was just evicted. Keep the active mirror in
+            // step with residency: promote the most-recently-used survivor,
+            // or clear it only when the pool is now empty. This preserves the
+            // invariant `activeRef.current == nil` <=> no resident models,
+            // which display endpoints rely on for a synchronous empty check.
+            if let mruKey = order.last, let survivor = entries[mruKey] {
+                activeRef.set(survivor.engine)
+            } else {
+                activeRef.set(nil)
+            }
+        }
+        return evicted
+    }
+
+    /// Per-model status for `GET /api/ps`: every resident model with its
+    /// display name and current keep-alive expiry (nil = pinned).
+    public func residentInfo() async -> [(name: String, expiresAt: Date?)] {
+        var out: [(name: String, expiresAt: Date?)] = []
+        for key in order {
+            guard let entry = entries[key] else { continue }
+            let name = entry.engine.modelName ?? (key as NSString).lastPathComponent
+            out.append((name: name, expiresAt: await entry.keepAlive.expiresAt()))
+        }
+        return out
     }
 
     /// The active engine (mirror of ``ActiveEngineRef/current``).
     public func current() -> InferenceEngine? { activeRef.current }
 
-    /// Unload every resident model and clear the active pointer. Used by the
-    /// idle keep-alive evictor and `POST /v1/models/unload`.
+    /// Unload every resident model and clear the active pointer. Used by
+    /// `POST /v1/models/unload` (a deliberate, immediate force-unload).
     public func unloadAll() {
         for (_, entry) in entries { entry.engine.unload() }
         entries.removeAll()
@@ -210,4 +281,16 @@ public actor EngineRegistry {
         order.removeAll { $0 == key }
         order.append(key)
     }
+
+    #if DEBUG
+    /// Test-only: register a resident entry without loading weights, so the
+    /// per-model eviction policy (``evictExpired(now:)``) can be unit-tested
+    /// against controllers in known states. Compiled out of release builds.
+    func _insertForTesting(key: String, engine: InferenceEngine,
+                           keepAlive: KeepAliveController) {
+        entries[key] = Entry(engine: engine, lastUsed: Date(), keepAlive: keepAlive)
+        order.append(key)
+        activeRef.set(engine)
+    }
+    #endif
 }
