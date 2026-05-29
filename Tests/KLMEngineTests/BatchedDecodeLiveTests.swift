@@ -1,5 +1,6 @@
 import XCTest
 @testable import KLMEngine
+import KLMSampler
 
 /// Stage B correctness gate: a batched (B>1) decode of several DIFFERENT,
 /// ragged-length prompts must produce, for every row, exactly the tokens that
@@ -90,7 +91,8 @@ final class BatchedDecodeLiveTests: XCTestCase {
     /// by the teacher-forced logit test above), so they are not compared here.
     func testBatchedStreamingMatchesSerialFirstToken() async throws {
         let dir = try requireModelDirectory()
-        let engine = try await makeEngine(dir)
+        let engine = InferenceEngine(modelDirectory: dir)
+        try await engine.load()
         guard engine.supportsBatchedDecode else {
             throw XCTSkip("loaded model is not batched-eligible")
         }

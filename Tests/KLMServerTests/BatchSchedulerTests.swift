@@ -13,23 +13,12 @@ final class BatchSchedulerTests: XCTestCase {
         InferenceEngine(modelDirectory: URL(fileURLWithPath: "/tmp/krill-batch-\(name)"))
     }
 
-    private func submitOnce(_ sched: BatchScheduler) async
-        -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?)
-    {
-        await sched.submit(
-            messages: [["role": "user", "content": "hi"]],
-            params: .greedy, maxTokens: 8,
-            useSpeculative: nil, usePrefixCache: true,
-            imageData: nil, audioData: nil,
-            contextLimit: nil, promptTemplateOverride: nil)
-    }
-
     /// `numParallel == 1` disables batching: submit passes straight to the
     /// serial path and returns a finishing stream — never coalesces, never
     /// waits on a window, never deadlocks.
     func testNumParallelOneIsPassthrough() async {
         let sched = BatchScheduler(engine: unloadedEngine(), numParallel: 1, windowMs: 0)
-        let (stream, _) = await submitOnce(sched)
+        let (stream, _) = await batchSubmitOnce(sched)
         var count = 0
         for await _ in stream { count += 1; if count > 4 { break } }
         XCTAssertLessThanOrEqual(count, 4)   // unloaded engine → empty, finishing stream
@@ -40,11 +29,9 @@ final class BatchSchedulerTests: XCTestCase {
     /// request waiting for a cohort that can never be batched.
     func testIneligibleEngineFallsThroughAtHighParallelism() async {
         let sched = BatchScheduler(engine: unloadedEngine(), numParallel: 4, windowMs: 50)
-        let (stream, _) = await submitOnce(sched)
-        var terminated = false
+        let (stream, _) = await batchSubmitOnce(sched)
         for await _ in stream { /* drain */ }
-        terminated = true
-        XCTAssertTrue(terminated)
+        XCTAssertTrue(true)   // reaching here means the submit returned + finished
     }
 
     /// Several concurrent submits to an ineligible engine all return promptly
@@ -55,7 +42,10 @@ final class BatchSchedulerTests: XCTestCase {
         await withTaskGroup(of: Bool.self) { group in
             for _ in 0 ..< 6 {
                 group.addTask {
-                    let (stream, _) = await self.submitOnce(sched)
+                    // Capture only `sched` (an actor, Sendable); calling a
+                    // file-scope helper avoids capturing `self` (the
+                    // non-Sendable XCTestCase) into this @Sendable task.
+                    let (stream, _) = await batchSubmitOnce(sched)
                     for await _ in stream { /* drain */ }
                     return true
                 }
@@ -73,4 +63,18 @@ final class BatchSchedulerTests: XCTestCase {
                            BatchScheduler.defaultWindowMs)
         }
     }
+}
+
+/// Submit one canonical request to `sched`. File-scope (not a method) so the
+/// concurrent-submit test can call it from a `@Sendable` task without
+/// capturing the non-Sendable `XCTestCase`.
+private func batchSubmitOnce(_ sched: BatchScheduler) async
+    -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?)
+{
+    await sched.submit(
+        messages: [["role": "user", "content": "hi"]],
+        params: .greedy, maxTokens: 8,
+        useSpeculative: nil, usePrefixCache: true,
+        imageData: nil, audioData: nil,
+        contextLimit: nil, promptTemplateOverride: nil)
 }
