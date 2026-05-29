@@ -4,6 +4,23 @@ All notable changes to KrillLM are recorded here. Entries are in
 reverse chronological order. Versioning follows
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Multi-model resident pool (`MAX_LOADED_MODELS > 1`)** (follow-up #8,
+  Stage A — routing first): a new `EngineRegistry` keeps more than one
+  model resident at once (`KRILL_MAX_LOADED_MODELS` /
+  `OLLAMA_MAX_LOADED_MODELS`, default 1). Generate requests are now
+  **routed-or-loaded** by model name: a request for an installed model
+  loads it on demand and routes to it, keeping previously-loaded models
+  resident up to the cap (evicting the least-recently-used when full)
+  instead of discarding the prior model on every swap. All resident
+  engines share one prefix cache (keys already namespace by model). At
+  the default `MAX_LOADED_MODELS=1` behavior is unchanged. (Per-model
+  keep-alive, in-flight-aware eviction, and the full+busy "meaningful
+  503" are the next PR; batched concurrent decode is Stage B.)
+
 ## [0.4.0] - 2026-05-28
 
 Headline: Gemma 4 26B-A4B native MoE serves on Apple Silicon and beats
