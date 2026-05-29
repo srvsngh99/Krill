@@ -498,6 +498,13 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
                       mediaHash: mediaHash,
                       lastTokenOnly: true)
             },
+            // Batched ragged-decode (Stage B/C) for the DENSE text path
+            // (e2b/e4b/12b). Left nil for the 26B-A4B MoE checkpoint: the
+            // sparse per-(row,slot) expert dispatch at R>1 is a separate
+            // change (follow-up #8 Stage C3), so MoE Gemma 4 still serializes.
+            batchedDecodeForward: config.enableMoeBlock ? nil : { tokens, caches, mask, rowOffsets in
+                model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+            },
             vocabSize: config.vocabSize
         )
     }
@@ -556,6 +563,11 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
             model(tokens, caches: caches, lastTokenOnly: true)
         },
         multimodalForward: nil,
+        // Batched ragged-decode (Stage B/C) for the dense text path; nil for
+        // the 26B-A4B MoE checkpoint (Stage C3). See the multimodal branch.
+        batchedDecodeForward: config.enableMoeBlock ? nil : { tokens, caches, mask, rowOffsets in
+            model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
         vocabSize: config.vocabSize
     )
 }

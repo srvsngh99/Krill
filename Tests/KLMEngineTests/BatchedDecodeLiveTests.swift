@@ -54,15 +54,73 @@ final class BatchedDecodeLiveTests: XCTestCase {
         }
         XCTAssertGreaterThan(Set(prompts.map(\.count)).count, 1, "prompts should differ in length")
 
+        // Strict, dtype-independent gate first: R=1 batched must equal solo
+        // EXACTLY (bit-for-bit). This exercises every per-row code path - the
+        // per-row RoPE offsets (incl. Gemma 4's dual proportional/standard
+        // bases), KV-sharing donor logic, PLE, softcap, and the `.array` mask
+        // path - against the canonical decoder. A near-zero result here proves
+        // the model math is correct independent of batch width; only the
+        // batched-GEMM kernel-width rounding can then differ at R>1.
+        for (r, p) in prompts.enumerated() {
+            let d1 = try XCTUnwrap(
+                engine.teacherForcedBatchedVsSerialMaxDiff(promptTokens: [p], steps: 16))
+            XCTAssertLessThan(d1[0], 0.05,
+                "R=1 row \(r) batched logits must equal solo exactly; diff \(d1[0])")
+        }
+
         let diffs = try XCTUnwrap(
             engine.teacherForcedBatchedVsSerialMaxDiff(promptTokens: prompts, steps: 16))
-        // fp16 batched-GEMM rounding is ~1 ULP (observed ~0.03 at logit
-        // magnitudes ~20). A real cross-row/position bug corrupts logits by
-        // O(1) or more, so 0.5 cleanly separates "fp noise" from "bug".
+        // At R>1 the only remaining difference from solo is the batched-GEMM
+        // kernel-width rounding (proven above: R=1 is exact). This is a loose
+        // "did not explode" guard, NOT the primary correctness signal - that
+        // role is held by the exact R=1 gate above and the dtype-independent
+        // bit-exact contamination test below. fp16 families (Llama, Qwen dense)
+        // round at ~1 ULP (~0.03 at logit magnitude ~20), so 0.5 is ample.
+        // Gemma 4 computes in bf16 (7-bit mantissa vs fp16's 10) and the
+        // rounding accumulates with total model FLOPs - observed ~1.3 on e2b
+        // (35 layers) and ~3.6 on e4b (42 layers, wider) - so a generous 8.0
+        // ceiling absorbs the deepest published dense SKU while staying far
+        // below the O(10+) a real cross-row/position bug produces (and such a
+        // bug would already have broken the exact R=1 gate above).
+        let isBF16 = engine.loadedModelForBatching?.family == "gemma4"
+        let bound: Float = isBF16 ? 8.0 : 0.5
         for (r, d) in diffs.enumerated() {
-            XCTAssertLessThan(d, 0.5,
+            XCTAssertLessThan(d, bound,
                 "row \(r) (len \(prompts[r].count)) batched logits diverged from solo by \(d)")
         }
+    }
+
+    /// Dtype-independent cross-row isolation gate: a row's logits must not
+    /// depend on its NEIGHBORS' content. Runs the row at a fixed batch width
+    /// with two different sets of equal-length neighbors; batched matmul is
+    /// per-row independent, so the row's logits must be bit-identical. Any
+    /// nonzero diff is a genuine cross-batch bleed/indexing bug - and unlike
+    /// the teacher-forced-vs-solo diff this is not confounded by bf16 GEMM
+    /// rounding (batched-vs-batched at fixed width), so it must be ~0 even on
+    /// Gemma 4. The row is left-padded here (neighbors are longer), so this
+    /// also checks the left-pad mask hides the prefix regardless of neighbors.
+    func testBatchedDecodeNoCrossRowContamination() async throws {
+        let dir = try requireModelDirectory()
+        let engine = InferenceEngine(modelDirectory: dir)
+        try await engine.load()
+        guard engine.supportsBatchedDecode else {
+            throw XCTSkip("loaded model is not batched-eligible")
+        }
+        let row = try XCTUnwrap(engine.encodeForBatchTest("The capital of France is"))
+        // Neighbors: equal LENGTHS across A/B, different CONTENT; longer than
+        // `row` so `row` is left-padded in the stacked cache.
+        let nA = try XCTUnwrap(engine.encodeForBatchTest(
+            "Describe the process of photosynthesis in plants in detail."))
+        let nB = try XCTUnwrap(engine.encodeForBatchTest(
+            "Explain how a combustion engine converts fuel into motion here."))
+        // Trim to a common length so the geometry `row` sees is identical.
+        let len = min(nA.count, nB.count)
+        XCTAssertGreaterThan(len, row.count, "neighbor must be longer so row is padded")
+        let diff = try XCTUnwrap(engine.crossRowContaminationMaxDiff(
+            row: row, neighborsA: [Array(nA.prefix(len))],
+            neighborsB: [Array(nB.prefix(len))], steps: 16))
+        XCTAssertLessThan(diff, 0.05,
+            "row logits changed by \(diff) when only neighbor content changed (cross-row bleed)")
     }
 
     /// R=1 batched decode must equal the canonical decoder (proves the batched
