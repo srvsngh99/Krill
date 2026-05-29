@@ -48,6 +48,14 @@ public final class InferenceEngine: @unchecked Sendable {
     /// The detected model family (nil if not loaded).
     public var family: String? { loadedModel?.family }
 
+    /// Internal access for the Stage B batched decoder (BatchedDecode.swift),
+    /// which lives in a separate file and so cannot see the `private` stored
+    /// model/tokenizer directly.
+    var loadedModelForBatching: LoadedModel? { loadedModel }
+    var tokenizerEOS: Int? { tokenizer?.eosTokenId }
+    /// Tokenize raw text for the Stage B batched-decode tests.
+    public func encodeForBatchTest(_ text: String) -> [Int]? { tokenizer?.encode(text) }
+
     /// The loaded model's directory name (useful for display/status).
     public var modelName: String? { isLoaded ? modelDirectory.lastPathComponent : nil }
 

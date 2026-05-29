@@ -8,6 +8,17 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **Batched concurrent decode engine** (follow-up #8, Stage B - core): the
+  inference engine can now decode several ragged-length prompts in ONE
+  batched forward for plain-causal families (Llama 3.x, Qwen 2.5/3 dense).
+  Each row carries its own RoPE position (threaded into the attention
+  forward) and an additive mask hides its left-padded prefix in the stacked
+  KV cache, so a batched row reproduces that prompt's solo decode. Verified
+  on real checkpoints: batched per-row logits match the single-prompt logits
+  within fp16 rounding (~1 ULP), with no cross-row attention bleed. fp16 KV
+  only; greedy/per-row sampling; speculative decode and the prefix cache are
+  bypassed on the batched path. This lands the verified engine; wiring it to
+  concurrent server requests (`KRILL_NUM_PARALLEL >= 2`) is the next PR.
 - **Multi-model resident pool (`MAX_LOADED_MODELS > 1`)** (follow-up #8,
   Stage A — routing first): a new `EngineRegistry` keeps more than one
   model resident at once (`KRILL_MAX_LOADED_MODELS` /

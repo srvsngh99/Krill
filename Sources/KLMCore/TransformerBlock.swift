@@ -27,10 +27,11 @@ public class TransformerBlock: Module {
     public func callAsFunction(
         _ x: MLXArray,
         mask: MLXArray? = nil,
-        cache: KVCache? = nil
+        cache: KVCache? = nil,
+        rowOffsets: [Int]? = nil
     ) -> MLXArray {
         // Pre-norm attention with residual
-        let attnOut = selfAttn(inputLayernorm(x), mask: mask, cache: cache)
+        let attnOut = selfAttn(inputLayernorm(x), mask: mask, cache: cache, rowOffsets: rowOffsets)
         let h = x + attnOut
 
         // Pre-norm FFN with residual
