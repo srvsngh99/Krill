@@ -370,6 +370,24 @@ class Gemma4Attention: Module {
         }
     }
 
+    /// Apply RoPE per batch row at a DISTINCT position offset each
+    /// (`offsets[r]`), for the Stage B/C batched ragged-decode path. MLX's
+    /// `RoPE` takes a single scalar offset, so the rows are rotated
+    /// individually and re-concatenated. Reuses the same scalar `applyRoPE`
+    /// (proportional split-half for full layers, standard for sliding) so the
+    /// batched rotation is identical, row-for-row, to the solo-decode path -
+    /// the property the cross-row teacher-forced test asserts. `R` is the
+    /// (small) concurrency width, so the per-row loop is acceptable. Used only
+    /// on the batched decode path; B=1 / prefill keep the scalar call.
+    private func applyRoPEPerRow(_ x: MLXArray, offsets: [Int]) -> MLXArray {
+        var rows: [MLXArray] = []
+        rows.reserveCapacity(offsets.count)
+        for (r, off) in offsets.enumerated() {
+            rows.append(applyRoPE(x[r ..< (r + 1)], offset: off))
+        }
+        return concatenated(rows, axis: 0)
+    }
+
     /// Apply RoPE, handling proportional (split-half) for full attention layers.
     private func applyRoPE(_ x: MLXArray, offset: Int) -> MLXArray {
         if isFullAttn {
@@ -406,9 +424,17 @@ class Gemma4Attention: Module {
     }
 
     /// - Parameter sharedCache: If non-nil, use this cache's K/V instead of computing new ones (KV sharing)
+    /// - Parameter rowOffsets: Batched ragged-decode (Stage B/C) per-row RoPE
+    ///   positions. When non-nil, Q (and, on non-shared layers, the freshly
+    ///   computed K) are rotated per row at `rowOffsets[r]` instead of the
+    ///   single scalar `cache.sequenceLength` offset. The caller passes the
+    ///   row's true position (prefill length + step) for non-shared layers and
+    ///   all-zeros for KV-shared layers, mirroring the solo path where a
+    ///   shared layer's empty own cache yields offset 0.
     func callAsFunction(
         _ x: MLXArray, maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .none,
-        cache: KVCacheProtocol? = nil, sharedCache: KVCacheProtocol? = nil
+        cache: KVCacheProtocol? = nil, sharedCache: KVCacheProtocol? = nil,
+        rowOffsets: [Int]? = nil
     ) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
@@ -417,7 +443,11 @@ class Gemma4Attention: Module {
         var q = qProj(x).reshaped(B, L, numHeads, layerHeadDim).transposed(0, 2, 1, 3)
         q = qNorm(q)
         let offset = cache?.sequenceLength ?? (sharedCache?.sequenceLength ?? 0)
-        q = applyRoPE(q, offset: offset)
+        if let rowOffsets {
+            q = applyRoPEPerRow(q, offsets: rowOffsets)
+        } else {
+            q = applyRoPE(q, offset: offset)
+        }
 
         let k: MLXArray
         let v: MLXArray
@@ -446,7 +476,11 @@ class Gemma4Attention: Module {
             newK = kNorm(newK)
             let vVar = MLX.mean(newV * newV, axis: -1, keepDims: true)
             newV = newV * MLX.rsqrt(vVar + MLXArray(rmsNormEps).asType(newV.dtype))
-            newK = applyRoPE(newK, offset: offset)
+            if let rowOffsets {
+                newK = applyRoPEPerRow(newK, offsets: rowOffsets)
+            } else {
+                newK = applyRoPE(newK, offset: offset)
+            }
             if let cache {
                 (k, v) = cache.update(keys: newK, values: newV)
             } else {
@@ -971,13 +1005,13 @@ class Gemma4Block: Module {
     func callAsFunction(
         _ x: MLXArray, maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .none,
         cache: KVCacheProtocol? = nil, sharedCache: KVCacheProtocol? = nil,
-        perLayerInput: MLXArray? = nil
+        perLayerInput: MLXArray? = nil, rowOffsets: [Int]? = nil
     ) -> MLXArray {
         // Attention with post-norm
         var h = x + postAttnNorm(
             selfAttn(
                 inputLayernorm(x), maskMode: maskMode,
-                cache: cache, sharedCache: sharedCache))
+                cache: cache, sharedCache: sharedCache, rowOffsets: rowOffsets))
 
         // FFN: either parallel dense+sparse (MoE) or dense-only.
         let ffnOut: MLXArray
@@ -1193,6 +1227,77 @@ class Gemma4TextModel: Module {
 
         return norm(h)
     }
+
+    /// Stage B/C batched ragged-decode step (text-only, dense PLE path).
+    ///
+    /// One new token per row (`tokens` is `[R, 1]`), each rotated at its own
+    /// next position via `rowOffsets[r]`, attending under the explicit per-row
+    /// additive left-pad `mask` that hides each row's padded prefix in the
+    /// stacked cache. This deliberately reuses the same `Gemma4Block` /
+    /// `Gemma4Attention` bodies as the solo forward (norms, PLE gating,
+    /// `layer_scalar`, GeGLU all unchanged) and only swaps the scalar-offset
+    /// RoPE for the per-row variant, so a batched row is bit-identical (to fp
+    /// tolerance) to running that prompt alone.
+    ///
+    /// KV sharing (e2b/e4b): shared layers (`i >= firstKVSharedLayer`) reuse
+    /// the donor layer's stacked K/V and rotate Q at offset 0 - exactly the
+    /// solo path, where a shared layer's own (empty) cache yields
+    /// `sequenceLength == 0`. The stacked `caches` therefore hold real K/V only
+    /// at the non-shared (donor-eligible) slots; shared slots are empty
+    /// placeholders the attention never reads or updates.
+    ///
+    /// Decode-only: no multimodal injection, no prefill graph-flushing (the
+    /// step is a single token, the driver evals the logits). The causal
+    /// structure is plain left-pad for every layer - matching the solo path,
+    /// which applies no sliding-window restriction (see `callAsFunction`'s
+    /// `createCachedCausalMask`, which is plain causal). A future sliding-
+    /// window-aware solo path would need the matching restriction here.
+    func batchedDecode(
+        _ tokens: MLXArray, caches: [KVCache], mask: MLXArray, rowOffsets: [Int]
+    ) -> MLXArray {
+        let B = tokens.dim(0)
+        let L = tokens.dim(1)
+        let numLayers = config.numHiddenLayers
+        let pleDim = config.hiddenSizePerLayerInput
+        // Shared layers rotate Q at offset 0 (their own cache is empty in the
+        // solo path), so a fresh zero-offset vector mirrors that exactly.
+        let zeroOffsets = [Int](repeating: 0, count: B)
+
+        var h = embedTokens(tokens) * embedScale
+
+        // PLE per-layer inputs (e2b/e4b). Plain tokens - decode never carries
+        // image/audio placeholders. Identical math to the solo forward.
+        var combinedPLE: MLXArray? = nil
+        if hasPLE, let embedPerLayer = embedPerLayer,
+           let perLayerProj = perLayerProj, let perLayerNorm = perLayerNorm {
+            let pleEmbed = embedPerLayer(tokens) * pleScale
+            let projection = perLayerProj(h) * projScale
+            let projNormed = perLayerNorm(projection.reshaped(B * L * numLayers, pleDim))
+                .reshaped(B, L, numLayers * pleDim)
+            combinedPLE = (projNormed + pleEmbed) * combineScale
+        }
+
+        let maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .array(mask)
+        let firstShared = config.firstKVSharedLayer
+
+        for (i, layer) in layers.enumerated() {
+            let pleSlice: MLXArray? = combinedPLE.map { ple in
+                ple[0..., 0..., (i * pleDim) ..< ((i + 1) * pleDim)]
+            }
+
+            if kvSharingEnabled, i >= firstShared {
+                let donorIdx = config.isFullAttention(layerIdx: i) ? lastFullDonor : lastSlidingDonor
+                h = layer(h, maskMode: maskMode, cache: caches[i],
+                          sharedCache: caches[donorIdx], perLayerInput: pleSlice,
+                          rowOffsets: zeroOffsets)
+            } else {
+                h = layer(h, maskMode: maskMode, cache: caches[i],
+                          perLayerInput: pleSlice, rowOffsets: rowOffsets)
+            }
+        }
+
+        return norm(h)
+    }
 }
 
 // MARK: - Gemma4ForCausalLM
@@ -1230,6 +1335,20 @@ public class Gemma4ForCausalLM: Module {
             let last = hidden.dim(1) - 1
             hidden = hidden[0..., last ..< (last + 1), 0...]
         }
+        let logits = lmHead(hidden)
+        let cap = config.finalLogitSoftcapping
+        return MLX.tanh(logits / cap) * cap
+    }
+
+    /// Stage B/C batched ragged-decode step. Returns logits `[R, 1, vocab]`
+    /// with the same tied-head + `final_logit_softcapping` as the solo decode
+    /// (the softcap is per-element, so it commutes with the per-row batching).
+    /// `L == 1` already, so no `lastTokenOnly` slice is needed.
+    public func batchedDecode(
+        _ tokens: MLXArray, caches: [KVCache], mask: MLXArray, rowOffsets: [Int]
+    ) -> MLXArray {
+        let hidden = model.batchedDecode(
+            tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
         let logits = lmHead(hidden)
         let cap = config.finalLogitSoftcapping
         return MLX.tanh(logits / cap) * cap
@@ -1464,6 +1583,16 @@ public class Gemma4MultimodalModel: Module {
             imageTokenId: imageTokenId,
             audioTokenId: audioTokenId,
             lastTokenOnly: lastTokenOnly)
+    }
+
+    /// Stage B/C batched ragged-decode step over the text language model.
+    /// Forwards to `Gemma4ForCausalLM.batchedDecode` (text-only - the batched
+    /// path never carries image/audio placeholders).
+    public func batchedDecode(
+        _ tokens: MLXArray, caches: [KVCache], mask: MLXArray, rowOffsets: [Int]
+    ) -> MLXArray {
+        languageModel.batchedDecode(
+            tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
     }
 
     /// Number of transformer layers (for KV cache creation).
