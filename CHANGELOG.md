@@ -14,12 +14,15 @@ reverse chronological order. Versioning follows
   `OLLAMA_MAX_LOADED_MODELS`, default 1). Generate requests are now
   **routed-or-loaded** by model name: a request for an installed model
   loads it on demand and routes to it, keeping previously-loaded models
-  resident up to the cap (evicting the least-recently-used when full)
-  instead of discarding the prior model on every swap. All resident
-  engines share one prefix cache (keys already namespace by model). At
-  the default `MAX_LOADED_MODELS=1` behavior is unchanged. (Per-model
-  keep-alive, in-flight-aware eviction, and the full+busy "meaningful
-  503" are the next PR; batched concurrent decode is Stage B.)
+  resident up to the cap instead of discarding the prior model on every
+  swap. Eviction is **in-flight-aware**: the least-recently-used resident
+  that is NOT currently generating is evicted, and when the pool is full
+  and every model is busy a new-model request gets a meaningful 503
+  (naming `KRILL_MAX_LOADED_MODELS`) rather than tearing a model down
+  mid-stream. All resident engines share one prefix cache (keys already
+  namespace by model). At the default `MAX_LOADED_MODELS=1` behavior is
+  unchanged. (Per-model keep-alive is the next PR; batched concurrent
+  decode is Stage B.)
 
 ## [0.4.0] - 2026-05-28
 

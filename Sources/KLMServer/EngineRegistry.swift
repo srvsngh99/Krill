@@ -38,14 +38,27 @@ public final class ActiveEngineRef: @unchecked Sendable {
 /// prefix-cache memory budget singular rather than multiplying by the
 /// resident count. (Per-model pools are a deferred opt-in.)
 ///
-/// Scope note (Stage A / "routing first"): per-model keep-alive,
-/// in-flight-aware eviction, and the full+busy "meaningful 503" are the
-/// next PR. Today eviction is LRU-on-overflow plus the existing global
-/// idle evictor (which unloads the whole pool), and generation remains
-/// serialized by `GenerationQueue`, so the LRU victim is never the
-/// in-flight (active) model.
+/// Eviction is **in-flight-aware**: a resident engine with a live
+/// generation (tracked via ``retain(_:)``/``release(_:)``, bracketed around
+/// the `GenerationQueue` slot exactly like the keep-alive in-flight count)
+/// is never evicted. When the pool is at `maxLoaded` and every resident
+/// model is busy, ``activate(name:)`` throws ``PoolBusy`` rather than
+/// tearing a model down mid-stream; the server turns that into a meaningful
+/// 503. Without this guard, a concurrent request for a new model could
+/// `unload()` a model that another request is still decoding against.
+///
+/// Scope note (Stage A / "routing first"): per-model keep-alive and the
+/// full set of eviction policies are still the next PR; the idle evictor
+/// here unloads the whole pool. (Known narrow boundary: a model is
+/// protected from eviction only once its generation has entered the queue
+/// slot and retained; the microsecond window between activation and that
+/// retain is closed by an atomic reservation in the follow-up. Model loads
+/// take far longer than that window, so it is not reachable in practice.)
 public actor EngineRegistry {
     public struct ModelNotFound: Error { public let name: String }
+    /// Thrown when a new model must be loaded but every resident model is at
+    /// the `maxLoaded` cap AND currently in-flight, so none can be evicted.
+    public struct PoolBusy: Error { public let maxLoaded: Int }
 
     private struct Entry {
         let engine: InferenceEngine
@@ -56,6 +69,10 @@ public actor EngineRegistry {
     private var entries: [String: Entry] = [:]
     /// LRU order of keys, oldest first.
     private var order: [String] = []
+    /// Live-generation refcount per key; a key with count > 0 is never
+    /// evicted. Bracketed by ``retain(_:)``/``release(_:)`` around the
+    /// generation-queue slot.
+    private var inFlight: [String: Int] = [:]
 
     private let maxLoaded: Int
     private let registry: Registry
@@ -103,9 +120,10 @@ public actor EngineRegistry {
     public var residentCount: Int { entries.count }
 
     /// Resolve (route-or-load) the engine for `name`, mark it active, and
-    /// return it. Loads on demand, evicting the LRU resident model when the
-    /// pool is already at `maxLoaded`. Throws ``ModelNotFound`` if `name` is
-    /// not an installed model.
+    /// return it. Loads on demand, evicting the least-recently-used resident
+    /// model that is NOT in-flight when the pool is at `maxLoaded`. Throws
+    /// ``ModelNotFound`` if `name` is not installed, or ``PoolBusy`` if the
+    /// pool is full and every resident model is currently generating.
     public func activate(name: String) async throws -> InferenceEngine {
         guard registry.hasModel(name) else { throw ModelNotFound(name: name) }
         let key = registry.modelPath(name).path
@@ -117,13 +135,18 @@ public actor EngineRegistry {
             return existing.engine
         }
 
-        // Evict LRU residents until there is room for one more. The active
-        // (most-recently-used) model is at the tail of `order`, so the head
-        // we evict is never the in-flight model under serialized generation.
-        while entries.count >= maxLoaded, let victim = order.first {
+        // Make room: evict the LRU non-in-flight resident until under cap.
+        // Never evict a model with a live generation (it would tear the
+        // engine down mid-stream); if none is evictable, refuse with PoolBusy
+        // so the server can return a meaningful 503 instead of crashing.
+        while entries.count >= maxLoaded {
+            guard let victim = Self.selectEvictionVictim(
+                order: order, inFlight: inFlight) else {
+                throw PoolBusy(maxLoaded: maxLoaded)
+            }
             entries[victim]?.engine.unload()
             entries.removeValue(forKey: victim)
-            order.removeFirst()
+            order.removeAll { $0 == victim }
             logger.info("evicted LRU model to make room (cap=\(self.maxLoaded))")
         }
 
@@ -140,6 +163,29 @@ public actor EngineRegistry {
         return engine
     }
 
+    /// Choose the eviction victim: the least-recently-used resident key whose
+    /// in-flight count is zero, or nil if every resident model is in-flight.
+    /// Pure (no actor state) so the invariant can be unit-tested directly.
+    static func selectEvictionVictim(order: [String],
+                                     inFlight: [String: Int]) -> String? {
+        for key in order where (inFlight[key] ?? 0) == 0 { return key }
+        return nil
+    }
+
+    /// Mark `engine`'s live generation as started (call once a generation
+    /// queue slot is held). No-op for engines not in the pool (e.g. the
+    /// unloaded display fallback).
+    public func retain(_ engine: InferenceEngine?) {
+        guard let engine, let key = key(for: engine) else { return }
+        inFlight[key, default: 0] += 1
+    }
+
+    /// Release a live-generation hold taken by ``retain(_:)``.
+    public func release(_ engine: InferenceEngine?) {
+        guard let engine, let key = key(for: engine), let n = inFlight[key] else { return }
+        if n <= 1 { inFlight.removeValue(forKey: key) } else { inFlight[key] = n - 1 }
+    }
+
     /// The active engine (mirror of ``ActiveEngineRef/current``).
     public func current() -> InferenceEngine? { activeRef.current }
 
@@ -149,7 +195,14 @@ public actor EngineRegistry {
         for (_, entry) in entries { entry.engine.unload() }
         entries.removeAll()
         order.removeAll()
+        inFlight.removeAll()
         activeRef.set(nil)
+    }
+
+    /// Pool key for a resident engine, by object identity.
+    private func key(for engine: InferenceEngine) -> String? {
+        for (k, e) in entries where e.engine === engine { return k }
+        return nil
     }
 
     /// Move `key` to the most-recently-used (tail) position.

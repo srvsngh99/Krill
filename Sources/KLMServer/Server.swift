@@ -472,6 +472,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         self.requestEngine = eng
                         run(ctx, body)
                     }
+                } catch let busy as EngineRegistry.PoolBusy {
+                    el.execute {
+                        self.sendJSON(context: ctx, status: .serviceUnavailable, body: [
+                            "error": "All \(busy.maxLoaded) model slot(s) are loaded and busy; "
+                                + "cannot load '\(requested)' right now. Raise KRILL_MAX_LOADED_MODELS "
+                                + "to keep more models resident, then retry."])
+                    }
                 } catch {
                     let msg = String(describing: error).prefix(200)
                     el.execute {
@@ -500,7 +507,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     /// single-flight engine + prefix/KV caches are never entered in
     /// parallel.
     private func enterQueueOr503(_ ctx: ChannelHandlerContext,
-                                 _ eventLoop: EventLoop) async -> Bool {
+                                 _ eventLoop: EventLoop,
+                                 retaining eng: InferenceEngine? = nil) async -> Bool {
         // Register the model hold BEFORE queueing (PR #20 review P1): a
         // request accepted while the model is loaded must keep it loaded
         // even while it waits behind another request. If beginRequest() ran
@@ -513,6 +521,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         await keepAlive.beginRequest()
         do {
             try await genQueue.enter()
+            // In-flight hold on the resident engine so the registry never
+            // evicts a model that this request is about to generate against.
+            await engines.retain(eng)
             return true
         } catch {
             await keepAlive.endRequest()   // rejected: balance the hold
@@ -523,24 +534,26 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    private func leaveQueue() {
+    private func leaveQueue(releasing eng: InferenceEngine? = nil) {
         let q = genQueue
         let ka = keepAlive
+        let pool = engines
         // Release the queue slot first so the next waiter resumes, then drop
         // this request's hold. Any queued waiter already holds its own
         // beginRequest()-registered hold (taken before it queued), so
         // inFlight never transiently hits 0 during the handoff and the
         // evictor can't unload between requests (PR #20 review P1).
-        Task { await q.leave(); await ka.endRequest() }
+        Task { await q.leave(); await ka.endRequest(); await pool.release(eng) }
     }
 
     /// Slot acquire that just returns success/failure (for streaming paths
     /// whose 200 head is already on the wire, so a JSON 503 is impossible -
     /// the caller closes the stream with a terminal error instead).
-    private func tryEnterQueue() async -> Bool {
+    private func tryEnterQueue(retaining eng: InferenceEngine? = nil) async -> Bool {
         await keepAlive.beginRequest()     // hold from acceptance (P1)
         do {
             try await genQueue.enter()
+            await engines.retain(eng)
             return true
         } catch {
             await keepAlive.endRequest()   // rejected: balance the hold
@@ -830,8 +843,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             contextLimit: defaultContextLimit)
 
         Task {
-            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
-            defer { self.leaveQueue() }
+            guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
+            defer { self.leaveQueue(releasing: eng) }
             let (tokenStream, getStats) = eng.generate(
                 messages: msgs, params: params, maxTokens: maxTokens,
                 contextLimit: ctxLimit,
@@ -942,8 +955,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             defer { mediaCopy?.cleanup() }
-            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
-            defer { self.leaveQueue() }
+            guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
+            defer { self.leaveQueue(releasing: eng) }
             let (tokenStream, getStats) = eng.generate(
                 messages: messages, params: params,
                 maxTokens: maxTokens, imageData: imageData,
@@ -1143,7 +1156,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             // Hold a generation slot for the whole token loop (WS-E). The
             // 200 SSE head is already sent, so on overflow we close the
             // stream with a valid terminal error chunk + [DONE].
-            guard await self.tryEnterQueue() else {
+            guard await self.tryEnterQueue(retaining: eng) else {
                 let errChunk = "data: {\"error\":\"server busy: max queue exceeded\"}\n\n"
                 var b = ByteBufferAllocator().buffer(capacity: errChunk.utf8.count)
                 b.writeString(errChunk + "data: [DONE]\n\n")
@@ -1151,7 +1164,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 self.writeOnLoop(ctx, .end(nil), flush: true)
                 return
             }
-            defer { self.leaveQueue() }
+            defer { self.leaveQueue(releasing: eng) }
 
             let (tokenStream, _) = eng.generate(
                 messages: messages,
@@ -1217,8 +1230,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             defer { mediaCopy?.cleanup() }
-            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
-            defer { self.leaveQueue() }
+            guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
+            defer { self.leaveQueue(releasing: eng) }
             let (tokenStream, getStats) = eng.generate(
                 messages: messages,
                 params: params, maxTokens: maxTokens,
@@ -1286,8 +1299,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             // WS-E: /v1/completions is engine-touching too - serialize it.
-            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
-            defer { self.leaveQueue() }
+            guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
+            defer { self.leaveQueue(releasing: eng) }
             let (tokenStream, getStats) = eng.generate(
                 prompt: request.prompt,
                 params: request.sampling.samplingParams,
@@ -1486,16 +1499,16 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             defer { mediaCopy?.cleanup() }
             // Hold a generation slot for the whole token loop (WS-E).
             if wantStream {
-                guard await self.tryEnterQueue() else {
+                guard await self.tryEnterQueue(retaining: eng) else {
                     self.writeNDJSON(ctx, ["model": modelName,
                         "error": "server busy: max queue exceeded", "done": true])
                     self.writeOnLoop(ctx, .end(nil), flush: true)
                     return
                 }
             } else {
-                guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+                guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
             }
-            defer { self.leaveQueue() }
+            defer { self.leaveQueue(releasing: eng) }
             let (tokenStream, getStats) = eng.generate(
                 messages: genMessages,
                 params: ocParams,
@@ -1681,16 +1694,16 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         Task {
             defer { mediaCopy?.cleanup() }
             if wantStream {
-                guard await self.tryEnterQueue() else {
+                guard await self.tryEnterQueue(retaining: eng) else {
                     self.writeNDJSON(ctx, ["error": "server busy: max queue exceeded",
                                            "done": true])
                     self.writeOnLoop(ctx, .end(nil), flush: true)
                     return
                 }
             } else {
-                guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+                guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
             }
-            defer { self.leaveQueue() }
+            defer { self.leaveQueue(releasing: eng) }
             let (tokenStream, getStats) = eng.generate(
                 prompt: request.prompt,
                 systemPrompt: genSystem,
@@ -2574,8 +2587,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         Task {
             do {
                 // Stage A: load into the resident pool (keeping prior models
-                // resident up to MAX_LOADED_MODELS, evicting LRU) and make it
-                // active, instead of discarding the previously-loaded model.
+                // resident up to MAX_LOADED_MODELS, evicting an idle LRU) and
+                // make it active, instead of discarding the previously-loaded
+                // model via engine.swap(). The old swap() set `isSwapping` to
+                // fence concurrent generations; that interlock is now provided
+                // by the registry's in-flight-aware eviction (a generating
+                // model is never evicted), so an on-demand load can no longer
+                // pull a model out from under a live request.
                 let eng = try await pool.activate(name: modelName)
                 let model = eng.modelName ?? modelName
                 let family = eng.family ?? "unknown"
