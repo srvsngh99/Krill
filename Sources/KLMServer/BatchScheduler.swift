@@ -2,49 +2,43 @@ import Foundation
 import KLMEngine
 import KLMSampler
 
-/// Coalesces concurrent same-model generation requests into one batched
-/// forward (follow-up #8, Stage B — wiring). Sits between the server handlers
-/// and a single resident ``InferenceEngine``: eligible requests are gathered
-/// into a static cohort (up to `numParallel`, within a small coalescing
-/// window) and driven through ``InferenceEngine/generateBatched(_:)``; every
-/// other request — `numParallel < 2`, an ineligible family, multimodal,
-/// per-row seeded sampling, or an explicit speculative opt-in — falls straight
-/// through to today's serial ``InferenceEngine/generate(messages:...)`` and is
-/// byte-identical to before.
+/// Routes concurrent same-model generation requests into the engine's
+/// continuous batcher (follow-up #8, Stage C1). Sits between the server
+/// handlers and a single resident ``InferenceEngine``: eligible requests are
+/// submitted to ``InferenceEngine/submitBatched(_:maxRows:windowMs:)``, which
+/// admits each into one persistent running batch and drops finished rows
+/// between steps. Every other request — `numParallel < 2`, an ineligible
+/// family, multimodal, per-row seeded sampling, or an explicit speculative
+/// opt-in — falls straight through to serial
+/// ``InferenceEngine/generate(messages:...)`` and is byte-identical to before.
 ///
-/// One scheduler exists per resident model (owned by ``EngineRegistry``), so
-/// the cohort only ever batches rows that share an engine + KV layout.
+/// One scheduler exists per resident model (owned by ``EngineRegistry``), so a
+/// batch only ever contains rows that share an engine + KV layout.
 ///
-/// v1 (Stage B) is **static** batching: a cohort runs to completion before the
-/// next one starts. Continuous admission (splicing a newcomer into a running
-/// batch) is Stage C.
+/// Stage B was static (a fixed cohort decoded to completion); Stage C1 makes
+/// admission continuous — a newcomer joins the running batch at the next epoch
+/// boundary instead of waiting for the current cohort to finish. The coalescing
+/// behaviour now lives inside the batcher (cold-start gather window + rolling
+/// admission), so this type is a thin eligibility gate + pass-through.
 actor BatchScheduler {
     typealias GenResult = (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?)
 
     private let engine: InferenceEngine
     private let numParallel: Int
-    private let windowNanos: UInt64
-
-    private struct Waiter {
-        let req: BatchGenRequest
-        let cont: CheckedContinuation<GenResult, Never>
-    }
-    /// Requests waiting to be batched, in arrival order.
-    private var pending: [Waiter] = []
-    /// True while a coalescing-window timer is in flight, so we arm at most one.
-    private var timerArmed = false
+    private let windowMs: Int
 
     /// - Parameters:
     ///   - engine: the resident engine this scheduler batches for.
-    ///   - numParallel: `KRILL_NUM_PARALLEL` — max cohort size (and the
-    ///     in-flight cap the `GenerationQueue` already enforces). `< 2`
-    ///     disables batching entirely.
-    ///   - windowMs: coalescing window; the cohort fires when it reaches
-    ///     `numParallel` rows OR this many ms after the first row arrives.
+    ///   - numParallel: `KRILL_NUM_PARALLEL` — max simultaneously-decoding rows
+    ///     in the running batch (and the in-flight cap the `GenerationQueue`
+    ///     already enforces). `< 2` disables batching entirely.
+    ///   - windowMs: cold-start gather window passed to the batcher; on an
+    ///     idle->busy transition it waits this long once so genuinely-concurrent
+    ///     arrivals start in one batch instead of the first decoding solo.
     init(engine: InferenceEngine, numParallel: Int, windowMs: Int) {
         self.engine = engine
         self.numParallel = max(1, numParallel)
-        self.windowNanos = UInt64(max(0, windowMs)) * 1_000_000
+        self.windowMs = max(0, windowMs)
     }
 
     /// Default coalescing window when `KRILL_BATCH_WINDOW_MS` is unset. Small
@@ -76,90 +70,32 @@ actor BatchScheduler {
 
     /// Submit a generation request. Returns the same `(stream, stats)` shape as
     /// ``InferenceEngine/generate(messages:...)`` so handlers are unchanged
-    /// beyond the call site. Eligible requests await their cohort; everyone
-    /// else returns immediately on the serial path.
+    /// beyond the call site. Eligible requests join the running batch via the
+    /// continuous batcher; everyone else takes the serial path.
     func submit(messages: [[String: String]], params: SamplingParams, maxTokens: Int,
                 useSpeculative: Bool?, usePrefixCache: Bool,
                 imageData: Data?, audioData: Data?,
                 contextLimit: Int?, promptTemplateOverride: String?) async -> GenResult {
-        guard isEligible(params: params, imageData: imageData, audioData: audioData,
-                         useSpeculative: useSpeculative) else {
-            return engine.generate(
+        func serial() -> GenResult {
+            engine.generate(
                 messages: messages, params: params, maxTokens: maxTokens,
                 useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
                 imageData: imageData, audioData: audioData,
                 contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride)
+        }
+        guard isEligible(params: params, imageData: imageData, audioData: audioData,
+                         useSpeculative: useSpeculative) else {
+            return serial()
         }
 
         let req = BatchGenRequest(
             messages: messages, params: params, maxTokens: maxTokens,
             contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
             useSpeculative: useSpeculative, usePrefixCache: usePrefixCache)
-        return await withCheckedContinuation { (cont: CheckedContinuation<GenResult, Never>) in
-            pending.append(Waiter(req: req, cont: cont))
-            if pending.count >= numParallel {
-                fireCohort()
-            } else {
-                armTimer()
-            }
-        }
-    }
-
-    private func armTimer() {
-        guard !timerArmed else { return }
-        timerArmed = true
-        let ns = windowNanos
-        Task { [weak self] in
-            try? await Task.sleep(nanoseconds: ns)
-            await self?.timerFired()
-        }
-    }
-
-    private func timerFired() {
-        timerArmed = false
-        if !pending.isEmpty { fireCohort() }
-    }
-
-    /// Take up to `numParallel` waiters and drive them through one batched
-    /// generate, handing each its row's stream. `generateBatched` returns one
-    /// result per request in order (and itself falls back to serial for a
-    /// single-row cohort), so the mapping is positional.
-    private func fireCohort() {
-        let take = min(numParallel, pending.count)
-        guard take > 0 else { return }
-        let cohort = Array(pending.prefix(take))
-        pending.removeFirst(take)
-
-        let results = engine.generateBatched(cohort.map { $0.req })
-        // generateBatched returns exactly one result per request on every path,
-        // so this is positional. Guard defensively anyway: a count mismatch
-        // must never leave a waiter's continuation un-resumed (the HTTP request
-        // would hang with no timeout) — fall each unmatched waiter back to a
-        // direct serial generate so every continuation is resumed exactly once.
-        if results.count == cohort.count {
-            for (i, w) in cohort.enumerated() {
-                w.cont.resume(returning: results[i])
-            }
-        } else {
-            for (i, w) in cohort.enumerated() {
-                if i < results.count {
-                    w.cont.resume(returning: results[i])
-                } else {
-                    w.cont.resume(returning: engine.generate(
-                        messages: w.req.messages, params: w.req.params,
-                        maxTokens: w.req.maxTokens, useSpeculative: w.req.useSpeculative,
-                        usePrefixCache: w.req.usePrefixCache, contextLimit: w.req.contextLimit,
-                        promptTemplateOverride: w.req.promptTemplateOverride))
-                }
-            }
-        }
-
-        // Anything that arrived during assembly: fire again if a full cohort
-        // is ready, else re-arm the window for the stragglers.
-        if pending.count >= numParallel {
-            fireCohort()
-        } else if !pending.isEmpty {
-            armTimer()
-        }
+        // submitBatched returns nil only when the model turned out not to be
+        // batch-eligible after prompt construction (unknown family / empty
+        // prompt) — fall back to serial so the request is always served.
+        return engine.submitBatched(req, maxRows: numParallel, windowMs: windowMs)
+            ?? serial()
     }
 }
