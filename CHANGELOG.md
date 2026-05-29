@@ -8,6 +8,23 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **Continuous batched decode** (follow-up #8, Stage C1): batching is now
+  *continuous* rather than a static cohort. A persistent per-model
+  `ContinuousBatcher` runs one decode loop that admits a newly-arrived request
+  into the *running* batch at the next step boundary and drops finished or
+  cancelled rows mid-flight (shrink), instead of waiting for a fixed cohort to
+  complete. Each row keeps its own authoritative `[KVCache]`; the active set is
+  re-stacked left-padded only when it changes (an "epoch"), so within an epoch
+  the per-step cost matches the verified Stage B core and every active row is
+  always decoded exactly as if it ran alone. Driven via a new
+  `InferenceEngine.submitBatched(_:maxRows:windowMs:)`; the `BatchScheduler` now
+  forwards eligible requests to it (rolling admission) and the static
+  `generateBatched` cohort entry is retained for direct/test use. Scope is
+  unchanged from Stage B: text-only Llama 3.x / Qwen 2.5-3 dense, fp16 KV, no
+  prefix cache, no speculative decode (Gemma 4 / MoE / VL and
+  prefix/int8/spec reconciliation are later Stage C sub-stages). The batcher is
+  torn down on `unload()`, finishing every in-flight and waiting stream so a
+  model swap never strands a request.
 - **Live batched serving (`BatchScheduler`)** (follow-up #8, Stage B —
   wiring): concurrent same-model requests are now coalesced into ONE batched
   forward, turning the verified Stage B engine into a live throughput feature.

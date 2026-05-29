@@ -158,6 +158,13 @@ public final class InferenceEngine: @unchecked Sendable {
     /// `KRILL_KV_CACHE_DTYPE` env var.
     private let kvCacheDtype: String
 
+    /// Continuous batched-decode driver (follow-up #8, Stage C1). Lazily
+    /// created on the first eligible `submitBatched` call against the current
+    /// model and torn down on `unload()`, so a model swap never decodes against
+    /// a stale model's captured forward closures. Guarded by `batcherLock`.
+    private var continuousBatcher: ContinuousBatcher?
+    private let batcherLock = NSLock()
+
     public init(modelDirectory: URL, prefixCache: PrefixCache? = nil, kvCacheDtype: String? = nil) {
         self.modelDirectory = modelDirectory
         self.prefixCache = prefixCache ?? PrefixCache()
@@ -1216,6 +1223,14 @@ public final class InferenceEngine: @unchecked Sendable {
 
     /// Unload the model from memory and release resources.
     public func unload() {
+        // Tear down the continuous batcher first so its background decode loop
+        // stops and finishes every in-flight / waiting stream before the model
+        // it captured is dropped (its forward closures would otherwise dangle).
+        batcherLock.lock()
+        let batcher = continuousBatcher
+        continuousBatcher = nil
+        batcherLock.unlock()
+        batcher?.stop()
         loadedModel = nil
         tokenizer = nil
         specDecoder = nil
@@ -1402,6 +1417,50 @@ extension InferenceEngine {
         return (0 ..< R).map { r in
             (streams[r], { [statsHolders] in statsHolders[r].stats })
         }
+    }
+
+    /// Submit ONE request to the engine's persistent continuous batcher
+    /// (follow-up #8, Stage C1) and get back its own `(stream, stats)`. Unlike
+    /// `generateBatched` (a static cohort decoded to completion), the batcher
+    /// admits this row into the *running* batch between steps and drops finished
+    /// rows, so concurrent requests share one decode loop with rolling
+    /// admission. The batcher is created lazily on the first eligible call
+    /// against the current model (`maxRows` = `KRILL_NUM_PARALLEL`, `windowMs` =
+    /// the cold-start gather window) and torn down on `unload()`.
+    ///
+    /// Returns nil when the loaded model is not batch-eligible (unknown family,
+    /// nothing loaded, or an empty prompt) so the caller falls back to serial
+    /// `generate(...)`. Scope matches `generateBatched`: text-only plain-causal
+    /// (Llama 3.x / Qwen 2.5-3 dense), fp16 KV, no prefix cache, no spec.
+    public func submitBatched(
+        _ req: BatchGenRequest, maxRows: Int, windowMs: Int
+    ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?)? {
+        guard let model = loadedModelForBatching,
+              let batchedForward = model.batchedDecodeForward,
+              let tokenizer, let eosId = tokenizerEOS
+        else { return nil }
+        let promptTokens = buildBatchedPromptTokens(
+            messages: req.messages, contextLimit: req.contextLimit,
+            promptTemplateOverride: req.promptTemplateOverride, tokenizer: tokenizer)
+        guard !promptTokens.isEmpty else { return nil }
+
+        let stopIds = Self.stopTokenIds(
+            modelDirectory: modelDirectory, tokenizerEOS: eosId)
+
+        batcherLock.lock()
+        if continuousBatcher == nil {
+            let deps = ContinuousBatcher.Deps(
+                prefill: model.prefillForward ?? model.forward,
+                batchedForward: batchedForward,
+                numLayers: model.numLayers,
+                decode: { tokenizer.decode(token: $0) },
+                stopIds: stopIds)
+            continuousBatcher = ContinuousBatcher(
+                deps: deps, maxRows: maxRows, windowMs: windowMs)
+        }
+        let batcher = continuousBatcher!
+        batcherLock.unlock()
+        return batcher.submit(promptTokens: promptTokens, req: req)
     }
 
     /// Build one row's prompt tokens. This is the non-Gemma-4 (plain-causal)

@@ -138,4 +138,72 @@ final class BatchedDecodeLiveTests: XCTestCase {
                            "row \(i) first token diverged from its serial run")
         }
     }
+
+    /// End-to-end test of the continuous batcher (`submitBatched`, the path the
+    /// scheduler drives in Stage C1): submit rows over time so a NEWCOMER joins
+    /// while an incumbent is already decoding, and an incumbent finishes while
+    /// others keep going. Each row must still match its solo run's first token
+    /// (proving admission into the running batch did not corrupt any row), and
+    /// every stream must terminate exactly once. This exercises the epoch
+    /// rebuild + scatter-back path that static `generateBatched` never hits.
+    func testContinuousBatchingMatchesSerialFirstToken() async throws {
+        let dir = try requireModelDirectory()
+        let engine = InferenceEngine(modelDirectory: dir)
+        try await engine.load()
+        guard engine.supportsBatchedDecode else {
+            throw XCTSkip("loaded model is not batched-eligible")
+        }
+
+        // Differing maxTokens so one row finishes well before the others,
+        // forcing a mid-flight shrink + epoch rebuild for the survivors.
+        let cases: [(prompt: String, maxTokens: Int)] = [
+            ("Count slowly from one to twenty.", 24),
+            ("Say hi.", 2),
+            ("Name a color.", 12),
+        ]
+
+        var serialFirst: [Int] = []
+        for c in cases {
+            let (s, _) = engine.generate(
+                messages: [["role": "user", "content": c.prompt]],
+                params: .greedy, maxTokens: c.maxTokens,
+                useSpeculative: false, usePrefixCache: false)
+            var first: Int?
+            for await ev in s where !ev.isEnd { first = ev.tokenId; break }
+            serialFirst.append(try XCTUnwrap(first))
+        }
+
+        // Submit each row through the continuous batcher with a small stagger so
+        // later rows are admitted into the already-running batch.
+        let firsts = await withTaskGroup(of: (Int, Int?, Bool).self) { group -> [Int: (Int?, Bool)] in
+            for (i, c) in cases.enumerated() {
+                let result = engine.submitBatched(
+                    BatchGenRequest(messages: [["role": "user", "content": c.prompt]],
+                                    params: .greedy, maxTokens: c.maxTokens),
+                    maxRows: 4, windowMs: 0)
+                let res = try! XCTUnwrap(result)
+                group.addTask {
+                    var first: Int?
+                    var sawEnd = false
+                    for await ev in res.stream {
+                        if ev.isEnd { sawEnd = true; break }
+                        if first == nil { first = ev.tokenId }
+                    }
+                    return (i, first, sawEnd)
+                }
+                // Stagger: let the prior row(s) start decoding before the next joins.
+                try? await Task.sleep(nanoseconds: 30_000_000)
+            }
+            var out: [Int: (Int?, Bool)] = [:]
+            for await (i, first, sawEnd) in group { out[i] = (first, sawEnd) }
+            return out
+        }
+
+        for i in 0 ..< cases.count {
+            let (first, sawEnd) = try XCTUnwrap(firsts[i])
+            XCTAssertTrue(sawEnd, "row \(i) stream never terminated")
+            XCTAssertEqual(first, serialFirst[i],
+                           "row \(i) first token diverged from its serial run under continuous admission")
+        }
+    }
 }
