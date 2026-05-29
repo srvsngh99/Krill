@@ -71,6 +71,7 @@ let package = Package(
             name: "KLMServer",
             dependencies: [
                 "KLMEngine",
+                "KLMCache",
                 "KLMRegistry",
                 "KLMSampler",
                 .product(name: "NIOCore", package: "swift-nio"),

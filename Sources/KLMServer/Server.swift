@@ -19,7 +19,14 @@ import KLMSampler
 public final class KLMServer: Sendable {
     private let host: String
     private let port: Int
-    private let engine: InferenceEngine
+    /// LRU pool of resident engines (follow-up #8 Stage A). Replaces the
+    /// former single `engine` reference so `MAX_LOADED_MODELS > 1` works.
+    private let engines: EngineRegistry
+    /// Synchronously-readable active-engine mirror for display endpoints.
+    private let activeRef: ActiveEngineRef
+    /// The base (possibly unloaded) engine used for display when nothing is
+    /// resident — keeps `/healthz` etc. reporting "no model" cleanly.
+    private let fallbackEngine: InferenceEngine
     private let registry: Registry
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
@@ -34,7 +41,8 @@ public final class KLMServer: Sendable {
 
     public init(host: String = "127.0.0.1", port: Int = 11434,
                 compat: CompatMode = .both,
-                engine: InferenceEngine, registry: Registry,
+                engines: EngineRegistry, activeRef: ActiveEngineRef,
+                fallbackEngine: InferenceEngine, registry: Registry,
                 embedEngine: EmbeddingEngine = EmbeddingEngine(),
                 rerankEngine: RerankEngine = RerankEngine(),
                 moeEngine: MoEEngine = MoEEngine(),
@@ -46,7 +54,9 @@ public final class KLMServer: Sendable {
         self.port = port
         self.compat = compat
         self.corsOrigins = corsOrigins
-        self.engine = engine
+        self.engines = engines
+        self.activeRef = activeRef
+        self.fallbackEngine = fallbackEngine
         self.registry = registry
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
@@ -65,7 +75,14 @@ public final class KLMServer: Sendable {
         moeEngine: MoEEngine = MoEEngine(),
         maxBodySizeOverride: Int? = nil
     ) -> any ChannelHandler & Sendable {
-        HTTPHandler(engine: engine, registry: registry, compat: compat,
+        let activeRef = ActiveEngineRef(engine.isLoaded ? engine : nil)
+        let engines = EngineRegistry(
+            preloaded: engine.isLoaded ? engine : nil,
+            preloadedName: engine.modelName,
+            maxLoaded: 1, registry: registry,
+            prefixCache: engine.prefixCache, activeRef: activeRef)
+        return HTTPHandler(engines: engines, activeRef: activeRef,
+                    fallbackEngine: engine, registry: registry, compat: compat,
                     embedEngine: embedEngine,
                     rerankEngine: rerankEngine,
                     moeEngine: moeEngine,
@@ -84,7 +101,8 @@ public final class KLMServer: Sendable {
             .childChannelInitializer { channel in
                 channel.pipeline.configureHTTPServerPipeline().flatMap {
                     channel.pipeline.addHandler(
-                        HTTPHandler(engine: self.engine, registry: self.registry,
+                        HTTPHandler(engines: self.engines, activeRef: self.activeRef,
+                                    fallbackEngine: self.fallbackEngine, registry: self.registry,
                                     compat: self.compat, embedEngine: self.embedEngine,
                                     rerankEngine: self.rerankEngine,
                                     moeEngine: self.moeEngine,
@@ -113,15 +131,19 @@ public final class KLMServer: Sendable {
         print("Press Ctrl+C to stop.")
 
         // WS-E: background auto-unload when the keep-alive deadline passes.
-        let eng = engine
+        // Stage A: the global idle deadline evicts the whole resident pool
+        // (per-model keep-alive is the next PR); at MAX_LOADED_MODELS=1 this
+        // is byte-identical to the prior single-model behavior.
+        let pool = engines
+        let ref = activeRef
         let ka = keepAlive
         let evictor = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 10 * 1_000_000_000)
-                if eng.isLoaded, await ka.shouldEvict() {
-                    eng.unload()
+                if ref.current != nil, await ka.shouldEvict() {
+                    await pool.unloadAll()
                     await ka.markEvicted()
-                    self.logger.info("[KLMServer] auto-unloaded model (keep_alive expired)")
+                    self.logger.info("[KLMServer] auto-unloaded model(s) (keep_alive expired)")
                 }
             }
         }
@@ -139,7 +161,26 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
-    private let engine: InferenceEngine
+    private let engines: EngineRegistry
+    private let activeRef: ActiveEngineRef
+    private let fallbackEngine: InferenceEngine
+    /// Request-scoped engine resolved by ``routeGenerate(_:body:run:)`` before
+    /// a generate handler runs (nil on non-generate paths). Set/read only on
+    /// the channel's event loop, so single-channel-sequential access is safe.
+    private var requestEngine: InferenceEngine?
+
+    /// The engine the current handler acts on. Generate paths see the
+    /// request-scoped resolved engine; everything else falls back to the
+    /// active resident engine, then the (possibly unloaded) base. Keeping
+    /// this a computed property lets every existing `engine.` read work
+    /// unchanged after the single-engine → registry refactor.
+    private var engine: InferenceEngine { requestEngine ?? activeRef.current ?? fallbackEngine }
+
+    /// The active resident engine for *display* endpoints (`/healthz`,
+    /// `/v1/status`, `/api/ps`, `/metrics`): always the live active model,
+    /// never the request-scoped one.
+    private var displayEngine: InferenceEngine { activeRef.current ?? fallbackEngine }
+
     private let registry: Registry
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
@@ -159,7 +200,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let genQueue: GenerationQueue
     private var currentOrigin: String?
 
-    init(engine: InferenceEngine, registry: Registry,
+    init(engines: EngineRegistry, activeRef: ActiveEngineRef,
+         fallbackEngine: InferenceEngine, registry: Registry,
          compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
          rerankEngine: RerankEngine = RerankEngine(),
          moeEngine: MoEEngine = MoEEngine(),
@@ -168,7 +210,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
          defaultContextLimit: Int? = nil,
          genQueue: GenerationQueue = GenerationQueue(numParallel: 1, maxQueue: 512),
          maxBodySizeOverride: Int? = nil) {
-        self.engine = engine
+        self.engines = engines
+        self.activeRef = activeRef
+        self.fallbackEngine = fallbackEngine
         self.registry = registry
         self.compat = compat
         self.embedEngine = embedEngine
@@ -271,10 +315,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         // OpenAI endpoints
         case (.POST, "/v1/chat/completions"):
             guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
-            handleChatCompletions(context: context, body: body)
+            routeGenerate(context: context, body: body) { self.handleChatCompletions(context: $0, body: $1) }
         case (.POST, "/v1/completions"):
             guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
-            handleCompletions(context: context, body: body)
+            routeGenerate(context: context, body: body) { self.handleCompletions(context: $0, body: $1) }
         case (.GET, "/v1/models"):
             guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleModels(context: context)
@@ -290,7 +334,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             handleEmbeddings(context: context, body: body, style: .openAI)
         case (.POST, "/v1/messages"):
             guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
-            handleAnthropicMessages(context: context, body: body)
+            routeGenerate(context: context, body: body) { self.handleAnthropicMessages(context: $0, body: $1) }
 
         // Model management (KrillLM-native, available in any compat mode)
         case (.POST, "/v1/models/load"):
@@ -309,10 +353,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         // Ollama endpoints
         case (.POST, "/api/chat"):
             guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
-            handleOllamaChat(context: context, body: body)
+            routeGenerate(context: context, body: body) { self.handleOllamaChat(context: $0, body: $1) }
         case (.POST, "/api/generate"):
             guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
-            handleOllamaGenerate(context: context, body: body)
+            routeGenerate(context: context, body: body) { self.handleOllamaGenerate(context: $0, body: $1) }
         case (.GET, "/api/tags"):
             guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleOllamaTags(context: context)
@@ -352,9 +396,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         case (.GET, "/healthz"), (.GET, "/health"):
             sendJSON(context: context, status: .ok, body: [
                 "status": "ok",
-                "model_loaded": engine.isLoaded,
-                "model": engine.modelName ?? "none",
-                "family": engine.family ?? "none"
+                "model_loaded": displayEngine.isLoaded,
+                "model": displayEngine.modelName ?? "none",
+                "family": displayEngine.family ?? "none"
             ])
         case (.GET, "/metrics"):
             handleMetrics(context: context)
@@ -365,13 +409,106 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
+    // MARK: - Stage A: per-request engine routing
+
+    /// Peek the requested model name from a generate request body without a
+    /// full typed parse (`model`, then Ollama's `name` fallback).
+    private func peekModel(_ body: ByteBuffer) -> String? {
+        guard let json = parseJSON(body) else { return nil }
+        if let m = json["model"] as? String, !m.isEmpty { return m }
+        if let n = json["name"] as? String, !n.isEmpty { return n }
+        return nil
+    }
+
+    /// True when `name` is a bridge-routed (non-native MoE sidecar) model, so
+    /// it must NOT be loaded as a native ``InferenceEngine``. Mirrors the
+    /// decision in ``dispatchFamilyChat(context:request:style:)``.
+    private func isBridgeRouted(_ name: String) -> Bool {
+        guard let manifest = registry.getModel(name) else { return false }
+        switch ModelAdapter(family: manifest.family).chatRouting {
+        case .denseEngine:
+            return false
+        case .mixtureOfExperts:
+            return !nativeMoEDispatchSupported(at: registry.modelPath(manifest.name))
+        }
+    }
+
+    /// Resolve (route-or-load) the engine for the request's `model`, then run
+    /// the generate handler with `requestEngine` set so it — and every
+    /// `engine.` read inside it — acts on the right resident model.
+    ///
+    /// Routing rules (Stage A, "routing first"):
+    /// - No `model` field, or a bridge-routed family ⇒ pin to the current
+    ///   active engine (the handler's `requireModel`/bridge logic still runs).
+    /// - Installed native model ⇒ `engines.activate` it (loading on demand,
+    ///   evicting the LRU resident when at `MAX_LOADED_MODELS`), then run.
+    ///   This supersedes the per-handler "not loaded" mismatch checks (now
+    ///   removed) for installed models.
+    /// - Named but NOT installed ⇒ preserve prior semantics: reject as a
+    ///   mismatch (400) only when a *different* model is already loaded;
+    ///   otherwise fall through so media-shape validation and the no-model
+    ///   503 gate inside the handler still run (these must fire even with no
+    ///   model loaded — see MultimodalEndpointsTests).
+    ///
+    /// Concurrency: each branch sets `requestEngine` and invokes `run` inside
+    /// a single event-loop turn; the handler captures its engine into a local
+    /// (`let eng = engine`) synchronously before spawning generation, so a
+    /// later request on the same channel cannot retarget an in-flight one.
+    private func routeGenerate(context: ChannelHandlerContext, body: ByteBuffer,
+                               run: @escaping @Sendable (ChannelHandlerContext, ByteBuffer) -> Void) {
+        let requested = peekModel(body)
+        guard let requested, !isBridgeRouted(requested) else {
+            requestEngine = activeRef.current
+            run(context, body)
+            return
+        }
+        if registry.hasModel(requested) {
+            let el = context.eventLoop
+            nonisolated(unsafe) let ctx = context
+            Task {
+                do {
+                    let eng = try await engines.activate(name: requested)
+                    el.execute {
+                        self.requestEngine = eng
+                        run(ctx, body)
+                    }
+                } catch let busy as EngineRegistry.PoolBusy {
+                    el.execute {
+                        self.sendJSON(context: ctx, status: .serviceUnavailable, body: [
+                            "error": "All \(busy.maxLoaded) model slot(s) are loaded and busy; "
+                                + "cannot load '\(requested)' right now. Raise KRILL_MAX_LOADED_MODELS "
+                                + "to keep more models resident, then retry."])
+                    }
+                } catch {
+                    let msg = String(describing: error).prefix(200)
+                    el.execute {
+                        self.sendJSON(context: ctx, status: .serviceUnavailable, body: [
+                            "error": "Failed to load model '\(requested)': \(msg)"])
+                    }
+                }
+            }
+            return
+        }
+        // Named model is not installed.
+        if let active = activeRef.current, active.isLoaded,
+           let loaded = active.modelName, loaded != requested {
+            sendJSON(context: context, status: .badRequest, body: [
+                "error": "Requested model '\(requested)' is not loaded. Currently loaded: '\(loaded)'."
+            ])
+            return
+        }
+        requestEngine = activeRef.current
+        run(context, body)
+    }
+
     /// WS-E queue: acquire a generation slot, or return false having sent a
     /// 503. Callers must `leaveQueue()` (deferred) once done. Concurrent
     /// requests are queued up to `maxQueue`; beyond that they get 503 so the
     /// single-flight engine + prefix/KV caches are never entered in
     /// parallel.
     private func enterQueueOr503(_ ctx: ChannelHandlerContext,
-                                 _ eventLoop: EventLoop) async -> Bool {
+                                 _ eventLoop: EventLoop,
+                                 retaining eng: InferenceEngine? = nil) async -> Bool {
         // Register the model hold BEFORE queueing (PR #20 review P1): a
         // request accepted while the model is loaded must keep it loaded
         // even while it waits behind another request. If beginRequest() ran
@@ -382,11 +519,20 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         // waiter would then generate against an unloaded engine. Holding
         // from acceptance keeps inFlight >= 1 for the whole accepted set.
         await keepAlive.beginRequest()
+        // In-flight hold on the resident engine taken BEFORE queueing (same
+        // ordering as keepAlive.beginRequest, and for the same reason): a
+        // request that is queued behind another generation must already
+        // protect its engine, or a concurrent activate() at the cap could
+        // evict and unload the model out from under it during the - possibly
+        // multi-second - queue wait. Balanced by release() in the catch below
+        // and in leaveQueue.
+        await engines.retain(eng)
         do {
             try await genQueue.enter()
             return true
         } catch {
             await keepAlive.endRequest()   // rejected: balance the hold
+            await engines.release(eng)     // rejected: balance the in-flight hold
             sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
                            status: .serviceUnavailable,
                            body: ["error": "server busy: max queue exceeded (KRILL_MAX_QUEUE)"])
@@ -394,27 +540,30 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    private func leaveQueue() {
+    private func leaveQueue(releasing eng: InferenceEngine? = nil) {
         let q = genQueue
         let ka = keepAlive
+        let pool = engines
         // Release the queue slot first so the next waiter resumes, then drop
         // this request's hold. Any queued waiter already holds its own
         // beginRequest()-registered hold (taken before it queued), so
         // inFlight never transiently hits 0 during the handoff and the
         // evictor can't unload between requests (PR #20 review P1).
-        Task { await q.leave(); await ka.endRequest() }
+        Task { await q.leave(); await ka.endRequest(); await pool.release(eng) }
     }
 
     /// Slot acquire that just returns success/failure (for streaming paths
     /// whose 200 head is already on the wire, so a JSON 503 is impossible -
     /// the caller closes the stream with a terminal error instead).
-    private func tryEnterQueue() async -> Bool {
+    private func tryEnterQueue(retaining eng: InferenceEngine? = nil) async -> Bool {
         await keepAlive.beginRequest()     // hold from acceptance (P1)
+        await engines.retain(eng)          // protect the engine while queued too
         do {
             try await genQueue.enter()
             return true
         } catch {
             await keepAlive.endRequest()   // rejected: balance the hold
+            await engines.release(eng)     // rejected: balance the in-flight hold
             return false
         }
     }
@@ -590,15 +739,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
-        if let requestedModel = request.requestedModel,
-           let loadedModel = engine.modelName,
-           requestedModel != loadedModel {
-            sendJSON(context: context, status: .badRequest, body: [
-                "error": "Requested model '\(requestedModel)' is not loaded. Currently loaded: '\(loadedModel)'."
-            ])
-            return
-        }
+        // Model selection is handled up front by `routeGenerate` (Stage A):
+        // the requested model has already been routed-or-loaded (or 404'd if
+        // not installed), so `engine` here is the right resident model.
 
         // Multimodal shape validation runs before model gate so it is
         // observable even when no model is loaded.
@@ -707,8 +850,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             contextLimit: defaultContextLimit)
 
         Task {
-            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
-            defer { self.leaveQueue() }
+            guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
+            defer { self.leaveQueue(releasing: eng) }
             let (tokenStream, getStats) = eng.generate(
                 messages: msgs, params: params, maxTokens: maxTokens,
                 contextLimit: ctxLimit,
@@ -819,8 +962,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             defer { mediaCopy?.cleanup() }
-            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
-            defer { self.leaveQueue() }
+            guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
+            defer { self.leaveQueue(releasing: eng) }
             let (tokenStream, getStats) = eng.generate(
                 messages: messages, params: params,
                 maxTokens: maxTokens, imageData: imageData,
@@ -1020,7 +1163,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             // Hold a generation slot for the whole token loop (WS-E). The
             // 200 SSE head is already sent, so on overflow we close the
             // stream with a valid terminal error chunk + [DONE].
-            guard await self.tryEnterQueue() else {
+            guard await self.tryEnterQueue(retaining: eng) else {
                 let errChunk = "data: {\"error\":\"server busy: max queue exceeded\"}\n\n"
                 var b = ByteBufferAllocator().buffer(capacity: errChunk.utf8.count)
                 b.writeString(errChunk + "data: [DONE]\n\n")
@@ -1028,7 +1171,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 self.writeOnLoop(ctx, .end(nil), flush: true)
                 return
             }
-            defer { self.leaveQueue() }
+            defer { self.leaveQueue(releasing: eng) }
 
             let (tokenStream, _) = eng.generate(
                 messages: messages,
@@ -1094,8 +1237,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             defer { mediaCopy?.cleanup() }
-            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
-            defer { self.leaveQueue() }
+            guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
+            defer { self.leaveQueue(releasing: eng) }
             let (tokenStream, getStats) = eng.generate(
                 messages: messages,
                 params: params, maxTokens: maxTokens,
@@ -1152,14 +1295,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        if let requestedModel = request.requestedModel,
-           let loadedModel = engine.modelName,
-           requestedModel != loadedModel {
-            sendJSON(context: context, status: .badRequest, body: [
-                "error": "Requested model '\(requestedModel)' is not loaded. Currently loaded: '\(loadedModel)'."
-            ])
-            return
-        }
+        // Model selection handled by `routeGenerate` (Stage A).
 
         guard requireModel(context: context) else { return }
         touchKeepAlive(nil)
@@ -1170,8 +1306,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         Task {
             // WS-E: /v1/completions is engine-touching too - serialize it.
-            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
-            defer { self.leaveQueue() }
+            guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
+            defer { self.leaveQueue(releasing: eng) }
             let (tokenStream, getStats) = eng.generate(
                 prompt: request.prompt,
                 params: request.sampling.samplingParams,
@@ -1226,7 +1362,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         krillm_up 1
         # HELP krillm_model_loaded Whether a model is loaded
         # TYPE krillm_model_loaded gauge
-        krillm_model_loaded \(engine.isLoaded ? 1 : 0)
+        krillm_model_loaded \(displayEngine.isLoaded ? 1 : 0)
         # HELP krillm_resident_memory_mb Process resident memory in MB
         # TYPE krillm_resident_memory_mb gauge
         krillm_resident_memory_mb \(String(format: "%.1f", residentMB))
@@ -1289,16 +1425,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        // Fix 7: Model validation — reject if a specific model is requested but doesn't match loaded model.
-        if let requestedModel = request.requestedModel,
-           requestedModel != "unknown",
-           let loadedModel = engine.modelName,
-           requestedModel != loadedModel {
-            sendJSON(context: context, status: .badRequest, body: [
-                "error": "Requested model '\(requestedModel)' is not loaded. Currently loaded: '\(loadedModel)'."
-            ])
-            return
-        }
+        // Model selection handled by `routeGenerate` (Stage A).
 
         do { try validateMediaShape(request.media) } catch let e as MediaDecodeError {
             sendJSON(context: context,
@@ -1379,16 +1506,16 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             defer { mediaCopy?.cleanup() }
             // Hold a generation slot for the whole token loop (WS-E).
             if wantStream {
-                guard await self.tryEnterQueue() else {
+                guard await self.tryEnterQueue(retaining: eng) else {
                     self.writeNDJSON(ctx, ["model": modelName,
                         "error": "server busy: max queue exceeded", "done": true])
                     self.writeOnLoop(ctx, .end(nil), flush: true)
                     return
                 }
             } else {
-                guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+                guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
             }
-            defer { self.leaveQueue() }
+            defer { self.leaveQueue(releasing: eng) }
             let (tokenStream, getStats) = eng.generate(
                 messages: genMessages,
                 params: ocParams,
@@ -1504,16 +1631,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
-        // Fix 7: Model validation.
-        if let requestedModel = request.requestedModel,
-           requestedModel != "unknown",
-           let loadedModel = engine.modelName,
-           requestedModel != loadedModel {
-            sendJSON(context: context, status: .badRequest, body: [
-                "error": "Requested model '\(requestedModel)' is not loaded. Currently loaded: '\(loadedModel)'."
-            ])
-            return
-        }
+        // Model selection handled by `routeGenerate` (Stage A).
 
         do { try validateMediaShape(request.media) } catch let e as MediaDecodeError {
             sendJSON(context: context,
@@ -1583,16 +1701,16 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         Task {
             defer { mediaCopy?.cleanup() }
             if wantStream {
-                guard await self.tryEnterQueue() else {
+                guard await self.tryEnterQueue(retaining: eng) else {
                     self.writeNDJSON(ctx, ["error": "server busy: max queue exceeded",
                                            "done": true])
                     self.writeOnLoop(ctx, .end(nil), flush: true)
                     return
                 }
             } else {
-                guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+                guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
             }
-            defer { self.leaveQueue() }
+            defer { self.leaveQueue(releasing: eng) }
             let (tokenStream, getStats) = eng.generate(
                 prompt: request.prompt,
                 systemPrompt: genSystem,
@@ -2133,13 +2251,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func handleOllamaPS(context: ChannelHandlerContext) {
-        guard engine.isLoaded, let modelName = engine.modelName else {
+        let active = displayEngine
+        guard active.isLoaded, let modelName = active.modelName else {
             sendJSON(context: context, status: .ok, body: ["models": [[String: Any]]()])
             return
         }
         let manifest = registry.getModel(modelName)
         let size = manifest?.sizeBytes ?? 0
-        let fallback = (engine.loadedAt ?? Date())
+        let fallback = (active.loadedAt ?? Date())
             .addingTimeInterval(TimeInterval(KrillConfig.load().idleTimeout))
         let ka = keepAlive
         let eventLoop = context.eventLoop
@@ -2462,21 +2581,30 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         // Only allow loading models from the registry — no arbitrary filesystem paths.
-        let reg = registry
-        guard reg.hasModel(modelName) else {
+        guard registry.hasModel(modelName) else {
             sendJSON(context: context, status: .notFound,
                      body: ["error": "Model '\(modelName)' not found. Install with: krillm pull \(modelName)"])
             return
         }
-        let modelDir = reg.modelPath(modelName)
 
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
-        let eng = engine
+        let pool = engines
 
         Task {
             do {
-                try await eng.swap(modelDirectory: modelDir)
+                // Stage A: load into the resident pool (keeping prior models
+                // resident up to MAX_LOADED_MODELS, evicting an idle LRU) and
+                // make it active, instead of discarding the previously-loaded
+                // model via engine.swap(). The old swap()/isSwapping fence
+                // guarded against load-time eviction; that specific hazard is
+                // now covered by the registry's in-flight-aware EVICTION (a
+                // generating model is never chosen as an activate() victim).
+                // Explicit teardown (POST /v1/models/unload -> unloadAll) is
+                // still an immediate, deliberate force-unload as before, and
+                // the idle evictor stays gated by keepAlive in-flight; neither
+                // is changed here.
+                let eng = try await pool.activate(name: modelName)
                 let model = eng.modelName ?? modelName
                 let family = eng.family ?? "unknown"
                 eventLoop.execute {
@@ -2499,10 +2627,18 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     // MARK: - Model Management: POST /v1/models/unload
 
     private func handleUnloadModel(context: ChannelHandlerContext) {
-        engine.unload()
-        sendJSON(context: context, status: .ok, body: [
-            "status": "unloaded"
-        ])
+        // Unload the whole resident pool (Stage A; per-model unload is a
+        // later refinement). Matches the prior single-model behavior at
+        // MAX_LOADED_MODELS=1.
+        let pool = engines
+        let eventLoop = context.eventLoop
+        nonisolated(unsafe) let ctx = context
+        Task {
+            await pool.unloadAll()
+            eventLoop.execute {
+                self.sendJSON(context: ctx, status: .ok, body: ["status": "unloaded"])
+            }
+        }
     }
 
     // MARK: - Status: GET /v1/status
@@ -2523,19 +2659,20 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         // Installed models
         let installed = registry.listModels().map { $0.name }
 
+        let active = displayEngine
         var response: [String: Any] = [
-            "status": engine.isLoaded ? "ready" : "idle",
-            "model_loaded": engine.isLoaded,
+            "status": active.isLoaded ? "ready" : "idle",
+            "model_loaded": active.isLoaded,
             "uptime_seconds": Int(serverUptime),
             "memory_mb": Int(residentMB),
             "installed_models": installed,
             "version": KrillLMVersion
         ]
 
-        if engine.isLoaded {
-            response["model"] = engine.modelName ?? "unknown"
-            response["family"] = engine.family ?? "unknown"
-            if let loadedAt = engine.loadedAt {
+        if active.isLoaded {
+            response["model"] = active.modelName ?? "unknown"
+            response["family"] = active.family ?? "unknown"
+            if let loadedAt = active.loadedAt {
                 response["model_loaded_at"] = ISO8601DateFormatter().string(from: loadedAt)
                 response["model_uptime_seconds"] = Int(Date().timeIntervalSince(loadedAt))
             }

@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import KLMEngine
+import KLMCache
 import KLMServer
 import KLMRegistry
 
@@ -40,6 +41,11 @@ struct ServeCommand: AsyncParsableCommand {
             registry = Registry()
         }
 
+        // One PrefixCache shared by every resident engine (decision: shared
+        // by default; its keys already namespace by model id, so models never
+        // read each other's prefixes, and the GB budget stays singular rather
+        // than multiplying by MAX_LOADED_MODELS).
+        let sharedPrefix = PrefixCache()
         let engine: InferenceEngine
 
         if let model {
@@ -56,7 +62,9 @@ struct ServeCommand: AsyncParsableCommand {
             }
 
             print("Loading model from \(modelDir.path)...")
-            engine = InferenceEngine(modelDirectory: modelDir)
+            engine = InferenceEngine(modelDirectory: modelDir,
+                                     prefixCache: sharedPrefix,
+                                     kvCacheDtype: config.kvCacheDtype)
             try await engine.load()
             // Pre-warm compile caches + kernel JIT so the first
             // request does not pay one-time costs. Opt-out via
@@ -86,7 +94,9 @@ struct ServeCommand: AsyncParsableCommand {
             } else {
                 base = URL(fileURLWithPath: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".krillm").path)
             }
-            engine = InferenceEngine(modelDirectory: base)
+            engine = InferenceEngine(modelDirectory: base,
+                                     prefixCache: sharedPrefix,
+                                     kvCacheDtype: config.kvCacheDtype)
             print("Server starting in API-only mode (no model pre-loaded).")
             print("Load a model via:  POST http://\(host):\(port)/v1/models/load  {\"model\": \"<name>\"}")
             let installed = registry.listModels().map(\.name)
@@ -109,8 +119,23 @@ struct ServeCommand: AsyncParsableCommand {
         let moeEngine = MoEEngine()
         installSidecarSignalHandler(moeEngine)
 
+        // Stage A: an LRU pool of resident engines (MAX_LOADED_MODELS). The
+        // pre-loaded `--model` engine (if any) is registered as the initial
+        // active model; further models are routed-or-loaded on demand. The
+        // base engine doubles as the display fallback when nothing is loaded.
+        let activeRef = ActiveEngineRef()
+        let engines = EngineRegistry(
+            preloaded: self.model != nil ? engine : nil,
+            preloadedName: self.model,
+            maxLoaded: config.maxLoadedModels,
+            registry: registry,
+            prefixCache: sharedPrefix,
+            kvCacheDtype: config.kvCacheDtype,
+            activeRef: activeRef)
+
         let server = KLMServer(host: host, port: port, compat: compatMode,
-                               engine: engine, registry: registry,
+                               engines: engines, activeRef: activeRef,
+                               fallbackEngine: engine, registry: registry,
                                moeEngine: moeEngine,
                                corsOrigins: config.origins,
                                keepAliveDefaultSeconds:
