@@ -415,6 +415,15 @@ class Qwen3MoESparseMLP: Module {
         return accumulator.counts.asArray(Int32.self).map(Int.init)
     }
 
+    /// The raw on-device `[E]` tally as a lazy `MLXArray`, WITHOUT the
+    /// host read `cumulativeExpertCounts` does. The batched decode entry
+    /// realizes this alongside the step's logits (one combined `eval`) so
+    /// the running-sum graph stays depth-1 instead of chaining one node per
+    /// step (which would pin that step's routing intermediates). The solo
+    /// path bounds it differently (reset before a generation, one read
+    /// after), so it never needs this.
+    var pendingExpertCounts: MLXArray { accumulator.counts }
+
     init(_ config: Qwen3MoEConfig) {
         self.numExperts = config.numExperts
         self.topK = config.numExpertsPerToken
@@ -627,6 +636,13 @@ class Qwen3MoEModelInner: Module {
         }
         return norm(x)
     }
+
+    /// Each sparse layer's raw on-device expert tally (lazy, no host read).
+    /// Realized alongside the batched step's logits so the per-layer
+    /// running-sum graphs do not chain across decode steps.
+    var sparseExpertCounts: [MLXArray] {
+        layers.compactMap { ($0.mlp as? Qwen3MoESparseMLP)?.pendingExpertCounts }
+    }
 }
 
 // MARK: - MoE utilization snapshot
@@ -726,8 +742,18 @@ public class Qwen3MoEForCausalLM: Module {
         _ tokens: MLXArray, caches: [KVCache], mask: MLXArray, rowOffsets: [Int]
     ) -> MLXArray {
         let hidden = model(tokens, caches: caches, precomputedMask: mask, rowOffsets: rowOffsets)
-        if let lmHead { return lmHead(hidden) }
-        return model.embedTokens.asLinear(hidden)
+        let logits = lmHead != nil ? lmHead!(hidden) : model.embedTokens.asLinear(hidden)
+        // Realize this step's logits TOGETHER with every sparse layer's expert
+        // tally in one eval. The driver's own per-step `eval(logits)` is then a
+        // no-op (same single sync as before), but folding the tallies in keeps
+        // each layer's utilization running-sum graph at depth-1 instead of
+        // chaining a node per decode step. Unlike the solo path, the batched
+        // engine never resets or reads these tallies, so without this the chain
+        // (and the routing intermediates it pins) would grow unbounded over the
+        // resident model's lifetime. Per-step, not per-layer, so it does not
+        // reintroduce the per-layer host sync the SwitchGLU rewrite removed.
+        MLX.eval([logits] + model.sparseExpertCounts)
+        return logits
     }
 
     /// Snapshot expert utilization across every sparse MoE layer for the

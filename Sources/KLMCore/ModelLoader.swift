@@ -58,9 +58,10 @@ public struct LoadedModel: @unchecked Sendable {
     /// One new token per row, each rotated at its own next position
     /// (`rowOffsets[r]`), attending under an explicit per-row additive mask
     /// that hides each row's left-padded prefix in the stacked KV cache. Set
-    /// ONLY for plain-causal families that support true KV-batched concurrent
-    /// decode (Llama, Qwen 2.5/3 dense); nil means the family falls back to
-    /// serialized generation. fp16 `KVCache` only.
+    /// for every family that supports true KV-batched concurrent decode: Llama
+    /// and Qwen 2.5/3 dense, Gemma 4 (dense e2b/e4b/12b and 26B-A4B MoE), and
+    /// Qwen3 MoE. nil means the family falls back to serialized generation.
+    /// fp16 `KVCache` only.
     public let batchedDecodeForward: ((MLXArray, [KVCache], MLXArray, [Int]) -> MLXArray)?
 
     /// Vocab size for validation
