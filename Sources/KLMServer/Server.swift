@@ -519,14 +519,20 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         // waiter would then generate against an unloaded engine. Holding
         // from acceptance keeps inFlight >= 1 for the whole accepted set.
         await keepAlive.beginRequest()
+        // In-flight hold on the resident engine taken BEFORE queueing (same
+        // ordering as keepAlive.beginRequest, and for the same reason): a
+        // request that is queued behind another generation must already
+        // protect its engine, or a concurrent activate() at the cap could
+        // evict and unload the model out from under it during the - possibly
+        // multi-second - queue wait. Balanced by release() in the catch below
+        // and in leaveQueue.
+        await engines.retain(eng)
         do {
             try await genQueue.enter()
-            // In-flight hold on the resident engine so the registry never
-            // evicts a model that this request is about to generate against.
-            await engines.retain(eng)
             return true
         } catch {
             await keepAlive.endRequest()   // rejected: balance the hold
+            await engines.release(eng)     // rejected: balance the in-flight hold
             sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
                            status: .serviceUnavailable,
                            body: ["error": "server busy: max queue exceeded (KRILL_MAX_QUEUE)"])
@@ -551,12 +557,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     /// the caller closes the stream with a terminal error instead).
     private func tryEnterQueue(retaining eng: InferenceEngine? = nil) async -> Bool {
         await keepAlive.beginRequest()     // hold from acceptance (P1)
+        await engines.retain(eng)          // protect the engine while queued too
         do {
             try await genQueue.enter()
-            await engines.retain(eng)
             return true
         } catch {
             await keepAlive.endRequest()   // rejected: balance the hold
+            await engines.release(eng)     // rejected: balance the in-flight hold
             return false
         }
     }
@@ -2589,11 +2596,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 // Stage A: load into the resident pool (keeping prior models
                 // resident up to MAX_LOADED_MODELS, evicting an idle LRU) and
                 // make it active, instead of discarding the previously-loaded
-                // model via engine.swap(). The old swap() set `isSwapping` to
-                // fence concurrent generations; that interlock is now provided
-                // by the registry's in-flight-aware eviction (a generating
-                // model is never evicted), so an on-demand load can no longer
-                // pull a model out from under a live request.
+                // model via engine.swap(). The old swap()/isSwapping fence
+                // guarded against load-time eviction; that specific hazard is
+                // now covered by the registry's in-flight-aware EVICTION (a
+                // generating model is never chosen as an activate() victim).
+                // Explicit teardown (POST /v1/models/unload -> unloadAll) is
+                // still an immediate, deliberate force-unload as before, and
+                // the idle evictor stays gated by keepAlive in-flight; neither
+                // is changed here.
                 let eng = try await pool.activate(name: modelName)
                 let model = eng.modelName ?? modelName
                 let family = eng.family ?? "unknown"
