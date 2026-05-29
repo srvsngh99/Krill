@@ -62,6 +62,17 @@ final class ContinuousBatcher: @unchecked Sendable {
     }
 
     /// An active row in the running batch.
+    ///
+    /// THREADING INVARIANT: a `Row`'s mutable state (`caches`, `current`,
+    /// `generated`, `recent`, `epochBaseLen`, `isFinished`, `decodeStartedAt`)
+    /// is owned exclusively by the single `runLoop` Task and is only ever read
+    /// or written there — never from `submit`/`stop`/`onTermination`. Those
+    /// other entry points touch only the lock-guarded `pending`/`running`/
+    /// `stopped`/`loopTask` and the row's own thread-safe `cancelled`
+    /// (`CancelFlag`) / `stats` (`StatsBox`) boxes. So the bare `var`s here
+    /// need no lock, and `finalize`'s `isFinished` guard runs single-threaded.
+    /// Preserve this: any new cross-thread access to a Row field must go through
+    /// a thread-safe box like `cancelled`/`stats`, not a bare `var`.
     private final class Row {
         let promptLen: Int
         let sampler: Sampler
@@ -78,6 +89,7 @@ final class ContinuousBatcher: @unchecked Sendable {
         var admittedAt: Double
         var epochBaseLen = 0    // cache length at the current epoch's start
         var isFinished = false  // set once by finalize(); guards double-finish
+        var decodeStartedAt: Double?   // wall time of this row's first batched step
         init(promptLen: Int, sampler: Sampler, cont: AsyncStream<TokenEvent>.Continuation,
              stats: StatsBox, cancelled: CancelFlag, maxTokens: Int, caches: [KVCache],
              current: Int, recent: [Int], prefillTime: Double, admittedAt: Double) {
@@ -108,6 +120,10 @@ final class ContinuousBatcher: @unchecked Sendable {
     private var pending: [Pending] = []
     private var running = false
     private var stopped = false
+    /// Handle to the single decode loop Task, so `stop()` can cancel it and
+    /// halt active decode promptly (rather than waiting for the next epoch
+    /// boundary to observe `stopped`). Guarded by `lock`.
+    private var loopTask: Task<Void, Never>?
 
     init(deps: Deps, maxRows: Int, windowMs: Int) {
         self.deps = deps
@@ -141,28 +157,38 @@ final class ContinuousBatcher: @unchecked Sendable {
             return (stream, { statsBox.stats })
         }
         pending.append(pendingItem)
+        // Spawn a loop only on the idle->busy edge. The `running` flip and the
+        // spawn happen together under `lock`, and the loop only ever clears
+        // `running` inside `takePending` (also under `lock`) at the same instant
+        // it decides to idle-exit with zero active rows. So at most one loop is
+        // ever live: a submit that races a just-idle-exiting loop sees
+        // `running == false` and spawns the sole successor.
         let wasRunning = running
         running = true
-        lock.unlock()
-
         if !wasRunning {
             // Capture self STRONGLY: the running loop must keep the batcher
             // alive until it drains, even after `unload()` clears the engine's
             // reference (otherwise in-flight rows' streams would be stranded).
             // The Task releases the reference when `runLoop()` returns.
-            Task(priority: .userInitiated) { await self.runLoop() }
+            loopTask = Task(priority: .userInitiated) { await self.runLoop() }
         }
+        lock.unlock()
         return (stream, { statsBox.stats })
     }
 
     /// Stop the loop and finish any waiting (not-yet-admitted) requests. Called
     /// from `InferenceEngine.unload()` so a swap/unload never strands a stream.
+    /// Cancels the decode loop so it halts active decode at the next step check
+    /// (rather than draining the whole batch first) and finalizes its in-flight
+    /// rows itself; here we only finish the not-yet-admitted `pending` ones.
     func stop() {
         lock.lock()
         stopped = true
         let waiting = pending
         pending.removeAll()
+        let task = loopTask
         lock.unlock()
+        task?.cancel()
         for p in waiting { p.cont.finish() }
     }
 
@@ -199,6 +225,15 @@ final class ContinuousBatcher: @unchecked Sendable {
 
         var rows: [Row] = []
         while true {
+            // Cancelled by stop() (unload/swap): halt before touching the model
+            // again and finish every in-flight row's stream.
+            if Task.isCancelled {
+                for row in rows {
+                    finalize(row, decodeEnd: CFAbsoluteTimeGetCurrent(), emitTerminal: true)
+                }
+                return
+            }
+
             // --- Admit / shrink (epoch boundary): per-row caches are
             //     authoritative here; drop finished/cancelled, pull newcomers. ---
             rows = rows.filter { row in
@@ -234,8 +269,9 @@ final class ContinuousBatcher: @unchecked Sendable {
 
             // --- Decode within the epoch until the set changes. ---
             var step = 0
+            var cancelledMidEpoch = false
             while true {
-                if Task.isCancelled { break }
+                if Task.isCancelled { cancelledMidEpoch = true; break }
                 let R = rows.count
                 let offsets = rows.map { $0.epochBaseLen + step }
                 let totalLen = sMax + step + 1
@@ -251,6 +287,9 @@ final class ContinuousBatcher: @unchecked Sendable {
                 var setChanged = false
                 for i in 0 ..< R {
                     let row = rows[i]
+                    // Per-row decode clock starts at the row's first batched step,
+                    // so decodeTime excludes prefill + admission/epoch wait.
+                    if row.decodeStartedAt == nil { row.decodeStartedAt = now }
                     if row.needsHistory { row.recent.append(row.current) }
                     let next = row.sampler.sample(logits[i ..< (i + 1)], recent: row.recent)
                     row.current = next
@@ -263,8 +302,20 @@ final class ContinuousBatcher: @unchecked Sendable {
                 if setChanged || !pendingIsEmpty() { break }
             }
 
+            if cancelledMidEpoch {
+                // stop() cancelled us: do NOT scatter back (the model is being
+                // torn down); just finish every in-flight row's stream.
+                for row in rows {
+                    finalize(row, decodeEnd: CFAbsoluteTimeGetCurrent(), emitTerminal: true)
+                }
+                return
+            }
+
             // Scatter the grown stacked cache back into each row's own cache so
             // per-row caches stay authoritative across the next epoch rebuild.
+            // scatterBack forces evaluation of the sliced K/V so each row owns
+            // realized, independent storage (not a lazy view aliasing `stacked`,
+            // which is discarded when the next epoch re-stacks).
             if step > 0 {
                 scatterBack(stacked: stacked, rows: rows, sMax: sMax, steps: step)
             }
@@ -331,13 +382,14 @@ final class ContinuousBatcher: @unchecked Sendable {
             row.cont.yield(TokenEvent(tokenId: -1, text: "",
                                       elapsed: decodeEnd - row.admittedAt, isEnd: true))
         }
-        // `admittedAt` is captured AFTER prefill, so the elapsed since then is
-        // already pure decode (+ epoch-wait) time; do not subtract prefillTime
-        // again. prefillTime is reported separately.
+        // Decode time runs from the row's first batched step (set in the loop),
+        // so it excludes prefill and any admission/epoch wait. A row that
+        // finished on its prefill token never decoded, so its decode time is 0.
+        let decodeStart = row.decodeStartedAt ?? decodeEnd
         row.stats.stats = GenerationStats(
             promptTokens: row.promptLen, generatedTokens: row.generated,
             prefillTime: row.prefillTime,
-            decodeTime: max(0, decodeEnd - row.admittedAt))
+            decodeTime: max(0, decodeEnd - decodeStart))
         row.cont.finish()
         row.isFinished = true
     }
@@ -348,14 +400,27 @@ final class ContinuousBatcher: @unchecked Sendable {
     /// last that-many columns of the stacked `[R, h, sMax+steps, hd]` tensor.
     private func scatterBack(stacked: [KVCache], rows: [Row], sMax: Int, steps: Int) {
         let validEnd = sMax + steps
+        // Collect every per-row, per-layer slice, force them all realized in one
+        // eval, THEN restore. Without the eval each slice is a lazy view that
+        // aliases `stacked`'s storage; the next epoch discards `stacked` and
+        // re-stacks from these caches, so unevaluated views would both pin the
+        // old stacked tensor (unbounded memory + lazy-graph growth across
+        // epochs) and re-derive every row from a shared buffer. Evaluated, each
+        // row owns independent, realized K/V.
+        var realized: [(row: Row, layer: Int, k: MLXArray, v: MLXArray)] = []
+        realized.reserveCapacity(rows.count * (rows.first?.caches.count ?? 0))
         for (i, row) in rows.enumerated() {
             let start = sMax - row.epochBaseLen   // left-pad width for row i
             for l in 0 ..< row.caches.count {
                 guard let snap = stacked[l].snapshot() else { continue }
                 let k = snap.keys[i ..< (i + 1), 0..., start ..< validEnd, 0...]
                 let v = snap.values[i ..< (i + 1), 0..., start ..< validEnd, 0...]
-                row.caches[l].restore(keys: k, values: v)
+                realized.append((row, l, k, v))
             }
+        }
+        MLX.eval(realized.flatMap { [$0.k, $0.v] })
+        for entry in realized {
+            entry.row.caches[entry.layer].restore(keys: entry.k, values: entry.v)
         }
     }
 }
