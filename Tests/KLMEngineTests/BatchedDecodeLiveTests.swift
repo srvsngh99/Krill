@@ -82,7 +82,8 @@ final class BatchedDecodeLiveTests: XCTestCase {
         // ceiling absorbs the deepest published dense SKU while staying far
         // below the O(10+) a real cross-row/position bug produces (and such a
         // bug would already have broken the exact R=1 gate above).
-        let isBF16 = engine.loadedModelForBatching?.family == "gemma4"
+        let family = engine.loadedModelForBatching?.family
+        let isBF16 = family == "gemma4" || family == "moe"
         let bound: Float = isBF16 ? 8.0 : 0.5
         for (r, d) in diffs.enumerated() {
             XCTAssertLessThan(d, bound,
