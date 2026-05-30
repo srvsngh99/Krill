@@ -64,6 +64,17 @@ public struct LoadedModel: @unchecked Sendable {
     /// fp16 `KVCache` only.
     public let batchedDecodeForward: ((MLXArray, [KVCache], MLXArray, [Int]) -> MLXArray)?
 
+    /// Optional int8-quantized batched ragged-decode forward (Stage C4). Same
+    /// `(tokens [R,1], caches, mask, rowOffsets) -> [R,1,vocab]` contract as
+    /// `batchedDecodeForward`, but the stacked KV caches are `QuantizedKVCache`
+    /// (uint8 storage, dequantized inside attention). Set ONLY for the families
+    /// whose attention accepts `KVCacheProtocol` and therefore support int8 KV
+    /// serially - currently Gemma 4 (the plain-causal Llama/Qwen/MoE attentions
+    /// are hard-typed to fp16 `KVCache`). nil means the engine batches this
+    /// model with fp16 KV even when `KRILL_KV_CACHE_DTYPE=int8` is set, matching
+    /// its serial behavior (those families already fall back to fp16 serially).
+    public let batchedDecodeForwardQuantized: ((MLXArray, [QuantizedKVCache], MLXArray, [Int]) -> MLXArray)?
+
     /// Vocab size for validation
     public let vocabSize: Int
 
@@ -80,6 +91,7 @@ public struct LoadedModel: @unchecked Sendable {
         multimodalForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, MLXArray?, String?) -> MLXArray)? = nil,
         multimodalPrefillForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, MLXArray?, String?) -> MLXArray)? = nil,
         batchedDecodeForward: ((MLXArray, [KVCache], MLXArray, [Int]) -> MLXArray)? = nil,
+        batchedDecodeForwardQuantized: ((MLXArray, [QuantizedKVCache], MLXArray, [Int]) -> MLXArray)? = nil,
         vocabSize: Int
     ) {
         self.module = module
@@ -90,6 +102,7 @@ public struct LoadedModel: @unchecked Sendable {
         self.multimodalForward = multimodalForward
         self.multimodalPrefillForward = multimodalPrefillForward
         self.batchedDecodeForward = batchedDecodeForward
+        self.batchedDecodeForwardQuantized = batchedDecodeForwardQuantized
         self.vocabSize = vocabSize
     }
 }
@@ -507,6 +520,12 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
             batchedDecodeForward: { tokens, caches, mask, rowOffsets in
                 model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
             },
+            // int8 batched decode (Stage C4): the same Gemma4 batchedDecode
+            // accepts a stacked [QuantizedKVCache] - the attention dequantizes
+            // per element and the per-row RoPE / left-pad mask apply unchanged.
+            batchedDecodeForwardQuantized: { tokens, caches, mask, rowOffsets in
+                model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+            },
             vocabSize: config.vocabSize
         )
     }
@@ -568,6 +587,10 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
         // Batched ragged-decode (Stage B/C) for all Gemma 4 text paths (dense
         // and MoE). See the multimodal branch for the MoE rationale.
         batchedDecodeForward: { tokens, caches, mask, rowOffsets in
+            model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
+        // int8 batched decode (Stage C4): see the multimodal branch.
+        batchedDecodeForwardQuantized: { tokens, caches, mask, rowOffsets in
             model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
         },
         vocabSize: config.vocabSize

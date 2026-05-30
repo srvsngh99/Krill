@@ -32,11 +32,16 @@ final class ContinuousBatcher: @unchecked Sendable {
         /// lookup/restore/trim/store into this closure (honoring the row's
         /// `usePrefixCache`), so a full prefix hit restores the prompt's KV and
         /// forwards just the last token - identical KV to a cold prefill, so the
-        /// stacked decode is byte-for-byte the same. fp16 only (the batched path
-        /// is fp16 `KVCache`).
-        let prefillRow: ([Int], [KVCache], Bool) -> MLXArray
-        let batchedForward: (MLXArray, [KVCache], MLXArray, [Int]) -> MLXArray
+        /// stacked decode is byte-for-byte the same. Caches are
+        /// `[KVCacheProtocol]` so the same loop drives the fp16 (`KVCache`) and
+        /// the int8 (`QuantizedKVCache`) paths.
+        let prefillRow: ([Int], [KVCacheProtocol], Bool) -> MLXArray
+        let batchedForward: (MLXArray, [KVCacheProtocol], MLXArray, [Int]) -> MLXArray
         let numLayers: Int
+        /// When true, rows allocate `QuantizedKVCache` (int8) instead of fp16
+        /// `KVCache` (Stage C4, Gemma 4 only - the engine sets this from
+        /// `usesQuantizedKVCache` AND a quantized batched forward being wired).
+        let useQuantizedKV: Bool
         let decode: (Int) -> String
         let stopIds: Set<Int>
     }
@@ -90,7 +95,7 @@ final class ContinuousBatcher: @unchecked Sendable {
         let stats: StatsBox
         let cancelled: CancelFlag
         let maxTokens: Int
-        var caches: [KVCache]
+        var caches: [KVCacheProtocol]
         var current: Int        // last-emitted token; the next forward's input
         var generated = 0
         var recent: [Int]
@@ -100,7 +105,7 @@ final class ContinuousBatcher: @unchecked Sendable {
         var isFinished = false  // set once by finalize(); guards double-finish
         var decodeStartedAt: Double?   // wall time of this row's first batched step
         init(promptLen: Int, sampler: Sampler, cont: AsyncStream<TokenEvent>.Continuation,
-             stats: StatsBox, cancelled: CancelFlag, maxTokens: Int, caches: [KVCache],
+             stats: StatsBox, cancelled: CancelFlag, maxTokens: Int, caches: [KVCacheProtocol],
              current: Int, recent: [Int], prefillTime: Double, admittedAt: Double) {
             self.promptLen = promptLen
             self.sampler = sampler
@@ -272,7 +277,7 @@ final class ContinuousBatcher: @unchecked Sendable {
             // --- Build the epoch: stack the active set left-padded once. ---
             for row in rows { row.epochBaseLen = row.caches.first?.sequenceLength ?? row.promptLen }
             let sMax = rows.map { $0.epochBaseLen }.max() ?? 0
-            let stacked = stackCachesLeftPadded(
+            let stacked = stackCachesLeftPaddedAny(
                 perRow: rows.map { $0.caches }, lengths: rows.map { $0.epochBaseLen })
             let kDtype = stacked.first?.snapshot()?.keys.dtype ?? .float16
 
@@ -340,7 +345,9 @@ final class ContinuousBatcher: @unchecked Sendable {
     /// terminates the row (EOS / stop / maxTokens==0) or the prompt is empty.
     private func prefillAndAdmit(_ p: Pending) -> Row? {
         let start = CFAbsoluteTimeGetCurrent()
-        let caches = makeKVCaches(numLayers: deps.numLayers)
+        let caches: [KVCacheProtocol] = deps.useQuantizedKV
+            ? makeQuantizedKVCaches(numLayers: deps.numLayers)
+            : makeKVCaches(numLayers: deps.numLayers)
         // Prefix-cache aware: a full hit restores this prompt's KV and forwards
         // only the last token, yielding KV identical to a cold prefill (so the
         // stacked decode is unchanged); a miss prefills cold and stores
@@ -409,7 +416,7 @@ final class ContinuousBatcher: @unchecked Sendable {
     /// restore it into that row's authoritative per-row cache. After an epoch of
     /// `steps` forwards, row i holds `epochBaseLen[i] + steps` real tokens at the
     /// last that-many columns of the stacked `[R, h, sMax+steps, hd]` tensor.
-    private func scatterBack(stacked: [KVCache], rows: [Row], sMax: Int, steps: Int) {
+    private func scatterBack(stacked: [KVCacheProtocol], rows: [Row], sMax: Int, steps: Int) {
         let validEnd = sMax + steps
         // Collect every per-row, per-layer slice, force them all realized in one
         // eval, THEN restore. Without the eval each slice is a lazy view that
@@ -418,20 +425,45 @@ final class ContinuousBatcher: @unchecked Sendable {
         // old stacked tensor (unbounded memory + lazy-graph growth across
         // epochs) and re-derive every row from a shared buffer. Evaluated, each
         // row owns independent, realized K/V.
-        var realized: [(row: Row, layer: Int, k: MLXArray, v: MLXArray)] = []
-        realized.reserveCapacity(rows.count * (rows.first?.caches.count ?? 0))
+        //
+        // fp16 and int8 are scattered the same way - slice row i's own non-pad
+        // suffix out of the grown stacked cache - but the int8 path slices the
+        // QUANTIZED storage (uint8 keys/values + fp16 scales/zeros) directly
+        // rather than via the dequantizing `snapshot()`, so re-stacking never
+        // dequant->requant round-trips (which would compound int8 error each
+        // epoch). A KV-shared / empty layer snapshots nil and is skipped, so the
+        // row's empty cache stays empty (matching the fp16 contract).
+        var fp16Realized: [(dst: KVCache, k: MLXArray, v: MLXArray)] = []
+        var quantRealized: [(dst: QuantizedKVCache, snap: QuantizedKVSnapshot)] = []
         for (i, row) in rows.enumerated() {
             let start = sMax - row.epochBaseLen   // left-pad width for row i
             for l in 0 ..< row.caches.count {
-                guard let snap = stacked[l].snapshot() else { continue }
-                let k = snap.keys[i ..< (i + 1), 0..., start ..< validEnd, 0...]
-                let v = snap.values[i ..< (i + 1), 0..., start ..< validEnd, 0...]
-                realized.append((row, l, k, v))
+                if let q = stacked[l] as? QuantizedKVCache,
+                   let dst = row.caches[l] as? QuantizedKVCache {
+                    guard let s = q.quantizedSnapshot() else { continue }
+                    let sliced = QuantizedKVSnapshot(
+                        keys: s.keys[i ..< (i + 1), 0..., start ..< validEnd, 0...],
+                        values: s.values[i ..< (i + 1), 0..., start ..< validEnd, 0...],
+                        keyScales: s.keyScales[i ..< (i + 1), 0..., start ..< validEnd, 0...],
+                        keyZeros: s.keyZeros[i ..< (i + 1), 0..., start ..< validEnd, 0...],
+                        valueScales: s.valueScales[i ..< (i + 1), 0..., start ..< validEnd, 0...],
+                        valueZeros: s.valueZeros[i ..< (i + 1), 0..., start ..< validEnd, 0...])
+                    quantRealized.append((dst, sliced))
+                } else if let f = stacked[l] as? KVCache,
+                          let dst = row.caches[l] as? KVCache {
+                    guard let snap = f.snapshot() else { continue }
+                    let k = snap.keys[i ..< (i + 1), 0..., start ..< validEnd, 0...]
+                    let v = snap.values[i ..< (i + 1), 0..., start ..< validEnd, 0...]
+                    fp16Realized.append((dst, k, v))
+                }
             }
         }
-        MLX.eval(realized.flatMap { [$0.k, $0.v] })
-        for entry in realized {
-            entry.row.caches[entry.layer].restore(keys: entry.k, values: entry.v)
-        }
+        MLX.eval(fp16Realized.flatMap { [$0.k, $0.v] }
+            + quantRealized.flatMap {
+                [$0.snap.keys, $0.snap.values, $0.snap.keyScales,
+                 $0.snap.keyZeros, $0.snap.valueScales, $0.snap.valueZeros]
+            })
+        for e in fp16Realized { e.dst.restore(keys: e.k, values: e.v) }
+        for e in quantRealized { e.dst.restoreQuantized(e.snap) }
     }
 }
