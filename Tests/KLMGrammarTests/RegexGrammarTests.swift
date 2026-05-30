@@ -87,6 +87,32 @@ final class RegexGrammarTests: XCTestCase {
         rejects(#"\D"#, "3")
     }
 
+    func testWordIsASCIIOnly() {
+        // \w is [A-Za-z0-9_], ASCII only: a non-ASCII letter must NOT match
+        // (the operator-precedence bug let "é" through).
+        accepts(#"\w"#, "a")
+        accepts(#"\w"#, "9")
+        rejects(#"\w"#, "é")
+        rejects(#"\w"#, "中")
+        // \W is the exact inverse, so a non-ASCII letter IS a non-word char.
+        accepts(#"\W"#, "é")
+        rejects(#"\W"#, "a")
+    }
+
+    func testEscapedLowBoundClassRange() {
+        // A character class whose range LOW bound is an escaped char, e.g.
+        // [\+-/] = the range '+'(0x2B)..'/'(0x2F), covering + , - . /.
+        // The parseClass escaped-literal branch must index the input, not the
+        // accumulator, to build this range.
+        let p = #"[\+-/]"#
+        accepts(p, "+")
+        accepts(p, ",")
+        accepts(p, ".")
+        accepts(p, "/")
+        rejects(p, "a")
+        rejects(p, "0")
+    }
+
     // MARK: - Character classes
 
     func testCharClass() {

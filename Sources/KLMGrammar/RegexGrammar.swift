@@ -50,8 +50,8 @@ public struct RegexGrammar: GrammarAutomaton {
                 return negated ? !hit : hit
             case .digit: return c.isNumber && c.isASCII
             case .notDigit: return !(c.isNumber && c.isASCII)
-            case .word: return c == "_" || (c.isLetter || c.isNumber) && c.isASCII
-            case .notWord: return !(c == "_" || (c.isLetter || c.isNumber) && c.isASCII)
+            case .word: return c == "_" || ((c.isLetter || c.isNumber) && c.isASCII)
+            case .notWord: return !(c == "_" || ((c.isLetter || c.isNumber) && c.isASCII))
             case .space: return c == " " || c == "\t" || c == "\n" || c == "\r"
             case .notSpace: return !(c == " " || c == "\t" || c == "\n" || c == "\r")
             }

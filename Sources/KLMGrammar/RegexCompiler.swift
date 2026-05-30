@@ -110,6 +110,12 @@ public extension RegexGrammar {
                 if var f = frag {
                     builder.patch(f.outs, to: piece.start)
                     f.outs = piece.outs
+                    // A concatenation of two or more pieces is not a single
+                    // bare-char atom, so it can never be cloned by counted
+                    // repetition. Clearing this prevents the first atom's
+                    // `singleChar` from leaking through and making e.g.
+                    // `(ab){2}` look clonable (it must be rejected).
+                    f.singleChar = nil
                     frag = f
                 } else {
                     frag = piece
@@ -142,9 +148,11 @@ public extension RegexGrammar {
             switch c {
             case "(":
                 pos += 1
-                guard let inner = parseAlternation(), eat(")") else { return nil }
+                guard var inner = parseAlternation(), eat(")") else { return nil }
                 // A group is NOT a single bare char, even if it wraps one, so
-                // `(ab){2}` and `(a|b){2}` are rejected by parseCounted.
+                // `(a){2}`, `(ab){2}`, and `(a|b){2}` are all rejected by
+                // parseCounted (counted repetition clones a single char only).
+                inner.singleChar = nil
                 return inner
             case "[":
                 return parseClass()
@@ -259,8 +267,10 @@ public extension RegexGrammar {
                     if let m = Self.classEscape(esc) {
                         classMatchers.append(m)
                     } else if let lit = Self.literalEscape(esc) {
-                        // Possible range start: lit '-' x
-                        if peek() == "-", pos + 1 < chars.count, chars[pos + 1] != "]" {
+                        // Possible range start: lit '-' x. Index `self.chars`
+                        // (the input array), not the local `chars` accumulator
+                        // Set — mirrors the non-escaped branch below.
+                        if peek() == "-", pos + 1 < self.chars.count, self.chars[pos + 1] != "]" {
                             pos += 1
                             guard let hi = readClassChar() else { return nil }
                             guard lit <= hi else { return nil }
