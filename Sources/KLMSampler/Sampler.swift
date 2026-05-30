@@ -98,20 +98,24 @@ public final class Sampler: @unchecked Sendable {
     ///
     /// - Parameter logits: Raw logits, shape `[B, vocabSize]` or `[B, 1, vocabSize]`
     /// - Returns: Sampled token ID as Int
-    public func sample(_ logits: MLXArray) -> Int {
-        return sampleArray(logits).item(Int.self)
+    /// - Parameter mask: optional additive `[vocab]` logit mask (0 for
+    ///   allowed tokens, a large negative bias for forbidden ones), used by
+    ///   grammar-constrained decoding. `nil` (the default) leaves the
+    ///   sampling path byte-for-byte unchanged.
+    public func sample(_ logits: MLXArray, mask: MLXArray? = nil) -> Int {
+        return sampleArray(logits, mask: mask).item(Int.self)
     }
 
     /// Penalty-aware variants. `recent` is the trailing token window the
     /// decode loop maintains *only* when `needsHistory` is true; on the
     /// default path these are never called, so the hot path is unchanged.
-    public func sample(_ logits: MLXArray, recent: [Int]) -> Int {
-        sampleArray(logits, recent: recent).item(Int.self)
+    public func sample(_ logits: MLXArray, recent: [Int], mask: MLXArray? = nil) -> Int {
+        sampleArray(logits, recent: recent, mask: mask).item(Int.self)
     }
 
-    public func sampleArray(_ logits: MLXArray, recent: [Int]) -> MLXArray {
+    public func sampleArray(_ logits: MLXArray, recent: [Int], mask: MLXArray? = nil) -> MLXArray {
         let l = applyPenalties(to1D(logits), recent: recent)
-        return sampleFrom(l)
+        return sampleFrom(l, mask: mask)
     }
 
     /// Reduce `[B, seq, vocab]` / `[B, vocab]` / `[vocab]` to 1-D `[vocab]`.
@@ -165,20 +169,27 @@ public final class Sampler: @unchecked Sendable {
     ///
     /// - Parameter logits: Raw logits, shape `[B, vocabSize]` or `[B, 1, vocabSize]`
     /// - Returns: A 1-element int32 MLXArray of shape `[1]` containing the token ID.
-    public func sampleArray(_ logits: MLXArray) -> MLXArray {
-        return sampleFrom(to1D(logits))
+    public func sampleArray(_ logits: MLXArray, mask: MLXArray? = nil) -> MLXArray {
+        return sampleFrom(to1D(logits), mask: mask)
     }
 
     /// Shared sampling tail operating on 1-D `[vocab]` logits.
-    private func sampleFrom(_ logits1D: MLXArray) -> MLXArray {
+    ///
+    /// `mask`, when present, is an additive `[vocab]` logit mask applied
+    /// FIRST — before greedy argmax and before any temperature / top-p /
+    /// top-k / min-p / mirostat step — so a grammar-forbidden token (biased
+    /// to roughly `-inf`) can never win regardless of the sampling knobs.
+    private func sampleFrom(_ logits1D: MLXArray, mask: MLXArray? = nil) -> MLXArray {
+        let l = mask.map { logits1D + $0.asType(logits1D.dtype) } ?? logits1D
+
         // Greedy: just argmax (keepDims gives shape [1])
         if params.temperature <= 0 && params.mirostat == 0 {
-            return argMax(logits1D, keepDims: true).asType(.int32)
+            return argMax(l, keepDims: true).asType(.int32)
         }
 
         // Temperature scaling
         let temp = params.temperature <= 0 ? 1.0 : params.temperature
-        var scaled = logits1D / temp
+        var scaled = l / temp
 
         // Mirostat (v1/v2): adaptive top-k truncation toward target surprise.
         if params.mirostat != 0 {
@@ -198,6 +209,22 @@ public final class Sampler: @unchecked Sendable {
         // Min-p filtering (relative to the peak probability).
         if params.minP > 0.0 {
             scaled = minPFilter(scaled, minP: params.minP)
+        }
+
+        // Grammar-masked sampling. `MLXRandom.categorical` interprets its
+        // input as LOGITS (it softmaxes internally); the unmasked path below
+        // historically feeds it `softmax(scaled)` (probabilities), a harmless
+        // double-softmax for ordinary sampling. But that path gives a
+        // forbidden token (probability ~0) a weight of exp(0)=1 inside
+        // categorical, so it can still be drawn. When a mask is present we
+        // therefore feed categorical the masked LOGITS directly: re-add the
+        // mask so any token a filter let slip back is at ~-2e9, then sample —
+        // masked tokens softmax to 0 and can never win. The unmasked branch
+        // is byte-for-byte unchanged.
+        if let mask {
+            let masked = scaled + mask.asType(scaled.dtype)
+            let token = MLXRandom.categorical(expandedDimensions(masked, axis: 0))
+            return token.asType(.int32)
         }
 
         // Sample from the distribution. categorical returns shape [1] uint32.

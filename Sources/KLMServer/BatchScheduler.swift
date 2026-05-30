@@ -79,14 +79,20 @@ actor BatchScheduler {
     func submit(messages: [[String: String]], params: SamplingParams, maxTokens: Int,
                 useSpeculative: Bool?, usePrefixCache: Bool,
                 imageData: Data?, audioData: Data?,
-                contextLimit: Int?, promptTemplateOverride: String?) async -> GenResult {
+                contextLimit: Int?, promptTemplateOverride: String?,
+                format: OutputFormat? = nil) async -> GenResult {
         func serial() -> GenResult {
             engine.generate(
                 messages: messages, params: params, maxTokens: maxTokens,
                 useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
                 imageData: imageData, audioData: audioData,
-                contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride)
+                contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
+                format: format)
         }
+        // Grammar-constrained decoding advances a per-sequence JSON automaton
+        // each step; the shared-step batched loop cannot isolate per-row
+        // masks, so a format request always takes the serial path.
+        if format != nil { return serial() }
         guard isEligible(params: params, imageData: imageData, audioData: audioData,
                          useSpeculative: useSpeculative) else {
             // Surface the one case where the user asked for two features that

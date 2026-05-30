@@ -567,20 +567,23 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         imageData: Data? = nil,
         audioData: Data? = nil,
         contextLimit: Int? = nil,
-        promptTemplateOverride: String? = nil
+        promptTemplateOverride: String? = nil,
+        format: OutputFormat? = nil
     ) async -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         if let sched = await engines.scheduler(for: eng) {
             return await sched.submit(
                 messages: messages, params: params, maxTokens: maxTokens,
                 useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
                 imageData: imageData, audioData: audioData,
-                contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride)
+                contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
+                format: format)
         }
         return eng.generate(
             messages: messages, params: params, maxTokens: maxTokens,
             useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
             imageData: imageData, audioData: audioData,
-            contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride)
+            contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
+            format: format)
     }
 
     /// Prompt-shaped convenience over ``runGenerate(_:messages:...)`` mirroring
@@ -598,7 +601,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         imageData: Data? = nil,
         audioData: Data? = nil,
         contextLimit: Int? = nil,
-        promptTemplateOverride: String? = nil
+        promptTemplateOverride: String? = nil,
+        format: OutputFormat? = nil
     ) async -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
@@ -609,7 +613,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             eng, messages: messages, params: params, maxTokens: maxTokens,
             useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
             imageData: imageData, audioData: audioData,
-            contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride)
+            contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
+            format: format)
     }
 
     /// Apply a created model's Modelfile `PARAMETER` overrides (WS-C) as
@@ -854,7 +859,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             handleStreamingCompletion(
                 context: context, messages: genMessages,
                 params: effParams, maxTokens: effMax,
-                media: decodedMedia, contextLimit: effCtx)
+                media: decodedMedia, responseFormat: request.responseFormat,
+                contextLimit: effCtx)
         } else {
             handleNonStreamingCompletion(
                 context: context, messages: genMessages,
@@ -1183,6 +1189,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         messages: [[String: String]],
         params: SamplingParams, maxTokens: Int,
         media: DecodedMedia? = nil,
+        responseFormat: ResponseFormat? = nil,
         contextLimit: Int? = nil
     ) {
         // Write the SSE head synchronously within the channelRead call
@@ -1222,7 +1229,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 params: params, maxTokens: maxTokens,
                 imageData: imageData, audioData: audioData,
                 contextLimit: contextLimit,
-                promptTemplateOverride: modelTemplateOverride())
+                promptTemplateOverride: modelTemplateOverride(),
+                format: StructuredOutput.engineFormat(for: responseFormat))
 
             let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
             // Strip <think>/<thinking> from streamed chunks. Holds
@@ -1288,7 +1296,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 params: params, maxTokens: maxTokens,
                 imageData: imageData, audioData: audioData,
                 contextLimit: contextLimit,
-                promptTemplateOverride: modelTemplateOverride())
+                promptTemplateOverride: modelTemplateOverride(),
+                format: StructuredOutput.engineFormat(for: responseFormat))
 
             var fullContent = ""
             for await event in tokenStream {
@@ -1567,7 +1576,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 imageData: imageData,
                 audioData: audioData,
                 contextLimit: ocCtx,
-                promptTemplateOverride: modelTemplateOverride())
+                promptTemplateOverride: modelTemplateOverride(),
+                format: StructuredOutput.engineFormat(for: respFormat))
 
             if request.stream {
                 var firstTokenTime: Double?
@@ -1763,7 +1773,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 imageData: imageData,
                 audioData: audioData,
                 contextLimit: ogCtx,
-                promptTemplateOverride: modelTemplateOverride())
+                promptTemplateOverride: modelTemplateOverride(),
+                format: StructuredOutput.engineFormat(for: respFormat))
 
             if request.stream {
                 var firstTokenTime: Double?

@@ -14,6 +14,11 @@ public final class KLMTokenizer: @unchecked Sendable {
     /// guessing from the encoded special-token ids. Empty when
     /// the file is missing or unparseable.
     public let tokenizerModelKind: String
+    /// Model vocabulary size, read from `config.json`'s `vocab_size`
+    /// (falling back to the entry count in `tokenizer.json`'s model
+    /// vocab). Used to size the grammar logit mask to the logits width.
+    /// `nil` when neither file declares it.
+    public let vocabSize: Int?
     /// Contents of `chat_template.jinja` from the model directory, if
     /// present. Newer HF checkpoints (Qwen 3 Coder, Qwen 3 Instruct-2507,
     /// Gemma 4) ship the chat template as a separate Jinja file instead
@@ -81,6 +86,31 @@ public final class KLMTokenizer: @unchecked Sendable {
         // Capture a separate `chat_template.jinja` if the checkpoint
         // ships one. Best-effort, no-op when absent.
         self.externalChatTemplate = Self.readExternalChatTemplate(directory: directory)
+
+        // Model vocab size (for sizing the grammar logit mask). Best-effort.
+        self.vocabSize = Self.readVocabSize(directory: directory)
+    }
+
+    private static func readVocabSize(directory: URL) -> Int? {
+        // Preferred source: config.json's `vocab_size` — this matches the
+        // model's lm_head output width (the logits the mask must align to).
+        let cfg = directory.appendingPathComponent("config.json")
+        if let data = try? Data(contentsOf: cfg),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let v = obj["vocab_size"] as? Int, v > 0 {
+            return v
+        }
+        // Fallback: the entry count of tokenizer.json's model vocab
+        // (BPE/WordPiece use a `{token: id}` dict; Unigram uses a
+        // `[[token, score], ...]` array).
+        let tok = directory.appendingPathComponent("tokenizer.json")
+        if let data = try? Data(contentsOf: tok),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let model = obj["model"] as? [String: Any] {
+            if let vocab = model["vocab"] as? [String: Any] { return vocab.count }
+            if let vocab = model["vocab"] as? [Any] { return vocab.count }
+        }
+        return nil
     }
 
     internal static func readExternalChatTemplate(directory: URL) -> String? {
