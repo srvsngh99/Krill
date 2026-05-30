@@ -1419,6 +1419,68 @@ extension InferenceEngine {
         }
     }
 
+    /// Build the prefix-cache-aware per-row prefill closure for the batched
+    /// path (Stage C4). Mirrors the dense `generate()` prefill exactly, fp16
+    /// only: on a FULL prefix hit (`usePrefixCache` set and the cached prefix
+    /// covers the whole prompt) it restores each layer's KV, trims the last
+    /// position, and forwards just that token - so the resulting per-row caches
+    /// are identical to a cold prefill and the stacked decode is byte-for-byte
+    /// the same. On a miss it prefills cold and stores write-behind (>= 8
+    /// tokens). Gemma 4 KV-shared layers leave a suffix of caches empty, so the
+    /// store skips nil snapshots and the restore only fills the layers the hit
+    /// carries - matching the dense path. `mediaHash` is nil: the batched path
+    /// is text-only (image/audio requests are routed serially upstream).
+    private func makeBatchedPrefillRow(
+        _ model: LoadedModel
+    ) -> ([Int], [KVCache], Bool) -> MLXArray {
+        let rawPrefill = model.prefillForward ?? model.forward
+        let pc = self.prefixCache
+        let pcModelId = self.modelId
+        return { tokens, caches, usePrefixCache in
+            var cacheHit = false
+            if usePrefixCache,
+               let hit = pc.lookup(tokens: tokens, modelId: pcModelId, mediaHash: nil),
+               !hit.keys.isEmpty, hit.prefixLength == tokens.count {
+                for (i, cache) in caches.enumerated() {
+                    if i < hit.keys.count, let k = hit.keys[i].first,
+                       i < hit.values.count, let v = hit.values[i].first {
+                        cache.restore(keys: k, values: v)
+                    }
+                }
+                cacheHit = true
+            }
+
+            let toProcess: [Int]
+            if cacheHit {
+                let trimmed = max(0, tokens.count - 1)
+                for cache in caches { cache.truncate(to: trimmed) }
+                toProcess = [tokens.last!]
+            } else {
+                toProcess = tokens
+            }
+
+            let input = MLXArray(toProcess.map { Int32($0) }).reshaped(1, toProcess.count)
+            let logits = rawPrefill(input, caches)
+            MLX.eval(logits)   // realize the cache fills before snapshotting for store
+
+            if usePrefixCache, !cacheHit, tokens.count >= 8 {
+                var snapshotKeys: [[MLXArray]] = []
+                var snapshotValues: [[MLXArray]] = []
+                for cache in caches {
+                    if let snap = cache.snapshot() {
+                        snapshotKeys.append([snap.keys])
+                        snapshotValues.append([snap.values])
+                    }
+                }
+                if !snapshotKeys.isEmpty {
+                    pc.store(tokens: tokens, modelId: pcModelId,
+                             keys: snapshotKeys, values: snapshotValues, mediaHash: nil)
+                }
+            }
+            return logits
+        }
+    }
+
     /// Submit ONE request to the engine's persistent continuous batcher
     /// (follow-up #8, Stage C1) and get back its own `(stream, stats)`. Unlike
     /// `generateBatched` (a static cohort decoded to completion), the batcher
@@ -1430,8 +1492,9 @@ extension InferenceEngine {
     ///
     /// Returns nil when the loaded model is not batch-eligible (unknown family,
     /// nothing loaded, or an empty prompt) so the caller falls back to serial
-    /// `generate(...)`. Scope matches `generateBatched`: text-only plain-causal
-    /// (Llama 3.x / Qwen 2.5-3 dense), fp16 KV, no prefix cache, no spec.
+    /// `generate(...)`. The batched families are text-only Llama 3.x / Qwen
+    /// 2.5-3 dense, Gemma 4 (dense + MoE) and Qwen3 MoE; fp16 KV; the shared
+    /// prefix cache IS consulted per row (Stage C4); no speculative decode.
     public func submitBatched(
         _ req: BatchGenRequest, maxRows: Int, windowMs: Int
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?)? {
@@ -1450,7 +1513,7 @@ extension InferenceEngine {
         batcherLock.lock()
         if continuousBatcher == nil {
             let deps = ContinuousBatcher.Deps(
-                prefill: model.prefillForward ?? model.forward,
+                prefillRow: makeBatchedPrefillRow(model),
                 batchedForward: batchedForward,
                 numLayers: model.numLayers,
                 decode: { tokenizer.decode(token: $0) },
