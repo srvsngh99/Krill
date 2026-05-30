@@ -315,4 +315,65 @@ final class BatchedDecodeLiveTests: XCTestCase {
         XCTAssertEqual(hit, cold,
             "prefix-cache replay must decode identically to the cold (no-cache) run")
     }
+
+    /// Stage C4 (2b): the shared prefix cache on the STATIC-cohort
+    /// `generateBatched` path (the BatchScheduler's non-continuous entry) must
+    /// be an exact replay too. A full prefix hit restores each row's KV and
+    /// forwards only its last token, so a cohort decoded from cached prefixes is
+    /// byte-for-byte the same cohort decoded cold. Two distinct prompts are
+    /// batched (R=2, so this exercises the real batched forward, not a 1-row
+    /// fallback): run the cohort cold (usePrefixCache=false, never stores), then
+    /// run it twice with the cache on (miss+store, then hit). Each row's full
+    /// greedy token sequence on the hit run must equal its cold run, bit-for-bit
+    /// - the hit and cold runs are the SAME R=2 batched forward over identical
+    /// KV, so there is no batched-GEMM-width confound. The memoryCount
+    /// transitions guard against a silent miss masquerading as a match.
+    func testBatchedStaticCohortPrefixCacheReplayMatchesColdDecode() async throws {
+        let dir = try requireModelDirectory()
+        let engine = InferenceEngine(modelDirectory: dir)
+        try await engine.load()
+        guard engine.supportsBatchedDecode else {
+            throw XCTSkip("loaded model is not batched-eligible")
+        }
+
+        let prompts = [
+            "Explain in one clear sentence why the daytime sky looks blue to us.",
+            "Describe in one sentence how a rainbow forms after the rain.",
+        ]
+        func runCohort(usePrefixCache: Bool) async -> [[Int]] {
+            let reqs = prompts.map {
+                BatchGenRequest(messages: [["role": "user", "content": $0]],
+                                params: .greedy, maxTokens: 24,
+                                usePrefixCache: usePrefixCache)
+            }
+            let results = engine.generateBatched(reqs)
+            // AsyncStream buffers unbounded, so the shared decode Task fills
+            // every row's stream regardless of drain order; draining the rows in
+            // sequence collects each row's full sequence safely.
+            var out: [[Int]] = []
+            for res in results {
+                var toks: [Int] = []
+                for await ev in res.stream { if ev.isEnd { break }; toks.append(ev.tokenId) }
+                out.append(toks)
+            }
+            return out
+        }
+
+        XCTAssertEqual(engine.prefixCache.memoryCount, 0, "cache should start empty")
+        let cold = await runCohort(usePrefixCache: false)    // never stores
+        XCTAssertEqual(engine.prefixCache.memoryCount, 0,
+                       "usePrefixCache=false must not populate the cache")
+        _ = await runCohort(usePrefixCache: true)            // miss -> stores both prompts
+        XCTAssertGreaterThanOrEqual(engine.prefixCache.memoryCount, 1,
+                       "the usePrefixCache=true cohort must have stored its prompt prefixes")
+        let hit = await runCohort(usePrefixCache: true)      // full hit -> restore + 1 token
+
+        XCTAssertEqual(cold.count, prompts.count)
+        XCTAssertEqual(hit.count, prompts.count)
+        for r in 0 ..< prompts.count {
+            XCTAssertGreaterThan(cold[r].count, 0, "cold cohort row \(r) produced no tokens")
+            XCTAssertEqual(hit[r], cold[r],
+                "row \(r): static-cohort prefix replay must decode identically to the cold run")
+        }
+    }
 }
