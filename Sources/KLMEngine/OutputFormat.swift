@@ -11,7 +11,14 @@
 ///   (still valid JSON); if the schema cannot be compiled at all the engine
 ///   falls back to the `.json` validity mask, and the server's system-prompt
 ///   guidance + post-extraction `coerce` remain as a final backstop.
+/// - `.regex(String)` (Stage C) constrains the output to a full match of a
+///   regular expression (the associated string is the pattern): the output
+///   must be exactly a string in the regex's language. Unlike the JSON
+///   formats the output is NOT JSON, so the server does not JSON-extract it.
+///   If the pattern cannot be compiled the engine disables the mask (the
+///   request decodes unconstrained) and the system-prompt guidance applies.
 public enum OutputFormat: Sendable {
     case json
     case jsonSchema(String)
+    case regex(String)
 }

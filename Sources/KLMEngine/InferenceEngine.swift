@@ -41,6 +41,8 @@ public final class InferenceEngine: @unchecked Sendable {
     private var cachedPieces: [String]?
     private var cachedJSONMask: JSONTokenMask?
     private var cachedSchemaMask: (schema: String, mask: any GrammarLogitMask)?
+    /// Memoized most-recent Stage C regex mask, keyed by (pattern, stop set).
+    private var cachedRegexMask: (pattern: String, mask: any GrammarLogitMask)?
     private let jsonMaskLock = NSLock()
 
     /// Display name of the loaded draft model (alias or directory name).
@@ -462,6 +464,21 @@ public final class InferenceEngine: @unchecked Sendable {
             }
             let mask = GrammarTokenMask(automaton: grammar, pieces: pieces, stopIds: stopIds)
             cachedSchemaMask = (schema, mask)
+            return mask
+
+        case .regex(let pattern):
+            if let cached = cachedRegexMask, cached.pattern == pattern,
+               cached.mask.stopIdSet == stopIds {
+                return cached.mask
+            }
+            guard let grammar = RegexGrammar.compile(pattern) else {
+                FileHandle.standardError.write(Data((
+                    "[KrillLM] regex did not compile; decoding unconstrained "
+                    + "for this request.\n").utf8))
+                return nil
+            }
+            let mask = GrammarTokenMask(automaton: grammar, pieces: pieces, stopIds: stopIds)
+            cachedRegexMask = (pattern, mask)
             return mask
         }
     }
