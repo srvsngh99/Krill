@@ -265,4 +265,54 @@ final class BatchedDecodeLiveTests: XCTestCase {
                            "row \(i) first token diverged from its serial run under continuous admission")
         }
     }
+
+    /// Stage C4: the shared prefix cache on the batched (continuous-batcher)
+    /// path must be an EXACT replay - a full prefix hit restores the prompt's KV
+    /// and forwards only the last token, so its decode is byte-for-byte the cold
+    /// (never-cached) decode. Drives `submitBatched` three times on one engine:
+    /// (1) usePrefixCache=false (never stores) for the cold reference, (2)
+    /// usePrefixCache=true to MISS and store the prompt write-behind, (3)
+    /// usePrefixCache=true to HIT that stored entry. The hit run's full greedy
+    /// token sequence must equal the cold run's, bit-for-bit. The prompt is
+    /// comfortably longer than minPrefixLength (8), so step 2 really does store
+    /// and step 3 really does hit - exercising the restore/trim path, not a
+    /// silent miss.
+    func testBatchedPrefixCacheReplayMatchesColdDecode() async throws {
+        let dir = try requireModelDirectory()
+        let engine = InferenceEngine(modelDirectory: dir)
+        try await engine.load()
+        guard engine.supportsBatchedDecode else {
+            throw XCTSkip("loaded model is not batched-eligible")
+        }
+
+        let prompt = "Explain in one clear sentence why the daytime sky looks blue to us."
+        func runBatched(usePrefixCache: Bool) async -> [Int] {
+            guard let r = engine.submitBatched(
+                BatchGenRequest(messages: [["role": "user", "content": prompt]],
+                                params: .greedy, maxTokens: 24,
+                                usePrefixCache: usePrefixCache),
+                maxRows: 4, windowMs: 0)
+            else { return [] }
+            var toks: [Int] = []
+            for await ev in r.stream { if ev.isEnd { break }; toks.append(ev.tokenId) }
+            return toks
+        }
+
+        // Guard against a silently-missing hit (greedy decode is deterministic,
+        // so hit == cold would also hold if the hit path never ran). Assert the
+        // cache actually transitions empty -> populated so a broken store/hit
+        // fails loudly here, not silently.
+        XCTAssertEqual(engine.prefixCache.memoryCount, 0, "cache should start empty")
+        let cold = await runBatched(usePrefixCache: false)   // never stores
+        XCTAssertEqual(engine.prefixCache.memoryCount, 0,
+                       "usePrefixCache=false must not populate the cache")
+        _ = await runBatched(usePrefixCache: true)           // miss -> stores the prompt
+        XCTAssertGreaterThanOrEqual(engine.prefixCache.memoryCount, 1,
+                       "the usePrefixCache=true run must have stored the prompt prefix")
+        let hit = await runBatched(usePrefixCache: true)     // full hit -> restore + 1 token
+
+        XCTAssertGreaterThan(cold.count, 0, "cold batched run produced no tokens")
+        XCTAssertEqual(hit, cold,
+            "prefix-cache replay must decode identically to the cold (no-cache) run")
+    }
 }

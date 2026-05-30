@@ -18,14 +18,23 @@ import KLMSampler
 /// re-stacked from per-row caches whenever it changes, so every active row is
 /// always decoded exactly as if it ran alone (no cross-row bleed).
 ///
-/// Scope (Stage C1): fp16 KV, text-only Llama 3.x / Qwen 2.5-3 dense, no prefix
-/// cache, no speculative decode. Gemma 4 / MoE / VL and prefix/int8/spec
-/// reconciliation are later C sub-stages.
+/// Scope: fp16 KV, no speculative decode. Batched families now include Gemma 4
+/// (dense + MoE) and Qwen3 MoE alongside Llama 3.x / Qwen 2.5-3 dense (Stage
+/// C2/C3). The shared prefix cache IS consulted per row at prefill (Stage C4,
+/// via `Deps.prefillRow`); int8-on-batched and speculative remain later
+/// sub-stages.
 final class ContinuousBatcher: @unchecked Sendable {
     /// Engine-supplied closures + constants the decode loop needs. Bundled into
     /// one `@unchecked Sendable` value (the loop runs off the caller's context).
     struct Deps: @unchecked Sendable {
-        let prefill: (MLXArray, [KVCacheProtocol]?) -> MLXArray
+        /// Prefill one row's prompt into its own fp16 caches and return the
+        /// prefill (last-token) logits. The engine bakes the shared prefix-cache
+        /// lookup/restore/trim/store into this closure (honoring the row's
+        /// `usePrefixCache`), so a full prefix hit restores the prompt's KV and
+        /// forwards just the last token - identical KV to a cold prefill, so the
+        /// stacked decode is byte-for-byte the same. fp16 only (the batched path
+        /// is fp16 `KVCache`).
+        let prefillRow: ([Int], [KVCache], Bool) -> MLXArray
         let batchedForward: (MLXArray, [KVCache], MLXArray, [Int]) -> MLXArray
         let numLayers: Int
         let decode: (Int) -> String
@@ -332,9 +341,11 @@ final class ContinuousBatcher: @unchecked Sendable {
     private func prefillAndAdmit(_ p: Pending) -> Row? {
         let start = CFAbsoluteTimeGetCurrent()
         let caches = makeKVCaches(numLayers: deps.numLayers)
-        let input = MLXArray(p.promptTokens.map { Int32($0) })
-            .reshaped(1, p.promptTokens.count)
-        let logits = deps.prefill(input, caches)
+        // Prefix-cache aware: a full hit restores this prompt's KV and forwards
+        // only the last token, yielding KV identical to a cold prefill (so the
+        // stacked decode is unchanged); a miss prefills cold and stores
+        // write-behind. Honors the row's own `usePrefixCache`.
+        let logits = deps.prefillRow(p.promptTokens, caches, p.req.usePrefixCache)
         MLX.eval(logits)
         let firstTok = p.sampler.sample(logits)
         let prefillTime = CFAbsoluteTimeGetCurrent() - start
