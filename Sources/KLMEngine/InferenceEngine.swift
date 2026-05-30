@@ -1351,12 +1351,13 @@ extension InferenceEngine {
     public func generateBatched(_ requests: [BatchGenRequest])
         -> [(stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?)]
     {
-        // A fallback row is NOT a batched row — it is the request running
-        // alone on the serial path — so it honors that request's own
+        // A fallback row is NOT a batched row - it is the request running
+        // alone on the serial path - so it honors that request's own
         // useSpeculative / usePrefixCache rather than forcing them off. This
         // keeps a single-row cohort (or an ineligible model) byte-identical to
-        // calling generate() directly. (The true R>1 batched loop below never
-        // touches the prefix cache or spec, per Stage B scope.)
+        // calling generate() directly. (The true R>1 batched loop below now
+        // consults the shared prefix cache per row (Stage C4); it still never
+        // runs speculative decode, per the batched-path scope.)
         func serialFallback()
             -> [(stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?)]
         {
