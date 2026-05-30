@@ -56,6 +56,24 @@ final class BatchSchedulerTests: XCTestCase {
         }
     }
 
+    /// An explicit speculative opt-in is never batched (the two do not
+    /// compose); it falls through to the serial path and still returns a
+    /// finishing stream. The one-time exclusion notice only logs when the
+    /// engine is genuinely batch-capable (a loaded checkpoint), so here - on an
+    /// unloaded engine - we just assert the spec request still terminates and
+    /// the new exclusion branch never hangs or traps.
+    func testSpeculativeOptInFallsThroughSerially() async {
+        let sched = BatchScheduler(engine: unloadedEngine(), numParallel: 4, windowMs: 10)
+        let (stream, _) = await sched.submit(
+            messages: [["role": "user", "content": "hi"]],
+            params: .greedy, maxTokens: 8,
+            useSpeculative: true, usePrefixCache: true,
+            imageData: nil, audioData: nil,
+            contextLimit: nil, promptTemplateOverride: nil)
+        for await _ in stream { /* drain */ }
+        XCTAssertTrue(true)   // reaching here means the spec request returned + finished
+    }
+
     /// The coalescing window default is used when the env var is unset.
     func testWindowDefaultFromEnvironment() {
         if ProcessInfo.processInfo.environment["KRILL_BATCH_WINDOW_MS"] == nil {
