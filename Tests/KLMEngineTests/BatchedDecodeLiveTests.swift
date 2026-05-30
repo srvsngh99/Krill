@@ -298,8 +298,17 @@ final class BatchedDecodeLiveTests: XCTestCase {
             return toks
         }
 
+        // Guard against a silently-missing hit (greedy decode is deterministic,
+        // so hit == cold would also hold if the hit path never ran). Assert the
+        // cache actually transitions empty -> populated so a broken store/hit
+        // fails loudly here, not silently.
+        XCTAssertEqual(engine.prefixCache.memoryCount, 0, "cache should start empty")
         let cold = await runBatched(usePrefixCache: false)   // never stores
+        XCTAssertEqual(engine.prefixCache.memoryCount, 0,
+                       "usePrefixCache=false must not populate the cache")
         _ = await runBatched(usePrefixCache: true)           // miss -> stores the prompt
+        XCTAssertGreaterThanOrEqual(engine.prefixCache.memoryCount, 1,
+                       "the usePrefixCache=true run must have stored the prompt prefix")
         let hit = await runBatched(usePrefixCache: true)     // full hit -> restore + 1 token
 
         XCTAssertGreaterThan(cold.count, 0, "cold batched run produced no tokens")
