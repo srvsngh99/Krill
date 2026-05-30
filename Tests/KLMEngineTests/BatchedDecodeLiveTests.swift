@@ -376,4 +376,114 @@ final class BatchedDecodeLiveTests: XCTestCase {
                 "row \(r): static-cohort prefix replay must decode identically to the cold run")
         }
     }
+
+    // MARK: - int8 batched decode (Stage C4)
+
+    /// int8 engine factory. Skips unless the loaded model supports the quantized
+    /// batched path (currently Gemma 4 - the plain-causal Llama/Qwen/MoE
+    /// attentions are hard-typed to fp16 KVCache, so int8 KV is Gemma-4-only,
+    /// batched and serial alike). Use a Gemma 4 checkpoint for these gates.
+    private func requireInt8BatchedEngine() async throws -> InferenceEngine {
+        let dir = try requireModelDirectory()
+        let engine = InferenceEngine(modelDirectory: dir, kvCacheDtype: "int8")
+        try await engine.load()
+        guard engine.supportsQuantizedBatchedDecode, engine.useQuantizedBatched(
+            engine.loadedModelForBatching!) else {
+            throw XCTSkip("loaded model does not support int8 batched decode (use a Gemma 4 checkpoint)")
+        }
+        return engine
+    }
+
+    /// int8 dtype-independent cross-row isolation gate (the real correctness
+    /// signal for the quantized path): a row's logits must be BIT-IDENTICAL
+    /// regardless of neighbor CONTENT at a fixed batch width. int8 quantization
+    /// is lossy but per-row, and the batched matmul computes each row from its
+    /// own dequantized K/V, so the row's logits cannot depend on what the
+    /// neighbors contain - any nonzero diff is a genuine cross-row bleed or a
+    /// quantized-stacking indexing bug. Unlike the teacher-forced-vs-solo diff,
+    /// this is unconfounded by bf16 GEMM rounding (batched-vs-batched at fixed
+    /// width), so it must be ~0 even on bf16 Gemma 4 with int8 KV.
+    func testInt8BatchedDecodeNoCrossRowContamination() async throws {
+        let engine = try await requireInt8BatchedEngine()
+        let row = try XCTUnwrap(engine.encodeForBatchTest("The capital of France is"))
+        let nA = try XCTUnwrap(engine.encodeForBatchTest(
+            "Describe the process of photosynthesis in plants in detail."))
+        let nB = try XCTUnwrap(engine.encodeForBatchTest(
+            "Explain how a combustion engine converts fuel into motion here."))
+        let len = min(nA.count, nB.count)
+        XCTAssertGreaterThan(len, row.count, "neighbor must be longer so row is padded")
+        let diff = try XCTUnwrap(engine.quantizedCrossRowContaminationMaxDiff(
+            row: row, neighborsA: [Array(nA.prefix(len))],
+            neighborsB: [Array(nB.prefix(len))], steps: 16))
+        XCTAssertLessThan(diff, 0.05,
+            "int8 row logits changed by \(diff) when only neighbor content changed (cross-row bleed)")
+    }
+
+    /// int8 R=1 batched must equal int8 solo EXACTLY (bit-for-bit): the K is
+    /// quantized post-RoPE identically in both paths and there is no left-pad at
+    /// R=1, so the only difference would be a per-row stacking/decode bug. At R>1
+    /// the same bf16 batched-GEMM kernel-width rounding the fp16 path sees
+    /// applies (Gemma 4 computes in bf16), so a loose explosion-guard bound is
+    /// used there; the exact R=1 gate plus the bit-exact contamination test
+    /// above are the real correctness signals.
+    func testInt8BatchedDecodeMatchesSerializedPerRow() async throws {
+        let engine = try await requireInt8BatchedEngine()
+        let texts = [
+            "The capital of France is",
+            "Write one short sentence about the ocean and why it matters to the planet.",
+            "List three colors:",
+        ]
+        let prompts = try texts.map { text -> [Int] in
+            guard let toks = engine.encodeForBatchTest(text), !toks.isEmpty else {
+                throw XCTSkip("tokenizer produced no tokens")
+            }
+            return toks
+        }
+        for (r, p) in prompts.enumerated() {
+            let d1 = try XCTUnwrap(
+                engine.quantizedTeacherForcedBatchedVsSerialMaxDiff(promptTokens: [p], steps: 16))
+            XCTAssertLessThan(d1[0], 0.05,
+                "int8 R=1 row \(r) batched logits must equal int8 solo exactly; diff \(d1[0])")
+        }
+        let diffs = try XCTUnwrap(
+            engine.quantizedTeacherForcedBatchedVsSerialMaxDiff(promptTokens: prompts, steps: 16))
+        // Gemma 4 is bf16; int8 is the only family with a quantized batched
+        // forward, so the bf16 R>1 explosion-guard bound applies (see the fp16
+        // gate's rationale). Far below the O(10+) a real cross-row bug produces.
+        for (r, d) in diffs.enumerated() {
+            XCTAssertLessThan(d, 8.0,
+                "int8 row \(r) (len \(prompts[r].count)) batched logits diverged from solo by \(d)")
+        }
+    }
+
+    /// int8 shared-prefix replay on the continuous batcher must be an exact
+    /// replay too: a full quantized prefix hit restores each row's uint8 KV and
+    /// forwards only the last token, so the decode is byte-for-byte the cold
+    /// int8 decode. Mirrors the fp16 prefix replay gate on the quantized path.
+    func testInt8BatchedPrefixCacheReplayMatchesColdDecode() async throws {
+        let engine = try await requireInt8BatchedEngine()
+        let prompt = "Explain in one clear sentence why the daytime sky looks blue to us."
+        func runBatched(usePrefixCache: Bool) async -> [Int] {
+            guard let r = engine.submitBatched(
+                BatchGenRequest(messages: [["role": "user", "content": prompt]],
+                                params: .greedy, maxTokens: 24,
+                                usePrefixCache: usePrefixCache),
+                maxRows: 4, windowMs: 0)
+            else { return [] }
+            var toks: [Int] = []
+            for await ev in r.stream { if ev.isEnd { break }; toks.append(ev.tokenId) }
+            return toks
+        }
+        XCTAssertEqual(engine.prefixCache.memoryCount, 0, "cache should start empty")
+        let cold = await runBatched(usePrefixCache: false)
+        XCTAssertEqual(engine.prefixCache.memoryCount, 0,
+                       "usePrefixCache=false must not populate the cache")
+        _ = await runBatched(usePrefixCache: true)           // miss -> stores int8 prefix
+        XCTAssertGreaterThanOrEqual(engine.prefixCache.memoryCount, 1,
+                       "the usePrefixCache=true run must have stored the int8 prompt prefix")
+        let hit = await runBatched(usePrefixCache: true)     // full hit -> restore + 1 token
+        XCTAssertGreaterThan(cold.count, 0, "cold int8 batched run produced no tokens")
+        XCTAssertEqual(hit, cold,
+            "int8 prefix-cache replay must decode identically to the cold (no-cache) run")
+    }
 }

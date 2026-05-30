@@ -83,6 +83,89 @@ func stackCachesLeftPadded(perRow caches: [[KVCache]], lengths: [Int]) -> [KVCac
     return batched
 }
 
+/// Quantized analogue of ``stackCachesLeftPadded``: stack R per-row
+/// `[QuantizedKVCache]` (each layer `[1, kvHeads, L_r, headDim]` uint8 storage
+/// plus per-position fp16 scales/zeros) into one batched `[QuantizedKVCache]`
+/// per layer of shape `[R, kvHeads, sMax, headDim]`, LEFT-padding shorter rows.
+/// The six tensors (uint8 keys/values + fp16 key/value scales/zeros) are each
+/// concatenated along the sequence axis per row, then batched across rows on
+/// axis 0 - so dequantization inside attention reads each row's own values
+/// only. The pad region is filled with quantized zeros (`q*scale + zero` with
+/// all three zero dequantizes to exactly 0) and is masked during decode, so it
+/// never contributes - matching the fp16 zero-pad contract.
+func stackCachesLeftPaddedQuantized(
+    perRow caches: [[QuantizedKVCache]], lengths: [Int]
+) -> [QuantizedKVCache] {
+    let R = caches.count
+    let numLayers = caches[0].count
+    let sMax = lengths.max() ?? 0
+    var batched: [QuantizedKVCache] = []
+    batched.reserveCapacity(numLayers)
+    for layer in 0 ..< numLayers {
+        // As with the fp16 stack, a layer can be uniformly empty for ALL rows
+        // (Gemma 4 KV-shared layers never write their own cache - the donor
+        // holds the K/V). Such a layer gets a fresh empty placeholder the
+        // batched forward routes around; a PARTIALLY-empty layer is a batch
+        // desync and fails hard.
+        let snaps = (0 ..< R).map { caches[$0][layer].quantizedSnapshot() }
+        let present = snaps.lazy.filter { $0 != nil }.count
+        if present == 0 {
+            batched.append(QuantizedKVCache())
+            continue
+        }
+        precondition(
+            present == R,
+            "partially-empty quantized KV layer \(layer): \(present)/\(R) rows cached (batch desync)")
+        var qks: [MLXArray] = []; var qvs: [MLXArray] = []
+        var kss: [MLXArray] = []; var kzs: [MLXArray] = []
+        var vss: [MLXArray] = []; var vzs: [MLXArray] = []
+        for r in 0 ..< R {
+            let s = snaps[r]!
+            let pad = sMax - lengths[r]
+            if pad > 0 {
+                let H = s.keys.dim(1), D = s.keys.dim(3)
+                // Pad with quantized zeros: uint8 0 storage + 0 scale + 0 zero
+                // dequantizes to 0 at every padded position (mask hides it too).
+                let padQ = MLXArray.zeros([1, H, pad, D], dtype: s.keys.dtype)
+                let padS = MLXArray.zeros([1, H, pad, 1], dtype: s.keyScales.dtype)
+                qks.append(concatenated([padQ, s.keys], axis: 2))
+                qvs.append(concatenated([padQ, s.values], axis: 2))
+                kss.append(concatenated([padS, s.keyScales], axis: 2))
+                kzs.append(concatenated([padS, s.keyZeros], axis: 2))
+                vss.append(concatenated([padS, s.valueScales], axis: 2))
+                vzs.append(concatenated([padS, s.valueZeros], axis: 2))
+            } else {
+                qks.append(s.keys); qvs.append(s.values)
+                kss.append(s.keyScales); kzs.append(s.keyZeros)
+                vss.append(s.valueScales); vzs.append(s.valueZeros)
+            }
+        }
+        let bc = QuantizedKVCache()
+        bc.restoreQuantized(QuantizedKVSnapshot(
+            keys: concatenated(qks, axis: 0), values: concatenated(qvs, axis: 0),
+            keyScales: concatenated(kss, axis: 0), keyZeros: concatenated(kzs, axis: 0),
+            valueScales: concatenated(vss, axis: 0), valueZeros: concatenated(vzs, axis: 0)))
+        batched.append(bc)
+    }
+    return batched
+}
+
+/// Type-dispatching stack: route a batched set of per-row caches to the fp16
+/// or the quantized stacker by their concrete type. The batcher allocates every
+/// row/layer from one factory, so inspecting any element decides the path. Lets
+/// the (type-agnostic) decode loop hold `[KVCacheProtocol]` while the stacking
+/// stays type-correct.
+func stackCachesLeftPaddedAny(
+    perRow caches: [[KVCacheProtocol]], lengths: [Int]
+) -> [KVCacheProtocol] {
+    if caches.first?.first is QuantizedKVCache {
+        let q = caches.map { $0.map { $0 as! QuantizedKVCache } }
+        return stackCachesLeftPaddedQuantized(perRow: q, lengths: lengths)
+    }
+    let f = caches.map { $0.map { $0 as! KVCache } }
+    return stackCachesLeftPadded(perRow: f, lengths: lengths)
+}
+
 /// Build the per-row additive decode mask `[R, 1, 1, totalLen]`: for each row
 /// the first `sMax - L_r` columns (its left-pad prefix in the stacked cache)
 /// are masked to a large negative, the rest are 0 (valid). Rebuilt each step
@@ -305,6 +388,168 @@ extension InferenceEngine {
             }
         }
         return maxDiff
+    }
+
+    /// Whether the loaded model supports int8-quantized batched decode (the
+    /// Stage C4 quantized path). Set for families whose attention accepts
+    /// `KVCacheProtocol` (currently Gemma 4).
+    public var supportsQuantizedBatchedDecode: Bool {
+        loadedModelForBatching?.batchedDecodeForwardQuantized != nil
+    }
+
+    /// int8 analogue of ``crossRowContaminationMaxDiff``: the dtype-independent
+    /// cross-row isolation gate, run on the QUANTIZED batched path. A row's
+    /// logits must be BIT-IDENTICAL regardless of neighbor CONTENT (same batch
+    /// width + neighbor lengths), because each batch element is quantized and
+    /// matmul-ed from its own inputs only - any nonzero result is a genuine
+    /// cross-row bleed or a quantized-stacking indexing bug. int8 quantization
+    /// is lossy but per-row, so this stays exactly 0 (it compares
+    /// batched-vs-batched at a FIXED width, so neither the int8 rounding nor the
+    /// bf16 GEMM-width rounding confounds it).
+    func quantizedCrossRowContaminationMaxDiff(
+        row: [Int], neighborsA: [[Int]], neighborsB: [[Int]], steps: Int
+    ) -> Float? {
+        guard let model = loadedModelForBatching,
+              let batchedForward = model.batchedDecodeForwardQuantized else { return nil }
+        precondition(
+            neighborsA.count == neighborsB.count
+                && zip(neighborsA, neighborsB).allSatisfy { $0.count == $1.count },
+            "contamination probe requires matching neighbor counts & lengths across A/B")
+        let prefill = model.prefillForward ?? model.forward
+        // Row's own greedy continuation, computed on the int8 serial path so the
+        // teacher-forcing tokens match what this row would generate alone.
+        let cont = quantizedSerialGreedyDecode(promptTokens: row, maxTokens: steps + 1) ?? []
+        let usableSteps = min(steps, cont.count - 1)
+        guard usableSteps >= 1 else { return nil }
+
+        func rowZeroLogits(_ neighbors: [[Int]]) -> [MLXArray] {
+            let prompts = [row] + neighbors
+            let R = prompts.count
+            var perRowCaches: [[QuantizedKVCache]] = []
+            var lengths: [Int] = []
+            for tokens in prompts {
+                let bc = makeQuantizedKVCaches(numLayers: model.numLayers)
+                let pl = prefill(MLXArray(tokens.map { Int32($0) }).reshaped(1, tokens.count), bc)
+                MLX.eval(pl)
+                perRowCaches.append(bc)
+                lengths.append(tokens.count)
+            }
+            let sMax = lengths.max() ?? 0
+            let caches = stackCachesLeftPaddedQuantized(perRow: perRowCaches, lengths: lengths)
+            var out: [MLXArray] = []
+            for k in 0 ..< usableSteps {
+                let rowOffsets = (0 ..< R).map { lengths[$0] + k }
+                let mask = buildBatchedDecodeMask(
+                    lengths: lengths, sMax: sMax, totalLen: sMax + k + 1, dtype: .float16)
+                let toks = [cont[k]] + neighbors.map { $0.first ?? 0 }
+                let input = MLXArray(toks.map { Int32($0) }).reshaped(R, 1)
+                let bl = batchedForward(input, caches, mask, rowOffsets)
+                MLX.eval(bl)
+                out.append(bl[0 ..< 1].reshaped(-1))
+            }
+            return out
+        }
+
+        let a = rowZeroLogits(neighborsA)
+        let b = rowZeroLogits(neighborsB)
+        var maxDiff: Float = 0
+        for k in 0 ..< usableSteps {
+            maxDiff = Swift.max(maxDiff, MLX.max(MLX.abs(a[k] - b[k])).item(Float.self))
+        }
+        return maxDiff
+    }
+
+    /// int8 analogue of ``teacherForcedBatchedVsSerialMaxDiff``: teacher-force
+    /// each row with its own int8 serial continuation and compare, per step, the
+    /// QUANTIZED batched per-row logits against that prompt's int8 SOLO logits.
+    /// At R=1 (no left-pad, the stacked cache IS the single row) the K is
+    /// quantized post-RoPE identically in both paths, so the diff is ~0
+    /// bit-exact - proving per-row quantized stacking + decode correctness. At
+    /// R>1 the same bf16 batched-GEMM kernel-width rounding the fp16 path sees
+    /// applies (so the test uses the loose explosion-guard bound there); the
+    /// real correctness signal is the bit-exact contamination gate above.
+    func quantizedTeacherForcedBatchedVsSerialMaxDiff(
+        promptTokens: [[Int]], steps: Int
+    ) -> [Float]? {
+        guard let model = loadedModelForBatching,
+              let batchedForward = model.batchedDecodeForwardQuantized else { return nil }
+        let R = promptTokens.count
+        let prefill = model.prefillForward ?? model.forward
+
+        var cont: [[Int]] = []
+        for tokens in promptTokens {
+            cont.append(quantizedSerialGreedyDecode(promptTokens: tokens, maxTokens: steps + 1) ?? [])
+        }
+        let usableSteps = min(steps, (cont.map { $0.count }.min() ?? 1) - 1)
+        guard usableSteps >= 1 else { return nil }
+
+        // int8 serial teacher-forced logits per row.
+        var serialLogits: [[MLXArray]] = []
+        for (i, tokens) in promptTokens.enumerated() {
+            let sc = makeQuantizedKVCaches(numLayers: model.numLayers)
+            let pl = prefill(MLXArray(tokens.map { Int32($0) }).reshaped(1, tokens.count), sc)
+            MLX.eval(pl)
+            var rowLogits: [MLXArray] = []
+            for k in 0 ..< usableSteps {
+                let l = model.forward(MLXArray([Int32(cont[i][k])]).reshaped(1, 1), sc)
+                MLX.eval(l)
+                rowLogits.append(l.reshaped(-1))
+            }
+            serialLogits.append(rowLogits)
+        }
+
+        // int8 batched teacher-forced.
+        var lengths: [Int] = []
+        var perRowCaches: [[QuantizedKVCache]] = []
+        for tokens in promptTokens {
+            let bc = makeQuantizedKVCaches(numLayers: model.numLayers)
+            let pl = prefill(MLXArray(tokens.map { Int32($0) }).reshaped(1, tokens.count), bc)
+            MLX.eval(pl)
+            perRowCaches.append(bc)
+            lengths.append(tokens.count)
+        }
+        let sMax = lengths.max() ?? 0
+        let caches = stackCachesLeftPaddedQuantized(perRow: perRowCaches, lengths: lengths)
+        var maxDiff = [Float](repeating: 0, count: R)
+        for k in 0 ..< usableSteps {
+            let rowOffsets = (0 ..< R).map { lengths[$0] + k }
+            let mask = buildBatchedDecodeMask(
+                lengths: lengths, sMax: sMax, totalLen: sMax + k + 1, dtype: .float16)
+            let input = MLXArray((0 ..< R).map { Int32(cont[$0][k]) }).reshaped(R, 1)
+            let bl = batchedForward(input, caches, mask, rowOffsets)
+            MLX.eval(bl)
+            for r in 0 ..< R {
+                let br = bl[r ..< (r + 1)].reshaped(-1)
+                let d = MLX.max(MLX.abs(br - serialLogits[r][k])).item(Float.self)
+                maxDiff[r] = Swift.max(maxDiff[r], d)
+            }
+        }
+        return maxDiff
+    }
+
+    /// int8 reference B=1 greedy decode (same model, quantized caches, NO
+    /// batching). Mirrors ``serialGreedyDecode`` but allocates
+    /// `QuantizedKVCache`s, so it is the solo reference the quantized batched
+    /// gates teacher-force against.
+    func quantizedSerialGreedyDecode(promptTokens: [Int], maxTokens: Int) -> [Int]? {
+        guard let model = loadedModelForBatching, let eosId = tokenizerEOS,
+              model.batchedDecodeForwardQuantized != nil else { return nil }
+        let caches = makeQuantizedKVCaches(numLayers: model.numLayers)
+        let sampler = Sampler(params: .greedy)
+        let prefill = model.prefillForward ?? model.forward
+        let input = MLXArray(promptTokens.map { Int32($0) }).reshaped(1, promptTokens.count)
+        var logits = prefill(input, caches)
+        MLX.eval(logits)
+        var tok = sampler.sample(logits)
+        var gen = [tok]
+        var done = tok == eosId
+        while gen.count < maxTokens && !done {
+            logits = model.forward(MLXArray([Int32(tok)]).reshaped(1, 1), caches)
+            MLX.eval(logits)
+            tok = sampler.sample(logits)
+            if tok == eosId { done = true } else { gen.append(tok) }
+        }
+        return gen
     }
 
     /// Reference canonical B=1 greedy decode from raw tokens (same model, NO
