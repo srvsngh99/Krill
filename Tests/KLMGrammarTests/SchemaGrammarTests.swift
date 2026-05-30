@@ -119,6 +119,22 @@ final class SchemaGrammarTests: XCTestCase {
         assertRejects(s, #"{"name":"x","extra":1}"#)  // 'extra' not declared
     }
 
+    func testDuplicateKeyRejectedUniformly() {
+        // A repeated key is rejected whether additionalProperties is the
+        // default (allowed) or false — no asymmetry between the two.
+        let openSchema = #"{"type":"object","properties":{"a":{"type":"integer"}}}"#
+        assertAccepts(openSchema, #"{"a":1}"#)
+        assertRejects(openSchema, #"{"a":1,"a":2}"#)
+
+        let closedSchema = #"{"type":"object","properties":{"a":{"type":"integer"}},"additionalProperties":false}"#
+        assertRejects(closedSchema, #"{"a":1,"a":2}"#)
+
+        // A repeated ADDITIONAL (undeclared) key is also rejected.
+        let extraSchema = #"{"type":"object","properties":{},"additionalProperties":{"type":"integer"}}"#
+        assertAccepts(extraSchema, #"{"x":1,"y":2}"#)
+        assertRejects(extraSchema, #"{"x":1,"x":2}"#)
+    }
+
     func testAdditionalPropertiesTrueAllowsExtra() {
         let s = #"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#
         // additionalProperties defaults to allowed.

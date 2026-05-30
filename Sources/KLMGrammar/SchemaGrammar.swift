@@ -414,6 +414,12 @@ public struct SchemaGrammar: GrammarAutomaton {
     /// move to expect the colon.
     private func closeKey(_ top: Frame, key: String) -> Outcome {
         guard case .object(let props, _, let additional) = nodes[top.node] else { return .reject }
+        // Forbid repeating a key already emitted in this object, uniformly
+        // (declared or additional). A repeated member makes the object's value
+        // for that key ambiguous; rejecting it keeps the constraint consistent
+        // regardless of `additionalProperties` rather than only catching
+        // declared-key repeats under `additionalProperties:false`.
+        if top.seen.contains(key) { return .reject }
         let childId: Int
         if let declared = props[key] {
             childId = declared
