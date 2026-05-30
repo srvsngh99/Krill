@@ -186,6 +186,22 @@ final class RegexGrammarTests: XCTestCase {
         rejects("a{2,}", "a")
     }
 
+    func testCountedZero() {
+        // {0} is an empty match: `a{0}b` is exactly "b" (no 'a').
+        accepts("a{0}b", "b")
+        rejects("a{0}b", "ab")
+        accepts("a{0}", "")
+        rejects("a{0}", "a")
+        // {0,2} is zero-to-two.
+        accepts("a{0,2}b", "b")
+        accepts("a{0,2}b", "ab")
+        accepts("a{0,2}b", "aab")
+        rejects("a{0,2}b", "aaab")
+        // {0,} is a plain star.
+        accepts("a{0,}", "")
+        accepts("a{0,}", "aaaa")
+    }
+
     // MARK: - Realistic patterns
 
     func testPhoneNumber() {

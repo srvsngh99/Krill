@@ -210,8 +210,15 @@ public extension RegexGrammar {
                 let n = builder.addChar(matcher)
                 return Fragment(start: n, outs: [.charOut(n)])
             }
+            // Chain fragments in sequence. Defensively returns an empty-match
+            // epsilon fragment for an empty list — callers below already guard
+            // the only empty case ({0}), but this keeps `chain` total so it can
+            // never index `frags[0]` out of range.
             func chain(_ frags: [Fragment]) -> Fragment {
-                var acc = frags[0]
+                guard var acc = frags.first else {
+                    let s = builder.addSplit()
+                    return Fragment(start: s, outs: [.eps(node: s, index: 0)])
+                }
                 for f in frags.dropFirst() {
                     builder.patch(acc.outs, to: f.start)
                     acc = Fragment(start: acc.start, outs: f.outs)
