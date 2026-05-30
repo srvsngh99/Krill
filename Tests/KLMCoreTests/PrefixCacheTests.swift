@@ -196,7 +196,7 @@ final class PrefixCacheTests: XCTestCase {
                     if i % 50 == 0 { cache.clear() }
                 }
             }
-            // The capacity bound must still hold after the storm — proof the LRU
+            // The capacity bound must still hold after the storm - proof the LRU
             // eviction never raced into an inconsistent state.
             XCTAssertLessThanOrEqual(cache.memoryCount, 4)
         }
