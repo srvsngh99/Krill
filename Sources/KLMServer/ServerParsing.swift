@@ -62,10 +62,13 @@ internal struct ServerToolSpec: Equatable, Sendable {
 }
 
 /// Structured-output request (WS-D D2 / T1-1). `.json` = free-form JSON;
-/// `.schema` carries a JSON-schema string the output must conform to.
+/// `.schema` carries a JSON-schema string the output must conform to;
+/// `.regex` carries a regular-expression pattern the output must fully match
+/// (Stage C — a KrillLM extension, not standard OpenAI/Ollama).
 internal enum ResponseFormat: Equatable, Sendable {
     case json
     case schema(String)
+    case regex(String)
 }
 
 internal struct ServerChatRequest: Equatable, Sendable {
@@ -235,22 +238,37 @@ internal enum ServerParsing {
         return copy
     }
 
-    /// Ollama `format`: the string `"json"` or a JSON-schema object.
+    /// Ollama `format`: the string `"json"`, a JSON-schema object, or (a
+    /// KrillLM extension) an object `{"regex": "<pattern>"}` to constrain the
+    /// output to a regular expression. The regex key is checked first because
+    /// `{"regex": ...}` is otherwise a valid-looking schema object.
     static func parseOllamaFormat(_ raw: Any?) -> ResponseFormat? {
         guard let raw else { return nil }
         if let s = raw as? String {
             return s.lowercased() == "json" ? .json : nil
         }
-        if let obj = raw as? [String: Any],
-           let d = try? JSONSerialization.data(withJSONObject: obj),
-           let s = String(data: d, encoding: .utf8) {
-            return .schema(s)
+        if let obj = raw as? [String: Any] {
+            // Treat the object as a regex request ONLY when it is exactly
+            // `{"regex": "<pattern>"}` — a single string-valued `regex` key
+            // and nothing else. A real JSON schema always carries other
+            // keywords (`type`, `properties`, `items`, …), so this never
+            // shadows a schema that happens to declare a `regex` property.
+            if obj.count == 1, let pattern = obj["regex"] as? String {
+                return .regex(pattern)
+            }
+            if let d = try? JSONSerialization.data(withJSONObject: obj),
+               let s = String(data: d, encoding: .utf8) {
+                return .schema(s)
+            }
         }
         return nil
     }
 
     /// OpenAI `response_format`: `{type:"json_object"}`,
-    /// `{type:"json_schema", json_schema:{schema:{…}}}`, or `{type:"text"}`.
+    /// `{type:"json_schema", json_schema:{schema:{…}}}`, `{type:"text"}`, or
+    /// (a KrillLM extension) `{type:"regex", regex:"<pattern>"}` /
+    /// `{type:"grammar", grammar:"<pattern>"}` to constrain the output to a
+    /// regular expression (Stage C).
     static func parseOpenAIResponseFormat(_ raw: Any?) -> ResponseFormat? {
         guard let obj = raw as? [String: Any],
               let type = obj["type"] as? String else { return nil }
@@ -266,6 +284,14 @@ internal enum ServerParsing {
                 }
             }
             return .json
+        case "regex", "grammar":
+            // Accept the pattern under `regex`, `grammar`, or a nested
+            // `{type:"regex", regex:{pattern:"..."}}` shape.
+            if let p = obj["regex"] as? String { return .regex(p) }
+            if let p = obj["grammar"] as? String { return .regex(p) }
+            if let nested = obj[type] as? [String: Any],
+               let p = nested["pattern"] as? String { return .regex(p) }
+            return nil
         default:
             return nil
         }
