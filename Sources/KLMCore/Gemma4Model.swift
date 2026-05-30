@@ -1253,7 +1253,7 @@ class Gemma4TextModel: Module {
     /// `createCachedCausalMask`, which is plain causal). A future sliding-
     /// window-aware solo path would need the matching restriction here.
     func batchedDecode(
-        _ tokens: MLXArray, caches: [KVCache], mask: MLXArray, rowOffsets: [Int]
+        _ tokens: MLXArray, caches: [KVCacheProtocol], mask: MLXArray, rowOffsets: [Int]
     ) -> MLXArray {
         let B = tokens.dim(0)
         let L = tokens.dim(1)
@@ -1345,7 +1345,7 @@ public class Gemma4ForCausalLM: Module {
     /// (the softcap is per-element, so it commutes with the per-row batching).
     /// `L == 1` already, so no `lastTokenOnly` slice is needed.
     public func batchedDecode(
-        _ tokens: MLXArray, caches: [KVCache], mask: MLXArray, rowOffsets: [Int]
+        _ tokens: MLXArray, caches: [KVCacheProtocol], mask: MLXArray, rowOffsets: [Int]
     ) -> MLXArray {
         let hidden = model.batchedDecode(
             tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
@@ -1589,7 +1589,7 @@ public class Gemma4MultimodalModel: Module {
     /// Forwards to `Gemma4ForCausalLM.batchedDecode` (text-only - the batched
     /// path never carries image/audio placeholders).
     public func batchedDecode(
-        _ tokens: MLXArray, caches: [KVCache], mask: MLXArray, rowOffsets: [Int]
+        _ tokens: MLXArray, caches: [KVCacheProtocol], mask: MLXArray, rowOffsets: [Int]
     ) -> MLXArray {
         languageModel.batchedDecode(
             tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)

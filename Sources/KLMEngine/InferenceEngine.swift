@@ -1307,15 +1307,15 @@ extension InferenceEngine {
     /// `generate(...)`'s `Captures` uses for the Swift 6.2.4 SIL
     /// SendNonSendable crash under `-O`.
     private struct BatchedCaptures: @unchecked Sendable {
-        typealias BatchedFn = (MLXArray, [KVCache], MLXArray, [Int]) -> MLXArray
         /// Prefix-cache-aware per-row prefill (tokens, fresh caches, the row's
-        /// usePrefixCache flag) -> prefill logits. Built by
-        /// `makeBatchedPrefillRow`, the SAME closure the continuous batcher uses
-        /// via `Deps.prefillRow`, so the static cohort and the live batcher
-        /// consult the shared prefix cache identically.
-        let prefillRow: ([Int], [KVCache], Bool) -> MLXArray
-        let batchedForward: BatchedFn
+        /// usePrefixCache flag) -> prefill logits. The SAME protocol-typed
+        /// closures the continuous batcher uses, so the static cohort and the
+        /// live batcher consult the shared prefix cache identically and share the
+        /// fp16/int8 dispatch. `useQuantizedKV` selects the per-row cache factory.
+        let prefillRow: ([Int], [KVCacheProtocol], Bool) -> MLXArray
+        let batchedForward: (MLXArray, [KVCacheProtocol], MLXArray, [Int]) -> MLXArray
         let numLayers: Int
+        let useQuantizedKV: Bool
         let tokenizer: KLMTokenizer
         let stopIds: Set<Int>
         let promptRows: [[Int]]
@@ -1372,7 +1372,7 @@ extension InferenceEngine {
         guard !requests.isEmpty else { return [] }
         guard requests.count > 1,
               let model = loadedModelForBatching,
-              let batchedForward = model.batchedDecodeForward,
+              model.batchedDecodeForward != nil,
               let tokenizer, let eosId = tokenizerEOS
         else { return serialFallback() }
 
@@ -1405,9 +1405,10 @@ extension InferenceEngine {
         let statsHolders = (0 ..< R).map { _ in StatsHolder() }
 
         let caps = BatchedCaptures(
-            prefillRow: makeBatchedPrefillRow(model),
-            batchedForward: batchedForward,
+            prefillRow: protocolPrefillRow(model),
+            batchedForward: protocolBatchedForward(model),
             numLayers: model.numLayers,
+            useQuantizedKV: useQuantizedBatched(model),
             tokenizer: tokenizer,
             stopIds: stopIds,
             promptRows: promptRows,
@@ -1491,6 +1492,94 @@ extension InferenceEngine {
         }
     }
 
+    /// int8 analogue of ``makeBatchedPrefillRow``: the prefix-cache-aware per-row
+    /// prefill closure for the QUANTIZED batched path (Stage C4). Mirrors the
+    /// int8 serial prefill exactly (`lookupQuantized` / `restoreQuantized` /
+    /// `storeQuantized`): a full hit restores each layer's uint8 KV (avoiding a
+    /// dequant->requant round trip), trims the last position, and forwards just
+    /// that token - so the resulting per-row quantized caches are identical to a
+    /// cold int8 prefill and the stacked decode is byte-for-byte the same; a
+    /// miss prefills cold and stores write-behind (>= 8 tokens). Gemma 4
+    /// KV-shared layers leave a suffix of caches empty, so the store skips nil
+    /// snapshots and the restore fills only the layers the hit carries.
+    private func makeBatchedPrefillRowQuantized(
+        _ model: LoadedModel
+    ) -> ([Int], [QuantizedKVCache], Bool) -> MLXArray {
+        let rawPrefill = model.prefillForward ?? model.forward
+        let pc = self.prefixCache
+        let pcModelId = self.modelId
+        return { tokens, caches, usePrefixCache in
+            var cacheHit = false
+            if usePrefixCache,
+               let hit = pc.lookupQuantized(tokens: tokens, modelId: pcModelId, mediaHash: nil),
+               !hit.layers.isEmpty, hit.layers.count <= caches.count,
+               hit.prefixLength == tokens.count {
+                for i in 0 ..< hit.layers.count {
+                    caches[i].restoreQuantized(hit.layers[i])
+                }
+                cacheHit = true
+            }
+
+            let toProcess: [Int]
+            if cacheHit {
+                let trimmed = max(0, tokens.count - 1)
+                for cache in caches { cache.truncate(to: trimmed) }
+                toProcess = [tokens.last!]
+            } else {
+                toProcess = tokens
+            }
+
+            let input = MLXArray(toProcess.map { Int32($0) }).reshaped(1, toProcess.count)
+            let logits = rawPrefill(input, caches)
+            MLX.eval(logits)
+
+            if usePrefixCache, !cacheHit, tokens.count >= 8 {
+                var snapshots: [QuantizedKVSnapshot] = []
+                for cache in caches {
+                    if let snap = cache.quantizedSnapshot() { snapshots.append(snap) }
+                }
+                if !snapshots.isEmpty {
+                    pc.storeQuantized(tokens: tokens, modelId: pcModelId,
+                                      snapshots: snapshots, mediaHash: nil)
+                }
+            }
+            return logits
+        }
+    }
+
+    /// Whether the engine should batch this model with int8 KV: int8 is
+    /// configured AND a quantized batched forward is wired (Gemma 4). Other
+    /// families have no quantized forward, so they batch fp16 - matching their
+    /// serial behavior (they also fall back to fp16 KV serially).
+    func useQuantizedBatched(_ model: LoadedModel) -> Bool {
+        usesQuantizedKVCache && model.batchedDecodeForwardQuantized != nil
+    }
+
+    /// Adapt the chosen fp16/int8 prefill closure to the protocol-typed shape
+    /// the batcher holds. The batcher allocates caches from the matching factory
+    /// (`useQuantizedKV`), so the downcast is always valid.
+    private func protocolPrefillRow(
+        _ model: LoadedModel
+    ) -> ([Int], [KVCacheProtocol], Bool) -> MLXArray {
+        if useQuantizedBatched(model) {
+            let q = makeBatchedPrefillRowQuantized(model)
+            return { toks, caches, upc in q(toks, caches.map { $0 as! QuantizedKVCache }, upc) }
+        }
+        let f = makeBatchedPrefillRow(model)
+        return { toks, caches, upc in f(toks, caches.map { $0 as! KVCache }, upc) }
+    }
+
+    /// Adapt the chosen fp16/int8 batched forward to the protocol-typed shape.
+    private func protocolBatchedForward(
+        _ model: LoadedModel
+    ) -> (MLXArray, [KVCacheProtocol], MLXArray, [Int]) -> MLXArray {
+        if useQuantizedBatched(model), let qf = model.batchedDecodeForwardQuantized {
+            return { inp, caches, mask, offs in qf(inp, caches.map { $0 as! QuantizedKVCache }, mask, offs) }
+        }
+        let ff = model.batchedDecodeForward!
+        return { inp, caches, mask, offs in ff(inp, caches.map { $0 as! KVCache }, mask, offs) }
+    }
+
     /// Submit ONE request to the engine's persistent continuous batcher
     /// (follow-up #8, Stage C1) and get back its own `(stream, stats)`. Unlike
     /// `generateBatched` (a static cohort decoded to completion), the batcher
@@ -1509,7 +1598,7 @@ extension InferenceEngine {
         _ req: BatchGenRequest, maxRows: Int, windowMs: Int
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?)? {
         guard let model = loadedModelForBatching,
-              let batchedForward = model.batchedDecodeForward,
+              model.batchedDecodeForward != nil,
               let tokenizer, let eosId = tokenizerEOS
         else { return nil }
         let promptTokens = buildBatchedPromptTokens(
@@ -1523,9 +1612,10 @@ extension InferenceEngine {
         batcherLock.lock()
         if continuousBatcher == nil {
             let deps = ContinuousBatcher.Deps(
-                prefillRow: makeBatchedPrefillRow(model),
-                batchedForward: batchedForward,
+                prefillRow: protocolPrefillRow(model),
+                batchedForward: protocolBatchedForward(model),
                 numLayers: model.numLayers,
+                useQuantizedKV: useQuantizedBatched(model),
                 decode: { tokenizer.decode(token: $0) },
                 stopIds: stopIds)
             continuousBatcher = ContinuousBatcher(
@@ -1580,14 +1670,16 @@ extension InferenceEngine {
         // only the last token, so the cache matches a cold prefill) or prefills
         // cold and stores write-behind, honoring this row's usePrefixCache. It
         // evaluates the logits internally before returning.
-        var perRowCaches: [[KVCache]] = []
+        var perRowCaches: [[KVCacheProtocol]] = []
         var lengths: [Int] = []
         var current: [Int] = []
         perRowCaches.reserveCapacity(R)
         lengths.reserveCapacity(R)
         current.reserveCapacity(R)
         for (i, tokens) in c.promptRows.enumerated() {
-            let caches = makeKVCaches(numLayers: c.numLayers)
+            let caches: [KVCacheProtocol] = c.useQuantizedKV
+                ? makeQuantizedKVCaches(numLayers: c.numLayers)
+                : makeKVCaches(numLayers: c.numLayers)
             let logits = c.prefillRow(tokens, caches, c.usePrefixCache[i])
             perRowCaches.append(caches)
             lengths.append(tokens.count)
@@ -1596,7 +1688,7 @@ extension InferenceEngine {
         let prefillDuration = CFAbsoluteTimeGetCurrent() - startTime
 
         let sMax = lengths.max() ?? 0
-        let caches = stackCachesLeftPadded(perRow: perRowCaches, lengths: lengths)
+        let caches = stackCachesLeftPaddedAny(perRow: perRowCaches, lengths: lengths)
         let kDtype = caches.first?.snapshot()?.keys.dtype ?? .float16
 
         var generated = [Int](repeating: 0, count: R)
