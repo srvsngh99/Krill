@@ -27,6 +27,10 @@ actor BatchScheduler {
     private let numParallel: Int
     private let windowMs: Int
 
+    /// One-shot guard so the speculative+batch exclusion notice is logged at
+    /// most once per resident model, not on every request.
+    private var didNoteSpecBatchExclusion = false
+
     /// - Parameters:
     ///   - engine: the resident engine this scheduler batches for.
     ///   - numParallel: `KRILL_NUM_PARALLEL` — max simultaneously-decoding rows
@@ -85,6 +89,27 @@ actor BatchScheduler {
         }
         guard isEligible(params: params, imageData: imageData, audioData: audioData,
                          useSpeculative: useSpeculative) else {
+            // Surface the one case where the user asked for two features that
+            // do not compose: an explicit speculative opt-in on a request that
+            // would batch if ONLY the speculative flag were dropped. Speculative
+            // decode verifies a draft run against the target's own sequential
+            // greedy sampler, which the shared-step batched loop cannot
+            // interleave, so the request runs serially (no batching). WS2 found
+            // the speculative speedup gate structurally unreachable on M-series,
+            // so the actionable advice is to drop the speculative opt-in to
+            // regain batching.
+            //
+            // The condition mirrors every OTHER `isEligible` gate (so spec is
+            // the sole remaining blocker): a seeded non-greedy request is also
+            // excluded, and for it "unset useSpeculative to batch" would be
+            // wrong advice - it stays serial regardless. Only notice when
+            // dropping the speculative flag genuinely restores batching.
+            let greedy = params.temperature <= 0 && params.mirostat == 0
+            let seedBlocks = params.seed != nil && !greedy
+            if useSpeculative == true, numParallel >= 2, engine.supportsBatchedDecode,
+               imageData == nil, audioData == nil, !seedBlocks {
+                noteSpecBatchExclusionOnce()
+            }
             return serial()
         }
 
@@ -97,5 +122,16 @@ actor BatchScheduler {
         // prompt) — fall back to serial so the request is always served.
         return engine.submitBatched(req, maxRows: numParallel, windowMs: windowMs)
             ?? serial()
+    }
+
+    /// Log the speculative+batch incompatibility once per resident model. Actor
+    /// isolation makes the `didNote...` check-and-set race-free without a lock.
+    private func noteSpecBatchExclusionOnce() {
+        guard !didNoteSpecBatchExclusion else { return }
+        didNoteSpecBatchExclusion = true
+        FileHandle.standardError.write(Data(
+            ("[KrillLM] speculative decode requested with KRILL_NUM_PARALLEL=\(numParallel): "
+             + "speculative and batched decode are not composable, so this request runs "
+             + "serially (no batching). Unset useSpeculative to batch concurrent requests.\n").utf8))
     }
 }
