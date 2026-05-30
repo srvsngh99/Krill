@@ -168,6 +168,43 @@ final class PrefixCacheTests: XCTestCase {
         #endif
     }
 
+    // MARK: - Concurrency
+
+    /// Hammer `store` / `lookup` / `clear` from many threads at once. The
+    /// serial `generate` path and the batched decode path now share one
+    /// `PrefixCache` and each prefills on its own Task, so these calls genuinely
+    /// race the `memoryCache` dictionary + `accessOrder` LRU array. Without the
+    /// guarding lock this traps (concurrent dictionary/array mutation) or leaves
+    /// the LRU bookkeeping inconsistent; with it the cache survives and never
+    /// exceeds its capacity bound.
+    func testConcurrentStoreLookupClearIsSafe() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = makeTempCache()   // maxMemoryEntries = 4, minPrefixLength = 4
+            let threads = 8
+            let iterations = 200
+            DispatchQueue.concurrentPerform(iterations: threads) { t in
+                for i in 0 ..< iterations {
+                    let tokens = Array((t * 1000 + i) ..< (t * 1000 + i + 6))
+                    let modelId = "m\(i % 3)"
+                    cache.store(
+                        tokens: tokens, modelId: modelId,
+                        keys: [[self.makeKV(seqLen: tokens.count, start: Int32(i))]],
+                        values: [[self.makeKV(seqLen: tokens.count, start: Int32(i + 5000))]])
+                    _ = cache.lookup(tokens: tokens, modelId: modelId)
+                    _ = cache.lookup(tokens: Array(0 ..< 6), modelId: modelId)
+                    if i % 50 == 0 { cache.clear() }
+                }
+            }
+            // The capacity bound must still hold after the storm — proof the LRU
+            // eviction never raced into an inconsistent state.
+            XCTAssertLessThanOrEqual(cache.memoryCount, 4)
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
     #if canImport(MLX) && os(macOS) && arch(arm64)
     private func withMLXCPU(_ body: () throws -> Void) throws {
         guard MLXMetalRuntime.canInitializeMLXForTests else {

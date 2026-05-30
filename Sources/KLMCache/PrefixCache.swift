@@ -27,8 +27,18 @@ public final class PrefixCache: @unchecked Sendable {
     /// In-memory LRU: key -> (kvState, accessTime).
     /// fp16 and int8 entries share the LRU; their key strings are namespaced
     /// by dtype so a lookup from one path cannot read the other's tensors.
+    ///
+    /// Guarded by ``memoryLock``: a single ``PrefixCache`` is shared across the
+    /// serial ``generate`` path AND the batched decode path (Stage C4), and each
+    /// runs its prefill on its own Task, so concurrent `lookup`/`store` calls
+    /// race the dictionary + LRU array. Without the lock, two stores can
+    /// interleave a `memoryCache` insert with an `accessOrder` mutation and
+    /// corrupt the LRU bookkeeping (or trap on the array). The lock is only ever
+    /// held around the in-memory bookkeeping itself - never across disk I/O or
+    /// the pure `build` closure - so it adds no contention to the hot path.
     private var memoryCache: [String: MemoryCacheEntry] = [:]
     private var accessOrder: [String] = []
+    private let memoryLock = NSLock()
 
     public init(
         cacheDir: URL? = nil,
@@ -102,11 +112,15 @@ public final class PrefixCache: @unchecked Sendable {
             let prefix = Array(tokens[0 ..< checkLen])
             let key = cacheKey(tokens: prefix, modelId: modelId, mediaHash: mediaHash, dtype: dtype)
 
-            if let entry = memoryCache[key] {
-                touchEntry(key)
-                if let hit = build(entry, checkLen) { return hit }
-            }
+            // Read + LRU-touch atomically under the lock, then run the (pure)
+            // build closure outside it so the lock never spans non-map work.
+            memoryLock.lock()
+            let memEntry = memoryCache[key]
+            if memEntry != nil { touchEntryLocked(key) }
+            memoryLock.unlock()
+            if let memEntry, let hit = build(memEntry, checkLen) { return hit }
 
+            // Disk I/O happens with the lock RELEASED; storeInMemory re-takes it.
             if let entry = loadFromDisk(key: key, dtype: dtype) {
                 storeInMemory(key: key, entry: entry)
                 if let hit = build(entry, checkLen) { return hit }
@@ -177,14 +191,19 @@ public final class PrefixCache: @unchecked Sendable {
 
     /// Clear all cached entries (memory + disk).
     public func clear() {
+        memoryLock.lock()
         memoryCache.removeAll()
         accessOrder.removeAll()
+        memoryLock.unlock()
         try? FileManager.default.removeItem(at: cacheDir)
         try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
     }
 
     /// Number of entries in memory cache.
-    public var memoryCount: Int { memoryCache.count }
+    public var memoryCount: Int {
+        memoryLock.lock(); defer { memoryLock.unlock() }
+        return memoryCache.count
+    }
 
     /// Number of entries on disk.
     public var diskCount: Int {
@@ -271,12 +290,15 @@ extension PrefixCache {
         return String(format: "%016llx", hash)
     }
 
-    private func touchEntry(_ key: String) {
+    /// Move `key` to the most-recently-used end. Caller MUST hold `memoryLock`.
+    private func touchEntryLocked(_ key: String) {
         accessOrder.removeAll { $0 == key }
         accessOrder.append(key)
     }
 
     private func storeInMemory(key: String, entry: MemoryCacheEntry) {
+        memoryLock.lock()
+        defer { memoryLock.unlock() }
         // Evict LRU if at capacity
         while memoryCache.count >= maxMemoryEntries, let oldest = accessOrder.first {
             memoryCache.removeValue(forKey: oldest)
@@ -284,7 +306,7 @@ extension PrefixCache {
         }
 
         memoryCache[key] = entry
-        touchEntry(key)
+        touchEntryLocked(key)
     }
 
     private func loadFromDisk(key: String, dtype: KVDtype) -> MemoryCacheEntry? {
