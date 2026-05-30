@@ -24,6 +24,25 @@ reverse chronological order. Versioning follows
   Stage B schema→grammar compiler lands). Constrained requests take the
   serial decode path — the mask advances a per-sequence automaton, which
   the batched/speculative loops cannot interleave.
+- **JSON-schema constrained decoding (Stage B)** (follow-up #9): a
+  `format` carrying a JSON Schema (OpenAI `response_format: json_schema`
+  / Ollama object `format`) now constrains decoding to the schema's
+  structure, not just JSON well-formedness. A new `SchemaGrammar`
+  automaton plus a total `SchemaGrammar.compile(_:)` turn a bounded
+  schema subset into a pushdown grammar: object `properties` / `required`
+  / `additionalProperties` (bool or sub-schema), array `items`, scalar
+  `type` (string, number, integer-distinct-from-number, boolean, null),
+  and `enum` / `const`. The Stage A mask layer was generalized to a
+  `GrammarAutomaton` protocol + `GrammarTokenMask<A>`, so JSON and schema
+  masks share all caching, fail-open, and per-generation session logic
+  (`JSONTokenMask` is now a typealias). Unsupported keywords (`anyOf`,
+  `oneOf`, `allOf`, `not`, `$ref`, `patternProperties`, `pattern`,
+  `format`, numeric / item bounds, union `type` arrays) relax to an
+  unconstrained value (still valid JSON) with a one-time note; an
+  uncompilable schema falls back to the Stage A JSON-validity mask, and
+  the system-prompt guidance + post-extraction `coerce` remain the
+  backstop. Stage C (general Lark-style grammars) is the remaining
+  follow-up.
 - **Continuous batched decode** (follow-up #8, Stage C1): batching is now
   *continuous* rather than a static cohort. A persistent per-model
   `ContinuousBatcher` runs one decode loop that admits a newly-arrived request

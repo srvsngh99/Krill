@@ -1,13 +1,17 @@
 /// Structured-output format requested for a generation, threaded from the
 /// server through `generate(...)` into the decode loop to drive
-/// grammar-constrained decoding (parity plan §8, Stage A).
+/// grammar-constrained decoding (parity plan §8).
 ///
-/// `.json` constrains the decoder so every emitted token keeps the output
-/// a valid prefix of a JSON value (via `KLMGrammar` / `JSONTokenMask`).
-/// JSON-schema requests map to `.json` for now — the value is guaranteed
-/// well-formed JSON by the mask, and the schema shape is still enforced by
-/// the server's system-prompt guidance + post-extraction `coerce` until a
-/// schema→grammar compiler lands (Stage B).
+/// - `.json` (Stage A) constrains the decoder so every emitted token keeps
+///   the output a valid prefix of a JSON value.
+/// - `.jsonSchema(String)` (Stage B) additionally constrains it to match a
+///   JSON Schema (the associated string is the schema JSON): declared keys,
+///   required fields, `additionalProperties`, array `items`, scalar types,
+///   `enum` / `const`. Unsupported schema constructs relax to "any value"
+///   (still valid JSON); if the schema cannot be compiled at all the engine
+///   falls back to the `.json` validity mask, and the server's system-prompt
+///   guidance + post-extraction `coerce` remain as a final backstop.
 public enum OutputFormat: Sendable {
     case json
+    case jsonSchema(String)
 }
