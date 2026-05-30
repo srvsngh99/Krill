@@ -1307,15 +1307,20 @@ extension InferenceEngine {
     /// `generate(...)`'s `Captures` uses for the Swift 6.2.4 SIL
     /// SendNonSendable crash under `-O`.
     private struct BatchedCaptures: @unchecked Sendable {
-        typealias ForwardFn = (MLXArray, [KVCacheProtocol]?) -> MLXArray
         typealias BatchedFn = (MLXArray, [KVCache], MLXArray, [Int]) -> MLXArray
-        let engine: InferenceEngine
-        let prefill: ForwardFn
+        /// Prefix-cache-aware per-row prefill (tokens, fresh caches, the row's
+        /// usePrefixCache flag) -> prefill logits. Built by
+        /// `makeBatchedPrefillRow`, the SAME closure the continuous batcher uses
+        /// via `Deps.prefillRow`, so the static cohort and the live batcher
+        /// consult the shared prefix cache identically.
+        let prefillRow: ([Int], [KVCache], Bool) -> MLXArray
         let batchedForward: BatchedFn
         let numLayers: Int
         let tokenizer: KLMTokenizer
         let stopIds: Set<Int>
         let promptRows: [[Int]]
+        /// Per-row prefix-cache opt-in, mirroring each `BatchGenRequest`.
+        let usePrefixCache: [Bool]
         let samplers: [Sampler]
         let perRowMax: [Int]
         let conts: [AsyncStream<TokenEvent>.Continuation]
@@ -1335,10 +1340,14 @@ extension InferenceEngine {
     /// (unsupported family, nothing loaded, an empty prompt, or a single row)
     /// so the entry is always total-correct regardless of how it is called.
     ///
-    /// v1 scope (Stage B): fp16 KV, no prefix cache, no speculative decode;
-    /// finished rows stay in the batch (they simply stop emitting) until every
-    /// row completes. Shrinking the batch mid-flight and continuous admission
-    /// are Stage C.
+    /// Scope: fp16 KV, no speculative decode; finished rows stay in the batch
+    /// (they simply stop emitting) until every row completes. The shared prefix
+    /// cache IS consulted per row at prefill (Stage C4), honoring each row's
+    /// `usePrefixCache` - a full hit restores that prompt's KV and forwards only
+    /// the last token, identical to a cold prefill, so the stacked decode is
+    /// byte-for-byte the same. Shrinking the batch mid-flight and continuous
+    /// admission are the continuous batcher (`submitBatched`), not this static
+    /// cohort.
     public func generateBatched(_ requests: [BatchGenRequest])
         -> [(stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?)]
     {
@@ -1395,13 +1404,13 @@ extension InferenceEngine {
         let statsHolders = (0 ..< R).map { _ in StatsHolder() }
 
         let caps = BatchedCaptures(
-            engine: self,
-            prefill: model.prefillForward ?? model.forward,
+            prefillRow: makeBatchedPrefillRow(model),
             batchedForward: batchedForward,
             numLayers: model.numLayers,
             tokenizer: tokenizer,
             stopIds: stopIds,
             promptRows: promptRows,
+            usePrefixCache: requests.map { $0.usePrefixCache },
             samplers: requests.map { Sampler(params: $0.params) },
             perRowMax: requests.map { $0.maxTokens },
             conts: conts,
@@ -1565,7 +1574,11 @@ extension InferenceEngine {
         let R = c.promptRows.count
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        // Per-row prefill (unchanged B=1 path) → per-row cache + first token.
+        // Per-row prefill (B=1 path) → per-row cache + first token. The
+        // prefix-cache-aware closure restores a full hit's KV (then forwards
+        // only the last token, so the cache matches a cold prefill) or prefills
+        // cold and stores write-behind, honoring this row's usePrefixCache. It
+        // evaluates the logits internally before returning.
         var perRowCaches: [[KVCache]] = []
         var lengths: [Int] = []
         var current: [Int] = []
@@ -1574,9 +1587,7 @@ extension InferenceEngine {
         current.reserveCapacity(R)
         for (i, tokens) in c.promptRows.enumerated() {
             let caches = makeKVCaches(numLayers: c.numLayers)
-            let input = MLXArray(tokens.map { Int32($0) }).reshaped(1, tokens.count)
-            let logits = c.prefill(input, caches)
-            MLX.eval(logits)
+            let logits = c.prefillRow(tokens, caches, c.usePrefixCache[i])
             perRowCaches.append(caches)
             lengths.append(tokens.count)
             current.append(c.samplers[i].sample(logits))
