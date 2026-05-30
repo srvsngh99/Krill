@@ -8,6 +8,22 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **Grammar-constrained JSON decoding (Stage A)** (follow-up #9):
+  `format:"json"` / OpenAI `response_format` now drive a real token-level
+  logit mask, not just guided prompting. A new `KLMGrammar` module runs an
+  incremental JSON-value automaton (`JSONGrammar`) plus a tokenizer-vocab
+  mask (`JSONTokenMask`) so the sampler can only pick tokens that keep the
+  output a valid JSON prefix; EOS is forbidden until the value is complete.
+  This turns JSON output from "usually valid" into "always valid",
+  including under adversarial prompts. The mask is built once per model and
+  cached per grammar state. `Sampler` gains an optional `mask:` parameter
+  applied before greedy/temperature/top-p/top-k/min-p, so the decode path
+  is byte-for-byte unchanged when no format is requested. The existing
+  system-prompt injection + post-extraction `coerce` are kept as a fallback
+  (and remain the schema-shape enforcement for `.schema` requests until the
+  Stage B schema→grammar compiler lands). Constrained requests take the
+  serial decode path — the mask advances a per-sequence automaton, which
+  the batched/speculative loops cannot interleave.
 - **Continuous batched decode** (follow-up #8, Stage C1): batching is now
   *continuous* rather than a static cohort. A persistent per-model
   `ContinuousBatcher` runs one decode loop that admits a newly-arrived request

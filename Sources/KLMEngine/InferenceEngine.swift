@@ -5,6 +5,7 @@ import KLMCore
 import KLMCache
 import KLMTokenizer
 import KLMSampler
+import KLMGrammar
 import KLMRegistry
 #if canImport(CoreGraphics) && canImport(ImageIO)
 import CoreGraphics
@@ -30,6 +31,12 @@ public final class InferenceEngine: @unchecked Sendable {
 
     /// Optional speculative decoder (loaded separately via loadDraftModel).
     private var specDecoder: SpeculativeDecoder?
+
+    /// Lazily-built, per-model token-piece logit mask for JSON-constrained
+    /// decoding (parity plan §8, Stage A). Built on the first `format`
+    /// request and reused; `nil` until then. Guarded by `jsonMaskLock`.
+    private var cachedJSONMask: JSONTokenMask?
+    private let jsonMaskLock = NSLock()
 
     /// Display name of the loaded draft model (alias or directory name).
     /// Nil when no draft is loaded.
@@ -404,6 +411,28 @@ public final class InferenceEngine: @unchecked Sendable {
         }
     }
 
+    /// Build (or reuse) the per-model JSON logit mask. Decodes every vocab
+    /// id to its string piece once, then caches the result on the engine.
+    /// `nil` when the tokenizer cannot report a vocab size (mask disabled,
+    /// the request falls back to guided-prompt + post-extraction only).
+    private func jsonTokenMask(stopIds: Set<Int>) -> JSONTokenMask? {
+        guard let tokenizer, let vocabSize = tokenizer.vocabSize, vocabSize > 0 else {
+            return nil
+        }
+        jsonMaskLock.lock(); defer { jsonMaskLock.unlock() }
+        if let cached = cachedJSONMask { return cached }
+        let start = CFAbsoluteTimeGetCurrent()
+        var pieces = [String](repeating: "", count: vocabSize)
+        for id in 0 ..< vocabSize { pieces[id] = tokenizer.decode(token: id) }
+        let mask = JSONTokenMask(pieces: pieces, stopIds: stopIds)
+        cachedJSONMask = mask
+        FileHandle.standardError.write(Data((
+            "[KrillLM] built JSON grammar mask (vocab=\(vocabSize)) in "
+            + String(format: "%.0fms", (CFAbsoluteTimeGetCurrent() - start) * 1000)
+            + "\n").utf8))
+        return mask
+    }
+
     public func generate(
         prompt: String,
         systemPrompt: String? = nil,
@@ -414,7 +443,8 @@ public final class InferenceEngine: @unchecked Sendable {
         imageData: Data? = nil,
         audioData: Data? = nil,
         contextLimit: Int? = nil,
-        promptTemplateOverride: String? = nil
+        promptTemplateOverride: String? = nil,
+        format: OutputFormat? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
@@ -427,7 +457,8 @@ public final class InferenceEngine: @unchecked Sendable {
                         useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
                         imageData: imageData, audioData: audioData,
                         contextLimit: contextLimit,
-                        promptTemplateOverride: promptTemplateOverride)
+                        promptTemplateOverride: promptTemplateOverride,
+                        format: format)
     }
 
     /// Generate tokens from a full conversation history, streaming results.
@@ -452,7 +483,8 @@ public final class InferenceEngine: @unchecked Sendable {
         imageData: Data? = nil,
         audioData: Data? = nil,
         contextLimit: Int? = nil,
-        promptTemplateOverride: String? = nil
+        promptTemplateOverride: String? = nil,
+        format: OutputFormat? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         guard let loadedModel, let tokenizer else {
             let emptyStream = AsyncStream<TokenEvent> { $0.finish() }
@@ -567,6 +599,11 @@ public final class InferenceEngine: @unchecked Sendable {
         // stops correctly because it honors the full list.
         let stopIds = Self.stopTokenIds(
             modelDirectory: modelDirectory, tokenizerEOS: eosId)
+        // Grammar-constrained decoding (parity plan §8, Stage A): when a
+        // structured-output format is requested, build/reuse the token-level
+        // JSON logit mask. EOS/stop tokens are passed so the mask can forbid
+        // them until the JSON value is complete. nil format → no work.
+        let jsonMask: JSONTokenMask? = (format == .json) ? jsonTokenMask(stopIds: stopIds) : nil
         let numLayers = loadedModel.numLayers
         let forwardFn = loadedModel.forward
         let prefillForwardFn = loadedModel.prefillForward
@@ -614,6 +651,7 @@ public final class InferenceEngine: @unchecked Sendable {
             let audioMel: MLXArray?
             let audioMask: MLXArray?
             let moeModel: Qwen3MoEForCausalLM?
+            let jsonMask: JSONTokenMask?
         }
         // int8 KV is gated to Gemma 4: other model loaders downcast caches to
         // [KVCache] in their forward closures (see ModelLoader.swift), so a
@@ -649,8 +687,11 @@ public final class InferenceEngine: @unchecked Sendable {
         // need: they want to call generate() on the same engine instance
         // and get the non-spec output for comparison.
         let wantsSpec = useSpeculative ?? autoUseSpec
+        // Grammar masking advances a per-token JSON automaton in the
+        // standard serial loop; the multi-token speculative path cannot
+        // honor a per-step mask, so a format request disables spec.
         let shouldSpec = wantsSpec && specDecoder != nil && !useInt8KV
-            && !params.penaltiesActive && greedyRequest
+            && !params.penaltiesActive && greedyRequest && jsonMask == nil
         let captures = Captures(
             forward: forwardFn,
             prefillForward: prefillForwardFn,
@@ -663,7 +704,8 @@ public final class InferenceEngine: @unchecked Sendable {
             imageData: imageData,
             audioMel: nativeAudio?.mel,
             audioMask: nativeAudio?.validMask,
-            moeModel: loadedModel.module as? Qwen3MoEForCausalLM
+            moeModel: loadedModel.module as? Qwen3MoEForCausalLM,
+            jsonMask: jsonMask
         )
 
         // int8 KV + prefix cache coexist via the quantized snapshot path
@@ -702,6 +744,7 @@ public final class InferenceEngine: @unchecked Sendable {
                 let capturedAudioMel = captures.audioMel
                 let capturedAudioMask = captures.audioMask
                 let capturedMoEModel = captures.moeModel
+                let capturedJSONMask = captures.jsonMask
 
                 let startTime = CFAbsoluteTimeGetCurrent()
                 // Scope expert-utilization telemetry to this generation
@@ -868,15 +911,36 @@ public final class InferenceEngine: @unchecked Sendable {
                 // Int up front; for the standard path we keep the token as a
                 // lazy 1-element MLXArray so we can chain it directly into the
                 // next forward without paying a GPU↔CPU sync per step.
+                // Grammar-constrained decoding: validate the mask width
+                // against the real logits width once (config vocab_size can
+                // be padded relative to the lm_head). On mismatch, fail open
+                // — the request still gets guided-prompt + post-extraction.
+                var activeJSONMask = capturedJSONMask
+                if let m = activeJSONMask {
+                    let logitsVocab = prefillLogits.dim(prefillLogits.ndim - 1)
+                    if m.vocabSize != logitsVocab {
+                        FileHandle.standardError.write(Data((
+                            "[KrillLM] JSON grammar mask disabled: mask vocab "
+                            + "\(m.vocabSize) != logits vocab \(logitsVocab).\n").utf8))
+                        activeJSONMask = nil
+                    }
+                }
+                var grammarState = JSONGrammar.initialState
+
                 var nextToken: Int
                 var nextTokenArr: MLXArray
                 if shouldSpec {
                     nextToken = sampler.sample(prefillLogits)
                     nextTokenArr = MLXArray(Int32(nextToken))
                 } else {
-                    nextTokenArr = sampler.sampleArray(prefillLogits)
+                    let prefillMask = activeJSONMask?.mask(for: grammarState)
+                    nextTokenArr = sampler.sampleArray(prefillLogits, mask: prefillMask)
                     asyncEval(nextTokenArr)
                     nextToken = nextTokenArr.item(Int.self)
+                }
+                // Advance the grammar by the first (prefill) token.
+                if let m = activeJSONMask {
+                    grammarState = m.advance(grammarState, token: nextToken) ?? grammarState
                 }
 
                 // Prefill the draft model on the FULL prompt BEFORE we
@@ -996,12 +1060,15 @@ public final class InferenceEngine: @unchecked Sendable {
                         // allocation and keeps the dependency graph on-device.
                         let tokenInput = nextTokenArr.reshaped(1, 1)
                         let logits = capturedForward(tokenInput, caches)
+                        // Grammar mask for the NEXT token, given everything
+                        // accepted so far (reflected in grammarState).
+                        let stepMask = activeJSONMask?.mask(for: grammarState)
                         let nextTokenArr2: MLXArray
                         if trackHistory {
                             recent.append(nextToken)
-                            nextTokenArr2 = sampler.sampleArray(logits, recent: recent)
+                            nextTokenArr2 = sampler.sampleArray(logits, recent: recent, mask: stepMask)
                         } else {
-                            nextTokenArr2 = sampler.sampleArray(logits)
+                            nextTokenArr2 = sampler.sampleArray(logits, mask: stepMask)
                         }
 
                         // Schedule both the forward and the next sample to run
@@ -1019,6 +1086,11 @@ public final class InferenceEngine: @unchecked Sendable {
                         // Sync once per step on a single 1-element int32 array.
                         nextTokenArr = nextTokenArr2
                         nextToken = nextTokenArr.item(Int.self)
+                        // Advance the grammar by the freshly accepted token so
+                        // the next iteration masks from the correct state.
+                        if let m = activeJSONMask {
+                            grammarState = m.advance(grammarState, token: nextToken) ?? grammarState
+                        }
                     }
                 }
 

@@ -1,4 +1,5 @@
 import Foundation
+import KLMEngine
 
 /// Structured output (WS-D D2 / T1-1): `format:"json"` / JSON-schema and
 /// the OpenAI `response_format` equivalent.
@@ -11,6 +12,18 @@ import Foundation
 /// system turn demands it; the extractor then strips any prose/fences so
 /// the client receives parseable JSON.
 internal enum StructuredOutput {
+
+    /// Map a server-internal `ResponseFormat` to the engine's
+    /// grammar-decoding `OutputFormat`. Both `.json` and `.schema` request
+    /// the JSON-validity mask (Stage A): the mask guarantees well-formed
+    /// JSON, and for `.schema` the shape is still enforced by the injected
+    /// system prompt + `coerce` until a schema→grammar compiler lands.
+    static func engineFormat(for format: ResponseFormat?) -> OutputFormat? {
+        guard let format else { return nil }
+        switch format {
+        case .json, .schema: return .json
+        }
+    }
 
     static func systemPrompt(for format: ResponseFormat) -> String {
         switch format {

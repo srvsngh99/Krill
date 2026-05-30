@@ -52,6 +52,12 @@ let package = Package(
             ]
         ),
         .target(
+            name: "KLMGrammar",
+            dependencies: [
+                .product(name: "MLX", package: "mlx-swift"),
+            ]
+        ),
+        .target(
             name: "KLMKernels",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
@@ -87,6 +93,7 @@ let package = Package(
                 "KLMCache",
                 "KLMTokenizer",
                 "KLMSampler",
+                "KLMGrammar",
                 "KLMRegistry",
                 .product(name: "MLX", package: "mlx-swift"),
             ]
@@ -157,6 +164,13 @@ let package = Package(
             dependencies: [
                 "KLMAgent",
                 "KLMRegistry",
+            ]
+        ),
+        .testTarget(
+            name: "KLMGrammarTests",
+            dependencies: [
+                "KLMGrammar",
+                .product(name: "MLX", package: "mlx-swift"),
             ]
         ),
     ]
