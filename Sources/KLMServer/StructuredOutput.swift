@@ -14,14 +14,16 @@ import KLMEngine
 internal enum StructuredOutput {
 
     /// Map a server-internal `ResponseFormat` to the engine's
-    /// grammar-decoding `OutputFormat`. Both `.json` and `.schema` request
-    /// the JSON-validity mask (Stage A): the mask guarantees well-formed
-    /// JSON, and for `.schema` the shape is still enforced by the injected
-    /// system prompt + `coerce` until a schema→grammar compiler lands.
+    /// grammar-decoding `OutputFormat`. `.json` requests the any-JSON-value
+    /// mask (Stage A); `.schema` requests the schema-constrained mask (Stage
+    /// B) so the decoder is held to the schema's structure, not just JSON
+    /// well-formedness. The injected system prompt + post-extraction `coerce`
+    /// remain as a backstop (and cover schema features the compiler relaxes).
     static func engineFormat(for format: ResponseFormat?) -> OutputFormat? {
         guard let format else { return nil }
         switch format {
-        case .json, .schema: return .json
+        case .json: return .json
+        case .schema(let schema): return .jsonSchema(schema)
         }
     }
 
