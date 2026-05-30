@@ -307,10 +307,12 @@ public actor EngineRegistry {
         order.append(key)
     }
 
-    #if DEBUG
     /// Test-only: register a resident entry without loading weights, so the
     /// per-model eviction policy (``evictExpired(now:)``) can be unit-tested
-    /// against controllers in known states. Compiled out of release builds.
+    /// against controllers in known states. Not `#if DEBUG`-gated: CI builds
+    /// the test bundle in release configuration (`swift test -c release`),
+    /// where `DEBUG` is undefined, so gating it out breaks the test compile.
+    /// It is an internal symbol, harmless to ship in a release library.
     func _insertForTesting(key: String, engine: InferenceEngine,
                            keepAlive: KeepAliveController) {
         entries[key] = Entry(engine: engine, lastUsed: Date(), keepAlive: keepAlive,
@@ -320,5 +322,4 @@ public actor EngineRegistry {
         order.append(key)
         activeRef.set(engine)
     }
-    #endif
 }

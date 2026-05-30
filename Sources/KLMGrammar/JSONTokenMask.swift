@@ -28,11 +28,19 @@ public final class JSONTokenMask: @unchecked Sendable {
 
     private var cache: [JSONGrammar.State: MLXArray] = [:]
     private let lock = NSLock()
+    /// One-shot guard for the all-blocked fail-open notice.
+    private var didWarnAllBlocked = false
+
+    /// The stop-token set this mask was built with, exposed so the engine can
+    /// detect when a later request's stop set differs and rebuild the mask
+    /// rather than silently reuse a stale one.
+    public let stopIdSet: Set<Int>
 
     public init(pieces: [String], stopIds: Set<Int>) {
         self.pieces = pieces
         self.vocabSize = pieces.count
         self.stopIds = Array(stopIds)
+        self.stopIdSet = stopIds
     }
 
     /// Advance the grammar state by an accepted token. Returns `nil` if the
@@ -52,17 +60,47 @@ public final class JSONTokenMask: @unchecked Sendable {
 
         let complete = JSONGrammar.isComplete(state)
         var bias = [Float](repeating: Self.blocked, count: vocabSize)
+        var allowedCount = 0
         for id in 0 ..< vocabSize {
             let piece = pieces[id]
             // Empty pieces (typically special tokens that decode to "")
             // are forbidden: emitting one makes no textual progress and
             // could stall the decode. EOS is handled via `stopIds` below.
             if piece.isEmpty { continue }
-            if JSONGrammar.advance(state, piece: piece) != nil { bias[id] = 0 }
+            if JSONGrammar.advance(state, piece: piece) != nil {
+                bias[id] = 0
+                allowedCount += 1
+            }
         }
         // Stop tokens may fire only when the value is complete.
         for id in stopIds where id >= 0 && id < vocabSize {
-            bias[id] = complete ? 0 : Self.blocked
+            if complete {
+                if bias[id] != 0 { allowedCount += 1 }
+                bias[id] = 0
+            } else {
+                bias[id] = Self.blocked
+            }
+        }
+
+        // Fail open: if NO token is allowed for this state (e.g. a
+        // lossy-detokenized vocab where no single piece faithfully extends
+        // the prefix, or a stop set that excludes the model's real EOS at a
+        // non-complete state), an all-blocked mask would force argMax onto a
+        // forbidden token and wedge the decode. Returning an all-allowed mask
+        // hands control back to the unconstrained sampler for this step — the
+        // post-extraction `coerce` remains the safety net for validity. This
+        // is logged once so the condition is observable.
+        if allowedCount == 0 {
+            if !didWarnAllBlocked {
+                didWarnAllBlocked = true
+                FileHandle.standardError.write(Data((
+                    "[KrillLM] JSON grammar mask: no token extends the current "
+                    + "state; failing open for this step (output validity then "
+                    + "relies on post-extraction).\n").utf8))
+            }
+            let open = MLXArray([Float](repeating: 0, count: vocabSize))
+            cache[state] = open
+            return open
         }
 
         let arr = MLXArray(bias)

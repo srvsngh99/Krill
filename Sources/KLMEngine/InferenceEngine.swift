@@ -420,7 +420,11 @@ public final class InferenceEngine: @unchecked Sendable {
             return nil
         }
         jsonMaskLock.lock(); defer { jsonMaskLock.unlock() }
-        if let cached = cachedJSONMask { return cached }
+        // Reuse the cached mask only when its stop set matches this request's.
+        // A created model's Modelfile `PARAMETER stop` can vary the stop set
+        // per request; the mask gates EOS on exactly that set, so a stale set
+        // would forbid the wrong tokens. Rebuild on mismatch.
+        if let cached = cachedJSONMask, cached.stopIdSet == stopIds { return cached }
         let start = CFAbsoluteTimeGetCurrent()
         var pieces = [String](repeating: "", count: vocabSize)
         for id in 0 ..< vocabSize { pieces[id] = tokenizer.decode(token: id) }
@@ -938,9 +942,19 @@ public final class InferenceEngine: @unchecked Sendable {
                     asyncEval(nextTokenArr)
                     nextToken = nextTokenArr.item(Int.self)
                 }
-                // Advance the grammar by the first (prefill) token.
+                // Advance the grammar by the first (prefill) token. If the
+                // chosen token's piece does not extend the grammar (a mask
+                // fail-open step let an off-grammar token through, or
+                // single-id detok diverged from streaming detok), disable the
+                // mask for the rest of this generation rather than freeze the
+                // state and emit a stuck mask every step. `coerce` remains the
+                // validity safety net.
                 if let m = activeJSONMask {
-                    grammarState = m.advance(grammarState, token: nextToken) ?? grammarState
+                    if let advanced = m.advance(grammarState, token: nextToken) {
+                        grammarState = advanced
+                    } else {
+                        activeJSONMask = nil
+                    }
                 }
 
                 // Prefill the draft model on the FULL prompt BEFORE we
@@ -1087,9 +1101,16 @@ public final class InferenceEngine: @unchecked Sendable {
                         nextTokenArr = nextTokenArr2
                         nextToken = nextTokenArr.item(Int.self)
                         // Advance the grammar by the freshly accepted token so
-                        // the next iteration masks from the correct state.
+                        // the next iteration masks from the correct state. On a
+                        // non-extending token, disable the mask for the rest of
+                        // this generation (see the prefill site above) instead
+                        // of freezing and re-emitting a stuck mask each step.
                         if let m = activeJSONMask {
-                            grammarState = m.advance(grammarState, token: nextToken) ?? grammarState
+                            if let advanced = m.advance(grammarState, token: nextToken) {
+                                grammarState = advanced
+                            } else {
+                                activeJSONMask = nil
+                            }
                         }
                     }
                 }

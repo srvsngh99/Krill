@@ -80,6 +80,76 @@ final class JSONTokenMaskTests: XCTestCase {
         XCTAssertNotNil(mask.advance(JSONGrammar.initialState, token: 0))
     }
 
+    // MARK: - Multi-character (BPE) pieces straddling structural boundaries
+
+    /// A glued-token vocabulary: real BPE vocabs emit pieces that span
+    /// structural boundaries (`{"`, `":"`, `","`, `"}`), not one char each.
+    /// The whole point of a TOKEN-level mask (vs char-level) is to handle
+    /// these, so build a complete object using ONLY straddling tokens. The
+    /// value-side glue is `":"` (close key, colon, open value string) so the
+    /// value is a proper JSON string, and `","` (close value, comma, open
+    /// next key) chains object members.
+    //  0:"{\"" 1:"\":\"" 2:"\",\"" 3:"\"}" 4:"k" 5:"v" 6:"}" 7:"" 8:EOS
+    private let gluedPieces = ["{\"", "\":\"", "\",\"", "\"}", "k", "v",
+                              "}", "", ""]
+    private func gluedMask() -> JSONTokenMask {
+        JSONTokenMask(pieces: gluedPieces, stopIds: [8])
+    }
+
+    /// Feed a token-id sequence through the mask's `advance`, asserting each
+    /// step is accepted (non-nil). Returns the final grammar state.
+    private func runTokens(_ mask: JSONTokenMask, _ ids: [Int],
+                           file: StaticString = #filePath, line: UInt = #line) -> JSONGrammar.State? {
+        var st = JSONGrammar.initialState
+        for id in ids {
+            guard let next = mask.advance(st, token: id) else {
+                XCTFail("token id \(id) (piece \(gluedPieces[id])) rejected", file: file, line: line)
+                return nil
+            }
+            st = next
+        }
+        return st
+    }
+
+    func testObjectBuiltFromStraddlingTokens() {
+        let mask = gluedMask()
+        // {"k":"v"}  via  {"  k  ":  v  "}
+        guard let st = runTokens(mask, [0, 4, 1, 5, 3]) else { return }
+        XCTAssertTrue(JSONGrammar.isComplete(st),
+                      "object from straddling tokens should be complete")
+    }
+
+    func testMultiKeyObjectFromStraddlingTokens() {
+        let mask = gluedMask()
+        // {"k":"v","k":"v"}  via  {"  k  ":  v  ","  k  ":  v  "}
+        guard let st = runTokens(mask, [0, 4, 1, 5, 2, 4, 1, 5, 3]) else { return }
+        XCTAssertTrue(JSONGrammar.isComplete(st))
+    }
+
+    func testStraddlingTokenAllowedOnlyInRightState() {
+        let mask = gluedMask()
+        // A bare key character `k` (id 4) is not a valid value start, so it is
+        // forbidden at the top level, but allowed once a key string is open.
+        XCTAssertNil(mask.advance(JSONGrammar.initialState, token: 4))
+        guard let afterOpen = mask.advance(JSONGrammar.initialState, token: 0) else {
+            return XCTFail("'{\"' should open")
+        }
+        XCTAssertNotNil(mask.advance(afterOpen, token: 4))  // k inside key
+        XCTAssertTrue(allowed(mask, afterOpen).contains(4))
+        XCTAssertFalse(allowed(mask, JSONGrammar.initialState).contains(4))
+    }
+
+    func testStraddlingCloserForbiddenMidValue() {
+        let mask = gluedMask()
+        // After `{"` we are expecting a key string body; the `"}` closer
+        // (id 3) is `"` (closes the key -> expecting `:`) then `}` — but `}`
+        // where a `:` is required is invalid, so `{""}` must be rejected.
+        guard let afterOpen = mask.advance(JSONGrammar.initialState, token: 0) else {
+            return XCTFail("'{\"' should open")
+        }
+        XCTAssertNil(mask.advance(afterOpen, token: 3))
+    }
+
     func testMaskBiasValues() {
         let mask = makeMask()
         let arr = mask.mask(for: JSONGrammar.initialState)
