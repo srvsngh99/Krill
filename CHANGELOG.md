@@ -8,6 +8,26 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **Regex-constrained decoding (Stage C)** (follow-up #9): a request can
+  now constrain the output to a full match of a regular expression, for
+  non-JSON shapes like enums, dates, IDs, and phone numbers. Supplied via
+  an OpenAI `response_format: {type:"regex", regex:"<pattern>"}` (or
+  `type:"grammar"`) extension, or an Ollama `format: {"regex":"<pattern>"}`
+  object. A new `RegexGrammar` parses a bounded regex dialect (literals,
+  `.`, character classes incl. ranges and negation, the `\d \w \s` family
+  and escaped metacharacters, groups, alternation, and the `* + ? {n} {n,}
+  {n,m}` quantifiers) into a Thompson NFA and drives the shared
+  `GrammarTokenMask` by subset construction, so a `State` is a compact set
+  of NFA nodes that recurs across generations and caches well (no
+  per-prefix blow-up). The pattern is matched as a full match: EOS is
+  allowed only at an accepting state. An uncompilable or unsupported
+  pattern (backreferences, lookaround, counted repetition on a group)
+  disables the mask and the request decodes unconstrained with the
+  system-prompt guidance. Regex output is not JSON, so `coerce` returns it
+  verbatim rather than JSON-extracting. A full Lark-style CFG runtime
+  (arbitrary nesting via an Earley parser) remains a possible follow-up;
+  regex covers the common flat-pattern cases, and JSON/JSON-schema (Stages
+  A/B) already cover the common nested cases.
 - **Grammar-constrained JSON decoding (Stage A)** (follow-up #9):
   `format:"json"` / OpenAI `response_format` now drive a real token-level
   logit mask, not just guided prompting. A new `KLMGrammar` module runs an
