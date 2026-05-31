@@ -214,6 +214,14 @@ private let aliases: [String: ResolvedModel] = [
         repo: "sentence-transformers/all-mpnet-base-v2",
         name: "all-mpnet-base-v2", family: .bert, params: "109M", quant: "fp32", context: 514),
 
+    // GTE-v1.5 ("NewModel"): RoPE encoder, GeGLU MLP, CLS-pooled, 8192 ctx.
+    "gte-base-en-v1.5": ResolvedModel(
+        repo: "Alibaba-NLP/gte-base-en-v1.5",
+        name: "gte-base-en-v1.5", family: .bert, params: "137M", quant: "fp32", context: 8192),
+    "gte-large-en-v1.5": ResolvedModel(
+        repo: "Alibaba-NLP/gte-large-en-v1.5",
+        name: "gte-large-en-v1.5", family: .bert, params: "434M", quant: "fp32", context: 8192),
+
     // nomic-embed-text: a `nomic_bert` RoPE encoder (fused Wqkv + SwiGLU),
     // 768-dim, served fp32. Routed to NomicBertEmbeddingModel by model_type at
     // load. `nomic-embed-text` tracks Ollama's default tag (v1.5).

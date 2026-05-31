@@ -185,6 +185,10 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         // name contains neither "bert" nor "roberta"; the engine loads it via its
         // own relative-attention encoder selected from model_type.
         if archLower.contains("mpnet") { return .bert }
+        // GTE-v1.5 ships as `NewModel` (model_type "new"): a RoPE sentence
+        // encoder, loaded via the engine's GTE path. Still a `.bert`-family
+        // embedder at the registry level so the embeddings gate admits it.
+        if archLower.contains("newmodel") { return .bert }
         if archLower.contains("gemma4") { return .gemma4 }
         if archLower.contains("gemma") { return .gemma }
         if archLower.contains("chatglm") || archLower.contains("glm") { return .glm }
