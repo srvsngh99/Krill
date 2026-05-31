@@ -30,3 +30,9 @@ extension LlamaForCausalLM: SentenceEmbeddingEncoder {
         model(tokens, caches: nil)
     }
 }
+
+extension GemmaForCausalLM: SentenceEmbeddingEncoder {
+    public func lastHiddenState(_ tokens: MLXArray) -> MLXArray {
+        model(tokens, caches: nil)
+    }
+}

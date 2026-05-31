@@ -330,4 +330,24 @@ final class EmbeddingModelTests: XCTestCase {
         let norm = vec.reduce(0) { $0 + $1 * $1 }.squareRoot()
         XCTAssertEqual(norm, 1.0, accuracy: 1e-4)
     }
+
+    /// Gemma backbone conformance (for bge-multilingual-gemma2): the inner model
+    /// must expose its final hidden state `[1, T, H]` for last-token pooling.
+    func testGemmaForCausalLMActsAsDecoderEmbedder() throws {
+        let dict: [String: Any] = [
+            "hidden_size": 64, "intermediate_size": 128,
+            "num_attention_heads": 4, "num_key_value_heads": 2,
+            "num_hidden_layers": 2, "vocab_size": 256,
+            "rms_norm_eps": 1e-6, "rope_theta": 10000.0,
+            "max_position_embeddings": 4096, "head_dim": 16,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: dict)
+        let cfg = try JSONDecoder().decode(GemmaConfig.self, from: data)
+
+        let encoder: any SentenceEmbeddingEncoder = GemmaForCausalLM(cfg)
+        let tokens = MLXArray((0 ..< 5).map { Int32($0) }).reshaped(1, 5)
+        let hidden = encoder.lastHiddenState(tokens)
+        hidden.eval()
+        XCTAssertEqual(hidden.shape, [1, 5, 64])
+    }
 }
