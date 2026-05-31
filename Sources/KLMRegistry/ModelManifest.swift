@@ -214,6 +214,10 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         case "chatglm", "glm", "glm4_moe": return .glm
         case "deepseek_v3": return .deepseek
         case "bert", "roberta", "xlm-roberta", "mpnet", "distilbert": return .bert
+        // nomic-embed-text: RoPE encoder, still a sentence-embedding (.bert)
+        // family at the registry level; the embedding engine selects the
+        // NomicBert encoder from model_type at load time.
+        case "nomic_bert", "nomic-bert": return .bert
         default: return nil
         }
     }
