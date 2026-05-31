@@ -29,11 +29,13 @@ public final class KLMTokenizer: @unchecked Sendable {
     /// embedded path is empty. Nil for checkpoints that don't ship
     /// the file (the older embedded-template repos work unchanged).
     private let externalChatTemplate: String?
-    /// Special-token wrap `([cls], ..., [sep])` applied in `encode` for
-    /// tokenizers whose `RobertaProcessing`/`BertProcessing` post-processor was
-    /// stripped at load (swift-transformers fatal-errors parsing its sep/cls
-    /// shape). `nil` for the common case where the library handles wrapping.
-    private let specialWrap: (cls: Int, sep: Int)?
+    /// Special-token wrap applied manually for tokenizers whose
+    /// `RobertaProcessing`/`BertProcessing` post-processor was stripped at load
+    /// (swift-transformers fatal-errors parsing its sep/cls shape). `encode`
+    /// wraps `[cls] .. [sep]`; `encodePair` uses `pairDoubleSep` to pick the
+    /// cross-encoder separator (`</s></s>` for RoBERTa-class, `[SEP]` for
+    /// Bert-class). `nil` for the common case where the library handles wrapping.
+    private let specialWrap: (cls: Int, sep: Int, pairDoubleSep: Bool)?
 
     /// Load tokenizer from a model directory containing tokenizer.json.
     public init(from directory: URL) async throws {
@@ -113,7 +115,7 @@ public final class KLMTokenizer: @unchecked Sendable {
     /// copied; the large weights are not touched.
     private static func sanitizedTokenizerDirectory(
         _ directory: URL
-    ) -> (URL, (cls: Int, sep: Int)?) {
+    ) -> (URL, (cls: Int, sep: Int, pairDoubleSep: Bool)?) {
         let tjURL = directory.appendingPathComponent("tokenizer.json")
         guard let data = try? Data(contentsOf: tjURL),
               var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -123,6 +125,9 @@ public final class KLMTokenizer: @unchecked Sendable {
         else {
             return (directory, nil)
         }
+        // RoBERTa pairs use a doubled separator (`</s></s>`); Bert pairs a single
+        // `[SEP]`. Captured for `encodePair` since the post-processor is dropped.
+        let pairDoubleSep = (type == "RobertaProcessing")
         // sep/cls are `[token, id]` pairs, e.g. `["</s>", 2]`.
         func idOf(_ key: String) -> Int? {
             guard let pair = pp[key] as? [Any], pair.count == 2 else { return nil }
@@ -155,7 +160,7 @@ public final class KLMTokenizer: @unchecked Sendable {
         } catch {
             return (directory, nil)
         }
-        return (tmp, (cls, sep))
+        return (tmp, (cls, sep, pairDoubleSep))
     }
 
     private static func readVocabSize(directory: URL) -> Int? {
@@ -339,6 +344,15 @@ public final class KLMTokenizer: @unchecked Sendable {
         // Per-side encodes carry the model's BOS and EOS specials.
         let qIds = tokenizer.encode(text: query)
         let dIds = tokenizer.encode(text: document)
+
+        // When the post-processor was stripped at load (`specialWrap` set), the
+        // per-side encodes have NO specials, so the first/last-token inference
+        // below would be wrong. Build the pair layout explicitly from the known
+        // cls/sep instead: `[cls] q <sep..> d [sep]`.
+        if let w = specialWrap {
+            let separator = w.pairDoubleSep ? [w.sep, w.sep] : [w.sep]
+            return [w.cls] + qIds + separator + dIds + [w.sep]
+        }
 
         // Infer the bos/eos ids from what the tokenizer ACTUALLY
         // emitted. Asking the wrapper's `tokenizer.bosTokenId` is
