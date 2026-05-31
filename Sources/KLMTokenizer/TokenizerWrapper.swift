@@ -107,37 +107,64 @@ public final class KLMTokenizer: @unchecked Sendable {
         self.vocabSize = Self.readVocabSize(directory: directory)
     }
 
-    /// If `tokenizer.json` declares a `RobertaProcessing`/`BertProcessing`
-    /// post-processor (whose `["</s>", 2]` sep/cls shape swift-transformers
-    /// cannot parse), return a temp directory with that post-processor removed
-    /// plus the `(cls, sep)` ids to wrap manually in `encode`. Otherwise return
-    /// the original directory and `nil`. Only the small tokenizer input files are
-    /// copied; the large weights are not touched.
+    /// Normalize a tokenizer.json for swift-transformers when it trips one of two
+    /// known gaps, returning a temp directory with the rewritten file (plus the
+    /// `(cls, sep)` ids to wrap manually in `encode` when a post-processor was
+    /// stripped). Returns the original directory and `nil` when neither applies.
+    /// Only the small tokenizer input files are copied; weights are untouched.
+    ///
+    /// Fix 1 (post-processor): `RobertaProcessing`/`BertProcessing` (whose
+    /// `["</s>", 2]` sep/cls shape swift-transformers cannot parse) is stripped
+    /// and re-applied as a `[cls]..[sep]` wrap in `encode`.
+    ///
+    /// Fix 2 (Metaspace prefix): new-style Metaspace configs declare
+    /// `prepend_scheme` but omit `add_prefix_space` (e.g.
+    /// nomic-embed-text-v2-moe). swift-transformers gates the whole `▁` prepend
+    /// behind `add_prefix_space` (defaulting false when absent), so it never
+    /// prepends and every word matches the wrong, non-word-initial vocab entries
+    /// (garbage embeddings). Inject `add_prefix_space: true` so the existing
+    /// prepend-scheme logic runs; the scheme value still governs behavior, so
+    /// "never" stays a no-op. Tokenizers that already set the field (e.g.
+    /// bge-reranker-v2-m3) are untouched, so the reranker is unaffected.
     private static func sanitizedTokenizerDirectory(
         _ directory: URL
     ) -> (URL, (cls: Int, sep: Int, pairDoubleSep: Bool)?) {
         let tjURL = directory.appendingPathComponent("tokenizer.json")
         guard let data = try? Data(contentsOf: tjURL),
-              var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let pp = obj["post_processor"] as? [String: Any],
-              let type = pp["type"] as? String,
-              type == "RobertaProcessing" || type == "BertProcessing"
+              var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
             return (directory, nil)
         }
-        // RoBERTa pairs use a doubled separator (`</s></s>`); Bert pairs a single
-        // `[SEP]`. Captured for `encodePair` since the post-processor is dropped.
-        let pairDoubleSep = (type == "RobertaProcessing")
-        // sep/cls are `[token, id]` pairs, e.g. `["</s>", 2]`.
-        func idOf(_ key: String) -> Int? {
-            guard let pair = pp[key] as? [Any], pair.count == 2 else { return nil }
-            return (pair[1] as? Int) ?? (pair[1] as? NSNumber)?.intValue
+
+        // Fix 1: strip a RobertaProcessing/BertProcessing post-processor.
+        var wrap: (cls: Int, sep: Int, pairDoubleSep: Bool)?
+        if let pp = obj["post_processor"] as? [String: Any],
+           let type = pp["type"] as? String,
+           type == "RobertaProcessing" || type == "BertProcessing" {
+            func idOf(_ key: String) -> Int? {
+                guard let pair = pp[key] as? [Any], pair.count == 2 else { return nil }
+                return (pair[1] as? Int) ?? (pair[1] as? NSNumber)?.intValue
+            }
+            if let cls = idOf("cls"), let sep = idOf("sep") {
+                // RoBERTa pairs use a doubled separator (`</s></s>`); Bert a single
+                // `[SEP]`. Captured for `encodePair` since the post-processor drops.
+                wrap = (cls, sep, type == "RobertaProcessing")
+                obj.removeValue(forKey: "post_processor")
+            }
         }
-        guard let cls = idOf("cls"), let sep = idOf("sep") else {
+
+        // Fix 2: inject add_prefix_space on new-style Metaspace pretokenizers.
+        var metaspaceFixed = false
+        if var pre = obj["pre_tokenizer"] as? [String: Any] {
+            metaspaceFixed = injectMetaspaceAddPrefixSpace(&pre)
+            if metaspaceFixed { obj["pre_tokenizer"] = pre }
+        }
+
+        // Neither fix applied: load straight from the original directory.
+        if wrap == nil && !metaspaceFixed {
             return (directory, nil)
         }
 
-        obj.removeValue(forKey: "post_processor")
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("krillm-tok-\(UUID().uuidString)")
         do {
@@ -160,7 +187,27 @@ public final class KLMTokenizer: @unchecked Sendable {
         } catch {
             return (directory, nil)
         }
-        return (tmp, (cls, sep, pairDoubleSep))
+        return (tmp, wrap)
+    }
+
+    /// Recursively set `add_prefix_space: true` on any Metaspace pretokenizer
+    /// (including those nested in a `Sequence`) that declares `prepend_scheme`
+    /// but omits `add_prefix_space`. Returns true when any node was changed. See
+    /// `sanitizedTokenizerDirectory` Fix 2 for why. Internal for testability.
+    static func injectMetaspaceAddPrefixSpace(_ node: inout [String: Any]) -> Bool {
+        var changed = false
+        let type = node["type"] as? String
+        if type == "Metaspace", node["prepend_scheme"] != nil, node["add_prefix_space"] == nil {
+            node["add_prefix_space"] = true
+            changed = true
+        }
+        if type == "Sequence", var subs = node["pretokenizers"] as? [[String: Any]] {
+            for i in subs.indices where injectMetaspaceAddPrefixSpace(&subs[i]) {
+                changed = true
+            }
+            if changed { node["pretokenizers"] = subs }
+        }
+        return changed
     }
 
     private static func readVocabSize(directory: URL) -> Int? {
