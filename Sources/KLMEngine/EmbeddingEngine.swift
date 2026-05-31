@@ -153,8 +153,11 @@ public final class EmbeddingEngine: @unchecked Sendable {
             var ids = tokenizer.encode(text)
             if ids.isEmpty { ids = [tokenizer.bosTokenId] }
             if appendEOS {
-                // Last-token decoder embedders pool the EOS position, so reserve
-                // a slot for it when truncating, then append it.
+                // Last-token decoder embedders pool the EOS position. Normalize
+                // to exactly one trailing EOS (some tokenizers, e.g. e5-mistral,
+                // already append it; others, e.g. gte-Qwen2, do not), reserving a
+                // slot for it when truncating.
+                if ids.last == eos { ids.removeLast() }
                 if ids.count > cap - 1 { ids = Array(ids.prefix(cap - 1)) }
                 ids.append(eos)
             } else if ids.count > cap {
@@ -173,10 +176,15 @@ public final class EmbeddingEngine: @unchecked Sendable {
 
     // MARK: - Decoder-LLM embedder detection
 
-    /// Causal base architectures that can be repurposed as sentence embedders
-    /// (paired with a sentence-transformers pooling head).
+    /// Causal base architectures that can be repurposed as sentence embedders.
+    /// Limited to the dense families that conform to `SentenceEmbeddingEncoder`
+    /// (see `DecoderEmbedder.swift`), so an unsupported backbone is rejected at
+    /// the gate (400) rather than admitted and failing in `load` (500). Add a
+    /// family here only once its `*ForCausalLM` conforms (e.g. Gemma for
+    /// bge-multilingual-gemma2). Qwen3 MoE has model_type `qwen3_moe`, so it does
+    /// not match `qwen3` here.
     private static let causalEmbedderTypes: Set<String> = [
-        "qwen2", "qwen3", "llama", "mistral", "gemma", "gemma2", "phi", "phi3",
+        "qwen2", "qwen3", "llama", "mistral",
     ]
 
     /// True when `directory` holds a decoder-LLM embedder: a causal base arch
@@ -198,7 +206,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
         guard let v = ProcessInfo.processInfo.environment["KRILL_EMBED_POOLING"] else {
             return nil
         }
-        return EmbeddingPooling(rawValue: v.lowercased())
+        return EmbeddingPooling.from(v)
     }
 
     private static func maxPositionEmbeddings(from data: Data) -> Int? {

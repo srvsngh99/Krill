@@ -250,9 +250,21 @@ public enum EmbeddingPooling: String, Sendable {
     /// the whole sequence under causal masking, so it summarizes the input.
     case lastToken
 
+    /// Parse a user/string spelling, tolerant of case and separators. (The
+    /// `lastToken` rawValue is camelCase, so a lowercased `init(rawValue:)` would
+    /// never match it; this is the single parse path for env + config strings.)
+    public static func from(_ raw: String) -> EmbeddingPooling? {
+        switch raw.lowercased().replacingOccurrences(of: "_", with: "") {
+        case "mean": return .mean
+        case "cls": return .cls
+        case "lasttoken", "last": return .lastToken
+        default: return nil
+        }
+    }
+
     public static func fromEnv() -> EmbeddingPooling {
         if let v = ProcessInfo.processInfo.environment["KRILL_EMBED_POOLING"],
-           let p = EmbeddingPooling(rawValue: v.lowercased()) {
+           let p = EmbeddingPooling.from(v) {
             return p
         }
         return .mean

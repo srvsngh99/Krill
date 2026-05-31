@@ -196,6 +196,18 @@ final class EmbeddingModelTests: XCTestCase {
 
     // MARK: - Decoder-LLM embedders (last-token pooling)
 
+    func testPoolingStringParseToleratesCaseAndSeparators() {
+        XCTAssertEqual(EmbeddingPooling.from("mean"), .mean)
+        XCTAssertEqual(EmbeddingPooling.from("CLS"), .cls)
+        // The camelCase rawValue would defeat a lowercased init(rawValue:);
+        // these spellings must all resolve to .lastToken.
+        XCTAssertEqual(EmbeddingPooling.from("lasttoken"), .lastToken)
+        XCTAssertEqual(EmbeddingPooling.from("last_token"), .lastToken)
+        XCTAssertEqual(EmbeddingPooling.from("LastToken"), .lastToken)
+        XCTAssertEqual(EmbeddingPooling.from("last"), .lastToken)
+        XCTAssertNil(EmbeddingPooling.from("bogus"))
+    }
+
     func testLastTokenPoolingPicksFinalRow() {
         // [1, T=3, H=2]
         let hidden = MLXArray(
