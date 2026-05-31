@@ -12,7 +12,11 @@ public final class EmbeddingEngine: @unchecked Sendable {
     private var tokenizer: KLMTokenizer?
     private var loadedDir: URL?
     private var maxTokens: Int = 512
-    private let pooling = EmbeddingPooling.fromEnv()
+    private var pooling = EmbeddingPooling.fromEnv()
+    /// Decoder-LLM embedders (last-token pooling) append an EOS so the pooled
+    /// final position has attended over the whole input; BERT encoders do not.
+    private var appendEOS = false
+    private var eosTokenId = 0
     private let lock = NSLock()
 
     public init() {}
@@ -34,12 +38,16 @@ public final class EmbeddingEngine: @unchecked Sendable {
     }
 
     private func install(model: any SentenceEmbeddingEncoder, tokenizer: KLMTokenizer,
-                         directory: URL, maxTokens: Int) {
+                         directory: URL, maxTokens: Int,
+                         pooling: EmbeddingPooling, appendEOS: Bool, eosTokenId: Int) {
         withLock {
             self.model = model
             self.tokenizer = tokenizer
             self.loadedDir = directory
             self.maxTokens = maxTokens
+            self.pooling = pooling
+            self.appendEOS = appendEOS
+            self.eosTokenId = eosTokenId
         }
     }
 
@@ -49,15 +57,18 @@ public final class EmbeddingEngine: @unchecked Sendable {
 
         let configURL = directory.appendingPathComponent("config.json")
         let data = try Data(contentsOf: configURL)
+        let mt = Self.modelType(from: data) ?? ""
+        let tok = try await KLMTokenizer(from: directory)
 
-        // nomic-embed-text (model_type "nomic_bert") is a RoPE encoder with a
-        // fused Wqkv and a SwiGLU MLP - a different architecture from vanilla
-        // BERT/RoBERTa, so it routes to a dedicated encoder. Its checkpoint keys
-        // already match the module keys (no `bert.`/`roberta.` prefix), and
-        // strict verify guards against a silent weight mismatch.
         let model: any SentenceEmbeddingEncoder
         let maxTokens: Int
-        if Self.modelType(from: data) == "nomic_bert" {
+        let pooling: EmbeddingPooling
+        var appendEOS = false
+
+        if mt == "nomic_bert" {
+            // nomic-embed-text: a RoPE encoder (fused Wqkv + SwiGLU), distinct
+            // from vanilla BERT/RoBERTa. Checkpoint keys already match the module
+            // keys (no `bert.`/`roberta.` prefix); strict verify guards mismatch.
             let config = try JSONDecoder().decode(NomicBertConfig.self, from: data)
             let m = NomicBertEmbeddingModel(config)
             try loadWeights(into: m, from: directory, quantization: nil,
@@ -65,6 +76,23 @@ public final class EmbeddingEngine: @unchecked Sendable {
             eval(m)
             model = m
             maxTokens = config.maxTokens
+            pooling = Self.envPooling() ?? .mean
+        } else if Self.causalEmbedderTypes.contains(mt) {
+            // Decoder-LLM embedder (gte-Qwen2, e5-mistral, ...): reuse the
+            // already-validated causal backbone via the shared loader, then pool
+            // its final hidden state. Last-token pooling appends an EOS upstream
+            // so the pooled position has attended over the whole sequence.
+            let loaded = try loadModel(from: directory)
+            guard let enc = loaded.module as? (any SentenceEmbeddingEncoder) else {
+                throw EmbeddingError.unsupported(mt)
+            }
+            model = enc
+            pooling = Self.envPooling()
+                ?? Self.sentenceTransformerPooling(directory: directory) ?? .lastToken
+            appendEOS = (pooling == .lastToken)
+            // Cap context to keep a single embed forward bounded (these backbones
+            // advertise 100k+ positions); deepkrill-scale chunks sit far under it.
+            maxTokens = min(Self.maxPositionEmbeddings(from: data) ?? 8192, 8192)
         } else {
             let config = try JSONDecoder().decode(BertEmbeddingConfig.self, from: data)
             let m = BertEmbeddingModel(config)
@@ -78,11 +106,12 @@ public final class EmbeddingEngine: @unchecked Sendable {
             eval(m)
             model = m
             maxTokens = config.maxPositionEmbeddings
+            pooling = Self.envPooling() ?? .mean
         }
 
-        let tok = try await KLMTokenizer(from: directory)
         install(model: model, tokenizer: tok, directory: directory,
-                maxTokens: maxTokens)
+                maxTokens: maxTokens, pooling: pooling,
+                appendEOS: appendEOS, eosTokenId: tok.eosTokenId)
     }
 
     /// Peek the `model_type` field from a raw config.json to select the encoder
@@ -107,6 +136,9 @@ public final class EmbeddingEngine: @unchecked Sendable {
         let model = self.model
         let tokenizer = self.tokenizer
         let cap = self.maxTokens
+        let pooling = self.pooling
+        let appendEOS = self.appendEOS
+        let eos = self.eosTokenId
         lock.unlock()
 
         guard let model, let tokenizer else {
@@ -120,7 +152,14 @@ public final class EmbeddingEngine: @unchecked Sendable {
         for text in texts {
             var ids = tokenizer.encode(text)
             if ids.isEmpty { ids = [tokenizer.bosTokenId] }
-            if ids.count > cap { ids = Array(ids.prefix(cap)) }
+            if appendEOS {
+                // Last-token decoder embedders pool the EOS position, so reserve
+                // a slot for it when truncating, then append it.
+                if ids.count > cap - 1 { ids = Array(ids.prefix(cap - 1)) }
+                ids.append(eos)
+            } else if ids.count > cap {
+                ids = Array(ids.prefix(cap))
+            }
             totalTokens += ids.count
 
             let tokens = MLXArray(ids.map { Int32($0) }).reshaped(1, ids.count)
@@ -131,15 +170,69 @@ public final class EmbeddingEngine: @unchecked Sendable {
 
         return EmbedResult(vectors: vectors, promptTokens: totalTokens)
     }
+
+    // MARK: - Decoder-LLM embedder detection
+
+    /// Causal base architectures that can be repurposed as sentence embedders
+    /// (paired with a sentence-transformers pooling head).
+    private static let causalEmbedderTypes: Set<String> = [
+        "qwen2", "qwen3", "llama", "mistral", "gemma", "gemma2", "phi", "phi3",
+    ]
+
+    /// True when `directory` holds a decoder-LLM embedder: a causal base arch
+    /// plus a sentence-transformers `1_Pooling/config.json`. Used by the server
+    /// to admit such models through the embeddings endpoint (their family is
+    /// `.qwen`/`.mistral`/... not `.bert`).
+    public static func isDecoderEmbedder(directory: URL) -> Bool {
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("config.json")),
+              let mt = modelType(from: data), causalEmbedderTypes.contains(mt) else {
+            return false
+        }
+        return FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("1_Pooling/config.json").path)
+    }
+
+    /// Explicit `KRILL_EMBED_POOLING` override, or nil when unset (so each model
+    /// keeps its natural default: mean for BERT, last-token for decoder embedders).
+    private static func envPooling() -> EmbeddingPooling? {
+        guard let v = ProcessInfo.processInfo.environment["KRILL_EMBED_POOLING"] else {
+            return nil
+        }
+        return EmbeddingPooling(rawValue: v.lowercased())
+    }
+
+    private static func maxPositionEmbeddings(from data: Data) -> Int? {
+        struct Peek: Decodable {
+            let maxPos: Int?
+            enum CodingKeys: String, CodingKey { case maxPos = "max_position_embeddings" }
+        }
+        return (try? JSONDecoder().decode(Peek.self, from: data))?.maxPos
+    }
+
+    /// Read the pooling mode from a sentence-transformers `1_Pooling/config.json`.
+    private static func sentenceTransformerPooling(directory: URL) -> EmbeddingPooling? {
+        let url = directory.appendingPathComponent("1_Pooling/config.json")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if json["pooling_mode_lasttoken"] as? Bool == true { return .lastToken }
+        if json["pooling_mode_cls_token"] as? Bool == true { return .cls }
+        if json["pooling_mode_mean_tokens"] as? Bool == true { return .mean }
+        return nil
+    }
 }
 
 public enum EmbeddingError: Error, CustomStringConvertible {
     case notLoaded
+    case unsupported(String)
 
     public var description: String {
         switch self {
         case .notLoaded:
             return "No embedding model loaded"
+        case .unsupported(let mt):
+            return "Model type '\(mt)' is not a supported embedder"
         }
     }
 }

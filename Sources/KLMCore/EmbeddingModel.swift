@@ -245,6 +245,10 @@ public final class BertEmbeddingModel: Module {
 public enum EmbeddingPooling: String, Sendable {
     case mean
     case cls
+    /// Hidden state of the final token. The pooling used by decoder-LLM
+    /// embedders (gte-Qwen2, e5-mistral): the last position has attended over
+    /// the whole sequence under causal masking, so it summarizes the input.
+    case lastToken
 
     public static func fromEnv() -> EmbeddingPooling {
         if let v = ProcessInfo.processInfo.environment["KRILL_EMBED_POOLING"],
@@ -269,6 +273,9 @@ public func poolSentenceEmbedding(
         pooled = lastHidden[0, 0, 0...]            // [H]
     case .mean:
         pooled = MLX.mean(lastHidden[0], axis: 0)  // mean over T -> [H]
+    case .lastToken:
+        let last = lastHidden.dim(1) - 1
+        pooled = lastHidden[0, last, 0...]         // [H]
     }
     var vec = pooled
     if normalize {

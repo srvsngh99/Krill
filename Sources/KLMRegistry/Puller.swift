@@ -218,6 +218,13 @@ extension Puller {
         // so the allowlist accepts both rather than picking sides.
         case "chat_template.jinja", "chat_template.json":
             return true
+        // sentence-transformers metadata. `1_Pooling/config.json` declares the
+        // pooling mode (mean/cls/last-token) and is the on-disk marker that a
+        // causal checkpoint (gte-Qwen2, e5-mistral) is actually an embedder; the
+        // others carry the module pipeline, default prompts, and max seq length.
+        case "1_pooling/config.json", "config_sentence_transformers.json",
+             "modules.json", "sentence_bert_config.json":
+            return true
         // Multimodal preprocessor configs. Qwen 2.5-VL ships
         // `preprocessor_config.json`; Gemma 3/4 ship `processor_config.json`
         // (and sometimes both). Image-mean / patch-size / dtype live
