@@ -33,6 +33,21 @@ public func loadWeightArrays(from directory: URL) throws -> [String: MLXArray] {
     return allWeights
 }
 
+/// True when a checkpoint exports a base model (backbone tensors named
+/// `embed_tokens.*`/`layers.N.*`/`norm.*` with no `model.` prefix and no
+/// lm_head), as sentence-embedding decoders like intfloat/e5-mistral-7b-instruct
+/// and Salesforce/SFR-Embedding-Mistral do (`MistralModel`, not
+/// `MistralForCausalLM`). The causal modules used as embedder backbones nest
+/// the backbone under `model.`, so such keys must be prefixed. Normal
+/// `*ForCausalLM` checkpoints already carry the `model.` prefix and are left
+/// untouched.
+public func baseModelNeedsModelPrefix<C: Collection>(_ keys: C) -> Bool
+where C.Element == String {
+    let hasNestedBackbone = keys.contains { $0.hasPrefix("model.") }
+    let hasBareBackbone = keys.contains { $0.hasPrefix("layers.") }
+    return hasBareBackbone && !hasNestedBackbone
+}
+
 /// Load weights from a directory and apply them to a model.
 ///
 /// Handles quantization: if the config specifies quantization parameters,
@@ -116,6 +131,23 @@ public func loadWeights(
         if anyStripped {
             flatWeights = rebuilt
         }
+    }
+
+    // Base-model checkpoints name the backbone with no `model.` prefix and
+    // ship no lm_head: a sentence-embedding decoder like
+    // intfloat/e5-mistral-7b-instruct exports `MistralModel` (tensors
+    // `embed_tokens.*`, `layers.N.*`, `norm.*`), not `MistralForCausalLM`
+    // (which nests them under `model.` and adds `lm_head.*`). The causal
+    // modules used as embedder backbones expect the nested layout, so a bare
+    // checkpoint otherwise drops every backbone weight (lax verify) or fails
+    // (strict) - the cause of e5-mistral's earlier garbage embeddings. Prefix
+    // the bare backbone keys; the lm_head tie below then fills the unused head
+    // so strict verify still passes. Detected by bare `layers.` keys with no
+    // `model.` keys, so normal ForCausalLM checkpoints are untouched.
+    if baseModelNeedsModelPrefix(flatWeights.keys) {
+        var rebuilt: [String: MLXArray] = [:]
+        for (key, value) in flatWeights { rebuilt["model." + key] = value }
+        flatWeights = rebuilt
     }
 
     // Handle tied embeddings: copy embed_tokens weights to lm_head if
