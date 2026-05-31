@@ -2224,13 +2224,23 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                      body: ["error": "Missing 'model' field"])
             return
         }
-        guard let inputs = embedInputs(json, style: style), !inputs.isEmpty else {
+        guard let rawInputs = embedInputs(json, style: style), !rawInputs.isEmpty else {
             sendJSON(context: context, status: .badRequest, body: [
                 "error": style == .ollamaLegacy
                     ? "Missing 'prompt' (string)"
                     : "Missing 'input' (string or array of strings)"
             ])
             return
+        }
+        // Optional `instruction` prefix prepended to every input. Instruction
+        // tuned decoder embedders (e5-mistral, gte-Qwen2, SFR, bge-gemma2) need
+        // their query-side task prompt (e.g. "Instruct: ...\nQuery: ") to
+        // separate well; callers pass it for queries and omit it for documents.
+        let inputs: [String]
+        if let instruction = json["instruction"] as? String, !instruction.isEmpty {
+            inputs = rawInputs.map { instruction + $0 }
+        } else {
+            inputs = rawInputs
         }
         guard let manifest = registry.getModel(name) else {
             sendJSON(context: context, status: .notFound, body: [
