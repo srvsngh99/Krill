@@ -19,6 +19,11 @@ public struct GTEConfig: Decodable, Sendable {
     public let layerNormEps: Float
     public let ropeBase: Float
     public let maxTokens: Int
+    /// Fixed-NTK rope scaling factor + type, present on gte-large
+    /// (`rope_scaling: {factor: 2.0, type: "ntk"}`); nil on gte-base. When set
+    /// with type "ntk", the RoPE frequencies are NTK-adjusted (see GTEAttention).
+    public let ropeScalingFactor: Float?
+    public let ropeScalingType: String?
 
     public var headDim: Int { hiddenSize / numAttentionHeads }
 
@@ -32,6 +37,12 @@ public struct GTEConfig: Decodable, Sendable {
         case layerNormEps = "layer_norm_eps"
         case ropeTheta = "rope_theta"
         case maxPositionEmbeddings = "max_position_embeddings"
+        case ropeScaling = "rope_scaling"
+    }
+
+    private struct RopeScaling: Decodable {
+        let factor: Float?
+        let type: String?
     }
 
     public init(from decoder: Decoder) throws {
@@ -46,6 +57,9 @@ public struct GTEConfig: Decodable, Sendable {
         typeVocabSize = (try? c.decode(Int.self, forKey: .typeVocabSize)) ?? 0
         layerNormEps = (try? c.decode(Float.self, forKey: .layerNormEps)) ?? 1e-12
         ropeBase = (try? c.decode(Float.self, forKey: .ropeTheta)) ?? 10000
+        let scaling = try? c.decode(RopeScaling.self, forKey: .ropeScaling)
+        ropeScalingFactor = scaling?.factor
+        ropeScalingType = scaling?.type
         // Cap a single embed forward; deepkrill-scale chunks sit far under it.
         maxTokens = min((try? c.decode(Int.self, forKey: .maxPositionEmbeddings)) ?? 8192, 8192)
     }
@@ -94,7 +108,14 @@ final class GTEAttention: Module {
     let numHeads: Int
     let headDim: Int
     let scale: Float
-    let rope: RoPE
+    /// Stock RoPE for the unscaled case (gte-base); nil when fixed-NTK scaling
+    /// is active so the custom-`freqs` path is taken instead.
+    let rope: RoPE?
+    /// Precomputed fixed-NTK frequencies (denominator theta_i) for gte-large;
+    /// nil when no `rope_scaling`. Stored as plain `[Float]` (not an `MLXArray`
+    /// property, which `Module.parameters()` would register as a phantom weight
+    /// and break strictVerify) and lifted to an `MLXArray` in `applyRope`.
+    let ntkFreqs: [Float]?
 
     init(_ cfg: GTEConfig) {
         numHeads = cfg.numAttentionHeads
@@ -104,7 +125,32 @@ final class GTEAttention: Module {
             wrappedValue: Linear(cfg.hiddenSize, 3 * cfg.hiddenSize), key: "qkv_proj")
         _oProj = ModuleInfo(
             wrappedValue: Linear(cfg.hiddenSize, cfg.hiddenSize), key: "o_proj")
-        rope = RoPE(dimensions: headDim, traditional: false, base: cfg.ropeBase)
+        // Fixed-NTK (kexue.fm/archives/9706, gte-large): the effective
+        // inv_freq[i] = 1/((base*factor)^(2i/d)) / factor^(2/d). MLX's `freqs`
+        // is the denominator theta_i, so theta_i = (base*factor)^(2i/d) *
+        // factor^(2/d). Anything else (no scaling) uses the stock RoPE module.
+        if cfg.ropeScalingType == "ntk", let factor = cfg.ropeScalingFactor {
+            let d = cfg.hiddenSize / cfg.numAttentionHeads
+            let half = d / 2
+            let baseEff = Double(cfg.ropeBase * factor)
+            let corr = pow(Double(factor), 2.0 / Double(d))
+            ntkFreqs = (0 ..< half).map { i in
+                Float(pow(baseEff, 2.0 * Double(i) / Double(d)) * corr)
+            }
+            rope = nil
+        } else {
+            ntkFreqs = nil
+            rope = RoPE(dimensions: headDim, traditional: false, base: cfg.ropeBase)
+        }
+    }
+
+    private func applyRope(_ x: MLXArray) -> MLXArray {
+        if let ntkFreqs {
+            return MLXFast.RoPE(
+                x, dimensions: headDim, traditional: false, base: nil, scale: 1,
+                offset: 0, freqs: MLXArray(ntkFreqs))
+        }
+        return rope!(x, offset: 0)
     }
 
     func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
@@ -114,8 +160,8 @@ final class GTEAttention: Module {
         var q = qkv[0..., 0..., 0, 0..., 0...].transposed(0, 2, 1, 3)
         var k = qkv[0..., 0..., 1, 0..., 0...].transposed(0, 2, 1, 3)
         let v = qkv[0..., 0..., 2, 0..., 0...].transposed(0, 2, 1, 3)
-        q = rope(q, offset: 0)
-        k = rope(k, offset: 0)
+        q = applyRope(q)
+        k = applyRope(k)
         let out = MLXFast.scaledDotProductAttention(
             queries: q, keys: k, values: v, scale: scale, mask: mask)
         return oProj(out.transposed(0, 2, 1, 3).reshaped(B, T, numHeads * headDim))
