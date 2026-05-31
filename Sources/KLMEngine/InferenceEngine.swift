@@ -43,6 +43,8 @@ public final class InferenceEngine: @unchecked Sendable {
     private var cachedSchemaMask: (schema: String, mask: any GrammarLogitMask)?
     /// Memoized most-recent Stage C regex mask, keyed by (pattern, stop set).
     private var cachedRegexMask: (pattern: String, mask: any GrammarLogitMask)?
+    /// Memoized most-recent Stage D CFG mask, keyed by (grammar, stop set).
+    private var cachedCFGMask: (grammar: String, mask: any GrammarLogitMask)?
     private let jsonMaskLock = NSLock()
 
     /// Display name of the loaded draft model (alias or directory name).
@@ -479,6 +481,21 @@ public final class InferenceEngine: @unchecked Sendable {
             }
             let mask = GrammarTokenMask(automaton: grammar, pieces: pieces, stopIds: stopIds)
             cachedRegexMask = (pattern, mask)
+            return mask
+
+        case .cfg(let grammarText):
+            if let cached = cachedCFGMask, cached.grammar == grammarText,
+               cached.mask.stopIdSet == stopIds {
+                return cached.mask
+            }
+            guard let grammar = CFGGrammar.compile(grammarText) else {
+                FileHandle.standardError.write(Data((
+                    "[KrillLM] CFG grammar did not compile; decoding unconstrained "
+                    + "for this request.\n").utf8))
+                return nil
+            }
+            let mask = GrammarTokenMask(automaton: grammar, pieces: pieces, stopIds: stopIds)
+            cachedCFGMask = (grammarText, mask)
             return mask
         }
     }

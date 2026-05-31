@@ -25,6 +25,7 @@ internal enum StructuredOutput {
         case .json: return .json
         case .schema(let schema): return .jsonSchema(schema)
         case .regex(let pattern): return .regex(pattern)
+        case .cfg(let grammar): return .cfg(grammar)
         }
     }
 
@@ -45,6 +46,13 @@ internal enum StructuredOutput {
             regular expression and nothing else - no prose, no markdown, no \
             code fences, no quotes around it:
             \(pattern)
+            """
+        case .cfg(let grammar):
+            return """
+            You must respond with a single string that exactly matches this \
+            context-free grammar and nothing else - no prose, no markdown, no \
+            code fences, no quotes around it:
+            \(grammar)
             """
         }
     }
@@ -80,13 +88,13 @@ internal enum StructuredOutput {
 
     /// Coerce model output for a structured request: extracted JSON if any,
     /// otherwise the original text (so a refusal/error is still visible).
-    /// Only the JSON formats are JSON-extracted; a `.regex` request's output
-    /// is not JSON, so it is returned verbatim (the grammar mask already
+    /// Only the JSON formats are JSON-extracted; a `.regex` or `.cfg` request's
+    /// output is not JSON, so it is returned verbatim (the grammar mask already
     /// constrained it, and JSON-extraction would corrupt a matching string
     /// that happens to contain braces).
     static func coerce(_ text: String, format: ResponseFormat?) -> String {
         switch format {
-        case .none, .some(.regex):
+        case .none, .some(.regex), .some(.cfg):
             return text
         case .some(.json), .some(.schema):
             return extractJSON(from: text) ?? text
