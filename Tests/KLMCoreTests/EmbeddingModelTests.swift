@@ -270,6 +270,61 @@ final class EmbeddingModelTests: XCTestCase {
         XCTAssertEqual(out.shape, [1, 3, 32])
     }
 
+    // MARK: - JinaBERT (ALiBi encoder)
+
+    func testJinaAlibiSlopes() throws {
+        let json = """
+        { "model_type": "bert", "hidden_size": 768, "num_hidden_layers": 12,
+          "num_attention_heads": 12, "intermediate_size": 3072, "vocab_size": 30528 }
+        """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(JinaBertConfig.self, from: json)
+        let s = cfg.alibiSlopes()
+        XCTAssertEqual(s.count, 12)
+        // power-of-2 head 0 = 2^-1, head 7 = 2^-8; then the non-power-of-2 tail
+        // starts at 2^-0.5.
+        XCTAssertEqual(s[0], 0.5, accuracy: 1e-5)
+        XCTAssertEqual(s[7], Float(pow(2.0, -8.0)), accuracy: 1e-6)
+        XCTAssertEqual(s[8], Float(pow(2.0, -0.5)), accuracy: 1e-5)
+    }
+
+    func testJinaForwardShapeAndKeys() throws {
+        let json = """
+        {
+          "model_type": "bert", "position_embedding_type": "alibi",
+          "hidden_size": 32, "num_hidden_layers": 2, "num_attention_heads": 4,
+          "intermediate_size": 64, "vocab_size": 100, "type_vocab_size": 2,
+          "max_position_embeddings": 8192, "layer_norm_eps": 1e-12
+        }
+        """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(JinaBertConfig.self, from: json)
+        let model = JinaBertEmbeddingModel(cfg)
+        let out = model.lastHiddenState(MLXArray([Int32(1), 2, 3, 4, 5]).reshaped(1, 5))
+        out.eval()
+        XCTAssertEqual(out.shape, [1, 5, 32])
+
+        var expected: Set<String> = [
+            "embeddings.word_embeddings.weight", "embeddings.token_type_embeddings.weight",
+            "embeddings.LayerNorm.weight", "embeddings.LayerNorm.bias",
+        ]
+        for i in 0 ..< cfg.numHiddenLayers {
+            let p = "encoder.layer.\(i)."
+            for proj in ["query", "key", "value"] {
+                expected.insert(p + "attention.self.\(proj).weight")
+                expected.insert(p + "attention.self.\(proj).bias")
+            }
+            expected.formUnion([
+                p + "attention.output.dense.weight", p + "attention.output.dense.bias",
+                p + "attention.output.LayerNorm.weight", p + "attention.output.LayerNorm.bias",
+                p + "mlp.gated_layers.weight",
+                p + "mlp.wo.weight", p + "mlp.wo.bias",
+                p + "mlp.layernorm.weight", p + "mlp.layernorm.bias",
+            ])
+        }
+        let actual = Set(model.parameters().flattened().map { $0.0 })
+        XCTAssertEqual(actual, expected,
+            "param keys diverge from the JinaBERT checkpoint (pooler is dropped at load)")
+    }
+
     // MARK: - ModernBERT (alternating global/local RoPE encoder)
 
     func testModernBertConfigDecoding() throws {
