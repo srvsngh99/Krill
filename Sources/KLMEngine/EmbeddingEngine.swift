@@ -202,7 +202,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
     /// bge-multilingual-gemma2). Qwen3 MoE has model_type `qwen3_moe`, so it does
     /// not match `qwen3` here.
     private static let causalEmbedderTypes: Set<String> = [
-        "qwen2", "qwen3", "llama", "mistral",
+        "qwen2", "qwen3", "llama", "mistral", "gemma", "gemma2",
     ]
 
     /// True when `directory` holds a decoder-LLM embedder: a causal base arch
