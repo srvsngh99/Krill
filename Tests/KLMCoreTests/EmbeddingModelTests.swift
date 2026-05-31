@@ -270,6 +270,61 @@ final class EmbeddingModelTests: XCTestCase {
         XCTAssertEqual(out.shape, [1, 3, 32])
     }
 
+    // MARK: - ModernBERT (alternating global/local RoPE encoder)
+
+    func testModernBertConfigDecoding() throws {
+        let json = """
+        {
+          "model_type": "modernbert", "architectures": ["ModernBertModel"],
+          "hidden_size": 768, "num_hidden_layers": 22, "num_attention_heads": 12,
+          "intermediate_size": 1152, "vocab_size": 50368,
+          "max_position_embeddings": 8192, "global_rope_theta": 160000,
+          "local_rope_theta": 10000, "global_attn_every_n_layers": 3,
+          "local_attention": 128, "norm_eps": 1e-5
+        }
+        """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(ModernBertConfig.self, from: json)
+        XCTAssertEqual(cfg.localWindow, 64)
+        XCTAssertTrue(cfg.isGlobal(0)); XCTAssertFalse(cfg.isGlobal(1))
+        XCTAssertTrue(cfg.isGlobal(3))
+        XCTAssertEqual(cfg.ropeTheta(0), 160000)   // global
+        XCTAssertEqual(cfg.ropeTheta(1), 10000)    // local
+    }
+
+    func testModernBertForwardShapeAndKeys() throws {
+        let json = """
+        {
+          "model_type": "modernbert",
+          "hidden_size": 32, "num_hidden_layers": 3, "num_attention_heads": 4,
+          "intermediate_size": 64, "vocab_size": 100,
+          "max_position_embeddings": 4096, "global_rope_theta": 160000,
+          "local_rope_theta": 10000, "global_attn_every_n_layers": 3,
+          "local_attention": 128, "norm_eps": 1e-5
+        }
+        """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(ModernBertConfig.self, from: json)
+        let model = ModernBertEmbeddingModel(cfg)
+        let out = model.lastHiddenState(MLXArray([Int32(1), 2, 3, 4, 5]).reshaped(1, 5))
+        out.eval()
+        XCTAssertEqual(out.shape, [1, 5, 32])
+
+        var expected: Set<String> = [
+            "embeddings.tok_embeddings.weight", "embeddings.norm.weight",
+            "final_norm.weight",
+        ]
+        for i in 0 ..< cfg.numHiddenLayers {
+            let p = "layers.\(i)."
+            expected.formUnion([
+                p + "attn.Wqkv.weight", p + "attn.Wo.weight",
+                p + "mlp.Wi.weight", p + "mlp.Wo.weight", p + "mlp_norm.weight",
+            ])
+            if i != 0 { expected.insert(p + "attn_norm.weight") }  // layer 0: identity
+        }
+        let actual = Set(model.parameters().flattened().map { $0.0 })
+        XCTAssertEqual(actual, expected,
+            "param keys diverge from the ModernBERT checkpoint (layer 0 has no attn_norm)")
+    }
+
     // MARK: - MPNet (relative-attention-bias encoder)
 
     func testMPNetConfigDecoding() throws {
