@@ -342,6 +342,76 @@ final class EmbeddingModelTests: XCTestCase {
             "param keys diverge from the gte-large checkpoint; strictVerify load would fail")
     }
 
+    // MARK: - nomic-embed-text-v2-moe (MoE encoder)
+
+    func testNomicV2ConfigDetectsMoE() throws {
+        let json = """
+        { "model_type": "nomic_bert", "n_embd": 768, "n_layer": 12, "n_head": 12,
+          "n_inner": 3072, "vocab_size": 250048, "rotary_emb_base": 10000,
+          "num_experts": 8, "moe_every_n_layers": 2, "moe_top_k": 2 }
+        """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(NomicBertV2Config.self, from: json)
+        XCTAssertTrue(cfg.isMoE)
+        XCTAssertEqual(cfg.numExperts, 8)
+        // MoE replaces the MLP on layer i when i % 2 == 1.
+        XCTAssertFalse(cfg.isMoELayer(0))
+        XCTAssertTrue(cfg.isMoELayer(1))
+        XCTAssertFalse(cfg.isMoELayer(2))
+        XCTAssertTrue(cfg.isMoELayer(11))
+    }
+
+    /// The MoE encoder's parameter keys must match the checkpoint exactly: dense
+    /// layers carry `mlp.fc1`/`mlp.fc2`, MoE layers carry `mlp.router.layer` and
+    /// stacked `mlp.experts.mlp.w1`/`w2` plus `mlp.experts.bias`. A drift here
+    /// fails the strict-verify load on the real checkpoint.
+    func testNomicV2MoEForwardShapeAndKeys() throws {
+        let json = """
+        { "model_type": "nomic_bert", "n_embd": 16, "n_layer": 2, "n_head": 4,
+          "n_inner": 8, "vocab_size": 32, "rotary_emb_base": 10000,
+          "num_experts": 4, "moe_every_n_layers": 2, "moe_top_k": 2,
+          "layer_norm_epsilon": 1e-5 }
+        """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(NomicBertV2Config.self, from: json)
+        let model = NomicBertV2MoEModel(cfg)
+        let tokens = MLXArray([Int32(1), 2, 3, 4, 5]).reshaped(1, 5)
+        let out = model.lastHiddenState(tokens)
+        out.eval()
+        XCTAssertEqual(out.shape, [1, 5, 16])
+        let out2 = model.lastHiddenState(tokens)
+        out2.eval()
+        XCTAssertTrue(allClose(out, out2, atol: 0).all().item(Bool.self))
+
+        var expected: Set<String> = [
+            "embeddings.word_embeddings.weight",
+            "embeddings.token_type_embeddings.weight",
+            "emb_ln.weight", "emb_ln.bias",
+        ]
+        for i in 0 ..< cfg.numHiddenLayers {
+            let p = "encoder.layers.\(i)."
+            expected.formUnion([
+                p + "attn.Wqkv.weight", p + "attn.Wqkv.bias",
+                p + "attn.out_proj.weight", p + "attn.out_proj.bias",
+                p + "norm1.weight", p + "norm1.bias",
+                p + "norm2.weight", p + "norm2.bias",
+            ])
+            if cfg.isMoELayer(i) {
+                expected.formUnion([
+                    p + "mlp.router.layer.weight",
+                    p + "mlp.experts.mlp.w1", p + "mlp.experts.mlp.w2",
+                    p + "mlp.experts.bias",
+                ])
+            } else {
+                expected.formUnion([
+                    p + "mlp.fc1.weight", p + "mlp.fc1.bias",
+                    p + "mlp.fc2.weight", p + "mlp.fc2.bias",
+                ])
+            }
+        }
+        let actual = Set(model.parameters().flattened().map { $0.0 })
+        XCTAssertEqual(actual, expected,
+            "param keys diverge from the nomic-v2-moe checkpoint; strictVerify load would fail")
+    }
+
     // MARK: - JinaBERT (ALiBi encoder)
 
     func testJinaAlibiSlopes() throws {

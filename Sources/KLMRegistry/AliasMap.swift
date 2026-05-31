@@ -248,6 +248,13 @@ private let aliases: [String: ResolvedModel] = [
         repo: "nomic-ai/nomic-embed-text-v1",
         name: "nomic-embed-text-v1", family: .bert, params: "137M", quant: "fp32", context: 2048),
 
+    // nomic-embed-text-v2-moe: a `nomic_bert` MoE encoder (top-2 of 8 experts on
+    // every 2nd layer, XLM-R vocab). Routed to NomicBertV2MoEModel by the MoE
+    // config fields. Needs the XLM-R Metaspace tokenizer fix. Mean-pooled, fp32.
+    "nomic-embed-text-v2-moe": ResolvedModel(
+        repo: "nomic-ai/nomic-embed-text-v2-moe",
+        name: "nomic-embed-text-v2-moe", family: .bert, params: "475M", quant: "fp32", context: 2048),
+
     // Decoder-LLM embedders: causal backbones (family .qwen) repurposed as
     // sentence embedders via last-token pooling. Served through the same Qwen
     // loader as chat; the embeddings engine detects the sentence-transformers
