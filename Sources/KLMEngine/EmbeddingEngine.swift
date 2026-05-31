@@ -1,5 +1,6 @@
 import Foundation
 import MLX
+import MLXNN
 import KLMCore
 import KLMTokenizer
 
@@ -132,6 +133,20 @@ public final class EmbeddingEngine: @unchecked Sendable {
             let loaded = try loadModel(from: directory)
             guard let enc = loaded.module as? (any SentenceEmbeddingEncoder) else {
                 throw EmbeddingError.unsupported(mt)
+            }
+            // fp16 decoder backbones (e5-mistral, SFR, ...) carry massive
+            // residual-stream activations that overflow fp16 (-> inf -> the
+            // final RMSNorm divides to an all-zero vector, so every embedding
+            // comes back zero). A full fp32 upcast would double a 7B past this
+            // host's RAM, so upcast only embed_tokens: that seeds the residual
+            // stream in fp32 and MLX promotes the fp16 weight matmuls to fp32
+            // from there, keeping the stream fp32 end to end for one extra
+            // embedding table. No-op when the backbone is already fp32.
+            let upcast = loaded.module.parameters().flattened()
+                .filter { $0.0.contains("embed_tokens") && $0.1.dtype == .float16 }
+                .map { ($0.0, $0.1.asType(.float32)) }
+            if !upcast.isEmpty {
+                loaded.module.update(parameters: ModuleParameters.unflattened(upcast))
             }
             model = enc
             pooling = Self.envPooling()
