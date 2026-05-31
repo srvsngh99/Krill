@@ -8,7 +8,7 @@ import KLMTokenizer
 /// `InferenceEngine` so embeddings do not require - or disturb - a loaded
 /// chat model, and so a RAG client can embed while chat is unloaded.
 public final class EmbeddingEngine: @unchecked Sendable {
-    private var model: BertEmbeddingModel?
+    private var model: (any SentenceEmbeddingEncoder)?
     private var tokenizer: KLMTokenizer?
     private var loadedDir: URL?
     private var maxTokens: Int = 512
@@ -33,7 +33,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
         return body()
     }
 
-    private func install(model: BertEmbeddingModel, tokenizer: KLMTokenizer,
+    private func install(model: any SentenceEmbeddingEncoder, tokenizer: KLMTokenizer,
                          directory: URL, maxTokens: Int) {
         withLock {
             self.model = model
@@ -49,21 +49,50 @@ public final class EmbeddingEngine: @unchecked Sendable {
 
         let configURL = directory.appendingPathComponent("config.json")
         let data = try Data(contentsOf: configURL)
-        let config = try JSONDecoder().decode(BertEmbeddingConfig.self, from: data)
 
-        let m = BertEmbeddingModel(config)
-        // BertModel checkpoints may prefix keys with `bert.`/`roberta.`.
-        let raw = try loadWeightArrays(from: directory)
-        let prefix: String? =
-            raw.keys.contains { $0.hasPrefix("bert.") } ? "bert."
-            : raw.keys.contains { $0.hasPrefix("roberta.") } ? "roberta."
-            : nil
-        try loadWeights(into: m, from: directory, quantization: nil, keyPrefix: prefix)
-        eval(m)
+        // nomic-embed-text (model_type "nomic_bert") is a RoPE encoder with a
+        // fused Wqkv and a SwiGLU MLP - a different architecture from vanilla
+        // BERT/RoBERTa, so it routes to a dedicated encoder. Its checkpoint keys
+        // already match the module keys (no `bert.`/`roberta.` prefix), and
+        // strict verify guards against a silent weight mismatch.
+        let model: any SentenceEmbeddingEncoder
+        let maxTokens: Int
+        if Self.modelType(from: data) == "nomic_bert" {
+            let config = try JSONDecoder().decode(NomicBertConfig.self, from: data)
+            let m = NomicBertEmbeddingModel(config)
+            try loadWeights(into: m, from: directory, quantization: nil,
+                            keyPrefix: nil, strictVerify: true)
+            eval(m)
+            model = m
+            maxTokens = config.maxTokens
+        } else {
+            let config = try JSONDecoder().decode(BertEmbeddingConfig.self, from: data)
+            let m = BertEmbeddingModel(config)
+            // BertModel checkpoints may prefix keys with `bert.`/`roberta.`.
+            let raw = try loadWeightArrays(from: directory)
+            let prefix: String? =
+                raw.keys.contains { $0.hasPrefix("bert.") } ? "bert."
+                : raw.keys.contains { $0.hasPrefix("roberta.") } ? "roberta."
+                : nil
+            try loadWeights(into: m, from: directory, quantization: nil, keyPrefix: prefix)
+            eval(m)
+            model = m
+            maxTokens = config.maxPositionEmbeddings
+        }
 
         let tok = try await KLMTokenizer(from: directory)
-        install(model: m, tokenizer: tok, directory: directory,
-                maxTokens: config.maxPositionEmbeddings)
+        install(model: model, tokenizer: tok, directory: directory,
+                maxTokens: maxTokens)
+    }
+
+    /// Peek the `model_type` field from a raw config.json to select the encoder
+    /// architecture without committing to a full config decode.
+    private static func modelType(from configData: Data) -> String? {
+        struct Peek: Decodable {
+            let modelType: String?
+            enum CodingKeys: String, CodingKey { case modelType = "model_type" }
+        }
+        return (try? JSONDecoder().decode(Peek.self, from: configData))?.modelType
     }
 
     public struct EmbedResult: Sendable {
@@ -95,7 +124,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
             totalTokens += ids.count
 
             let tokens = MLXArray(ids.map { Int32($0) }).reshaped(1, ids.count)
-            let hidden = model(tokens)
+            let hidden = model.lastHiddenState(tokens)
             vectors.append(
                 poolSentenceEmbedding(hidden, pooling: pooling, normalize: true))
         }

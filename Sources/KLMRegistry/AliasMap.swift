@@ -208,6 +208,19 @@ private let aliases: [String: ResolvedModel] = [
         repo: "BAAI/bge-base-en-v1.5",
         name: "bge-base-en", family: .bert, params: "109M", quant: "fp32", context: 512),
 
+    // nomic-embed-text: a `nomic_bert` RoPE encoder (fused Wqkv + SwiGLU),
+    // 768-dim, served fp32. Routed to NomicBertEmbeddingModel by model_type at
+    // load. `nomic-embed-text` tracks Ollama's default tag (v1.5).
+    "nomic-embed-text": ResolvedModel(
+        repo: "nomic-ai/nomic-embed-text-v1.5",
+        name: "nomic-embed-text", family: .bert, params: "137M", quant: "fp32", context: 2048),
+    "nomic-embed-text-v1.5": ResolvedModel(
+        repo: "nomic-ai/nomic-embed-text-v1.5",
+        name: "nomic-embed-text-v1.5", family: .bert, params: "137M", quant: "fp32", context: 2048),
+    "nomic-embed-text-v1": ResolvedModel(
+        repo: "nomic-ai/nomic-embed-text-v1",
+        name: "nomic-embed-text-v1", family: .bert, params: "137M", quant: "fp32", context: 2048),
+
     // Cross-encoder rerankers (WS7 foundation tier: family
     // detection + clear rejection only; cross-encoder scoring
     // runtime + /v1/rerank endpoint land in follow-up PRs).
