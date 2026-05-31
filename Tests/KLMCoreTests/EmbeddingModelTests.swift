@@ -270,6 +270,78 @@ final class EmbeddingModelTests: XCTestCase {
         XCTAssertEqual(out.shape, [1, 3, 32])
     }
 
+    /// gte-large ships `rope_scaling: {factor, type}`; gte-base has none. The
+    /// config must surface both (nil when absent) so the encoder picks the
+    /// fixed-NTK frequency path only for gte-large.
+    func testGTERopeScalingDecoding() throws {
+        let scaled = """
+        {
+          "model_type": "new", "hidden_size": 1024, "num_hidden_layers": 24,
+          "num_attention_heads": 16, "intermediate_size": 4096, "vocab_size": 30528,
+          "type_vocab_size": 2, "max_position_embeddings": 8192,
+          "rope_theta": 160000, "layer_norm_eps": 1e-12,
+          "rope_scaling": {"factor": 2.0, "type": "ntk"}
+        }
+        """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(GTEConfig.self, from: scaled)
+        XCTAssertEqual(cfg.ropeScalingType, "ntk")
+        XCTAssertEqual(cfg.ropeScalingFactor, 2.0)
+        XCTAssertEqual(cfg.ropeBase, 160000)
+
+        let base = """
+        { "model_type": "new", "hidden_size": 768, "num_hidden_layers": 12,
+          "num_attention_heads": 12, "intermediate_size": 3072, "vocab_size": 30528,
+          "max_position_embeddings": 8192, "rope_theta": 500000, "layer_norm_eps": 1e-12 }
+        """.data(using: .utf8)!
+        let baseCfg = try JSONDecoder().decode(GTEConfig.self, from: base)
+        XCTAssertNil(baseCfg.ropeScalingType)
+        XCTAssertNil(baseCfg.ropeScalingFactor)
+    }
+
+    /// gte-large (NTK-scaled, type_vocab_size 2) must build with the exact
+    /// checkpoint key template and run a deterministic scaled-RoPE forward.
+    func testGTELargeScaledForwardAndKeys() throws {
+        let json = """
+        {
+          "model_type": "new", "hidden_size": 32, "num_hidden_layers": 2,
+          "num_attention_heads": 4, "intermediate_size": 64, "vocab_size": 100,
+          "type_vocab_size": 2, "max_position_embeddings": 4096,
+          "rope_theta": 160000, "layer_norm_eps": 1e-12,
+          "rope_scaling": {"factor": 2.0, "type": "ntk"}
+        }
+        """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(GTEConfig.self, from: json)
+        let model = GTEEmbeddingModel(cfg)
+        let tokens = MLXArray([Int32(1), 2, 3, 4, 5]).reshaped(1, 5)
+        let out = model.lastHiddenState(tokens)
+        out.eval()
+        XCTAssertEqual(out.shape, [1, 5, 32])
+        // Determinism: same input, same output under the NTK freqs path.
+        let out2 = model.lastHiddenState(tokens)
+        out2.eval()
+        XCTAssertTrue(allClose(out, out2, atol: 0).all().item(Bool.self))
+
+        var expected: Set<String> = [
+            "embeddings.word_embeddings.weight",
+            "embeddings.token_type_embeddings.weight",
+            "embeddings.LayerNorm.weight", "embeddings.LayerNorm.bias",
+        ]
+        for i in 0 ..< cfg.numHiddenLayers {
+            let p = "encoder.layer.\(i)."
+            expected.formUnion([
+                p + "attention.qkv_proj.weight", p + "attention.qkv_proj.bias",
+                p + "attention.o_proj.weight", p + "attention.o_proj.bias",
+                p + "attn_ln.weight", p + "attn_ln.bias",
+                p + "mlp.up_gate_proj.weight",
+                p + "mlp.down_proj.weight", p + "mlp.down_proj.bias",
+                p + "mlp_ln.weight", p + "mlp_ln.bias",
+            ])
+        }
+        let actual = Set(model.parameters().flattened().map { $0.0 })
+        XCTAssertEqual(actual, expected,
+            "param keys diverge from the gte-large checkpoint; strictVerify load would fail")
+    }
+
     // MARK: - JinaBERT (ALiBi encoder)
 
     func testJinaAlibiSlopes() throws {
