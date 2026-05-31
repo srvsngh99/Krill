@@ -66,7 +66,20 @@ public final class EmbeddingEngine: @unchecked Sendable {
         let pooling: EmbeddingPooling
         var appendEOS = false
 
-        if mt == "nomic_bert" {
+        if mt == "nomic_bert",
+           let v2 = try? JSONDecoder().decode(NomicBertV2Config.self, from: data), v2.isMoE {
+            // nomic-embed-text-v2-moe: same `nomic_bert` model_type as v1.5 but a
+            // top-2 mixture of experts on every 2nd layer (XLM-R vocab). Detected
+            // by the MoE config fields. Keys match the checkpoint; strict verify
+            // guards mismatch. fp32 weights, mean-pooled.
+            let m = NomicBertV2MoEModel(v2)
+            try loadWeights(into: m, from: directory, quantization: nil,
+                            keyPrefix: nil, strictVerify: true)
+            eval(m)
+            model = m
+            maxTokens = v2.maxTokens
+            pooling = Self.envPooling() ?? .mean
+        } else if mt == "nomic_bert" {
             // nomic-embed-text: a RoPE encoder (fused Wqkv + SwiGLU), distinct
             // from vanilla BERT/RoBERTa. Checkpoint keys already match the module
             // keys (no `bert.`/`roberta.` prefix); strict verify guards mismatch.
