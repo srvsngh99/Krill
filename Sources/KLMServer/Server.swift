@@ -2238,14 +2238,18 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             ])
             return
         }
-        guard manifest.family == .bert else {
+        let dir = registry.modelPath(name)
+        // BERT/nomic encoders are family .bert; decoder-LLM embedders (gte-Qwen2,
+        // e5-mistral) keep their causal family (.qwen/.mistral/...) but ship a
+        // sentence-transformers pooling head, which the engine detects on disk.
+        guard manifest.family == .bert
+                || EmbeddingEngine.isDecoderEmbedder(directory: dir) else {
             sendJSON(context: context, status: .badRequest, body: [
                 "error": "'\(name)' (family \(manifest.family.rawValue)) is not a sentence-embedding model. Use a dedicated embedding model, e.g. krillm pull bge-small-en"
             ])
             return
         }
 
-        let dir = registry.modelPath(name)
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let embed = embedEngine

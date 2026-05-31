@@ -1,4 +1,5 @@
 import XCTest
+import Foundation
 import MLX
 @testable import KLMCore
 
@@ -191,5 +192,59 @@ final class EmbeddingModelTests: XCTestCase {
         let actual = Set(model.parameters().flattened().map { $0.0 })
         XCTAssertEqual(actual, expected,
             "param keys diverge from the nomic checkpoint; strictVerify load would fail")
+    }
+
+    // MARK: - Decoder-LLM embedders (last-token pooling)
+
+    func testPoolingStringParseToleratesCaseAndSeparators() {
+        XCTAssertEqual(EmbeddingPooling.from("mean"), .mean)
+        XCTAssertEqual(EmbeddingPooling.from("CLS"), .cls)
+        // The camelCase rawValue would defeat a lowercased init(rawValue:);
+        // these spellings must all resolve to .lastToken.
+        XCTAssertEqual(EmbeddingPooling.from("lasttoken"), .lastToken)
+        XCTAssertEqual(EmbeddingPooling.from("last_token"), .lastToken)
+        XCTAssertEqual(EmbeddingPooling.from("LastToken"), .lastToken)
+        XCTAssertEqual(EmbeddingPooling.from("last"), .lastToken)
+        XCTAssertNil(EmbeddingPooling.from("bogus"))
+    }
+
+    func testLastTokenPoolingPicksFinalRow() {
+        // [1, T=3, H=2]
+        let hidden = MLXArray(
+            [1.0, 2.0,
+             3.0, 4.0,
+             9.0, 12.0] as [Float]).reshaped(1, 3, 2)
+        let raw = poolSentenceEmbedding(hidden, pooling: .lastToken, normalize: false)
+        XCTAssertEqual(raw, [9.0, 12.0])  // final token's hidden state
+        // L2-normalized: [9,12] / 15 = [0.6, 0.8]
+        let v = poolSentenceEmbedding(hidden, pooling: .lastToken, normalize: true)
+        XCTAssertEqual(v[0], 0.6, accuracy: 1e-5)
+        XCTAssertEqual(v[1], 0.8, accuracy: 1e-5)
+    }
+
+    /// A causal backbone (here Qwen2) must satisfy `SentenceEmbeddingEncoder`,
+    /// returning the pre-lm_head hidden state `[1, T, H]` so decoder-LLM
+    /// embedders (gte-Qwen2, e5-mistral) reuse the validated causal forward.
+    func testQwenForCausalLMActsAsDecoderEmbedder() throws {
+        let dict: [String: Any] = [
+            "hidden_size": 64, "intermediate_size": 128,
+            "num_attention_heads": 4, "num_key_value_heads": 2,
+            "num_hidden_layers": 2, "vocab_size": 256,
+            "rms_norm_eps": 1e-6, "rope_theta": 1_000_000.0,
+            "max_position_embeddings": 4096, "model_type": "qwen2", "head_dim": 16,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: dict)
+        let cfg = try JSONDecoder().decode(QwenConfig.self, from: data)
+
+        let encoder: any SentenceEmbeddingEncoder = QwenForCausalLM(cfg)
+        let tokens = MLXArray((0 ..< 5).map { Int32($0) }).reshaped(1, 5)
+        let hidden = encoder.lastHiddenState(tokens)
+        hidden.eval()
+        XCTAssertEqual(hidden.shape, [1, 5, 64])
+
+        let vec = poolSentenceEmbedding(hidden, pooling: .lastToken, normalize: true)
+        XCTAssertEqual(vec.count, 64)
+        let norm = vec.reduce(0) { $0 + $1 * $1 }.squareRoot()
+        XCTAssertEqual(norm, 1.0, accuracy: 1e-4)
     }
 }
