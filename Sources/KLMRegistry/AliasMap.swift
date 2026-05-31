@@ -227,6 +227,11 @@ private let aliases: [String: ResolvedModel] = [
         repo: "Alibaba-NLP/gte-modernbert-base",
         name: "gte-modernbert-base", family: .bert, params: "149M", quant: "fp32", context: 8192),
 
+    // JinaBERT encoder: ALiBi (no positional embeddings) + GLU MLP, mean-pooled.
+    "jina-embeddings-v2-base-en": ResolvedModel(
+        repo: "jinaai/jina-embeddings-v2-base-en",
+        name: "jina-embeddings-v2-base-en", family: .bert, params: "137M", quant: "fp32", context: 8192),
+
     // nomic-embed-text: a `nomic_bert` RoPE encoder (fused Wqkv + SwiGLU),
     // 768-dim, served fp32. Routed to NomicBertEmbeddingModel by model_type at
     // load. `nomic-embed-text` tracks Ollama's default tag (v1.5).

@@ -140,6 +140,24 @@ public final class EmbeddingEngine: @unchecked Sendable {
             // Cap context to keep a single embed forward bounded (these backbones
             // advertise 100k+ positions); deepkrill-scale chunks sit far under it.
             maxTokens = min(Self.maxPositionEmbeddings(from: data) ?? 8192, 8192)
+        } else if Self.isJinaBert(data) {
+            // jina-embeddings-v2: model_type is "bert" but it uses ALiBi (no
+            // positional embeddings) and a GLU MLP, so it must NOT route to the
+            // vanilla BERT loader. Drop the unused `pooler.*`; upcast fp16 -> fp32.
+            let config = try JSONDecoder().decode(JinaBertConfig.self, from: data)
+            let m = JinaBertEmbeddingModel(config)
+            try loadWeights(into: m, from: directory, quantization: nil, keyPrefix: nil,
+                            keyRewrite: { weights in
+                                for key in weights.keys where key.hasPrefix("pooler.") {
+                                    weights.removeValue(forKey: key)
+                                }
+                            }, strictVerify: true)
+            m.update(parameters: m.parameters().mapValues { $0.asType(.float32) })
+            eval(m)
+            model = m
+            maxTokens = config.maxTokens
+            pooling = Self.envPooling()
+                ?? Self.sentenceTransformerPooling(directory: directory) ?? .mean
         } else {
             let config = try JSONDecoder().decode(BertEmbeddingConfig.self, from: data)
             let m = BertEmbeddingModel(config)
@@ -169,6 +187,23 @@ public final class EmbeddingEngine: @unchecked Sendable {
             enum CodingKeys: String, CodingKey { case modelType = "model_type" }
         }
         return (try? JSONDecoder().decode(Peek.self, from: configData))?.modelType
+    }
+
+    /// jina-embeddings-v2 declares `model_type: "bert"` but uses ALiBi; route it
+    /// to the JinaBERT encoder rather than the vanilla BERT loader. Detected by
+    /// `position_embedding_type == "alibi"` or a `JinaBert*` architecture.
+    private static func isJinaBert(_ configData: Data) -> Bool {
+        struct Peek: Decodable {
+            let positionEmbeddingType: String?
+            let architectures: [String]?
+            enum CodingKeys: String, CodingKey {
+                case positionEmbeddingType = "position_embedding_type"
+                case architectures
+            }
+        }
+        guard let p = try? JSONDecoder().decode(Peek.self, from: configData) else { return false }
+        if p.positionEmbeddingType?.lowercased() == "alibi" { return true }
+        return p.architectures?.contains { $0.lowercased().contains("jinabert") } ?? false
     }
 
     public struct EmbedResult: Sendable {
