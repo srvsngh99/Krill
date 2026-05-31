@@ -15,6 +15,7 @@ public struct GTEConfig: Decodable, Sendable {
     public let numAttentionHeads: Int
     public let intermediateSize: Int
     public let vocabSize: Int
+    public let typeVocabSize: Int
     public let layerNormEps: Float
     public let ropeBase: Float
     public let maxTokens: Int
@@ -27,6 +28,7 @@ public struct GTEConfig: Decodable, Sendable {
         case numAttentionHeads = "num_attention_heads"
         case intermediateSize = "intermediate_size"
         case vocabSize = "vocab_size"
+        case typeVocabSize = "type_vocab_size"
         case layerNormEps = "layer_norm_eps"
         case ropeTheta = "rope_theta"
         case maxPositionEmbeddings = "max_position_embeddings"
@@ -39,6 +41,9 @@ public struct GTEConfig: Decodable, Sendable {
         numAttentionHeads = try c.decode(Int.self, forKey: .numAttentionHeads)
         intermediateSize = try c.decode(Int.self, forKey: .intermediateSize)
         vocabSize = try c.decode(Int.self, forKey: .vocabSize)
+        // gte-base is type_vocab_size 0 (no token-type table); some variants
+        // (e.g. gte-large) ship a 2-entry table that must be summed in.
+        typeVocabSize = (try? c.decode(Int.self, forKey: .typeVocabSize)) ?? 0
         layerNormEps = (try? c.decode(Float.self, forKey: .layerNormEps)) ?? 1e-12
         ropeBase = (try? c.decode(Float.self, forKey: .ropeTheta)) ?? 10000
         // Cap a single embed forward; deepkrill-scale chunks sit far under it.
@@ -50,19 +55,33 @@ public struct GTEConfig: Decodable, Sendable {
 
 final class GTEEmbeddings: Module {
     @ModuleInfo(key: "word_embeddings") var word: Embedding
+    /// Present only when `type_vocab_size > 0` (e.g. gte-large); the checkpoint
+    /// has no such tensor when it is 0 (gte-base), and a strict-verify load
+    /// would reject an unconsumed module, so this stays nil there.
+    @ModuleInfo(key: "token_type_embeddings") var tokenType: Embedding?
     @ModuleInfo(key: "LayerNorm") var norm: LayerNorm
 
     init(_ cfg: GTEConfig) {
         _word = ModuleInfo(
             wrappedValue: Embedding(embeddingCount: cfg.vocabSize, dimensions: cfg.hiddenSize),
             key: "word_embeddings")
+        _tokenType = ModuleInfo(
+            wrappedValue: cfg.typeVocabSize > 0
+                ? Embedding(embeddingCount: cfg.typeVocabSize, dimensions: cfg.hiddenSize)
+                : nil,
+            key: "token_type_embeddings")
         _norm = ModuleInfo(
             wrappedValue: LayerNorm(dimensions: cfg.hiddenSize, eps: cfg.layerNormEps),
             key: "LayerNorm")
     }
 
     func callAsFunction(_ tokens: MLXArray) -> MLXArray {
-        norm(word(tokens))
+        var e = word(tokens)
+        if let tokenType {
+            let T = tokens.dim(1)
+            e = e + tokenType(MLXArray.zeros([1, T], dtype: .int32))
+        }
+        return norm(e)
     }
 }
 
