@@ -298,12 +298,40 @@ re-rendering it at decode is a tracked follow-up.)
 Ollama `format:"json"` or a JSON-schema object (on `/api/chat` and
 `/api/generate`), and OpenAI `response_format` (`{"type":"json_object"}`
 or `{"type":"json_schema","json_schema":{"schema":{…}}}`) on
-`/v1/chat/completions`, are honored. KrillLM injects a JSON-only system
-instruction (plus the schema, if given) and extracts the first balanced
-JSON value from the model output (stripping prose/fences). If the model
-produces no JSON, the raw text is returned so a refusal stays visible.
-Token-level grammar-constrained decoding is a tracked follow-up; today
-this is guided-prompt + best-effort extraction.
+`/v1/chat/completions`, are honored. KrillLM both injects a guiding system
+instruction (plus the schema, if given) **and** applies **token-level
+grammar-constrained decoding**: every emitted token is masked so the output
+stays a valid prefix of the requested format. For the JSON formats it then
+extracts the first balanced JSON value from the output (stripping
+prose/fences); if the model produces no JSON, the raw text is returned so a
+refusal stays visible.
+
+Two non-JSON formats extend this (KrillLM extensions, not standard
+OpenAI/Ollama):
+
+- **Regex (Stage C):** constrain the output to a full match of a regular
+  expression. OpenAI `response_format: {"type":"regex","regex":"<pattern>"}`
+  (or `"type":"grammar"`); Ollama `format: {"regex":"<pattern>"}`. Supports
+  literals, `.`, character classes (ranges/negation), the `\d \w \s` family
+  and escaped metacharacters, groups, alternation, and `* + ? {n} {n,} {n,m}`.
+
+- **CFG / Lark (Stage D):** constrain the output to a full parse of a
+  context-free grammar — for unbounded balanced nesting regex cannot express.
+  OpenAI `response_format: {"type":"lark","grammar":"<grammar>"}` (or
+  `"type":"cfg"`); Ollama `format: {"lark":"<grammar>"}` / `{"cfg":"<grammar>"}`.
+  The dialect is regex-flavored with named rules: `name: body`, `|`, groups
+  `()`, quantifiers `? * +`, string literals `"..."`, single-char classes
+  `[...]`, and bare identifiers as nonterminal references (enabling recursion);
+  the start symbol is `start` if present, else the first rule. Example
+  (balanced parentheses): `start: item*` / `item: "(" item* ")"`. **Opt-in /
+  slower** than the other formats (an Earley chart is near-unique per prefix,
+  so each decoded token pays a full-vocab mask rescan) — suited to short,
+  structurally constrained outputs.
+
+Regex and CFG output is not JSON, so it is returned verbatim (no JSON
+extraction). For all formats, a grammar that cannot be compiled disables the
+mask and the request decodes unconstrained, falling back to the system-prompt
+guidance.
 
 ## Tool / Function Calling
 
