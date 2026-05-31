@@ -208,6 +208,12 @@ private let aliases: [String: ResolvedModel] = [
         repo: "BAAI/bge-base-en-v1.5",
         name: "bge-base-en", family: .bert, params: "109M", quant: "fp32", context: 512),
 
+    // MPNet encoder: relative-attention-bias backbone (not vanilla BERT),
+    // routed to MPNetEmbeddingModel by model_type. 768-dim, mean pooling.
+    "all-mpnet-base-v2": ResolvedModel(
+        repo: "sentence-transformers/all-mpnet-base-v2",
+        name: "all-mpnet-base-v2", family: .bert, params: "109M", quant: "fp32", context: 514),
+
     // nomic-embed-text: a `nomic_bert` RoPE encoder (fused Wqkv + SwiGLU),
     // 768-dim, served fp32. Routed to NomicBertEmbeddingModel by model_type at
     // load. `nomic-embed-text` tracks Ollama's default tag (v1.5).

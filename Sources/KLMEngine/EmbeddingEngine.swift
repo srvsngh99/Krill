@@ -77,6 +77,24 @@ public final class EmbeddingEngine: @unchecked Sendable {
             model = m
             maxTokens = config.maxTokens
             pooling = Self.envPooling() ?? .mean
+        } else if mt == "mpnet" {
+            // MPNet: relative-attention-bias encoder, no token-type embeddings,
+            // RoBERTa-style offset positions. The checkpoint ships a `pooler` and
+            // a `position_ids` buffer this encoder does not use; drop them so a
+            // strict-verify update sees an exact key match.
+            let config = try JSONDecoder().decode(MPNetConfig.self, from: data)
+            let m = MPNetEmbeddingModel(config)
+            try loadWeights(into: m, from: directory, quantization: nil, keyPrefix: nil,
+                            keyRewrite: { weights in
+                                for key in weights.keys
+                                where key.hasPrefix("pooler.") || key == "embeddings.position_ids" {
+                                    weights.removeValue(forKey: key)
+                                }
+                            }, strictVerify: true)
+            eval(m)
+            model = m
+            maxTokens = config.maxTokens
+            pooling = Self.envPooling() ?? .mean
         } else if Self.causalEmbedderTypes.contains(mt) {
             // Decoder-LLM embedder (gte-Qwen2, e5-mistral, ...): reuse the
             // already-validated causal backbone via the shared loader, then pool

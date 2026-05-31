@@ -181,6 +181,10 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         if archLower.contains("forsequenceclassification") { return .reranker }
         if archLower.contains("crossencoder") { return .reranker }
         if archLower.contains("bert") || archLower.contains("roberta") { return .bert }
+        // MPNet (`MPNetForMaskedLM`) is a sentence-embedding encoder but its arch
+        // name contains neither "bert" nor "roberta"; the engine loads it via its
+        // own relative-attention encoder selected from model_type.
+        if archLower.contains("mpnet") { return .bert }
         if archLower.contains("gemma4") { return .gemma4 }
         if archLower.contains("gemma") { return .gemma }
         if archLower.contains("chatglm") || archLower.contains("glm") { return .glm }
