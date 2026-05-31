@@ -259,6 +259,19 @@ private let aliases: [String: ResolvedModel] = [
         repo: "Alibaba-NLP/gte-Qwen2-7B-instruct",
         name: "gte-qwen2-7b", family: .qwen, params: "7B", quant: "fp32", context: 32768),
 
+    // Mistral-backbone instruction embedders (e5-mistral, SFR). Shipped as base
+    // `MistralModel` checkpoints (no `model.` prefix, no lm_head), normalized by
+    // the loader's base-model prefix path; fp16 residual overflow is handled by
+    // the embeddings engine's embed_tokens fp32 upcast. Queries take the
+    // "Instruct: {task}\nQuery: " prefix (via the endpoint's `instruction`
+    // field); documents are sent raw. Verified cosine 1.0 vs transformers.
+    "e5-mistral-7b-instruct": ResolvedModel(
+        repo: "intfloat/e5-mistral-7b-instruct",
+        name: "e5-mistral-7b-instruct", family: .mistral, params: "7B", quant: "fp16", context: 4096),
+    "sfr-embedding-mistral": ResolvedModel(
+        repo: "Salesforce/SFR-Embedding-Mistral",
+        name: "sfr-embedding-mistral", family: .mistral, params: "7B", quant: "fp16", context: 4096),
+
     // Cross-encoder rerankers (WS7 foundation tier: family
     // detection + clear rejection only; cross-encoder scoring
     // runtime + /v1/rerank endpoint land in follow-up PRs).
