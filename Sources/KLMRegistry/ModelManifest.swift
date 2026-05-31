@@ -226,6 +226,10 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         // family at the registry level; the embedding engine selects the
         // NomicBert encoder from model_type at load time.
         case "nomic_bert", "nomic-bert": return .bert
+        // GTE-v1.5 / ModernBERT RoPE encoders (the arch arm already maps the
+        // "NewModel"/"ModernBertModel" architectures; this covers config.json
+        // that declares only model_type).
+        case "new", "modernbert": return .bert
         default: return nil
         }
     }
