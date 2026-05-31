@@ -7,7 +7,7 @@ import XCTest
 /// acceptance or rejection. The start symbol must span the whole input, so
 /// trailing junk and incomplete prefixes are non-matches at EOS.
 ///
-/// The signature capability is unbounded balanced nesting — the thing a regular
+/// The signature capability is unbounded balanced nesting - the thing a regular
 /// grammar (Stage C) provably cannot do.
 final class CFGGrammarTests: XCTestCase {
 
@@ -79,7 +79,7 @@ final class CFGGrammarTests: XCTestCase {
     }
 
     func testCharClassAndQuantifier() {
-        // A number is one or more digits — expressed grammatically.
+        // A number is one or more digits - expressed grammatically.
         let g = "start: [0-9]+"
         accepts(g, "0")
         accepts(g, "42")
@@ -165,7 +165,7 @@ final class CFGGrammarTests: XCTestCase {
     // MARK: - Left recursion, ambiguity, nullable
 
     func testLeftRecursion() {
-        // a: a "x" | "x"  — left-recursive; Earley handles it.
+        // a: a "x" | "x"  - left-recursive; Earley handles it.
         let g = #"a: a "x" | "x""#   // no `start`; first rule is the start
         accepts(g, "x")
         accepts(g, "xx")
@@ -175,7 +175,7 @@ final class CFGGrammarTests: XCTestCase {
     }
 
     func testAmbiguousGrammar() {
-        // a: a a | "x"  — highly ambiguous, but acceptance is unaffected.
+        // a: a a | "x"  - highly ambiguous, but acceptance is unaffected.
         let g = #"a: a a | "x""#
         accepts(g, "x")
         accepts(g, "xx")
@@ -245,5 +245,16 @@ final class CFGGrammarTests: XCTestCase {
         a: "x"
         b: "y" c
         """))   // `c` is undefined
+    }
+
+    func testOversizedGrammarRejected() {
+        // A rule with more alternatives than the production cap must fail to
+        // compile (fail open), bounding per-token recognizer work. A grammar
+        // just under the cap still compiles.
+        func grammar(alternatives n: Int) -> String {
+            "start: " + (0 ..< n).map { "\"a\($0)\"" }.joined(separator: " | ")
+        }
+        XCTAssertNotNil(CFGGrammar.compile(grammar(alternatives: 100)))
+        XCTAssertNil(CFGGrammar.compile(grammar(alternatives: CFGGrammar.maxProductions + 5)))
     }
 }

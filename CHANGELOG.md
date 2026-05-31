@@ -29,7 +29,7 @@ reverse chronological order. Versioning follows
   the request decodes unconstrained with the system-prompt guidance; CFG output
   is not JSON, so `coerce` returns it verbatim. **Opt-in / slower:** an Earley
   chart is near-unique per prefix, so the per-state mask cache mostly misses and
-  each decoded token pays a full-vocab rescan — suited to short, structurally
+  each decoded token pays a full-vocab rescan - suited to short, structurally
   constrained outputs. This completes the grammar follow-up (Stages A-D).
 
 - **Regex-constrained decoding (Stage C)** (follow-up #9): a request can

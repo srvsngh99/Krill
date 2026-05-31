@@ -316,7 +316,7 @@ OpenAI/Ollama):
   and escaped metacharacters, groups, alternation, and `* + ? {n} {n,} {n,m}`.
 
 - **CFG / Lark (Stage D):** constrain the output to a full parse of a
-  context-free grammar — for unbounded balanced nesting regex cannot express.
+  context-free grammar - for unbounded balanced nesting regex cannot express.
   OpenAI `response_format: {"type":"lark","grammar":"<grammar>"}` (or
   `"type":"cfg"`); Ollama `format: {"lark":"<grammar>"}` / `{"cfg":"<grammar>"}`.
   The dialect is regex-flavored with named rules: `name: body`, `|`, groups
@@ -325,7 +325,7 @@ OpenAI/Ollama):
   the start symbol is `start` if present, else the first rule. Example
   (balanced parentheses): `start: item*` / `item: "(" item* ")"`. **Opt-in /
   slower** than the other formats (an Earley chart is near-unique per prefix,
-  so each decoded token pays a full-vocab mask rescan) — suited to short,
+  so each decoded token pays a full-vocab mask rescan) - suited to short,
   structurally constrained outputs.
 
 Regex and CFG output is not JSON, so it is returned verbatim (no JSON

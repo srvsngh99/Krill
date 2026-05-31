@@ -8,8 +8,8 @@ import Foundation
 /// recognizer**: a `State` is the Earley chart (one column of dotted items per
 /// character consumed so far), and `step` advances it by one character,
 /// returning `nil` when no derivation can extend the prefix. Earley is the
-/// standard correct choice for arbitrary CFGs — it handles left-recursion,
-/// ambiguity, and nullable rules — and, unlike a regular grammar (Stage C), it
+/// standard correct choice for arbitrary CFGs - it handles left-recursion,
+/// ambiguity, and nullable rules - and, unlike a regular grammar (Stage C), it
 /// constrains **unbounded balanced nesting** (`(((…)))`, recursive expressions).
 ///
 /// The grammar is matched as a FULL parse (the start symbol must span the whole
@@ -45,7 +45,7 @@ public struct CFGGrammar: GrammarAutomaton {
     /// origin 0.
     let startNT: Int
     /// `nullable[nt]` ⇒ nonterminal `nt` can derive the empty string. Used to
-    /// advance past a nullable symbol during prediction (the Aycock–Horspool
+    /// advance past a nullable symbol during prediction (the Aycock-Horspool
     /// fix), which is what makes same-column completion of nullable rules
     /// correct.
     let nullable: [Bool]
@@ -156,7 +156,7 @@ public struct CFGGrammar: GrammarAutomaton {
                     let predicted = Item(nt: b, prod: p, dot: 0, origin: k)
                     if columns[k].insert(predicted).inserted { work.append(predicted) }
                 }
-                // Aycock–Horspool: if B is nullable, also advance past it now.
+                // Aycock-Horspool: if B is nullable, also advance past it now.
                 if b < nullable.count, nullable[b] {
                     let advanced = Item(nt: item.nt, prod: item.prod,
                                         dot: item.dot + 1, origin: item.origin)

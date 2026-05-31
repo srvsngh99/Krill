@@ -30,10 +30,16 @@ import Foundation
 /// anonymous nonterminals so the recognizer only ever sees pure BNF.
 public extension CFGGrammar {
 
-    /// Upper bound on the number of nonterminals (named + anonymous) a grammar
-    /// may expand to, and on a single string literal's length — to keep a
-    /// request-supplied grammar's compiled size bounded.
-    static let maxNonterminals = 50_000
+    /// Compiled-size bounds for a request-supplied grammar. These cap the
+    /// Earley recognizer's per-character work (predict/complete scales with the
+    /// total production and symbol count), so a pathological grammar - e.g. one
+    /// rule with thousands of alternatives, which stays under the nonterminal
+    /// cap but makes every column huge - is rejected at compile time and the
+    /// engine falls open to the unconstrained path, rather than imposing
+    /// seconds-per-token latency. Legitimate grammars are far smaller.
+    static let maxNonterminals = 5_000
+    static let maxProductions = 2_000
+    static let maxSymbols = 20_000
     static let maxLiteralLength = 4_096
 
     static func compile(_ text: String) -> CFGGrammar? {
@@ -61,6 +67,18 @@ public extension CFGGrammar {
             // Augmented start S' → realStart.
             let sprime = try lowerer.addNonterminal()
             lowerer.prods[sprime] = [[.nonterminal(realStart)]]
+
+            // Bound the compiled size so per-character recognizer work stays
+            // bounded (a single rule with very many alternatives keeps the
+            // nonterminal count low but the production count high). Over the
+            // bound ⇒ fail open, like an uncompilable grammar.
+            let totalProductions = lowerer.prods.reduce(0) { $0 + $1.count }
+            let totalSymbols = lowerer.prods.reduce(0) { acc, nt in
+                acc + nt.reduce(0) { $0 + $1.count }
+            }
+            guard totalProductions <= CFGGrammar.maxProductions,
+                  totalSymbols <= CFGGrammar.maxSymbols else { return nil }
+
             return CFGGrammar(prods: lowerer.prods, startNT: sprime)
         } catch {
             return nil

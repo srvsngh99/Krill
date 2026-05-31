@@ -65,7 +65,7 @@ internal struct ServerToolSpec: Equatable, Sendable {
 /// `.schema` carries a JSON-schema string the output must conform to;
 /// `.regex` carries a regular-expression pattern the output must fully match
 /// (Stage C); `.cfg` carries a context-free grammar the output must fully
-/// parse (Stage D — for unbounded nesting regex cannot express). Both `.regex`
+/// parse (Stage D - for unbounded nesting regex cannot express). Both `.regex`
 /// and `.cfg` are KrillLM extensions, not standard OpenAI/Ollama.
 internal enum ResponseFormat: Equatable, Sendable {
     case json
