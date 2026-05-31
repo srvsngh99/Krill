@@ -95,6 +95,18 @@ public final class EmbeddingEngine: @unchecked Sendable {
             model = m
             maxTokens = config.maxTokens
             pooling = Self.envPooling() ?? .mean
+        } else if mt == "new" {
+            // GTE-v1.5 ("NewModel"): RoPE encoder with biased fused qkv, GeGLU
+            // MLP, post-norm, no token-type. CLS-pooled. Keys match 1:1.
+            let config = try JSONDecoder().decode(GTEConfig.self, from: data)
+            let m = GTEEmbeddingModel(config)
+            try loadWeights(into: m, from: directory, quantization: nil,
+                            keyPrefix: nil, strictVerify: true)
+            eval(m)
+            model = m
+            maxTokens = config.maxTokens
+            pooling = Self.envPooling()
+                ?? Self.sentenceTransformerPooling(directory: directory) ?? .cls
         } else if Self.causalEmbedderTypes.contains(mt) {
             // Decoder-LLM embedder (gte-Qwen2, e5-mistral, ...): reuse the
             // already-validated causal backbone via the shared loader, then pool
