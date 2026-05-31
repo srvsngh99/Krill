@@ -155,4 +155,41 @@ final class EmbeddingModelTests: XCTestCase {
         let norm = vec.reduce(0) { $0 + $1 * $1 }.squareRoot()
         XCTAssertEqual(norm, 1.0, accuracy: 1e-4)
     }
+
+    /// Pins the module's parameter keys to the nomic-bert checkpoint key
+    /// template. `EmbeddingEngine` loads nomic weights with `strictVerify`, so a
+    /// stray `@ModuleInfo(key:)` typo would only blow up at real-weight load
+    /// (no fixture in CI). This catches it from the param tree alone.
+    func testNomicParameterKeysMatchCheckpointTemplate() throws {
+        let json = """
+        {
+          "model_type": "nomic_bert",
+          "n_embd": 32, "n_layer": 2, "n_head": 4, "n_inner": 64,
+          "vocab_size": 100, "type_vocab_size": 2,
+          "rotary_emb_base": 1000, "rotary_emb_fraction": 1.0,
+          "max_position_embeddings": 64
+        }
+        """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(NomicBertConfig.self, from: json)
+        let model = NomicBertEmbeddingModel(cfg)
+
+        var expected: Set<String> = [
+            "embeddings.word_embeddings.weight",
+            "embeddings.token_type_embeddings.weight",
+            "emb_ln.weight", "emb_ln.bias",
+        ]
+        for i in 0 ..< cfg.numHiddenLayers {
+            let p = "encoder.layers.\(i)."
+            expected.formUnion([
+                p + "attn.Wqkv.weight", p + "attn.out_proj.weight",
+                p + "mlp.fc11.weight", p + "mlp.fc12.weight", p + "mlp.fc2.weight",
+                p + "norm1.weight", p + "norm1.bias",
+                p + "norm2.weight", p + "norm2.bias",
+            ])
+        }
+
+        let actual = Set(model.parameters().flattened().map { $0.0 })
+        XCTAssertEqual(actual, expected,
+            "param keys diverge from the nomic checkpoint; strictVerify load would fail")
+    }
 }

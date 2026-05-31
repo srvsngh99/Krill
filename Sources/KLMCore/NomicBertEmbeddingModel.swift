@@ -138,7 +138,7 @@ final class NomicBertAttention: Module {
     }
 
     /// Bidirectional self-attention over `x [B, T, H]`. `mask` is an optional
-    /// additive key-padding mask (batch-1 callers pass nil — every token real).
+    /// additive key-padding mask (batch-1 callers pass nil, every token real).
     func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil) -> MLXArray {
         let B = x.dim(0), T = x.dim(1)
         // Fused projection -> [B, T, 3, numHeads, headDim]. flash-attn lays the
