@@ -107,6 +107,23 @@ public final class EmbeddingEngine: @unchecked Sendable {
             maxTokens = config.maxTokens
             pooling = Self.envPooling()
                 ?? Self.sentenceTransformerPooling(directory: directory) ?? .cls
+        } else if mt == "modernbert" {
+            // ModernBERT: pre-norm RoPE encoder with alternating global/local
+            // attention (per-layer theta + sliding window), GeGLU, weight-only
+            // norms, no biases. Keys map 1:1 (layer 0 has no attn_norm).
+            let config = try JSONDecoder().decode(ModernBertConfig.self, from: data)
+            let m = ModernBertEmbeddingModel(config)
+            try loadWeights(into: m, from: directory, quantization: nil,
+                            keyPrefix: nil, strictVerify: true)
+            // ModernBERT ships fp16 weights but its activations overflow fp16
+            // (GeGLU intermediates run large); upcast to fp32 for a stable,
+            // reference-matching forward.
+            m.update(parameters: m.parameters().mapValues { $0.asType(.float32) })
+            eval(m)
+            model = m
+            maxTokens = config.maxTokens
+            pooling = Self.envPooling()
+                ?? Self.sentenceTransformerPooling(directory: directory) ?? .cls
         } else if Self.causalEmbedderTypes.contains(mt) {
             // Decoder-LLM embedder (gte-Qwen2, e5-mistral, ...): reuse the
             // already-validated causal backbone via the shared loader, then pool
