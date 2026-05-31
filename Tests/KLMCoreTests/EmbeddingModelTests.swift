@@ -194,6 +194,89 @@ final class EmbeddingModelTests: XCTestCase {
             "param keys diverge from the nomic checkpoint; strictVerify load would fail")
     }
 
+    // MARK: - MPNet (relative-attention-bias encoder)
+
+    func testMPNetConfigDecoding() throws {
+        let json = """
+        {
+          "model_type": "mpnet",
+          "architectures": ["MPNetForMaskedLM"],
+          "hidden_size": 768, "num_hidden_layers": 12, "num_attention_heads": 12,
+          "intermediate_size": 3072, "vocab_size": 30527,
+          "max_position_embeddings": 514, "relative_attention_num_buckets": 32,
+          "layer_norm_eps": 1e-5, "pad_token_id": 1
+        }
+        """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(MPNetConfig.self, from: json)
+        XCTAssertEqual(cfg.hiddenSize, 768)
+        XCTAssertEqual(cfg.headDim, 64)
+        XCTAssertEqual(cfg.relativeAttentionNumBuckets, 32)
+        XCTAssertEqual(cfg.positionOffset, 2)   // pad_token_id (1) + 1
+        XCTAssertEqual(cfg.maxTokens, 512)       // 514 - offset
+    }
+
+    func testMPNetForwardShapeAndDeterminism() throws {
+        let json = """
+        {
+          "model_type": "mpnet",
+          "hidden_size": 32, "num_hidden_layers": 2, "num_attention_heads": 4,
+          "intermediate_size": 64, "vocab_size": 100,
+          "max_position_embeddings": 40, "relative_attention_num_buckets": 32,
+          "layer_norm_eps": 1e-5, "pad_token_id": 1
+        }
+        """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(MPNetConfig.self, from: json)
+        let model = MPNetEmbeddingModel(cfg)
+        let tokens = MLXArray([Int32(0), 1, 2, 3, 4, 5]).reshaped(1, 6)
+
+        let out = model.lastHiddenState(tokens)
+        out.eval()
+        XCTAssertEqual(out.shape, [1, 6, 32])
+        let out2 = model.lastHiddenState(tokens)
+        out2.eval()
+        XCTAssertTrue(allClose(out, out2, atol: 0).all().item(Bool.self))
+    }
+
+    /// Pins MPNet's module parameter keys to the checkpoint template. The engine
+    /// loads MPNet with `strictVerify` (after dropping `pooler.*`/`position_ids`),
+    /// so a stray `@ModuleInfo(key:)` would only fail at real-weight load.
+    func testMPNetParameterKeysMatchCheckpointTemplate() throws {
+        let json = """
+        {
+          "model_type": "mpnet",
+          "hidden_size": 32, "num_hidden_layers": 2, "num_attention_heads": 4,
+          "intermediate_size": 64, "vocab_size": 100,
+          "max_position_embeddings": 40, "relative_attention_num_buckets": 32,
+          "layer_norm_eps": 1e-5, "pad_token_id": 1
+        }
+        """.data(using: .utf8)!
+        let cfg = try JSONDecoder().decode(MPNetConfig.self, from: json)
+        let model = MPNetEmbeddingModel(cfg)
+
+        var expected: Set<String> = [
+            "embeddings.word_embeddings.weight",
+            "embeddings.position_embeddings.weight",
+            "embeddings.LayerNorm.weight", "embeddings.LayerNorm.bias",
+            "encoder.relative_attention_bias.weight",
+        ]
+        for i in 0 ..< cfg.numHiddenLayers {
+            let p = "encoder.layer.\(i)."
+            for proj in ["q", "k", "v", "o"] {
+                expected.insert(p + "attention.attn.\(proj).weight")
+                expected.insert(p + "attention.attn.\(proj).bias")
+            }
+            for (mod, suffix) in [("attention.LayerNorm", ["weight", "bias"]),
+                                  ("intermediate.dense", ["weight", "bias"]),
+                                  ("output.dense", ["weight", "bias"]),
+                                  ("output.LayerNorm", ["weight", "bias"])] {
+                for s in suffix { expected.insert(p + mod + "." + s) }
+            }
+        }
+        let actual = Set(model.parameters().flattened().map { $0.0 })
+        XCTAssertEqual(actual, expected,
+            "param keys diverge from the MPNet checkpoint; strictVerify load would fail")
+    }
+
     // MARK: - Decoder-LLM embedders (last-token pooling)
 
     func testPoolingStringParseToleratesCaseAndSeparators() {
