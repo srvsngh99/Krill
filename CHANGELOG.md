@@ -8,6 +8,30 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **CFG-constrained decoding (Stage D)** (follow-up #9): a request can now
+  constrain the output to a full parse of a context-free grammar, for shapes
+  with unbounded balanced nesting that regex cannot express (recursive
+  expression languages, nested blocks, custom DSLs). Supplied via an OpenAI
+  `response_format: {type:"lark", grammar:"<grammar>"}` (or `type:"cfg"`)
+  extension, or an Ollama `format: {"lark":"<grammar>"}` / `{"cfg":"<grammar>"}`
+  object. The grammar dialect is regex-flavored with named rules: rules
+  `name: body`, alternation `|`, groups `()`, quantifiers `? * +`, string
+  literals `"..."`, single-character classes `[...]`, and bare identifiers as
+  nonterminal references (which is what enables recursion); the start symbol is
+  the rule named `start` if present, else the first rule. A new `CFGGrammar`
+  compiles this to pure BNF (string literals, groups, and quantifiers desugar
+  to anonymous nonterminals over single-character terminals reused from
+  `RegexGrammar`) and drives the shared `GrammarTokenMask` with a
+  character-level Earley recognizer, which correctly handles left-recursion,
+  ambiguity, and nullable rules. The grammar is matched as a full parse: EOS is
+  allowed only when the start symbol spans the whole output. An uncompilable
+  grammar (syntax error, undefined nonterminal, oversized) disables the mask and
+  the request decodes unconstrained with the system-prompt guidance; CFG output
+  is not JSON, so `coerce` returns it verbatim. **Opt-in / slower:** an Earley
+  chart is near-unique per prefix, so the per-state mask cache mostly misses and
+  each decoded token pays a full-vocab rescan - suited to short, structurally
+  constrained outputs. This completes the grammar follow-up (Stages A-D).
+
 - **Regex-constrained decoding (Stage C)** (follow-up #9): a request can
   now constrain the output to a full match of a regular expression, for
   non-JSON shapes like enums, dates, IDs, and phone numbers. Supplied via

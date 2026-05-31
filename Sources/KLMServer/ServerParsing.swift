@@ -64,11 +64,14 @@ internal struct ServerToolSpec: Equatable, Sendable {
 /// Structured-output request (WS-D D2 / T1-1). `.json` = free-form JSON;
 /// `.schema` carries a JSON-schema string the output must conform to;
 /// `.regex` carries a regular-expression pattern the output must fully match
-/// (Stage C — a KrillLM extension, not standard OpenAI/Ollama).
+/// (Stage C); `.cfg` carries a context-free grammar the output must fully
+/// parse (Stage D - for unbounded nesting regex cannot express). Both `.regex`
+/// and `.cfg` are KrillLM extensions, not standard OpenAI/Ollama.
 internal enum ResponseFormat: Equatable, Sendable {
     case json
     case schema(String)
     case regex(String)
+    case cfg(String)
 }
 
 internal struct ServerChatRequest: Equatable, Sendable {
@@ -256,6 +259,14 @@ internal enum ServerParsing {
             if obj.count == 1, let pattern = obj["regex"] as? String {
                 return .regex(pattern)
             }
+            // Same single-key trick for a CFG request: `{"cfg": "..."}` or
+            // `{"lark": "..."}` and nothing else (a schema carries other keys).
+            if obj.count == 1, let grammar = obj["cfg"] as? String {
+                return .cfg(grammar)
+            }
+            if obj.count == 1, let grammar = obj["lark"] as? String {
+                return .cfg(grammar)
+            }
             if let d = try? JSONSerialization.data(withJSONObject: obj),
                let s = String(data: d, encoding: .utf8) {
                 return .schema(s)
@@ -291,6 +302,15 @@ internal enum ServerParsing {
             if let p = obj["grammar"] as? String { return .regex(p) }
             if let nested = obj[type] as? [String: Any],
                let p = nested["pattern"] as? String { return .regex(p) }
+            return nil
+        case "cfg", "lark":
+            // Stage D context-free grammar. Accept the grammar under `cfg`,
+            // `lark`, `grammar`, or a nested `{type:"lark", lark:{grammar:"…"}}`.
+            if let g = obj["cfg"] as? String { return .cfg(g) }
+            if let g = obj["lark"] as? String { return .cfg(g) }
+            if let g = obj["grammar"] as? String { return .cfg(g) }
+            if let nested = obj[type] as? [String: Any],
+               let g = nested["grammar"] as? String { return .cfg(g) }
             return nil
         default:
             return nil
