@@ -221,6 +221,17 @@ private let aliases: [String: ResolvedModel] = [
         repo: "nomic-ai/nomic-embed-text-v1",
         name: "nomic-embed-text-v1", family: .bert, params: "137M", quant: "fp32", context: 2048),
 
+    // Decoder-LLM embedders: causal backbones (family .qwen) repurposed as
+    // sentence embedders via last-token pooling. Served through the same Qwen
+    // loader as chat; the embeddings engine detects the sentence-transformers
+    // pooling head on disk and pools the final hidden state. 1536/3584-dim.
+    "gte-qwen2-1.5b": ResolvedModel(
+        repo: "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+        name: "gte-qwen2-1.5b", family: .qwen, params: "1.5B", quant: "fp32", context: 32768),
+    "gte-qwen2-7b": ResolvedModel(
+        repo: "Alibaba-NLP/gte-Qwen2-7B-instruct",
+        name: "gte-qwen2-7b", family: .qwen, params: "7B", quant: "fp32", context: 32768),
+
     // Cross-encoder rerankers (WS7 foundation tier: family
     // detection + clear rejection only; cross-encoder scoring
     // runtime + /v1/rerank endpoint land in follow-up PRs).
