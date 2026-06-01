@@ -135,8 +135,8 @@ public enum ModelCapabilities {
         case .moe:
             // Family-level default is conservative: the `.moe` family
             // spans both the native runtimes (Qwen 3 MoE + Mixtral +
-            // Qwen2-MoE, productionNative) and bridge-only members (OLMoE /
-            // DeepSeek, compatibleFallback). The family alone cannot tell
+            // Qwen2-MoE + OLMoE, productionNative) and the bridge-only
+            // DeepSeek (compatibleFallback). The family alone cannot tell
             // them apart, so the family-only call reports the safe floor.
             // Use `supportTier(for:at:)` with an installed checkpoint to
             // promote a native MoE model to productionNative once the
@@ -190,9 +190,9 @@ public enum ModelCapabilities {
 /// must route through the Python sidecar bridge.
 ///
 /// The native MoE runtime supports Qwen 3 MoE (`Qwen3MoeForCausalLM`),
-/// Mixtral (`MixtralForCausalLM`), and Qwen 2 MoE (`Qwen2MoeForCausalLM` /
-/// `model_type: qwen2_moe`). OLMoE and DeepSeek remain on the bridge until
-/// their native ports land in follow-up PRs.
+/// Mixtral (`MixtralForCausalLM`), Qwen 2 MoE (`Qwen2MoeForCausalLM`), and
+/// OLMoE (`OlmoeForCausalLM` / `model_type: olmoe`). DeepSeek remains on the
+/// bridge until its native port lands in a follow-up PR.
 ///
 /// Both native families dispatch the top-K experts in a single
 /// `gatherQuantizedMM` per projection (the SwitchGLU path, 2.7x faster on
@@ -217,7 +217,8 @@ public func nativeMoEDispatchSupported(at directory: URL) -> Bool {
         return false
     }
     let modelType = (json["model_type"] as? String)?.lowercased() ?? ""
-    if modelType == "qwen3_moe" || modelType == "mixtral" || modelType == "qwen2_moe" {
+    if modelType == "qwen3_moe" || modelType == "mixtral"
+        || modelType == "qwen2_moe" || modelType == "olmoe" {
         return true
     }
     let architectures = (json["architectures"] as? [String]) ?? []
@@ -226,6 +227,7 @@ public func nativeMoEDispatchSupported(at directory: URL) -> Bool {
         if a.contains("qwen3moe") || a.contains("qwen3_moe") { return true }
         if a.contains("mixtral") { return true }
         if a.contains("qwen2moe") { return true }
+        if a.contains("olmoe") { return true }
     }
     return false
 }

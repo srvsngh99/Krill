@@ -171,11 +171,11 @@ final class MoEFoundationTests: XCTestCase {
             "model_type": "qwen3_moe",
         ])
         defer { try? FileManager.default.removeItem(at: qwen3) }
-        let olmoe = try writeConfig([
-            "architectures": ["OlmoeForCausalLM"],
-            "model_type": "olmoe",
+        let deepseek = try writeConfig([
+            "architectures": ["DeepseekV3ForCausalLM"],
+            "model_type": "deepseek_v3",
         ])
-        defer { try? FileManager.default.removeItem(at: olmoe) }
+        defer { try? FileManager.default.removeItem(at: deepseek) }
 
         XCTAssertEqual(ModelCapabilities.supportTier(for: .moe), .compatibleFallback)
         try withEnv("KRILL_NATIVE_MOE", nil) {
@@ -185,9 +185,9 @@ final class MoEFoundationTests: XCTestCase {
                 "A Qwen 3 MoE checkpoint on the native default must "
                 + "report productionNative")
             XCTAssertEqual(
-                ModelCapabilities.supportTier(for: .moe, at: olmoe),
+                ModelCapabilities.supportTier(for: .moe, at: deepseek),
                 .compatibleFallback,
-                "A not-yet-ported MoE family (OLMoE) stays on the bridge floor")
+                "A not-yet-ported MoE family (DeepSeek) stays on the bridge floor")
         }
         try withEnv("KRILL_NATIVE_MOE", "0") {
             XCTAssertEqual(
@@ -240,15 +240,32 @@ final class MoEFoundationTests: XCTestCase {
         }
     }
 
-    func testNativeDispatchNotSupportedForOLMoE() throws {
+    func testNativeDispatchSupportedForOLMoEByDefault() throws {
+        // OLMoE now has a native runtime.
         let dir = try writeConfig([
             "architectures": ["OlmoeForCausalLM"],
             "model_type": "olmoe",
         ])
         defer { try? FileManager.default.removeItem(at: dir) }
+        try withEnv("KRILL_NATIVE_MOE", nil) {
+            XCTAssertTrue(nativeMoEDispatchSupported(at: dir),
+                "OLMoE native runtime is the default")
+        }
+        try withEnv("KRILL_NATIVE_MOE", "0") {
+            XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
+                "KRILL_NATIVE_MOE=0 opts OLMoE out to the bridge")
+        }
+    }
+
+    func testNativeDispatchNotSupportedForDeepSeek() throws {
+        let dir = try writeConfig([
+            "architectures": ["DeepseekV3ForCausalLM"],
+            "model_type": "deepseek_v3",
+        ])
+        defer { try? FileManager.default.removeItem(at: dir) }
         try withEnv("KRILL_NATIVE_MOE", "1") {
             XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
-                "OLMoE has no native runtime yet; must use the bridge")
+                "DeepSeek has no native runtime yet; must use the bridge")
         }
     }
 
