@@ -110,15 +110,6 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        // Bridge-backed MoE sidecar. Lazy-loaded on first request;
-        // instantiated up front so a signal handler can shut it
-        // down on SIGINT (otherwise the Python child becomes an
-        // orphan on Ctrl+C, holding the GPU and the loaded model
-        // weights resident). WS5 retired the Qwen 2.5-VL sidecar -
-        // that family is now native Swift+MLX.
-        let moeEngine = MoEEngine()
-        installSidecarSignalHandler(moeEngine)
-
         // Stage A: an LRU pool of resident engines (MAX_LOADED_MODELS). The
         // pre-loaded `--model` engine (if any) is registered as the initial
         // active model; further models are routed-or-loaded on demand. The
@@ -138,7 +129,6 @@ struct ServeCommand: AsyncParsableCommand {
         let server = KLMServer(host: host, port: port, compat: compatMode,
                                engines: engines, activeRef: activeRef,
                                fallbackEngine: engine, registry: registry,
-                               moeEngine: moeEngine,
                                corsOrigins: config.origins,
                                defaultContextLimit: config.contextLength,
                                numParallel: config.numParallel,
@@ -147,45 +137,3 @@ struct ServeCommand: AsyncParsableCommand {
     }
 }
 
-/// Hook SIGINT / SIGTERM so the MoE Python sidecar (if any) is
-/// terminated before the krillm process exits. Without this the
-/// child Python process becomes an orphan on Ctrl+C, holding the
-/// GPU and the mlx-lm-loaded model in memory until manually
-/// killed. The sidecar's own stdin EOF would also tear it down,
-/// but only AFTER mlx-lm's blocking generate returns - which can
-/// be many seconds for a large prompt.
-///
-/// Uses DispatchSource so the handler runs on a dedicated queue
-/// (signal handlers cannot acquire NSLock safely from the signal
-/// context). The default SIGINT behavior (terminate the process)
-/// is preserved via `exit(0)` after shutdown.
-private nonisolated(unsafe) var vlmShutdownHandler: (() -> Void)?
-
-private func installSidecarSignalHandler(_ moe: MoEEngine) {
-    vlmShutdownHandler = { [weak moe] in
-        try? moe?.shutdown()
-    }
-    for sig in [SIGINT, SIGTERM] {
-        signal(sig, SIG_IGN)
-        let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-        src.setEventHandler {
-            vlmShutdownHandler?()
-            exit(0)
-        }
-        src.resume()
-        // Hold the source for the lifetime of the process via a
-        // singleton box; otherwise DispatchSource cancels itself
-        // when the local goes out of scope.
-        VLMSignalSourceBox.shared.sources.append(src)
-    }
-}
-
-/// Singleton box that retains the DispatchSource instances for the
-/// lifetime of the process. DispatchSource cancels itself when
-/// released, so we cannot let the locals fall out of scope at the
-/// end of `installVLMSidecarSignalHandler`.
-private final class VLMSignalSourceBox: @unchecked Sendable {
-    static let shared = VLMSignalSourceBox()
-    var sources: [DispatchSourceSignal] = []
-    private init() {}
-}

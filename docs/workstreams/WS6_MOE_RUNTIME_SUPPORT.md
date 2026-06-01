@@ -1,5 +1,14 @@
 # WS6: MoE Runtime Support
 
+> **COMPLETED (post-WS6 native-MoE workstream).** Every MoE family is now
+> native Swift+MLX: Qwen 3 MoE, Mixtral, Qwen2-MoE, OLMoE, and
+> DeepSeek-V2 / V2-Lite (DeepSeek lives under the `.deepseek` family;
+> DeepSeek-V3's absorbed-MLA layout is deferred in `docs/BACKLOG.md`). The
+> mlx-lm Python sidecar bridge (`tools/moe_bridge.py`, `MoEEngine`,
+> `PythonSidecar`, `handleMoEChat`) and the `KRILL_NATIVE_MOE=0` opt-out were
+> deleted; MoE manifests route through the dense engine. The notes below are
+> the historical record of the first (Qwen 3 MoE) native PR.
+
 Status: native runtime shipped for **Qwen 3 MoE**
 (`Qwen3MoeForCausalLM` / `model_type: qwen3_moe`). Other MoE
 families (Mixtral, Qwen2-MoE, OLMoE, DeepSeek-V3) keep the

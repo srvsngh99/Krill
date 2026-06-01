@@ -10,17 +10,21 @@ final class ModelAdapterTests: XCTestCase {
 
     // MARK: - Chat routing
 
-    func testMoERoutesToMixtureOfExperts() {
-        XCTAssertEqual(ModelAdapter(family: .moe).chatRouting, .mixtureOfExperts,
-            "MoE must route to the native-or-bridge MoE path")
+    func testMoERoutesToDenseEngine() {
+        // Every MoE family is native now and loads through `loadModel` on the
+        // dense engine; the mlx-lm sidecar bridge (and the `.mixtureOfExperts`
+        // routing case) were removed.
+        XCTAssertEqual(ModelAdapter(family: .moe).chatRouting, .denseEngine,
+            "MoE must route to the native dense engine path")
     }
 
     func testDenseFamiliesRouteToDenseEngine() {
         // Qwen 2.5-VL is included: WS5 retired its Python bridge,
-        // so it routes through the native dense engine path.
+        // so it routes through the native dense engine path. `.moe` joined
+        // this group once the MoE sidecar was deleted.
         let dense: [ModelFamily] = [
             .llama, .qwen, .qwen25vl, .mistral, .gemma, .gemma4, .phi,
-            .glm, .deepseek, .bert, .reranker,
+            .glm, .deepseek, .bert, .reranker, .moe,
         ]
         for family in dense {
             XCTAssertEqual(ModelAdapter(family: family).chatRouting, .denseEngine,
