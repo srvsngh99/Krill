@@ -1,12 +1,39 @@
-# Native Tool-Calling Implementation Plan (Gemma 4 / Llama / Qwen)
+# Native Tool-Calling Implementation Plan (Gemma 4 / Llama / Qwen / Mistral / Phi)
 
 Created: 2026-05-20
-Status: WS1-5 DONE + multi-family validated (2026-05-20). Native tool
-calling for Gemma 4, Llama 3.x and Qwen 2.5, default-on, each
-benchmarked at parity with Ollama on a properly-sized model. 226 Swift
-tests green (+10). Pending: parity-gate cell wiring (WS5 final) +
-Mistral/Phi adapters (tracked, same methodology) + a tagged release.
+Status: WS1-5 DONE + multi-family validated. Native tool calling for
+Gemma 4, Llama 3.x, Qwen 2.5/3, **Mistral, and Phi**, default-on, each
+benchmarked at parity with Ollama on a properly-sized model.
 Owner: unassigned
+
+**Mistral / Phi adapters added 2026-06-01.** Both mirror the native wire
+format (verified byte-exact against Ollama's template) and are live-benchmarked
+on the real checkpoints:
+
+| Family | Native format | KrillLM | Ollama | Verdict |
+|--|--|--|--|--|
+| Mistral | `[AVAILABLE_TOOLS][…][/AVAILABLE_TOOLS]` / `[TOOL_CALLS][…]` / `[TOOL_RESULTS]` | 4/4 valid+exact | 4/4 | PASS |
+| Phi-4-mini | `<\|tool\|>[…]<\|/tool\|>` defs / `<\|tool_call\|>[…]<\|/tool_call\|>` | 1/4 | 1/4 | PASS¹ |
+
+¹ phi-4-mini is a weak tool-caller on **both** engines (it declines T1/T2/T4
+and emits a tool call only rarely); identical model behaviour, parity holds -
+the same pattern as the Llama-T3 note above. The KrillLM adapter parses the
+native `<|tool_call|>` array correctly when the model does emit one.
+
+**Phi-4-mini base-runtime fixes (2026-06-01, prerequisite for the above).**
+The Phi runtime was written for Phi-3-mini and produced pure garbage on
+phi-4-mini; five distinct bugs were fixed in `Sources/KLMCore/PhiModel.swift`
+(+ loader/engine): (1) `partial_rotary_factor` 0.75 was ignored (full RoPE on a
+partial-rotary head); (2) `tie_word_embeddings` was ignored (random `lm_head`);
+(3) the checkpoint's **fused `qkv_proj`** was silently dropped because the model
+declared separate `q/k/v_proj` (the dominant cause); (4) LongRoPE ("su") scaling
+was absent; (5) the `<|end|>` chat terminator (declared only in `config.json`'s
+`eos_token_id`, no `generation_config.json`) was not a stop token, so the
+assistant ran on. After the fixes phi-4-mini answers correctly and halts.
+
+The hard KrillLM>=Ollama tool-quality gate is `tools/tool_calling_benchmark.py`
+(per family, temp 0); the server's `parity_gate.py` `T0-4` cell now additionally
+asserts any returned `tool_calls` are structurally well-formed.
 
 **Multi-family parity (2026-05-20, `tools/tool_calling_benchmark.py`,
 temp 0; KrillLM vs Ollama, same model class):**
@@ -34,7 +61,12 @@ model-agnostic dispatcher (`ToolFormat` resolved from
 - `.qwen` - Qwen's native format already *is* Hermes
   `<tool_call>{"name","arguments"}</tool_call>`; reuses the Hermes
   injection + a leading-junk-tolerant extractor.
-- `.hermes` - generic fallback for Mistral/Phi/unknown (unchanged,
+- `.mistral` - native `[AVAILABLE_TOOLS]`/`[TOOL_CALLS]`/`[TOOL_RESULTS]`
+  (token ids 5-9); tool schemas spliced before the last user turn,
+  calls parsed from the `[TOOL_CALLS]` JSON array.
+- `.phi` - native `<|tool|>` defs baked into the system turn,
+  `<|tool_call|>[…]<|/tool_call|>` calls parsed from the array.
+- `.hermes` - generic fallback for GLM / Gemma(-2) / unknown (unchanged,
   byte-identical, regression-free).
 
 The vendored swift-transformers accepts but **ignores** `tools` in

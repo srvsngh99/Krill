@@ -379,7 +379,17 @@ private func loadGemma(configData: Data, directory: URL) throws -> LoadedModel {
 private func loadPhi(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(PhiConfig.self, from: configData)
     let model = PhiForCausalLM(config)
-    try loadWeights(into: model, from: directory, quantization: config.quantization)
+    // Phi-4-mini ties its output projection to the input embeddings (no
+    // `lm_head.*` in the checkpoint); the flag skips the embed->lm_head copy
+    // and the model produces logits from the shared embedding matrix.
+    //
+    // strictVerify catches the silent weight-drop that hid the original Phi
+    // bug: the model declared separate q/k/v_proj while the checkpoint ships a
+    // fused qkv_proj, so under lax verify the fused tensor was dropped and
+    // attention ran at random init. With strict verify a future module/key
+    // mismatch fails loudly at load instead of degenerating into garbage.
+    try loadWeights(into: model, from: directory, quantization: config.quantization,
+                    tieWordEmbeddings: config.tieWordEmbeddings, strictVerify: true)
 
     return LoadedModel(
         module: model,
