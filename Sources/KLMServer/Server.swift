@@ -31,7 +31,6 @@ public final class KLMServer: Sendable {
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
-    private let moeEngine: MoEEngine
     private let logger = Logger(label: "krillm.server")
 
     private let corsOrigins: [String]
@@ -44,7 +43,6 @@ public final class KLMServer: Sendable {
                 fallbackEngine: InferenceEngine, registry: Registry,
                 embedEngine: EmbeddingEngine = EmbeddingEngine(),
                 rerankEngine: RerankEngine = RerankEngine(),
-                moeEngine: MoEEngine = MoEEngine(),
                 corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
                 defaultContextLimit: Int? = nil,
                 numParallel: Int = 1, maxQueue: Int = 512) {
@@ -58,7 +56,6 @@ public final class KLMServer: Sendable {
         self.registry = registry
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
-        self.moeEngine = moeEngine
         self.defaultContextLimit = defaultContextLimit
         self.genQueue = GenerationQueue(numParallel: numParallel, maxQueue: maxQueue)
     }
@@ -69,7 +66,6 @@ public final class KLMServer: Sendable {
         compat: CompatMode = .both,
         embedEngine: EmbeddingEngine = EmbeddingEngine(),
         rerankEngine: RerankEngine = RerankEngine(),
-        moeEngine: MoEEngine = MoEEngine(),
         maxBodySizeOverride: Int? = nil
     ) -> any ChannelHandler & Sendable {
         let activeRef = ActiveEngineRef(engine.isLoaded ? engine : nil)
@@ -82,7 +78,6 @@ public final class KLMServer: Sendable {
                     fallbackEngine: engine, registry: registry, compat: compat,
                     embedEngine: embedEngine,
                     rerankEngine: rerankEngine,
-                    moeEngine: moeEngine,
                     genQueue: GenerationQueue(numParallel: 1, maxQueue: 512),
                     maxBodySizeOverride: maxBodySizeOverride)
     }
@@ -101,7 +96,6 @@ public final class KLMServer: Sendable {
                                     fallbackEngine: self.fallbackEngine, registry: self.registry,
                                     compat: self.compat, embedEngine: self.embedEngine,
                                     rerankEngine: self.rerankEngine,
-                                    moeEngine: self.moeEngine,
                                     corsOrigins: self.corsOrigins,
                                     defaultContextLimit: self.defaultContextLimit,
                                     genQueue: self.genQueue)
@@ -178,7 +172,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
-    private let moeEngine: MoEEngine
     private let logger = Logger(label: "krillm.http")
     private let startedAt = Date()
 
@@ -196,7 +189,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
          fallbackEngine: InferenceEngine, registry: Registry,
          compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
          rerankEngine: RerankEngine = RerankEngine(),
-         moeEngine: MoEEngine = MoEEngine(),
          corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
          defaultContextLimit: Int? = nil,
          genQueue: GenerationQueue = GenerationQueue(numParallel: 1, maxQueue: 512),
@@ -208,7 +200,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         self.compat = compat
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
-        self.moeEngine = moeEngine
         self.corsOrigins = corsOrigins
         self.defaultContextLimit = defaultContextLimit
         self.genQueue = genQueue
@@ -413,17 +404,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return nil
     }
 
-    /// True when `name` is a bridge-routed (non-native MoE sidecar) model, so
-    /// it must NOT be loaded as a native ``InferenceEngine``. Mirrors the
-    /// decision in ``dispatchFamilyChat(context:request:style:)``.
+    /// Historically true for mlx-lm-sidecar MoE models so they were not loaded
+    /// as a native ``InferenceEngine``. The sidecar is gone and every family
+    /// (including all MoE families) is native, so nothing is bridge-routed; the
+    /// hook is kept (always false) for the call site's routing guard.
     private func isBridgeRouted(_ name: String) -> Bool {
-        guard let manifest = registry.getModel(name) else { return false }
-        switch ModelAdapter(family: manifest.family).chatRouting {
-        case .denseEngine:
-            return false
-        case .mixtureOfExperts:
-            return !nativeMoEDispatchSupported(at: registry.modelPath(manifest.name))
-        }
+        return false
     }
 
     /// Resolve (route-or-load) the engine for the request's `model`, then run
@@ -711,16 +697,15 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     /// caller must `return`. Returns `false` for "no special routing
     /// - fall through to the native dense engine path".
     ///
-    /// WS3 consolidates the former per-handler
-    /// `manifest.family == .qwen25vl` / `.moe` branches into this
-    /// single point: `handleChatCompletions` and `handleOllamaChat`
-    /// call it with their own `VLMResponseStyle`. The routing
-    /// decision itself comes from `ModelAdapter`, so a new
-    /// bridge-backed family is added in the registry, not here.
+    /// WS3 consolidated the former per-handler
+    /// `manifest.family == .qwen25vl` / `.moe` branches into this single
+    /// point. Every family now routes to the native dense engine
+    /// (`ModelAdapter.chatRouting == .denseEngine`), so this always returns
+    /// false today; it is kept as the one place a future family-specific
+    /// early-exit would live, driven by `ModelAdapter`.
     private func dispatchFamilyChat(
         context: ChannelHandlerContext,
-        request: ServerChatRequest,
-        style: VLMResponseStyle
+        request: ServerChatRequest
     ) -> Bool {
         guard let model = request.requestedModel,
               let manifest = registry.getModel(model) else {
@@ -729,33 +714,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let adapter = ModelAdapter(family: manifest.family)
         switch adapter.chatRouting {
         case .denseEngine:
-            // Includes Qwen 2.5-VL: WS5 retired its Python bridge,
-            // so a VL manifest now runs on the native Swift+MLX
-            // engine exactly like Gemma 4 vision - the standard
-            // chat path decodes the image and calls
-            // `engine.generate(... imageData:)`.
+            // The single native path. Includes Qwen 2.5-VL (WS5 retired
+            // its Python bridge) and every MoE family (Qwen 3 MoE,
+            // Mixtral, Qwen2-MoE, OLMoE, DeepSeek-V2): a MoE manifest
+            // loads through `loadModel` and runs on the native engine
+            // like any other causal LM, so there is no family-specific
+            // dispatch here anymore.
             return false
-
-        case .mixtureOfExperts:
-            // MoE is text-only whether it runs native or bridged.
-            if !request.media.images.isEmpty {
-                sendJSON(context: context, status: .badRequest, body: [
-                    "error": "MoE models do not accept image input. Use a multimodal "
-                        + "checkpoint (e.g. qwen2.5-vl-3b) instead."
-                ])
-                return true
-            }
-            // Native Swift+MLX MoE when the checkpoint supports it
-            // (today: Qwen 3 MoE) - fall through to the dense engine
-            // path. Otherwise route through the mlx-lm sidecar bridge.
-            let dir = registry.modelPath(manifest.name)
-            if nativeMoEDispatchSupported(at: dir) {
-                return false
-            }
-            handleMoEChat(
-                context: context, request: request,
-                manifest: manifest, style: style)
-            return true
         }
     }
 
@@ -784,7 +749,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         // `dispatchFamilyChat`). Runs before the model-loaded gate
         // so a bridge-backed family is not refused for "no model
         // loaded".
-        if dispatchFamilyChat(context: context, request: request, style: .openAI) {
+        if dispatchFamilyChat(context: context, request: request) {
             return
         }
 
@@ -1474,7 +1439,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         // same dispatch point as `handleChatCompletions`. Runs
         // BEFORE the InferenceEngine model-loaded gate so a
         // bridge-backed request is not refused for "no model loaded".
-        if dispatchFamilyChat(context: context, request: request, style: .ollama) {
+        if dispatchFamilyChat(context: context, request: request) {
             return
         }
 
@@ -1877,201 +1842,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             ]
         }
         sendJSON(context: context, status: .ok, body: ["models": models])
-    }
-
-    // MARK: - Bridge chat response shaping (MoE sidecar)
-
-    /// Response shape selector for bridge-backed chat completions.
-    /// WS5 made Qwen 2.5-VL native; the remaining consumer is the
-    /// MoE sidecar (`handleMoEChat`).
-    private enum VLMResponseStyle {
-        case openAI  // OpenAI /v1/chat/completions: `{id, object, choices, ...}`
-        case ollama  // Ollama /api/chat: `{model, message:{role,content}, done, ...}`
-    }
-
-    /// Emit a chat-completion stream consisting of a single content
-    /// chunk plus a terminating chunk, in the shape selected by
-    /// `style`. The MoE sidecar's mlx-lm `generate` is non-streaming
-    /// today, so degenerate streaming is the simplest
-    /// forward-compatible shape.
-    ///
-    /// - OpenAI: SSE `data: <json>\n\n` framing with
-    ///   `chat.completion.chunk` objects ending in `data: [DONE]`.
-    /// - Ollama: newline-delimited JSON (`<json>\n` per frame),
-    ///   `{model, message:{role,content}, done}` objects with
-    ///   `done: true` and timing fields on the final frame.
-    private func emitVLMStream(
-        ctx: ChannelHandlerContext, modelName: String, text: String,
-        style: VLMResponseStyle,
-        promptTokens: Int, completionTokens: Int, totalNs: Int64,
-        corsHeaders: [(String, String)]
-    ) {
-        switch style {
-        case .openAI:
-            var headers = HTTPHeaders()
-            headers.add(name: "Content-Type", value: "text/event-stream")
-            headers.add(name: "Cache-Control", value: "no-cache")
-            headers.add(name: "Connection", value: "keep-alive")
-            for (k, v) in corsHeaders { headers.add(name: k, value: v) }
-            writeOnLoop(ctx, .head(HTTPResponseHead(
-                version: .http1_1, status: .ok, headers: headers)))
-            let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
-            let contentChunk: [String: Any] = [
-                "id": id,
-                "object": "chat.completion.chunk",
-                "created": Int(Date().timeIntervalSince1970),
-                "model": modelName,
-                "choices": [[
-                    "index": 0,
-                    "delta": ["role": "assistant", "content": text],
-                ]],
-            ]
-            writeSSEJSON(ctx, contentChunk)
-            let finalChunk: [String: Any] = [
-                "id": id,
-                "object": "chat.completion.chunk",
-                "created": Int(Date().timeIntervalSince1970),
-                "model": modelName,
-                "choices": [[
-                    "index": 0,
-                    "delta": [String: Any](),
-                    "finish_reason": "stop",
-                ]],
-            ]
-            writeSSEJSON(ctx, finalChunk)
-            writeRaw(ctx, "data: [DONE]\n\n")
-            writeOnLoop(ctx, .end(nil), flush: true)
-        case .ollama:
-            var headers = HTTPHeaders()
-            headers.add(name: "Content-Type", value: "application/x-ndjson")
-            headers.add(name: "Cache-Control", value: "no-cache")
-            headers.add(name: "Connection", value: "keep-alive")
-            for (k, v) in corsHeaders { headers.add(name: k, value: v) }
-            writeOnLoop(ctx, .head(HTTPResponseHead(
-                version: .http1_1, status: .ok, headers: headers)))
-            let createdAt = ISO8601DateFormatter().string(from: Date())
-            let contentChunk: [String: Any] = [
-                "model": modelName,
-                "created_at": createdAt,
-                "message": [
-                    "role": "assistant",
-                    "content": text,
-                ],
-                "done": false,
-            ]
-            writeNDJSON(ctx, contentChunk)
-            let finalChunk: [String: Any] = [
-                "model": modelName,
-                "created_at": ISO8601DateFormatter().string(from: Date()),
-                "message": ["role": "assistant", "content": ""],
-                "done": true,
-                "total_duration": totalNs,
-                "prompt_eval_count": promptTokens,
-                "eval_count": completionTokens,
-            ]
-            writeNDJSON(ctx, finalChunk)
-            writeOnLoop(ctx, .end(nil), flush: true)
-        }
-    }
-
-    // MARK: - MoE: bridge-backed text chat (Mixtral, Qwen3-MoE, ...)
-
-    /// Handle a chat completion against an MoE manifest by routing
-    /// through the Python sidecar (`MoEEngine` -> mlx-lm):
-    /// - `style: .openAI` emits OpenAI-shape JSON;
-    ///   `style: .ollama` emits Ollama-shape NDJSON.
-    /// - Streaming degenerates to a single content chunk plus a
-    ///   terminating chunk (mlx-lm's generate is non-streaming
-    ///   today; token-streaming would require driving
-    ///   `stream_generate` over the sidecar).
-    /// - Sampling parameters are ignored (the bridge runs
-    ///   mlx-lm's defaults).
-    private func handleMoEChat(
-        context: ChannelHandlerContext,
-        request: ServerChatRequest,
-        manifest: ModelManifest,
-        style: VLMResponseStyle
-    ) {
-        let messagesForBridge = request.messages
-        let dir = registry.modelPath(manifest.name)
-        let eventLoop = context.eventLoop
-        nonisolated(unsafe) let ctx = context
-        let moe = moeEngine
-        let modelName = manifest.name
-        let maxTokens = request.maxTokens
-        let wantStream = request.stream
-        let snapshotCORS = corsHeaders()
-        let started = CFAbsoluteTimeGetCurrent()
-        Task {
-            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
-            defer { self.leaveQueue() }
-            do {
-                try await moe.load(directory: dir)
-                let result = try moe.generate(
-                    messages: messagesForBridge,
-                    maxTokens: maxTokens)
-                let totalNs = Int64(
-                    (CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
-                if wantStream {
-                    self.emitVLMStream(
-                        ctx: ctx, modelName: modelName,
-                        text: result.text, style: style,
-                        promptTokens: result.promptTokens,
-                        completionTokens: result.completionTokens,
-                        totalNs: totalNs,
-                        corsHeaders: snapshotCORS)
-                } else {
-                    let response: [String: Any]
-                    switch style {
-                    case .openAI:
-                        response = [
-                            "id": "chatcmpl-\(UUID().uuidString.prefix(8))",
-                            "object": "chat.completion",
-                            "created": Int(Date().timeIntervalSince1970),
-                            "model": modelName,
-                            "choices": [[
-                                "index": 0,
-                                "message": [
-                                    "role": "assistant",
-                                    "content": result.text,
-                                ],
-                                "finish_reason": "stop",
-                            ]],
-                            "usage": [
-                                "prompt_tokens": result.promptTokens,
-                                "completion_tokens": result.completionTokens,
-                                "total_tokens": result.promptTokens
-                                    + result.completionTokens,
-                            ],
-                            "total_duration": totalNs,
-                        ]
-                    case .ollama:
-                        response = [
-                            "model": modelName,
-                            "created_at": ISO8601DateFormatter().string(
-                                from: Date()),
-                            "message": [
-                                "role": "assistant",
-                                "content": result.text,
-                            ],
-                            "done": true,
-                            "total_duration": totalNs,
-                            "prompt_eval_count": result.promptTokens,
-                            "eval_count": result.completionTokens,
-                        ]
-                    }
-                    self.sendJSONOnLoop(
-                        context: ctx, eventLoop: eventLoop,
-                        status: .ok, body: response)
-                }
-            } catch {
-                let msg = String(describing: error).prefix(300)
-                self.sendJSONOnLoop(
-                    context: ctx, eventLoop: eventLoop,
-                    status: .internalServerError,
-                    body: ["error": "MoE bridge failed: \(msg)"])
-            }
-        }
     }
 
     // MARK: - Reranking: POST /v1/rerank

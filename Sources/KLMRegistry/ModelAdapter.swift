@@ -42,19 +42,20 @@ public struct ModelAdapter: Sendable, Equatable {
     /// Which server chat handler a request for this family needs.
     public var chatRouting: ChatRouting {
         switch family {
-        case .moe:
-            // Native Swift+MLX runtime when the checkpoint supports
-            // it (today: Qwen 3 MoE), else the mlx-lm sidecar bridge.
-            return .mixtureOfExperts
         case .llama, .qwen, .qwen25vl, .mistral, .gemma, .gemma4,
-             .phi, .glm, .deepseek, .bert, .reranker:
+             .phi, .glm, .deepseek, .bert, .reranker, .moe:
             // Native Swift+MLX path. WS5 made Qwen 2.5-VL native, so
             // a VL manifest routes here too - the standard chat path
             // decodes the image and calls the native engine, exactly
-            // like Gemma 4 vision. (`.bert` / `.reranker` are not
-            // causal LMs and are refused by the chat surface on a
-            // capability check; they never reach a chat handler, so
-            // `.denseEngine` is the correct inert default.)
+            // like Gemma 4 vision. `.moe` joined this group once every
+            // MoE family (Qwen 3 MoE, Mixtral, Qwen2-MoE, OLMoE, plus
+            // DeepSeek-V2 under `.deepseek`) went native and the mlx-lm
+            // sidecar bridge was deleted; a MoE manifest now loads
+            // through `loadModel` on the dense engine like any other
+            // native causal LM. (`.bert` / `.reranker` are not causal
+            // LMs and are refused by the chat surface on a capability
+            // check; they never reach a chat handler, so `.denseEngine`
+            // is the correct inert default.)
             return .denseEngine
         }
     }
@@ -96,14 +97,15 @@ public struct ModelAdapter: Sendable, Equatable {
 }
 
 /// Which server chat handler a model family's request is routed to.
+///
+/// There is a single native path today: every supported family (dense text,
+/// Qwen 2.5-VL, Gemma 4 vision/audio, and all MoE families) loads through
+/// `loadModel` and runs on the native Swift+MLX engine. The historical
+/// `mixtureOfExperts` case (which fell back to the mlx-lm Python sidecar) was
+/// removed when the last MoE family went native and the bridge was deleted.
 public enum ChatRouting: String, Sendable, Equatable, CaseIterable {
     /// Native Swift+MLX dense engine path (`engine.generate`).
-    /// Includes Qwen 2.5-VL since WS5 retired its Python bridge.
     case denseEngine = "dense_engine"
-    /// Mixture-of-experts: the native Swift+MLX runtime when the
-    /// checkpoint supports it (see `nativeMoEDispatchSupported`),
-    /// otherwise the Python-sidecar MoE bridge (`handleMoEChat`).
-    case mixtureOfExperts = "mixture_of_experts"
 }
 
 /// The tool / function-call chat template a model family expects.

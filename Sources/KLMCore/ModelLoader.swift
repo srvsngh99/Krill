@@ -166,24 +166,10 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
         // per-expert loop, no per-layer host sync. Decode benches 2.7x
         // faster than the old scatter dispatch (24 -> 66 tok/s on
         // 30B-A3B, PR #85), and the #87 sort path recovers long-prompt
-        // prefill (229 -> 536 tok/s) so prefill is at parity too -- the
-        // precondition the opt-in gate waited on. Native is now the only
-        // tested Qwen3-MoE path on this build.
-        //
-        // `KRILL_NATIVE_MOE=0` is the opt-out: it forces the legacy
-        // mlx-lm MoE bridge (compatible_fallback tier) for one release,
-        // for anyone who needs to fall back. The server routes that case
-        // to `MoEEngine`; native loading is refused here so the bridge
-        // handler takes over.
-        if ProcessInfo.processInfo.environment["KRILL_NATIVE_MOE"] == "0" {
-            throw ModelLoadError.unsupportedArchitecture(
-                "Qwen 3 MoE native runtime disabled via KRILL_NATIVE_MOE=0; "
-                + "routing through the legacy MoE bridge (mlx-lm, "
-                + "compatible_fallback tier). Use POST /api/chat or "
-                + "/v1/chat/completions - the server routes MoE manifests to "
-                + "MoEEngine. Unset KRILL_NATIVE_MOE for the native default. "
-                + "Detected arch=\(arch), model_type=\(modelType).")
-        }
+        // prefill (229 -> 536 tok/s) so prefill is at parity too. Native
+        // is the only Qwen3-MoE path: the `KRILL_NATIVE_MOE=0` opt-out and
+        // the mlx-lm MoE bridge it routed to were removed once every MoE
+        // family went native.
         return try loadQwen3MoE(configData: configData, directory: directory)
     } else if arch.contains("mixtral") || modelType == "mixtral" {
         // Mixtral: native Swift+MLX sparse-MoE runtime. Mistral attention

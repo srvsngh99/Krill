@@ -133,15 +133,12 @@ public enum ModelCapabilities {
             // checkpoint; the Python bridge was then retired.
             return .productionNative
         case .moe:
-            // Family-level default is conservative: the `.moe` family
-            // spans both the native runtimes (Qwen 3 MoE + Mixtral +
-            // Qwen2-MoE + OLMoE, productionNative) and the bridge-only
-            // DeepSeek (compatibleFallback). The family alone cannot tell
-            // them apart, so the family-only call reports the safe floor.
-            // Use `supportTier(for:at:)` with an installed checkpoint to
-            // promote a native MoE model to productionNative once the
-            // native runtime serves it.
-            return .compatibleFallback
+            // Every MoE family is native Swift+MLX now (Qwen 3 MoE,
+            // Mixtral, Qwen2-MoE, OLMoE; DeepSeek-V2 lives under the
+            // `.deepseek` family). The mlx-lm sidecar bridge and the
+            // per-checkpoint tier refinement it required are gone, so the
+            // family reports productionNative directly.
+            return .productionNative
         case .reranker:
             // WS7 foundation: same shape as WS5/WS6. Family
             // detection + capability + alias entries + clear
@@ -154,25 +151,16 @@ public enum ModelCapabilities {
         }
     }
 
-    /// Support tier for an installed model, refined by checkpoint when
-    /// the family alone is ambiguous.
-    ///
-    /// The only family that needs refinement is `.moe`: it spans both
-    /// the native Qwen 3 MoE runtime and bridge-only members, and the
-    /// manifest does not carry the arch / model_type that tells them
-    /// apart. Given the installed directory, a checkpoint the native
-    /// runtime serves (`nativeMoEDispatchSupported`, i.e. a Qwen 3 MoE
-    /// checkpoint with the native default on) reports `productionNative`;
-    /// every other case delegates to the family-level
-    /// `supportTier(for:)` floor. Pass `directory: nil` (e.g. a catalog
-    /// entry with nothing pulled) to get that floor.
+    /// Support tier for an installed model. No family needs per-checkpoint
+    /// refinement anymore: the `.moe` family that once spanned a native
+    /// runtime plus mlx-lm-bridge members is now uniformly native
+    /// (productionNative), so this delegates to the family-level
+    /// `supportTier(for:)`. The `directory` parameter is retained for API
+    /// stability (callers like `/api/show` pass the installed path) but is no
+    /// longer consulted.
     public static func supportTier(
         for family: ModelFamily, at directory: URL?
     ) -> SupportTier {
-        if family == .moe, let directory,
-           nativeMoEDispatchSupported(at: directory) {
-            return .productionNative
-        }
         return supportTier(for: family)
     }
 
@@ -183,53 +171,6 @@ public enum ModelCapabilities {
     public static func hasNativeToolTemplate(_ family: ModelFamily) -> Bool {
         capabilities(for: family).contains(.tools)
     }
-}
-
-/// Inspect a model directory's config.json to decide whether the
-/// MoE family has a native Swift+MLX runtime in this build, or
-/// must route through the Python sidecar bridge.
-///
-/// The native MoE runtime supports Qwen 3 MoE (`Qwen3MoeForCausalLM`),
-/// Mixtral (`MixtralForCausalLM`), Qwen 2 MoE (`Qwen2MoeForCausalLM`), and
-/// OLMoE (`OlmoeForCausalLM` / `model_type: olmoe`). DeepSeek remains on the
-/// bridge until its native port lands in a follow-up PR.
-///
-/// Both native families dispatch the top-K experts in a single
-/// `gatherQuantizedMM` per projection (the SwitchGLU path, 2.7x faster on
-/// decode than the old scatter path, PR #85), with the #87 sort path
-/// recovering long-prompt prefill. The native runtime is the DEFAULT;
-/// `KRILL_NATIVE_MOE=0` is the opt-out that forces the legacy mlx-lm bridge
-/// for one transitional release.
-///
-/// Returns false (route through bridge) when `KRILL_NATIVE_MOE=0`, when the
-/// checkpoint is a not-yet-ported MoE family (Qwen2-MoE / OLMoE / DeepSeek
-/// have no native runtime yet), or when the directory has no readable
-/// config.json - the native loader would fail anyway, and the bridge
-/// handler emits a clearer error for that case.
-public func nativeMoEDispatchSupported(at directory: URL) -> Bool {
-    guard ProcessInfo.processInfo.environment["KRILL_NATIVE_MOE"] != "0" else {
-        return false
-    }
-    let configURL = directory.appendingPathComponent("config.json")
-    guard let data = try? Data(contentsOf: configURL),
-          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else {
-        return false
-    }
-    let modelType = (json["model_type"] as? String)?.lowercased() ?? ""
-    if modelType == "qwen3_moe" || modelType == "mixtral"
-        || modelType == "qwen2_moe" || modelType == "olmoe" {
-        return true
-    }
-    let architectures = (json["architectures"] as? [String]) ?? []
-    for arch in architectures {
-        let a = arch.lowercased()
-        if a.contains("qwen3moe") || a.contains("qwen3_moe") { return true }
-        if a.contains("mixtral") { return true }
-        if a.contains("qwen2moe") { return true }
-        if a.contains("olmoe") { return true }
-    }
-    return false
 }
 
 /// String IDs used in Ollama-compatible payloads (`/api/show`

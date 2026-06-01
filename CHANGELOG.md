@@ -8,6 +8,19 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **Native MoE runtimes for the remaining mixture-of-experts families.**
+  Mixtral (`MixtralForCausalLM`), Qwen2-MoE (`Qwen2MoeForCausalLM`), OLMoE
+  (`OlmoeForCausalLM`), and DeepSeek-V2 / V2-Lite (`DeepseekV2ForCausalLM`, MLA
+  attention + YaRN RoPE) now run on the native Swift+MLX engine, joining the
+  already-native Qwen 3 MoE. Each uses the `gatherQuantizedMM` SwitchGLU expert
+  dispatch and the shared prefill sort path; each is verified for logit parity
+  against mlx-lm on a tiny quantized checkpoint (argmax + cosine > 0.9999).
+  Qwen2-MoE adds a sigmoid-gated shared expert; OLMoE adds whole-projection
+  q/k-norm attention; DeepSeek adds MLA, YaRN, an always-on shared expert, the
+  `first_k_dense_replace` dense prefix, and V2/V3 group gating. DeepSeek-V3's
+  absorbed-MLA checkpoint layout (and the RAM-blocked 671B model) is deferred
+  with a clear load-time message (see `docs/BACKLOG.md`).
+
 - **CFG-constrained decoding (Stage D)** (follow-up #9): a request can now
   constrain the output to a full parse of a context-free grammar, for shapes
   with unbounded balanced nesting that regex cannot express (recursive
@@ -152,6 +165,17 @@ reverse chronological order. Versioning follows
   `GET /api/ps` lists every resident model with its own `expires_at`,
   not just the active one. At `MAX_LOADED_MODELS=1` this matches the prior
   single-model behavior.
+
+### Removed
+
+- **The Python MoE sidecar bridge.** With every mixture-of-experts family now
+  native, the mlx-lm sidecar (`tools/moe_bridge.py`, `MoEEngine`, the
+  `PythonSidecar` plumbing, the `handleMoEChat` server path, and the SIGINT
+  teardown handler) is deleted, along with the `KRILL_NATIVE_MOE=0` opt-out it
+  backed. Inference is now fully Swift+MLX-native with no Python dependency. MoE
+  manifests route through the dense engine like any other native causal LM
+  (`ModelAdapter.chatRouting` no longer has a `mixtureOfExperts` case), and the
+  `.moe` family reports `productionNative`.
 
 ## [0.4.0] - 2026-05-28
 
