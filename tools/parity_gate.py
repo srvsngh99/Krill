@@ -215,6 +215,14 @@ class Gate:
             # tools[] must be accepted (no parse-time 400 rejection). With no
             # model loaded the request reaches the model gate (503); with a
             # model it returns a 200 chat completion (optionally tool_calls).
+            #
+            # When a model IS loaded and emits tool_calls, this asserts they
+            # are STRUCTURALLY well-formed (each call has a non-empty function
+            # name and a JSON-object `arguments` string) - not merely that the
+            # request was "not rejected". A model that declines to call (only
+            # `content`) still passes: tool *selection* quality is the job of
+            # the KrillLM-vs-Ollama gate in tools/tool_calling_benchmark.py
+            # (the hard >= assertion); this cell guards the response *shape*.
             if code == 400 and b"not supported" in raw:
                 return "FAIL", "tools rejected at parse time"
             if code == 503:
@@ -223,8 +231,24 @@ class Gate:
                 try:
                     j = json.loads(raw)
                     msg = j["choices"][0]["message"]
-                    if "tool_calls" in msg or "content" in msg:
-                        return "PASS", "accepted; well-formed chat completion"
+                    calls = msg.get("tool_calls")
+                    if calls:
+                        for c in calls:
+                            fn = c.get("function", {})
+                            if not fn.get("name"):
+                                return "FAIL", "tool_call missing function name"
+                            args = fn.get("arguments")
+                            # OpenAI shape: arguments is a JSON-object STRING.
+                            if not isinstance(args, str):
+                                return "FAIL", "tool_call arguments not a string"
+                            try:
+                                if not isinstance(json.loads(args), dict):
+                                    return "FAIL", "tool_call arguments not a JSON object"
+                            except Exception:  # noqa: BLE001
+                                return "FAIL", "tool_call arguments not valid JSON"
+                        return "PASS", f"well-formed tool_calls ({len(calls)})"
+                    if "content" in msg:
+                        return "PASS", "accepted; model answered without a tool call"
                 except Exception:  # noqa: BLE001
                     pass
                 return "FAIL", "200 but malformed completion"
