@@ -198,6 +198,25 @@ final class MoEFoundationTests: XCTestCase {
         }
     }
 
+    func testNativeDispatchSupportedForQwen2MoEByDefault() throws {
+        // Qwen 2 MoE now has a native runtime; the helper claims native
+        // support by default and the KRILL_NATIVE_MOE=0 opt-out routes it to
+        // the bridge for one transitional release.
+        let dir = try writeConfig([
+            "architectures": ["Qwen2MoeForCausalLM"],
+            "model_type": "qwen2_moe",
+        ])
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try withEnv("KRILL_NATIVE_MOE", nil) {
+            XCTAssertTrue(nativeMoEDispatchSupported(at: dir),
+                "Qwen 2 MoE native runtime is the default")
+        }
+        try withEnv("KRILL_NATIVE_MOE", "0") {
+            XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
+                "KRILL_NATIVE_MOE=0 opts Qwen 2 MoE out to the bridge")
+        }
+    }
+
     func testNativeDispatchSupportedForMixtralByDefault() throws {
         // Mixtral now has a native runtime, so the helper claims native
         // support by default; the KRILL_NATIVE_MOE=0 opt-out still routes
