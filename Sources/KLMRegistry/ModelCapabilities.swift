@@ -134,8 +134,8 @@ public enum ModelCapabilities {
             return .productionNative
         case .moe:
             // Family-level default is conservative: the `.moe` family
-            // spans both the native runtimes (Qwen 3 MoE + Mixtral,
-            // productionNative) and bridge-only members (Qwen2-MoE / OLMoE /
+            // spans both the native runtimes (Qwen 3 MoE + Mixtral +
+            // Qwen2-MoE, productionNative) and bridge-only members (OLMoE /
             // DeepSeek, compatibleFallback). The family alone cannot tell
             // them apart, so the family-only call reports the safe floor.
             // Use `supportTier(for:at:)` with an installed checkpoint to
