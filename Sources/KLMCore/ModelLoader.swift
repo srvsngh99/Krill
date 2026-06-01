@@ -205,24 +205,18 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
         // norm) + an `mlp` router and `gatherQuantizedMM` SwitchGLU; no
         // shared expert. Replaces the mlx-lm bridge for this family.
         return try loadOLMoE(configData: configData, directory: directory)
-    } else if arch.contains("deepseek") || modelType == "deepseek_v3" {
-        // Remaining MoE families run through `MoEEngine` (Python
-        // sidecar / mlx-lm), not the native causal-LM dispatcher.
-        // `loadModel` is the entry point for native Swift+MLX
-        // runtimes only. Refuse to instantiate these as a dense
-        // causal LM so callers that hit /api/generate or
-        // /v1/chat on a non-native MoE manifest get a clear
-        // redirect instead of a garbage forward pass through the
-        // dense text loader. Qwen 3 MoE and Mixtral are handled by
-        // the dedicated arms above; Qwen2-MoE / OLMoE / DeepSeek are
-        // native-port follow-ups.
-        throw ModelLoadError.unsupportedArchitecture(
-            "Mixture-of-experts models run through the MoE bridge "
-            + "(compatible_fallback tier). Use POST /api/chat or "
-            + "/v1/chat/completions - the server routes MoE manifests to "
-            + "MoEEngine. Native Swift+MLX router + expert dispatch landed "
-            + "for Qwen 3 MoE, Mixtral, Qwen2-MoE, and OLMoE; DeepSeek is a "
-            + "follow-up. Detected arch=\(arch), model_type=\(modelType).")
+    } else if arch.contains("deepseek") || modelType == "deepseek_v2"
+        || modelType == "deepseek_v3"
+    {
+        // DeepSeek-V2 / V2-Lite: native Swift+MLX runtime. MLA attention
+        // (low-rank Q/KV bottleneck, split rope/nope head dims) + YaRN RoPE +
+        // a `gatherQuantizedMM` SwitchGLU for the routed experts, an always-on
+        // shared expert, a dense-layer prefix (first_k_dense_replace), and
+        // softmax / group_limited_greedy gating. `loadDeepSeek` rejects the V3
+        // absorbed-MLA layout with a clear message (docs/BACKLOG.md); the V3
+        // `noaux_tc` gating is implemented in the shared gate. Replaces the
+        // mlx-lm bridge for this family.
+        return try loadDeepSeek(configData: configData, directory: directory)
     } else if arch.contains("llama") || modelType == "llama" {
         return try loadLlama(configData: configData, directory: directory)
     } else if arch.contains("qwen") || modelType.hasPrefix("qwen") {
@@ -744,6 +738,57 @@ private func loadOLMoE(configData: Data, directory: URL) throws -> LoadedModel {
         module: model,
         numLayers: config.numHiddenLayers,
         family: "moe",
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
+        multimodalForward: nil,
+        batchedDecodeForward: { tokens, caches, mask, rowOffsets in
+            model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
+        vocabSize: config.vocabSize
+    )
+}
+
+private func loadDeepSeek(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(DeepSeekConfig.self, from: configData)
+    if config.usesAbsorbedMLA {
+        // DeepSeek-V3 ships an absorbed MLA representation (embed_q /
+        // unembed_out per-head linears + a latent KV cache) distinct from the
+        // V2 kv_b_proj form this native runtime implements. Fail fast with a
+        // useful message rather than a cryptic strict-verify keyNotFound on
+        // `embed_q`. The native runtime serves DeepSeek-V2 / V2-Lite today;
+        // the V3 attention + real-checkpoint verification (RAM-blocked here)
+        // is a tracked follow-up (docs/BACKLOG.md).
+        throw ModelLoadError.unsupportedArchitecture(
+            "DeepSeek-V3 uses an absorbed Multi-head Latent Attention layout "
+            + "(embed_q / unembed_out) that the native runtime does not load yet; "
+            + "it serves DeepSeek-V2 / V2-Lite (MLA + YaRN + shared experts + "
+            + "group gating). V3 absorbed-MLA support is a tracked follow-up "
+            + "(see docs/BACKLOG.md) and the 671B V3 is RAM-blocked on this host. "
+            + "Detected model_type=\(config.modelType).")
+    }
+    let model = DeepSeekForCausalLM(config)
+    // mlx-community DeepSeek checkpoints ship the routed experts as stacked
+    // `mlp.switch_mlp.{gate_proj,up_proj,down_proj}.*` tensors (mlx-lm's
+    // sanitize stacks per-expert `mlp.experts.{e}.*` at convert time), and
+    // the MLA / shared-expert / dense Linears match by name. The MoE gate
+    // (`mlp.gate.weight` + `e_score_correction_bias`) is a raw parameter,
+    // not a Linear, so the quantize pass leaves it unquantized (matching
+    // mlx-lm's MoEGate). No key rewrite needed.
+    try loadWeights(
+        into: model, from: directory,
+        quantization: config.quantization,
+        strictVerify: true)
+
+    // The DeepSeek manifest family is `.deepseek` (dense chat routing), so
+    // return that family for the capability / tool-template lookup; the
+    // server reaches this loader through the dense engine, not the `.moe`
+    // bridge dispatch.
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "deepseek",
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
         prefillForward: { tokens, caches in
             model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)

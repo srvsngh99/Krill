@@ -230,54 +230,79 @@ final class MoELoaderRejectionTests: XCTestCase {
         }
     }
 
-    func testUnportedMoEFamiliesStillRouteToBridge() throws {
-        // DeepSeek is the last MoE family without a native runtime; it keeps
-        // the bridge fallback until its native port lands. This pins the
-        // contract so a native PR cannot silently drop the bridge rejection.
-        for (arch, modelType, slug) in [
-            ("DeepseekV3ForCausalLM", "deepseek_v3", "deepseek-still-bridge"),
-            ("DeepseekV2ForCausalLM", "deepseek_v2", "deepseekv2-still-bridge"),
-        ] {
-            let dir = try writeConfig([
-                "architectures": [arch],
-                "model_type": modelType,
-                "hidden_size": 2048,
-                "vocab_size": 151936,
-            ], dirSlug: slug)
-            defer { try? FileManager.default.removeItem(at: dir) }
+    private func deepSeekConfig(arch: String, modelType: String) -> [String: Any] {
+        [
+            "architectures": [arch],
+            "model_type": modelType,
+            "hidden_size": 256,
+            "intermediate_size": 512,
+            "moe_intermediate_size": 128,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            "vocab_size": 1024,
+            "kv_lora_rank": 128,
+            "qk_rope_head_dim": 32,
+            "qk_nope_head_dim": 64,
+            "v_head_dim": 64,
+            "n_routed_experts": 8,
+            "num_experts_per_tok": 2,
+            "first_k_dense_replace": 1,
+            "rope_scaling": [
+                "type": "yarn", "factor": 4.0, "beta_fast": 32, "beta_slow": 1,
+                "mscale": 1.0, "mscale_all_dim": 0.0,
+                "original_max_position_embeddings": 256,
+            ],
+        ]
+    }
 
-            XCTAssertThrowsError(try loadModel(from: dir)) { error in
-                guard let modelError = error as? ModelLoadError,
-                      case .unsupportedArchitecture(let msg) = modelError else {
-                    XCTFail("Expected unsupportedArchitecture for \(modelType), got \(error)")
-                    return
-                }
-                XCTAssertTrue(msg.contains("MoE bridge"),
-                    "\(modelType) must still route through the MoE bridge (no native runtime yet)")
+    /// DeepSeek-V2 / V2-Lite has a native runtime. It is the `.deepseek` family
+    /// (dense chat routing), so the server reaches it via the dense engine ->
+    /// `loadModel` -> `loadDeepSeek`. With an empty config dir the native arm
+    /// fails specifically with `WeightLoadError.noSafetensorsFiles`, proving it
+    /// routed into the native loader rather than the old bridge rejection.
+    func testDeepSeekV2NativeReachesNativeArm() throws {
+        let dir = try writeConfig(
+            deepSeekConfig(arch: "DeepseekV2ForCausalLM", modelType: "deepseek_v2"),
+            dirSlug: "deepseekv2-native")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        do {
+            _ = try loadModel(from: dir)
+            XCTFail("Expected WeightLoadError.noSafetensorsFiles for deepseek_v2")
+        } catch let error as WeightLoadError {
+            guard case .noSafetensorsFiles = error else {
+                XCTFail("Expected noSafetensorsFiles, got \(error)")
+                return
+            }
+        } catch let error as ModelLoadError {
+            if case .unsupportedArchitecture(let msg) = error {
+                XCTFail("DeepSeek-V2 native arm must not throw unsupportedArchitecture; got: \(msg)")
+            } else {
+                XCTFail("Unexpected ModelLoadError: \(error)")
             }
         }
     }
 
-    func testDeepSeekV3IsRejectedWithMoEMessage() throws {
-        // DeepSeek V3 was migrated into the unified MoE
-        // rejection in WS6 foundation; the WS6 runtime PR keeps
-        // it on the same redirect path.
-        let dir = try writeConfig([
-            "architectures": ["DeepseekV3ForCausalLM"],
-            "model_type": "deepseek_v3",
-            "hidden_size": 7168,
-            "vocab_size": 129280,
-        ], dirSlug: "deepseekv3")
+    /// DeepSeek-V3 uses an absorbed MLA layout the native runtime does not load
+    /// yet; it must fail fast with a clear message (not a cryptic strict-verify
+    /// error), naming the V2/V2-Lite native support and the backlog follow-up.
+    func testDeepSeekV3GivesClearAbsorbedMLAError() throws {
+        let dir = try writeConfig(
+            deepSeekConfig(arch: "DeepseekV3ForCausalLM", modelType: "deepseek_v3"),
+            dirSlug: "deepseekv3-absorbed")
         defer { try? FileManager.default.removeItem(at: dir) }
 
         XCTAssertThrowsError(try loadModel(from: dir)) { error in
             guard let modelError = error as? ModelLoadError,
                   case .unsupportedArchitecture(let msg) = modelError else {
-                XCTFail("Expected unsupportedArchitecture, got \(error)")
+                XCTFail("Expected unsupportedArchitecture for deepseek_v3, got \(error)")
                 return
             }
-            XCTAssertTrue(msg.contains("MoE bridge"),
-                "DeepSeek V3 should route through the unified MoE bridge redirect")
+            XCTAssertTrue(msg.contains("absorbed"),
+                "V3 rejection must explain the absorbed-MLA limitation")
+            XCTAssertTrue(msg.contains("V2-Lite") || msg.contains("V2 / V2-Lite"),
+                "V3 rejection must point at the native V2/V2-Lite support")
         }
     }
 

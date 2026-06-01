@@ -35,3 +35,34 @@ be gated by a **bit-exact** logit/output comparison against the pre-refactor mod
 sidecar families) over consolidation. Copy-paste keeps each family PR self-contained and
 zero-risk to the shipped Qwen3/Gemma4 paths. Consolidate once all families have landed
 and their numerics are pinned by parity tests.
+
+---
+
+## DeepSeek-V3 absorbed-MLA attention + real-checkpoint verification
+
+**Status:** deferred (RAM-blocked here; distinct attention representation).
+
+**Context.** The native DeepSeek runtime (`Sources/KLMCore/DeepSeekModel.swift`) serves
+**DeepSeek-V2 / V2-Lite** end-to-end: MLA with the standard `kv_b_proj` decompression,
+YaRN RoPE, the always-on shared expert, the `first_k_dense_replace` dense prefix, and the
+V2 softmax / `group_limited_greedy` router. This is numerically verified against mlx-lm
+(`DeepSeekParityTests`, V2 fixture: argmax + cosine > 0.9999 on identical 4-bit weights).
+
+The **V3 router gating** (`noaux_tc`: sigmoid scores + `e_score_correction_bias` for
+selection + group top-2-sum + `norm_topk_prob`) is implemented in the shared
+`DeepSeekMoEGate` and structurally tested.
+
+**What's left.** mlx-lm's `deepseek_v3` uses an *absorbed* MLA representation that is
+structurally different from V2: per-head `MultiLinear` `embed_q` / `unembed_out` weights
+(instead of `kv_b_proj`), a **latent KV cache** (it caches `kv_latent` + `k_pe`, not full
+keys/values), and a split attention with separate `pe_scores` plus distinct L==1 (decode)
+vs L>1 (prefill) code paths. A real mlx-community DeepSeek-V3 checkpoint ships
+`embed_q`/`unembed_out`, so the V2 loader rejects it with a clear message
+(`loadDeepSeek` -> `usesAbsorbedMLA`). Implementing it requires a `MultiLinear` (per-head)
+layer, a latent-KV cache variant (the current `KVCache` stores `[B, H, L, headDim]`
+keys/values), and the absorbed forward with the L==1 / L>1 branches and manual rope-pe
+attention.
+
+It is verifiable against mlx-lm on a tiny synthetic V3 fixture
+(`tools/verify_deepseek_parity.py <dir> v3`), but the 671B real V3 is RAM-blocked on this
+24 GB host - run the real-checkpoint parity on a bigger box.
