@@ -187,7 +187,9 @@ final class MoEFoundationTests: XCTestCase {
             XCTAssertEqual(
                 ModelCapabilities.supportTier(for: .moe, at: deepseek),
                 .compatibleFallback,
-                "A not-yet-ported MoE family (DeepSeek) stays on the bridge floor")
+                "A checkpoint the .moe dispatch helper does not claim (DeepSeek "
+                + "routes via its own .deepseek family / the dense engine) stays "
+                + "on the .moe family floor")
         }
         try withEnv("KRILL_NATIVE_MOE", "0") {
             XCTAssertEqual(
@@ -257,7 +259,12 @@ final class MoEFoundationTests: XCTestCase {
         }
     }
 
-    func testNativeDispatchNotSupportedForDeepSeek() throws {
+    func testNativeMoEDispatchDoesNotClaimDeepSeek() throws {
+        // DeepSeek has a native runtime, but it is the `.deepseek` family
+        // (dense chat routing), NOT a `.moe`-family member. The `.moe`
+        // dispatch helper is only consulted for `.moe` manifests, so it must
+        // return false for a DeepSeek config - DeepSeek reaches its native
+        // loader through the dense engine, not the MoE bridge dispatch.
         let dir = try writeConfig([
             "architectures": ["DeepseekV3ForCausalLM"],
             "model_type": "deepseek_v3",
@@ -265,7 +272,8 @@ final class MoEFoundationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
         try withEnv("KRILL_NATIVE_MOE", "1") {
             XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
-                "DeepSeek has no native runtime yet; must use the bridge")
+                "The .moe dispatch helper must not claim DeepSeek (it is the "
+                + ".deepseek family, routed via the dense engine)")
         }
     }
 
