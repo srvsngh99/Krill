@@ -185,9 +185,16 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
                 + "Detected arch=\(arch), model_type=\(modelType).")
         }
         return try loadQwen3MoE(configData: configData, directory: directory)
-    } else if arch.contains("mixtral") || arch.contains("qwen2moe")
+    } else if arch.contains("mixtral") || modelType == "mixtral" {
+        // Mixtral: native Swift+MLX sparse-MoE runtime. Mistral attention
+        // + a `block_sparse_moe` router and `gatherQuantizedMM` SwitchGLU
+        // expert dispatch (`MixtralSwitchGLU`), mirroring the Qwen 3 MoE
+        // path (PR #85/#87). Replaces the legacy mlx-lm MoE bridge for
+        // this family.
+        return try loadMixtral(configData: configData, directory: directory)
+    } else if arch.contains("qwen2moe")
         || arch.contains("olmoe")
-        || modelType == "mixtral" || modelType == "qwen2_moe"
+        || modelType == "qwen2_moe"
         || modelType == "olmoe"
         || arch.contains("deepseek") || modelType == "deepseek_v3"
     {
@@ -196,17 +203,18 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
         // `loadModel` is the entry point for native Swift+MLX
         // runtimes only. Refuse to instantiate these as a dense
         // causal LM so callers that hit /api/generate or
-        // /v1/chat on a non-Qwen3-MoE MoE manifest get a clear
+        // /v1/chat on a non-native MoE manifest get a clear
         // redirect instead of a garbage forward pass through the
-        // dense text loader. Qwen 3 MoE is handled by the
-        // dedicated arm above.
+        // dense text loader. Qwen 3 MoE and Mixtral are handled by
+        // the dedicated arms above; Qwen2-MoE / OLMoE / DeepSeek are
+        // native-port follow-ups.
         throw ModelLoadError.unsupportedArchitecture(
             "Mixture-of-experts models run through the MoE bridge "
             + "(compatible_fallback tier). Use POST /api/chat or "
             + "/v1/chat/completions - the server routes MoE manifests to "
             + "MoEEngine. Native Swift+MLX router + expert dispatch landed "
-            + "for Qwen 3 MoE in WS6; other MoE families are follow-ups. "
-            + "Detected arch=\(arch), model_type=\(modelType).")
+            + "for Qwen 3 MoE and Mixtral; Qwen2-MoE / OLMoE / DeepSeek are "
+            + "follow-ups. Detected arch=\(arch), model_type=\(modelType).")
     } else if arch.contains("llama") || modelType == "llama" {
         return try loadLlama(configData: configData, directory: directory)
     } else if arch.contains("qwen") || modelType.hasPrefix("qwen") {
@@ -638,6 +646,38 @@ private func loadQwen3MoE(configData: Data, directory: URL) throws -> LoadedMode
         // Batched ragged-decode (Stage C3): attention is the proven
         // QwenAttention per-row RoPE path and the sparse MoE MLP is N-parametric
         // (same dispatch as prefill, at N=R), so batching reuses both unchanged.
+        batchedDecodeForward: { tokens, caches, mask, rowOffsets in
+            model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
+        vocabSize: config.vocabSize
+    )
+}
+
+private func loadMixtral(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(MixtralConfig.self, from: configData)
+    let model = MixtralForCausalLM(config)
+    // No key rewrite: mlx-community Mixtral checkpoints ship their experts
+    // as stacked `block_sparse_moe.switch_mlp.{gate_proj,up_proj,down_proj}.*`
+    // tensors (the original HF `block_sparse_moe.experts.{e}.w1/w2/w3` are
+    // sanitized into that layout at convert time), and the module hierarchy
+    // mirrors it directly via `MixtralSparseMLP.switchMLP`. The router
+    // `block_sparse_moe.gate` stays a `Linear` and is quantized by
+    // `loadWeights`' quantize pass; the switched linears are not `Linear`,
+    // so that pass skips them and they load their packed parameters directly.
+    try loadWeights(
+        into: model, from: directory,
+        quantization: config.quantization,
+        strictVerify: true)
+
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "moe",
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
+        multimodalForward: nil,
         batchedDecodeForward: { tokens, caches, mask, rowOffsets in
             model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
         },

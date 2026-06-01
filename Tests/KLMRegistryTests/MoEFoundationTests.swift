@@ -93,8 +93,9 @@ final class MoEFoundationTests: XCTestCase {
     /// Swift+MLX runtime or must use the Python sidecar bridge.
     /// The server's MoE dispatch uses this; the tests pin the
     /// contract so the bridge-fallback path cannot silently take
-    /// over for Qwen 3 MoE, and the native path cannot silently
-    /// claim Mixtral.
+    /// over for the native families (Qwen 3 MoE, Mixtral), and the
+    /// native path cannot silently claim a not-yet-ported family
+    /// (Qwen2-MoE / OLMoE / DeepSeek).
     private func writeConfig(_ json: [String: Any]) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("krillm-moe-native-\(UUID().uuidString)")
@@ -170,11 +171,11 @@ final class MoEFoundationTests: XCTestCase {
             "model_type": "qwen3_moe",
         ])
         defer { try? FileManager.default.removeItem(at: qwen3) }
-        let mixtral = try writeConfig([
-            "architectures": ["MixtralForCausalLM"],
-            "model_type": "mixtral",
+        let olmoe = try writeConfig([
+            "architectures": ["OlmoeForCausalLM"],
+            "model_type": "olmoe",
         ])
-        defer { try? FileManager.default.removeItem(at: mixtral) }
+        defer { try? FileManager.default.removeItem(at: olmoe) }
 
         XCTAssertEqual(ModelCapabilities.supportTier(for: .moe), .compatibleFallback)
         try withEnv("KRILL_NATIVE_MOE", nil) {
@@ -184,9 +185,9 @@ final class MoEFoundationTests: XCTestCase {
                 "A Qwen 3 MoE checkpoint on the native default must "
                 + "report productionNative")
             XCTAssertEqual(
-                ModelCapabilities.supportTier(for: .moe, at: mixtral),
+                ModelCapabilities.supportTier(for: .moe, at: olmoe),
                 .compatibleFallback,
-                "A non-native MoE family stays on the bridge floor")
+                "A not-yet-ported MoE family (OLMoE) stays on the bridge floor")
         }
         try withEnv("KRILL_NATIVE_MOE", "0") {
             XCTAssertEqual(
@@ -197,16 +198,26 @@ final class MoEFoundationTests: XCTestCase {
         }
     }
 
-    func testNativeDispatchNotSupportedForMixtral() throws {
+    func testNativeDispatchSupportedForMixtralByDefault() throws {
+        // Mixtral now has a native runtime, so the helper claims native
+        // support by default; the KRILL_NATIVE_MOE=0 opt-out still routes
+        // it through the bridge for one transitional release.
         let dir = try writeConfig([
             "architectures": ["MixtralForCausalLM"],
             "model_type": "mixtral",
         ])
         defer { try? FileManager.default.removeItem(at: dir) }
+        try withEnv("KRILL_NATIVE_MOE", nil) {
+            XCTAssertTrue(nativeMoEDispatchSupported(at: dir),
+                "Mixtral native runtime is the default")
+        }
         try withEnv("KRILL_NATIVE_MOE", "1") {
+            XCTAssertTrue(nativeMoEDispatchSupported(at: dir),
+                "KRILL_NATIVE_MOE=1 must also claim native support for Mixtral")
+        }
+        try withEnv("KRILL_NATIVE_MOE", "0") {
             XCTAssertFalse(nativeMoEDispatchSupported(at: dir),
-                "Mixtral has no native runtime yet; must use the bridge "
-                + "even with the opt-in flag set")
+                "KRILL_NATIVE_MOE=0 opts Mixtral out to the bridge")
         }
     }
 

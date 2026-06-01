@@ -134,13 +134,13 @@ public enum ModelCapabilities {
             return .productionNative
         case .moe:
             // Family-level default is conservative: the `.moe` family
-            // spans both the native Qwen 3 MoE runtime (productionNative)
-            // and bridge-only members (Mixtral / Qwen2-MoE / OLMoE /
-            // DeepSeek-V3, compatibleFallback). The family alone cannot
-            // tell them apart, so the family-only call reports the safe
-            // floor. Use `supportTier(for:at:)` with an installed
-            // checkpoint to promote a Qwen 3 MoE model to
-            // productionNative once the native runtime serves it.
+            // spans both the native runtimes (Qwen 3 MoE + Mixtral,
+            // productionNative) and bridge-only members (Qwen2-MoE / OLMoE /
+            // DeepSeek, compatibleFallback). The family alone cannot tell
+            // them apart, so the family-only call reports the safe floor.
+            // Use `supportTier(for:at:)` with an installed checkpoint to
+            // promote a native MoE model to productionNative once the
+            // native runtime serves it.
             return .compatibleFallback
         case .reranker:
             // WS7 foundation: same shape as WS5/WS6. Family
@@ -189,24 +189,23 @@ public enum ModelCapabilities {
 /// MoE family has a native Swift+MLX runtime in this build, or
 /// must route through the Python sidecar bridge.
 ///
-/// The native MoE runtime currently supports Qwen 3 MoE
-/// (`Qwen3MoeForCausalLM` / `model_type: qwen3_moe`). Mixtral,
-/// Qwen2-MoE, OLMoE, and DeepSeek-V3 remain on the bridge until
-/// their native ports land in follow-up WS6 PRs.
+/// The native MoE runtime supports Qwen 3 MoE (`Qwen3MoeForCausalLM` /
+/// `model_type: qwen3_moe`) and Mixtral (`MixtralForCausalLM` /
+/// `model_type: mixtral`). Qwen2-MoE, OLMoE, and DeepSeek remain on the
+/// bridge until their native ports land in follow-up PRs.
 ///
-/// The native runtime is now the DEFAULT for Qwen 3 MoE. The forward
-/// dispatches the top-K experts in a single `gatherQuantizedMM` per
-/// projection (`Qwen3SwitchGLU`), 2.7x faster on decode than the old
-/// scatter path (PR #85), and the #87 sort path recovers long-prompt
-/// prefill (the precondition the opt-in gate waited on). `KRILL_NATIVE_MOE=0`
-/// is the opt-out that forces the legacy mlx-lm bridge for one release.
+/// Both native families dispatch the top-K experts in a single
+/// `gatherQuantizedMM` per projection (the SwitchGLU path, 2.7x faster on
+/// decode than the old scatter path, PR #85), with the #87 sort path
+/// recovering long-prompt prefill. The native runtime is the DEFAULT;
+/// `KRILL_NATIVE_MOE=0` is the opt-out that forces the legacy mlx-lm bridge
+/// for one transitional release.
 ///
-/// Returns false (route through bridge) when `KRILL_NATIVE_MOE=0`, when
-/// the checkpoint is a non-Qwen3 MoE family (Mixtral / Qwen2-MoE /
-/// OLMoE / DeepSeek-V3 have no native runtime yet), or when the
-/// directory has no readable config.json - the native loader would
-/// fail anyway, and the bridge handler emits a clearer error for that
-/// case.
+/// Returns false (route through bridge) when `KRILL_NATIVE_MOE=0`, when the
+/// checkpoint is a not-yet-ported MoE family (Qwen2-MoE / OLMoE / DeepSeek
+/// have no native runtime yet), or when the directory has no readable
+/// config.json - the native loader would fail anyway, and the bridge
+/// handler emits a clearer error for that case.
 public func nativeMoEDispatchSupported(at directory: URL) -> Bool {
     guard ProcessInfo.processInfo.environment["KRILL_NATIVE_MOE"] != "0" else {
         return false
@@ -218,11 +217,12 @@ public func nativeMoEDispatchSupported(at directory: URL) -> Bool {
         return false
     }
     let modelType = (json["model_type"] as? String)?.lowercased() ?? ""
-    if modelType == "qwen3_moe" { return true }
+    if modelType == "qwen3_moe" || modelType == "mixtral" { return true }
     let architectures = (json["architectures"] as? [String]) ?? []
     for arch in architectures {
         let a = arch.lowercased()
         if a.contains("qwen3moe") || a.contains("qwen3_moe") { return true }
+        if a.contains("mixtral") { return true }
     }
     return false
 }

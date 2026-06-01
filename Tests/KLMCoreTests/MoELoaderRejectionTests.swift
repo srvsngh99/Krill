@@ -1,10 +1,12 @@
 import XCTest
 @testable import KLMCore
 
-/// WS6 foundation: the loader recognizes MoE architectures AND
-/// refuses to instantiate them (no silent fallback to a dense text
-/// loader that would crash on router/expert keys). Tests pin both
-/// halves of the contract for Mixtral, Qwen 3 MoE, and DeepSeek-V3.
+/// WS6 foundation: the loader recognizes MoE architectures AND either
+/// routes them to a native Swift+MLX runtime (Qwen 3 MoE, Mixtral) or
+/// refuses to instantiate the not-yet-ported families (Qwen2-MoE / OLMoE /
+/// DeepSeek) instead of silently falling back to a dense text loader that
+/// would crash on router/expert keys. Tests pin both halves of the
+/// contract.
 final class MoELoaderRejectionTests: XCTestCase {
 
     private func writeConfig(_ json: [String: Any], dirSlug: String) throws -> URL {
@@ -16,29 +18,41 @@ final class MoELoaderRejectionTests: XCTestCase {
         return dir
     }
 
-    func testMixtralIsRejectedWithDocumentedError() throws {
+    /// Mixtral now has a native runtime (`loadMixtral`), so it must reach
+    /// the native arm rather than the bridge rejection. With an empty config
+    /// dir (no safetensors) the native arm fails specifically with
+    /// `WeightLoadError.noSafetensorsFiles` -- proof it routed past the
+    /// rejection and into the native loader.
+    func testMixtralNativeReachesNativeArm() throws {
         let dir = try writeConfig([
             "architectures": ["MixtralForCausalLM"],
             "model_type": "mixtral",
             "hidden_size": 4096,
+            "intermediate_size": 14336,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+            "num_hidden_layers": 32,
             "vocab_size": 32000,
             "num_local_experts": 8,
             "num_experts_per_tok": 2,
-        ], dirSlug: "mixtral")
+        ], dirSlug: "mixtral-native")
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        XCTAssertThrowsError(try loadModel(from: dir)) { error in
-            guard let modelError = error as? ModelLoadError,
-                  case .unsupportedArchitecture(let msg) = modelError else {
-                XCTFail("Expected unsupportedArchitecture, got \(error)")
+        do {
+            _ = try loadModel(from: dir)
+            XCTFail("Expected WeightLoadError.noSafetensorsFiles for an empty config dir")
+        } catch let error as WeightLoadError {
+            guard case .noSafetensorsFiles = error else {
+                XCTFail("Expected noSafetensorsFiles, got \(error)")
                 return
             }
-            XCTAssertTrue(msg.contains("MoE bridge"),
-                "Error must redirect users to the MoE bridge runtime")
-            XCTAssertTrue(msg.lowercased().contains("mixture-of-experts"),
-                "Error must name the family for users debugging the rejection")
-            XCTAssertTrue(msg.contains("/api/chat") || msg.contains("/v1/chat"),
-                "Error must point at the chat-completion endpoints that handle MoE routing")
+            // OK: reached the native arm, failed at weight load.
+        } catch let error as ModelLoadError {
+            if case .unsupportedArchitecture(let msg) = error {
+                XCTFail("Mixtral native arm must not throw unsupportedArchitecture; got: \(msg)")
+            } else {
+                XCTFail("Unexpected ModelLoadError: \(error)")
+            }
         }
     }
 
@@ -145,30 +159,34 @@ final class MoELoaderRejectionTests: XCTestCase {
         }
     }
 
-    func testMixtralStillRoutesToBridge() throws {
-        // Mixtral (and other non-Qwen3 MoE families) keeps the
-        // bridge fallback until its native port lands. This pins
-        // the contract so the WS6 native PR cannot silently drop
-        // the bridge rejection for unmigrated MoE families.
-        let dir = try writeConfig([
-            "architectures": ["MixtralForCausalLM"],
-            "model_type": "mixtral",
-            "hidden_size": 4096,
-            "vocab_size": 32000,
-            "num_local_experts": 8,
-            "num_experts_per_tok": 2,
-        ], dirSlug: "mixtral-still-bridge")
-        defer { try? FileManager.default.removeItem(at: dir) }
+    func testUnportedMoEFamiliesStillRouteToBridge() throws {
+        // The not-yet-ported MoE families (Qwen2-MoE / OLMoE) keep the
+        // bridge fallback until their native ports land. This pins the
+        // contract so a native PR cannot silently drop the bridge
+        // rejection for an unmigrated family.
+        for (arch, modelType, slug) in [
+            ("Qwen2MoeForCausalLM", "qwen2_moe", "qwen2moe-still-bridge"),
+            ("OlmoeForCausalLM", "olmoe", "olmoe-still-bridge"),
+        ] {
+            let dir = try writeConfig([
+                "architectures": [arch],
+                "model_type": modelType,
+                "hidden_size": 2048,
+                "vocab_size": 151936,
+                "num_experts": 60,
+                "num_experts_per_tok": 4,
+            ], dirSlug: slug)
+            defer { try? FileManager.default.removeItem(at: dir) }
 
-        XCTAssertThrowsError(try loadModel(from: dir)) { error in
-            guard let modelError = error as? ModelLoadError,
-                  case .unsupportedArchitecture(let msg) = modelError else {
-                XCTFail("Expected unsupportedArchitecture, got \(error)")
-                return
+            XCTAssertThrowsError(try loadModel(from: dir)) { error in
+                guard let modelError = error as? ModelLoadError,
+                      case .unsupportedArchitecture(let msg) = modelError else {
+                    XCTFail("Expected unsupportedArchitecture for \(modelType), got \(error)")
+                    return
+                }
+                XCTAssertTrue(msg.contains("MoE bridge"),
+                    "\(modelType) must still route through the MoE bridge (no native runtime yet)")
             }
-            XCTAssertTrue(msg.contains("MoE bridge"),
-                "Mixtral must still route through the MoE bridge "
-                + "(no native runtime yet)")
         }
     }
 
