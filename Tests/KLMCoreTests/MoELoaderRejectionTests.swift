@@ -80,81 +80,31 @@ final class MoELoaderRejectionTests: XCTestCase {
         ], dirSlug: dirSlug)
     }
 
-    /// Scoped env-var setter so the test process restores the prior
-    /// value (or unset) after the assertion block, even on failure.
-    private func withEnv(_ key: String, _ value: String?, _ body: () throws -> Void) rethrows {
-        let prior = ProcessInfo.processInfo.environment[key]
-        if let value {
-            setenv(key, value, 1)
-        } else {
-            unsetenv(key)
-        }
-        defer {
-            if let prior {
-                setenv(key, prior, 1)
+    func testQwen3MoEReachesNativeArm() throws {
+        // Qwen 3 MoE is native and is the only path: the mlx-lm sidecar bridge
+        // and its `KRILL_NATIVE_MOE=0` opt-out were deleted. With an empty
+        // config dir the loader fails specifically with
+        // `WeightLoadError.noSafetensorsFiles`, proving it reached the native
+        // arm. The specific error type discriminates "reached native arm and
+        // failed at weight load" from an unrelated trap.
+        let dir = try writeQwen3MoEConfig(dirSlug: "qwen3moe-native")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        do {
+            _ = try loadModel(from: dir)
+            XCTFail("Expected WeightLoadError.noSafetensorsFiles "
+                + "for an empty config dir on the native arm")
+        } catch let error as WeightLoadError {
+            guard case .noSafetensorsFiles = error else {
+                XCTFail("Expected noSafetensorsFiles, got \(error)")
+                return
+            }
+        } catch let error as ModelLoadError {
+            if case .unsupportedArchitecture(let msg) = error {
+                XCTFail("Qwen 3 MoE native arm must not throw "
+                    + "unsupportedArchitecture; got: \(msg)")
             } else {
-                unsetenv(key)
-            }
-        }
-        try body()
-    }
-
-    func testQwen3MoENativeIsTheDefault() throws {
-        // Native is now the default: with KRILL_NATIVE_MOE unset (and
-        // also when explicitly "1"), the loader takes the native arm.
-        // With an empty config dir (no safetensors) the failure is
-        // specifically `WeightLoadError.noSafetensorsFiles`, which proves
-        // the family routed past the bridge rejection and into the native
-        // loader. Asserting the SPECIFIC error type is what discriminates
-        // "reached native arm and failed there" from "got an unrelated
-        // runtime trap that the test would have swallowed".
-        let dir = try writeQwen3MoEConfig(dirSlug: "qwen3moe-default-native")
-        defer { try? FileManager.default.removeItem(at: dir) }
-
-        func assertReachesNativeArm() throws {
-            do {
-                _ = try loadModel(from: dir)
-                XCTFail("Expected WeightLoadError.noSafetensorsFiles "
-                    + "for an empty config dir on the native arm")
-            } catch let error as WeightLoadError {
-                if case .noSafetensorsFiles = error {
-                    // OK: reached the native arm, failed at weight load.
-                } else {
-                    XCTFail("Expected noSafetensorsFiles, got \(error)")
-                }
-            } catch let error as ModelLoadError {
-                if case .unsupportedArchitecture(let msg) = error {
-                    XCTFail("Native arm must not throw "
-                        + "unsupportedArchitecture by default; got: \(msg)")
-                } else {
-                    XCTFail("Unexpected ModelLoadError: \(error)")
-                }
-            }
-        }
-
-        try withEnv("KRILL_NATIVE_MOE", nil) { try assertReachesNativeArm() }
-        try withEnv("KRILL_NATIVE_MOE", "1") { try assertReachesNativeArm() }
-    }
-
-    func testQwen3MoEOptOutRoutesToBridge() throws {
-        // KRILL_NATIVE_MOE=0 is the opt-out: the native arm refuses
-        // and emits the documented redirect to the legacy bridge. Pins
-        // the opt-out contract so the env-gate cannot silently drop it.
-        let dir = try writeQwen3MoEConfig(dirSlug: "qwen3moe-optout")
-        defer { try? FileManager.default.removeItem(at: dir) }
-
-        try withEnv("KRILL_NATIVE_MOE", "0") {
-            XCTAssertThrowsError(try loadModel(from: dir)) { error in
-                guard let modelError = error as? ModelLoadError,
-                      case .unsupportedArchitecture(let msg) = modelError else {
-                    XCTFail("Expected unsupportedArchitecture, got \(error)")
-                    return
-                }
-                XCTAssertTrue(msg.contains("KRILL_NATIVE_MOE"),
-                    "Opt-out rejection must name the env var so users "
-                    + "know how to restore the native default")
-                XCTAssertTrue(msg.contains("MoE bridge") || msg.contains("MoEEngine"),
-                    "Opt-out rejection must redirect to the bridge")
+                XCTFail("Unexpected ModelLoadError: \(error)")
             }
         }
     }
