@@ -159,22 +159,59 @@ final class MoELoaderRejectionTests: XCTestCase {
         }
     }
 
+    /// Qwen 2 MoE now has a native runtime; like Mixtral it must reach the
+    /// native arm and fail at weight load (empty config dir) rather than at
+    /// the bridge rejection.
+    func testQwen2MoENativeReachesNativeArm() throws {
+        let dir = try writeConfig([
+            "architectures": ["Qwen2MoeForCausalLM"],
+            "model_type": "qwen2_moe",
+            "hidden_size": 2048,
+            "intermediate_size": 5632,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 16,
+            "num_hidden_layers": 24,
+            "vocab_size": 151936,
+            "num_experts": 60,
+            "num_experts_per_tok": 4,
+            "moe_intermediate_size": 1408,
+            "shared_expert_intermediate_size": 5632,
+        ], dirSlug: "qwen2moe-native")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        do {
+            _ = try loadModel(from: dir)
+            XCTFail("Expected WeightLoadError.noSafetensorsFiles for an empty config dir")
+        } catch let error as WeightLoadError {
+            guard case .noSafetensorsFiles = error else {
+                XCTFail("Expected noSafetensorsFiles, got \(error)")
+                return
+            }
+        } catch let error as ModelLoadError {
+            if case .unsupportedArchitecture(let msg) = error {
+                XCTFail("Qwen2-MoE native arm must not throw unsupportedArchitecture; got: \(msg)")
+            } else {
+                XCTFail("Unexpected ModelLoadError: \(error)")
+            }
+        }
+    }
+
     func testUnportedMoEFamiliesStillRouteToBridge() throws {
-        // The not-yet-ported MoE families (Qwen2-MoE / OLMoE) keep the
-        // bridge fallback until their native ports land. This pins the
-        // contract so a native PR cannot silently drop the bridge
-        // rejection for an unmigrated family.
+        // The not-yet-ported MoE families (OLMoE / DeepSeek) keep the bridge
+        // fallback until their native ports land. This pins the contract so a
+        // native PR cannot silently drop the bridge rejection for an
+        // unmigrated family.
         for (arch, modelType, slug) in [
-            ("Qwen2MoeForCausalLM", "qwen2_moe", "qwen2moe-still-bridge"),
             ("OlmoeForCausalLM", "olmoe", "olmoe-still-bridge"),
+            ("DeepseekV3ForCausalLM", "deepseek_v3", "deepseek-still-bridge"),
         ] {
             let dir = try writeConfig([
                 "architectures": [arch],
                 "model_type": modelType,
                 "hidden_size": 2048,
                 "vocab_size": 151936,
-                "num_experts": 60,
-                "num_experts_per_tok": 4,
+                "num_experts": 64,
+                "num_experts_per_tok": 8,
             ], dirSlug: slug)
             defer { try? FileManager.default.removeItem(at: dir) }
 

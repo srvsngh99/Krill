@@ -134,8 +134,8 @@ public enum ModelCapabilities {
             return .productionNative
         case .moe:
             // Family-level default is conservative: the `.moe` family
-            // spans both the native runtimes (Qwen 3 MoE + Mixtral,
-            // productionNative) and bridge-only members (Qwen2-MoE / OLMoE /
+            // spans both the native runtimes (Qwen 3 MoE + Mixtral +
+            // Qwen2-MoE, productionNative) and bridge-only members (OLMoE /
             // DeepSeek, compatibleFallback). The family alone cannot tell
             // them apart, so the family-only call reports the safe floor.
             // Use `supportTier(for:at:)` with an installed checkpoint to
@@ -189,10 +189,10 @@ public enum ModelCapabilities {
 /// MoE family has a native Swift+MLX runtime in this build, or
 /// must route through the Python sidecar bridge.
 ///
-/// The native MoE runtime supports Qwen 3 MoE (`Qwen3MoeForCausalLM` /
-/// `model_type: qwen3_moe`) and Mixtral (`MixtralForCausalLM` /
-/// `model_type: mixtral`). Qwen2-MoE, OLMoE, and DeepSeek remain on the
-/// bridge until their native ports land in follow-up PRs.
+/// The native MoE runtime supports Qwen 3 MoE (`Qwen3MoeForCausalLM`),
+/// Mixtral (`MixtralForCausalLM`), and Qwen 2 MoE (`Qwen2MoeForCausalLM` /
+/// `model_type: qwen2_moe`). OLMoE and DeepSeek remain on the bridge until
+/// their native ports land in follow-up PRs.
 ///
 /// Both native families dispatch the top-K experts in a single
 /// `gatherQuantizedMM` per projection (the SwitchGLU path, 2.7x faster on
@@ -217,12 +217,15 @@ public func nativeMoEDispatchSupported(at directory: URL) -> Bool {
         return false
     }
     let modelType = (json["model_type"] as? String)?.lowercased() ?? ""
-    if modelType == "qwen3_moe" || modelType == "mixtral" { return true }
+    if modelType == "qwen3_moe" || modelType == "mixtral" || modelType == "qwen2_moe" {
+        return true
+    }
     let architectures = (json["architectures"] as? [String]) ?? []
     for arch in architectures {
         let a = arch.lowercased()
         if a.contains("qwen3moe") || a.contains("qwen3_moe") { return true }
         if a.contains("mixtral") { return true }
+        if a.contains("qwen2moe") { return true }
     }
     return false
 }

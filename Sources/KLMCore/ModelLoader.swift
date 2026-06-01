@@ -192,9 +192,14 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
         // path (PR #85/#87). Replaces the legacy mlx-lm MoE bridge for
         // this family.
         return try loadMixtral(configData: configData, directory: directory)
-    } else if arch.contains("qwen2moe")
-        || arch.contains("olmoe")
-        || modelType == "qwen2_moe"
+    } else if arch.contains("qwen2moe") || modelType == "qwen2_moe" {
+        // Qwen 2 MoE: native Swift+MLX sparse-MoE runtime. Dense Qwen 2
+        // attention (QKV bias, no q/k-norm) + a `mlp` router, a
+        // `gatherQuantizedMM` SwitchGLU for the routed experts, and an
+        // always-on sigmoid-gated shared expert. Replaces the mlx-lm bridge
+        // for this family.
+        return try loadQwen2MoE(configData: configData, directory: directory)
+    } else if arch.contains("olmoe")
         || modelType == "olmoe"
         || arch.contains("deepseek") || modelType == "deepseek_v3"
     {
@@ -213,7 +218,7 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
             + "(compatible_fallback tier). Use POST /api/chat or "
             + "/v1/chat/completions - the server routes MoE manifests to "
             + "MoEEngine. Native Swift+MLX router + expert dispatch landed "
-            + "for Qwen 3 MoE and Mixtral; Qwen2-MoE / OLMoE / DeepSeek are "
+            + "for Qwen 3 MoE, Mixtral, and Qwen2-MoE; OLMoE / DeepSeek are "
             + "follow-ups. Detected arch=\(arch), model_type=\(modelType).")
     } else if arch.contains("llama") || modelType == "llama" {
         return try loadLlama(configData: configData, directory: directory)
@@ -667,6 +672,38 @@ private func loadMixtral(configData: Data, directory: URL) throws -> LoadedModel
     try loadWeights(
         into: model, from: directory,
         quantization: config.quantization,
+        strictVerify: true)
+
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "moe",
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
+        multimodalForward: nil,
+        batchedDecodeForward: { tokens, caches, mask, rowOffsets in
+            model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
+        vocabSize: config.vocabSize
+    )
+}
+
+private func loadQwen2MoE(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(Qwen2MoEConfig.self, from: configData)
+    let model = Qwen2MoEForCausalLM(config)
+    // mlx-community Qwen2-MoE checkpoints ship the routed experts as stacked
+    // `mlp.switch_mlp.{gate_proj,up_proj,down_proj}.*` tensors, which bind
+    // directly to `Qwen2MoESparseMLP.switchMLP`. The router `mlp.gate`, the
+    // dense `mlp.shared_expert` projections, and `mlp.shared_expert_gate`
+    // stay `Linear` and are quantized by `loadWeights`' quantize pass; the
+    // switched linears are born quantized and load their packed parameters
+    // directly. No key rewrite needed.
+    try loadWeights(
+        into: model, from: directory,
+        quantization: config.quantization,
+        tieWordEmbeddings: config.tieWordEmbeddings,
         strictVerify: true)
 
     return LoadedModel(
