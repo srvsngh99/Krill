@@ -639,17 +639,25 @@ public final class InferenceEngine: @unchecked Sendable {
             promptTokensBuilt = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
         } else if loadedModel.family == "phi" {
             // Phi-4-mini's tokenizer is the o200k (GPT-4o / tiktoken) BPE.
-            // swift-transformers' direct `applyChatTemplateTokens` path
-            // mis-tokenizes the message *body* against that BPE (its ids
+            // ROOT CAUSE: swift-transformers' direct `applyChatTemplateTokens`
+            // mis-tokenizes the message *body* against that BPE - the ids
             // decode back to the right text but use non-canonical token
-            // boundaries), so the model sees an off-distribution prompt and
-            // degenerates. Rendering the template to a string and re-encoding
-            // it goes through the canonical `encode` path - which tokenizes
-            // both the body and the `<|user|>`/`<|end|>`/`<|assistant|>`
-            // special tokens correctly - and the model generates coherently.
-            // (This is the OPPOSITE of the Qwen 3 Coder case below, where the
-            // direct path is the one that preserves special tokens; hence the
-            // per-family split.)
+            // boundaries (different merges than `encode` picks), so the model
+            // sees an off-distribution prompt and degenerates into fluent
+            // garbage. Proven by isolation: raw `/v1/completions` (which goes
+            // through `encode`) generates coherently on the same checkpoint;
+            // only the chat path garbled.
+            //
+            // FIX: render the template to a string and re-encode through the
+            // canonical `encode` path, which tokenizes both the body and the
+            // `<|user|>`/`<|end|>`/`<|assistant|>` special tokens correctly.
+            // This is the SAME decode->re-encode round-trip the `else` branch
+            // below warns against - but the trade-off inverts per tokenizer:
+            // for Qwen 3 Coder the round-trip drops ChatML/FIM specials and the
+            // DIRECT path is correct; for phi's o200k BPE the DIRECT path is
+            // the broken one and the round-trip is correct. Hence the explicit
+            // per-family split. Covered by a live-gated golden in
+            // PhiPromptTokenizationTests (KLM_PHI_MODEL_PATH).
             let formatted = tokenizer.applyChatTemplate(messages: preparedMessages)
             promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(formatted)
         } else if let direct = tokenizer.applyChatTemplateTokens(messages: preparedMessages) {
