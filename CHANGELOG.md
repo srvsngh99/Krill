@@ -4,7 +4,16 @@ All notable changes to KrillLM are recorded here. Entries are in
 reverse chronological order. Versioning follows
 [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] - 2026-06-01
+
+Headline: KrillLM is now a fully native Swift+MLX inference stack with no
+Python dependency. Every mixture-of-experts family (Mixtral, Qwen2-MoE,
+OLMoE, DeepSeek-V2, alongside the already-native Qwen3 and Gemma 4
+26B-A4B) runs natively; grammar-constrained decoding (JSON, JSON-schema,
+regex, and full CFG) and continuous batched serving land; the embedding
+stack grows to ~15 encoder families; and the default port flips to
+`11434` for a zero-config Ollama drop-in. KrillLM beats Ollama on every
+published Gemma 4 SKU (decode, prefill, and total wall time).
 
 ### Added
 
@@ -166,27 +175,6 @@ reverse chronological order. Versioning follows
   not just the active one. At `MAX_LOADED_MODELS=1` this matches the prior
   single-model behavior.
 
-### Removed
-
-- **The Python MoE sidecar bridge.** With every mixture-of-experts family now
-  native, the mlx-lm sidecar (`tools/moe_bridge.py`, `MoEEngine`, the
-  `PythonSidecar` plumbing, the `handleMoEChat` server path, and the SIGINT
-  teardown handler) is deleted, along with the `KRILL_NATIVE_MOE=0` opt-out it
-  backed. Inference is now fully Swift+MLX-native with no Python dependency. MoE
-  manifests route through the dense engine like any other native causal LM
-  (`ModelAdapter.chatRouting` no longer has a `mixtureOfExperts` case), and the
-  `.moe` family reports `productionNative`.
-
-## [0.4.0] - 2026-05-28
-
-Headline: Gemma 4 26B-A4B native MoE serves on Apple Silicon and beats
-Ollama on every published Gemma 4 SKU (decode, prefill, and total wall
-time). Plus Qwen3-MoE coherence, a vision_config-driven Gemma 4
-encoder, daemon-mode CLI routing, the KLMAgent skeleton, and the
-default-port flip to `11434` that makes KrillLM a zero-config Ollama
-drop-in.
-
-### Added
 
 - **Gemma 4 26B-A4B native text MoE** (#81): first native inference of
   the sparse 26B-A4B variant on Apple Silicon. Router + top-K expert
@@ -217,6 +205,17 @@ drop-in.
 - **SDK usage docs** (#64): verified end-to-end snippets for the OpenAI
   Python SDK, LangChain, LlamaIndex, and the Anthropic SDK pointing at
   the local server.
+
+### Removed
+
+- **The Python MoE sidecar bridge.** With every mixture-of-experts family now
+  native, the mlx-lm sidecar (`tools/moe_bridge.py`, `MoEEngine`, the
+  `PythonSidecar` plumbing, the `handleMoEChat` server path, and the SIGINT
+  teardown handler) is deleted, along with the `KRILL_NATIVE_MOE=0` opt-out it
+  backed. Inference is now fully Swift+MLX-native with no Python dependency. MoE
+  manifests route through the dense engine like any other native causal LM
+  (`ModelAdapter.chatRouting` no longer has a `mixtureOfExperts` case), and the
+  `.moe` family reports `productionNative`.
 
 ### Changed
 
