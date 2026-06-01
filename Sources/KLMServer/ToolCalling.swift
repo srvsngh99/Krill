@@ -43,6 +43,8 @@ internal enum ToolCalling {
         case gemma4
         case llama
         case qwen
+        case mistral
+        case phi
 
         /// Resolve the wire format from the loaded model family
         /// (`InferenceEngine.family`).
@@ -73,6 +75,8 @@ internal enum ToolCalling {
             case .gemma4: return .gemma4
             case .llama: return .llama
             case .qwen: return .qwen
+            case .mistral: return .mistral
+            case .phi: return .phi
             }
         }
     }
@@ -126,6 +130,10 @@ internal enum ToolCalling {
             // `<tool_call>{"name","arguments"}</tool_call>` convention, so
             // the generic injection is already Qwen-native.
             return injectHermes(into: messages, tools: tools)
+        case .mistral:
+            return injectMistral(into: messages, tools: tools)
+        case .phi:
+            return injectPhi(into: messages, tools: tools)
         }
     }
 
@@ -219,6 +227,170 @@ internal enum ToolCalling {
         }
         if lastUser == nil {
             out.append(["role": "user", "content": toolBlock])
+        }
+        return out
+    }
+
+    /// Mistral native path. Mistral 7B Instruct v0.3 / Nemo / Small were
+    /// fine-tuned on `[AVAILABLE_TOOLS][ … ][/AVAILABLE_TOOLS]` (the tool
+    /// schemas, immediately before the final user `[INST]`), emit calls as
+    /// `[TOOL_CALLS][{"name":…,"arguments":{…}}]`, and take results back as
+    /// `[TOOL_RESULTS]{"content":…}[/TOOL_RESULTS]`. The checkpoint ships a
+    /// chat template that renders the `[INST]` turns but - like every family
+    /// here - swift-transformers drops the `tools`, so we splice the tool
+    /// block into the last genuine user turn as text (`[AVAILABLE_TOOLS]` and
+    /// friends are added tokens that re-encode to their special ids 5-9) and
+    /// un-transform the canonical Hermes history back to Mistral's native
+    /// call/result shapes.
+    private static func injectMistral(
+        into messages: [[String: String]],
+        tools: [ServerToolSpec]
+    ) -> [[String: String]] {
+        // [AVAILABLE_TOOLS] is a JSON array of
+        // {"type":"function","function":{name,description,parameters}}.
+        var schemas: [String] = []
+        for t in tools {
+            let params = (try? JSONSerialization.jsonObject(
+                with: Data(t.parametersJSON.utf8))) ?? [String: Any]()
+            let fn: [String: Any] = [
+                "type": "function",
+                "function": ["name": t.name, "description": t.description,
+                             "parameters": params],
+            ]
+            if let d = try? JSONSerialization.data(withJSONObject: fn),
+               let s = String(data: d, encoding: .utf8) {
+                schemas.append(s)
+            }
+        }
+        // Match Ollama's `[AVAILABLE_TOOLS] {tools}[/AVAILABLE_TOOLS]` byte
+        // layout (space after the open tag) so the model sees the same input
+        // it does under Ollama.
+        let toolBlock = "[AVAILABLE_TOOLS] [" + schemas.joined(separator: ", ")
+            + "][/AVAILABLE_TOOLS]"
+
+        // Un-transform the canonical Hermes turns normalizeToolTurns produced
+        // back into Mistral-native text.
+        var work: [[String: String]] = []
+        for var m in messages {
+            let role = m["role"] ?? "user"
+            let content = m["content"] ?? ""
+            if role == "user",
+               let inner = between(content, "<tool_response>", "</tool_response>") {
+                let result = stripNormalizerNamePrefix(inner)
+                let payload = (try? JSONSerialization.data(
+                    withJSONObject: ["content": result]))
+                    .flatMap { String(data: $0, encoding: .utf8) }
+                    ?? "{\"content\": \"\"}"
+                m["content"] = "[TOOL_RESULTS]\(payload)[/TOOL_RESULTS]"
+                work.append(m)
+                continue
+            }
+            if role == "assistant", content.contains("<tool_call>") {
+                let (calls, rest) = extractHermes(from: content)
+                if !calls.isEmpty {
+                    let arr = calls.map {
+                        "{\"name\": \"\($0.name)\", \"arguments\": \($0.argumentsJSON)}"
+                    }.joined(separator: ", ")
+                    let native = "[TOOL_CALLS][\(arr)]"
+                    m["content"] = rest.isEmpty ? native : rest + native
+                }
+            }
+            work.append(m)
+        }
+
+        // Splice the tool block as a prefix to the last GENUINE user turn (not
+        // a `[TOOL_RESULTS]` turn), mirroring Mistral's "tools before the last
+        // user query" placement.
+        let lastUser = work.lastIndex {
+            ($0["role"] ?? "user") == "user"
+                && !($0["content"] ?? "").hasPrefix("[TOOL_RESULTS]")
+        }
+        var out: [[String: String]] = []
+        for (i, m) in work.enumerated() {
+            if i == lastUser {
+                out.append(["role": "user",
+                            "content": toolBlock + (m["content"] ?? "")])
+            } else {
+                out.append(m)
+            }
+        }
+        if lastUser == nil {
+            out.append(["role": "user", "content": toolBlock])
+        }
+        return out
+    }
+
+    /// Phi-3.5 / Phi-4 native path. The Phi checkpoints were fine-tuned to
+    /// receive tool definitions inside the system turn, wrapped in
+    /// `<|tool|> … <|/tool|>` as a JSON array of bare
+    /// `{name,description,parameters}` objects, and to emit calls as
+    /// `<|tool_call|>[{"name":…,"arguments":{…}}]<|/tool_call|>`. The
+    /// checkpoint's chat template renders the `<|system|>`/`<|user|>` turns
+    /// but (like the other families) drops `tools`, so we bake the
+    /// `<|tool|>…<|/tool|>` block into the system message content - the added
+    /// tokens re-encode to their special ids - and un-transform the canonical
+    /// Hermes history into Phi's native call shape.
+    private static func injectPhi(
+        into messages: [[String: String]],
+        tools: [ServerToolSpec]
+    ) -> [[String: String]] {
+        // Ollama renders Phi's `<|tool|>` block from the same wrapped
+        // `[{"type":"function","function":{name,description,parameters}}]`
+        // array it uses everywhere; mirror that exact shape so the model sees
+        // identical input to the parity baseline.
+        var schemas: [String] = []
+        for t in tools {
+            let params = (try? JSONSerialization.jsonObject(
+                with: Data(t.parametersJSON.utf8))) ?? [String: Any]()
+            let fn: [String: Any] = [
+                "type": "function",
+                "function": ["name": t.name, "description": t.description,
+                             "parameters": params],
+            ]
+            if let d = try? JSONSerialization.data(withJSONObject: fn),
+               let s = String(data: d, encoding: .utf8) {
+                schemas.append(s)
+            }
+        }
+        let toolDef = "<|tool|>[" + schemas.joined(separator: ", ") + "]<|/tool|>"
+
+        var work: [[String: String]] = []
+        for var m in messages {
+            let role = m["role"] ?? "user"
+            let content = m["content"] ?? ""
+            if role == "user",
+               let inner = between(content, "<tool_response>", "</tool_response>") {
+                // Feed the tool result back as a plain user turn: Phi's chat
+                // template renders `<|user|>…<|end|>`, and a `tool` role would
+                // collide with the `<|tool|>` definition token.
+                m["content"] = stripNormalizerNamePrefix(inner)
+                work.append(m)
+                continue
+            }
+            if role == "assistant", content.contains("<tool_call>") {
+                let (calls, rest) = extractHermes(from: content)
+                if !calls.isEmpty {
+                    let arr = calls.map {
+                        "{\"name\": \"\($0.name)\", \"arguments\": \($0.argumentsJSON)}"
+                    }.joined(separator: ", ")
+                    let native = "<|tool_call|>[\(arr)]<|/tool_call|>"
+                    m["content"] = rest.isEmpty ? native : rest + native
+                }
+            }
+            work.append(m)
+        }
+
+        // Bake the tool definitions into the system turn (create one if none).
+        var out: [[String: String]] = []
+        if let first = work.first, first["role"] == "system" {
+            out.append(["role": "system",
+                        "content": (first["content"] ?? "") + toolDef])
+            out.append(contentsOf: work.dropFirst())
+        } else {
+            // Ollama's exact default system text when tools are present.
+            out.append(["role": "system",
+                        "content": "You are a helpful assistant with some tools." + toolDef])
+            out.append(contentsOf: work)
         }
         return out
     }
@@ -320,6 +492,8 @@ internal enum ToolCalling {
         case .gemma4: return extractGemma4(from: text)
         case .llama: return extractLlama(from: text)
         case .qwen: return extractQwen(from: text)
+        case .mistral: return extractMistral(from: text)
+        case .phi: return extractPhi(from: text)
         }
     }
 
@@ -405,6 +579,103 @@ internal enum ToolCalling {
         if !calls.isEmpty { return (calls, "") }
         // 1B fallback: it sometimes emits the Hermes sentinel anyway.
         return extractHermes(from: text)
+    }
+
+    /// Mistral native parser. The model emits `[TOOL_CALLS]` followed by a
+    /// JSON array of `{"name":…,"arguments":{…}}` objects. Tolerant of a
+    /// quantized model that drops the marker and emits a bare call array, and
+    /// falls back to the Hermes sentinel.
+    static func extractMistral(from text: String)
+        -> (calls: [ParsedToolCall], cleanedText: String)
+    {
+        if let r = text.range(of: "[TOOL_CALLS]") {
+            let calls = parseCallArray(text[r.upperBound...])
+            if !calls.isEmpty {
+                let cleaned = String(text[..<r.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return (calls, cleaned)
+            }
+        }
+        let bare = parseCallArray(Substring(text))
+        if !bare.isEmpty { return (bare, "") }
+        return extractHermes(from: text)
+    }
+
+    /// Phi-3.5 / Phi-4 native parser. The model wraps calls in
+    /// `<|tool_call|> … <|/tool_call|>` around a JSON array of
+    /// `{"name":…,"arguments":{…}}` objects (some builds prefix `functools`
+    /// or drop the wrapper). Falls back to a bare call array, then Hermes.
+    static func extractPhi(from text: String)
+        -> (calls: [ParsedToolCall], cleanedText: String)
+    {
+        if let r = text.range(of: "<|tool_call|>") {
+            let after = text[r.upperBound...]
+            // Body runs to the close marker if present, else to end.
+            let bodyEnd = after.range(of: "<|/tool_call|>")
+            let body = after[after.startIndex ..< (bodyEnd?.lowerBound ?? after.endIndex)]
+            let calls = parseCallArray(body)
+            if !calls.isEmpty {
+                var cleaned = String(text[..<r.lowerBound])
+                if let e = bodyEnd { cleaned += String(after[e.upperBound...]) }
+                return (calls, cleaned.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }
+        let bare = parseCallArray(Substring(text))
+        if !bare.isEmpty { return (bare, "") }
+        return extractHermes(from: text)
+    }
+
+    /// Parse the first balanced JSON array of `{"name":…,"arguments":…}` call
+    /// objects in `s` (shared by the Mistral `[TOOL_CALLS]` and Phi
+    /// `<|tool_call|>` parsers). Tolerant of leading prose; accepts
+    /// `parameters` as an alias for `arguments`. Falls back to a single bare
+    /// call object when there is no array.
+    private static func parseCallArray(_ s: Substring) -> [ParsedToolCall] {
+        guard let start = s.firstIndex(of: "[") else {
+            if let (json, _) = firstJSONObject(in: s),
+               json.contains("\"arguments\""), let c = parseCallJSON(json) {
+                return [c]
+            }
+            return []
+        }
+        // Find the balanced `]` that closes the array (string-literal aware).
+        var depth = 0, inStr = false, esc = false
+        var i = start
+        var end: Substring.Index?
+        while i < s.endIndex {
+            let ch = s[i]
+            if inStr {
+                if esc { esc = false }
+                else if ch == "\\" { esc = true }
+                else if ch == "\"" { inStr = false }
+            } else if ch == "\"" { inStr = true }
+            else if ch == "[" { depth += 1 }
+            else if ch == "]" {
+                depth -= 1
+                if depth == 0 { end = s.index(after: i); break }
+            }
+            i = s.index(after: i)
+        }
+        guard let e = end,
+              let data = String(s[start ..< e]).data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [] }
+        var calls: [ParsedToolCall] = []
+        for obj in arr {
+            guard let name = obj["name"] as? String, !name.isEmpty else { continue }
+            let argsAny = obj["arguments"] ?? obj["parameters"]
+            let argsString: String
+            if let str = argsAny as? String {
+                argsString = str
+            } else if let a = argsAny,
+                      let d = try? JSONSerialization.data(withJSONObject: a) {
+                argsString = String(data: d, encoding: .utf8) ?? "{}"
+            } else {
+                argsString = "{}"
+            }
+            calls.append(ParsedToolCall(name: name, argumentsJSON: argsString))
+        }
+        return calls
     }
 
     /// Gemma 4 native parser. Implements the grammar pinned by the

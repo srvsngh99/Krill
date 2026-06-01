@@ -62,6 +62,8 @@ final class ModelAdapterTests: XCTestCase {
         XCTAssertEqual(ModelAdapter(family: .gemma4).chatTemplate, .gemma4)
         XCTAssertEqual(ModelAdapter(family: .llama).chatTemplate, .llama)
         XCTAssertEqual(ModelAdapter(family: .qwen).chatTemplate, .qwen)
+        XCTAssertEqual(ModelAdapter(family: .mistral).chatTemplate, .mistral)
+        XCTAssertEqual(ModelAdapter(family: .phi).chatTemplate, .phi)
     }
 
     func testMoEUsesQwenTemplate() {
@@ -70,9 +72,11 @@ final class ModelAdapterTests: XCTestCase {
     }
 
     func testFallbackFamiliesUseHermesTemplate() {
+        // Families without a native tool template still fall back to the
+        // generic Hermes prompt. (Mistral and Phi gained native adapters
+        // 2026-06-01 and are asserted in testNativeToolTemplateFamilies.)
         let hermes: [ModelFamily] = [
-            .mistral, .gemma, .phi, .glm, .deepseek, .bert,
-            .qwen25vl, .reranker,
+            .gemma, .glm, .deepseek, .bert, .qwen25vl, .reranker,
         ]
         for family in hermes {
             XCTAssertEqual(ModelAdapter(family: family).chatTemplate, .hermes,

@@ -87,8 +87,15 @@ public struct ModelAdapter: Sendable, Equatable {
             // the Qwen chat / tool template verbatim. A future MoE
             // member needing a different template gets its own case.
             return .qwen
-        case .mistral, .gemma, .phi, .glm, .deepseek, .bert,
-             .qwen25vl, .reranker:
+        case .mistral:
+            // Mistral's native `[AVAILABLE_TOOLS]…[/AVAILABLE_TOOLS]` /
+            // `[TOOL_CALLS]` / `[TOOL_RESULTS]` format (token ids 5-9).
+            return .mistral
+        case .phi:
+            // Phi-3.5 / Phi-4 native `<|tool|>…<|/tool|>` definitions and
+            // `<|tool_call|>…<|/tool_call|>` call format.
+            return .phi
+        case .gemma, .glm, .deepseek, .bert, .qwen25vl, .reranker:
             // The generic Hermes-style `<tool_call>{…}</tool_call>`
             // prompt: an acceptable fallback, not a native template.
             return .hermes
@@ -124,4 +131,10 @@ public enum ChatTemplatePolicy: String, Sendable, Equatable, CaseIterable {
     case llama
     /// Qwen 2.5 / Qwen 3 native tool template.
     case qwen
+    /// Mistral native `[AVAILABLE_TOOLS]` / `[TOOL_CALLS]` / `[TOOL_RESULTS]`
+    /// tool template (Mistral 7B Instruct v0.3, Nemo, Small).
+    case mistral
+    /// Phi-3.5 / Phi-4 native `<|tool|>` definitions + `<|tool_call|>` call
+    /// template.
+    case phi
 }

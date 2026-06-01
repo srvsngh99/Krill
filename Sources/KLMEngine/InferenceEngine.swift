@@ -154,14 +154,22 @@ public final class InferenceEngine: @unchecked Sendable {
     /// EOS if the file is absent or unparseable.
     static func stopTokenIds(modelDirectory: URL, tokenizerEOS: Int) -> Set<Int> {
         var ids: Set<Int> = [tokenizerEOS]
-        let url = modelDirectory.appendingPathComponent("generation_config.json")
-        if let data = try? Data(contentsOf: url),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let eos = obj["eos_token_id"] {
-            if let single = eos as? Int {
-                ids.insert(single)
-            } else if let many = eos as? [Int] {
-                ids.formUnion(many)
+        // `generation_config.json` is authoritative when present; `config.json`
+        // is the fallback. Phi-4-mini ships no generation_config and its
+        // tokenizer EOS is `<|endoftext|>` (199999), but its chat turns end on
+        // `<|end|>` (200020) - declared only in config.json's `eos_token_id`.
+        // Without unioning that the assistant never halts and runs on into a
+        // hallucinated next turn.
+        for file in ["generation_config.json", "config.json"] {
+            let url = modelDirectory.appendingPathComponent(file)
+            if let data = try? Data(contentsOf: url),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let eos = obj["eos_token_id"] {
+                if let single = eos as? Int {
+                    ids.insert(single)
+                } else if let many = eos as? [Int] {
+                    ids.formUnion(many)
+                }
             }
         }
         return ids
@@ -629,6 +637,21 @@ public final class InferenceEngine: @unchecked Sendable {
             promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(rendered)
         } else if loadedModel.family == "gemma4" {
             promptTokensBuilt = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
+        } else if loadedModel.family == "phi" {
+            // Phi-4-mini's tokenizer is the o200k (GPT-4o / tiktoken) BPE.
+            // swift-transformers' direct `applyChatTemplateTokens` path
+            // mis-tokenizes the message *body* against that BPE (its ids
+            // decode back to the right text but use non-canonical token
+            // boundaries), so the model sees an off-distribution prompt and
+            // degenerates. Rendering the template to a string and re-encoding
+            // it goes through the canonical `encode` path - which tokenizes
+            // both the body and the `<|user|>`/`<|end|>`/`<|assistant|>`
+            // special tokens correctly - and the model generates coherently.
+            // (This is the OPPOSITE of the Qwen 3 Coder case below, where the
+            // direct path is the one that preserves special tokens; hence the
+            // per-family split.)
+            let formatted = tokenizer.applyChatTemplate(messages: preparedMessages)
+            promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(formatted)
         } else if let direct = tokenizer.applyChatTemplateTokens(messages: preparedMessages) {
             // Same loss-avoidance principle as the Gemma 4 branch, but
             // for every other family whose tokenizer can render via the

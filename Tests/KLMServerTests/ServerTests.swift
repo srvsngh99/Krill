@@ -1112,10 +1112,11 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(ToolCalling.ToolFormat.forFamily("qwen"), .qwen)
         // MoE inherits the Qwen tool template.
         XCTAssertEqual(ToolCalling.ToolFormat.forFamily("moe"), .qwen)
-        // Families without a native template fall back to Hermes.
-        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("mistral"), .hermes)
+        // Mistral and Phi now have native adapters.
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("mistral"), .mistral)
+        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("phi"), .phi)
+        // Families without a native template still fall back to Hermes.
         XCTAssertEqual(ToolCalling.ToolFormat.forFamily("gemma"), .hermes)
-        XCTAssertEqual(ToolCalling.ToolFormat.forFamily("phi"), .hermes)
         XCTAssertEqual(ToolCalling.ToolFormat.forFamily("glm"), .hermes)
         // The native VL loader returns "qwen2_5_vl" (ModelFamily's
         // rawValue), so it round-trips and resolves to Hermes - the
@@ -1289,6 +1290,119 @@ final class ServerTests: XCTestCase {
             from: "noise {\"name\":\"a\",\"arguments\":{\"x\":1}} then {\"name\":\"b\",\"arguments\":{\"y\":2}}",
             format: .qwen).calls
         XCTAssertEqual(qwen.map(\.name), ["a", "b"])
+    }
+
+    // MARK: - Native Mistral tool format
+
+    func testMistralInjectionMirrorsNativeFormat() {
+        let spec = ServerToolSpec(name: "add", description: "sum",
+                                  parametersJSON: "{\"type\":\"object\"}")
+        let out = ToolCalling.injectToolSystem(
+            into: [["role": "system", "content": "Be nice."],
+                   ["role": "user", "content": "do it"]],
+            tools: [spec], format: .mistral)
+        // System turn is preserved untouched (Mistral has no tool system msg).
+        XCTAssertEqual(out.first?["role"], "system")
+        XCTAssertEqual(out.first?["content"], "Be nice.")
+        // Tool block is spliced into the LAST user turn as a prefix, using the
+        // native `[AVAILABLE_TOOLS] [ … ][/AVAILABLE_TOOLS]` markers and the
+        // wrapped {"type":"function",…} schema shape.
+        let lastUser = out.last { $0["role"] == "user" }
+        XCTAssertTrue(lastUser?["content"]?.hasPrefix("[AVAILABLE_TOOLS] [") ?? false)
+        XCTAssertTrue(lastUser?["content"]?.contains("[/AVAILABLE_TOOLS]") ?? false)
+        // Compact JSON (matches Ollama's json.Marshal output - no spaces).
+        XCTAssertTrue(lastUser?["content"]?.contains("\"type\":\"function\"") ?? false)
+        XCTAssertTrue(lastUser?["content"]?.hasSuffix("do it") ?? false)
+        // No foreign Hermes instruction.
+        XCTAssertFalse(out.contains { ($0["content"] ?? "").contains("<tool_call>") })
+    }
+
+    func testMistralInjectionConvertsHermesHistoryToNative() {
+        let msgs = [
+            ["role": "user", "content": "weather?"],
+            ["role": "assistant",
+             "content": "<tool_call>{\"name\": \"wx\", \"arguments\": {\"city\":\"NYC\"}}</tool_call>"],
+            ["role": "user", "content": "<tool_response>name=wx sunny</tool_response>"],
+        ]
+        let spec = ServerToolSpec(name: "wx", description: "", parametersJSON: "{}")
+        let out = ToolCalling.injectToolSystem(into: msgs, tools: [spec],
+                                               format: .mistral)
+        // Assistant call -> [TOOL_CALLS][{…}]; tool result -> [TOOL_RESULTS].
+        XCTAssertTrue(out.contains {
+            $0["role"] == "assistant"
+                && ($0["content"]?.contains("[TOOL_CALLS][{\"name\": \"wx\"") ?? false)
+        })
+        XCTAssertTrue(out.contains {
+            ($0["content"]?.contains("[TOOL_RESULTS]") ?? false)
+                && ($0["content"]?.contains("\"content\"") ?? false)
+                && ($0["content"]?.contains("sunny") ?? false)
+        })
+        // The tool block goes on the genuine user query, NOT the result turn.
+        let avail = out.first { ($0["content"] ?? "").contains("[AVAILABLE_TOOLS]") }
+        XCTAssertTrue(avail?["content"]?.contains("weather?") ?? false)
+    }
+
+    func testMistralExtractNativeToolCalls() {
+        let (calls, cleaned) = ToolCalling.extractToolCalls(
+            from: "[TOOL_CALLS] [{\"name\": \"add\", \"arguments\": {\"a\": 1, \"b\": 2}}]",
+            format: .mistral)
+        XCTAssertEqual(calls.first?.name, "add")
+        let obj = (try? JSONSerialization.jsonObject(
+            with: Data(calls[0].argumentsJSON.utf8))).flatMap { $0 as? [String: Any] }
+        XCTAssertEqual(obj?["a"] as? Int, 1)
+        XCTAssertEqual(obj?["b"] as? Int, 2)
+        XCTAssertEqual(cleaned, "")
+        // Multi-call array stays intact.
+        let multi = ToolCalling.extractToolCalls(
+            from: "[TOOL_CALLS] [{\"name\":\"a\",\"arguments\":{}}, {\"name\":\"b\",\"arguments\":{}}]",
+            format: .mistral).calls
+        XCTAssertEqual(multi.map(\.name), ["a", "b"])
+        // No tool call -> plain text passes through.
+        let none = ToolCalling.extractToolCalls(from: "Just an answer.", format: .mistral)
+        XCTAssertTrue(none.calls.isEmpty)
+        XCTAssertEqual(none.cleanedText, "Just an answer.")
+    }
+
+    // MARK: - Native Phi tool format
+
+    func testPhiInjectionBakesToolsIntoSystemTurn() {
+        let spec = ServerToolSpec(name: "add", description: "sum",
+                                  parametersJSON: "{\"type\":\"object\"}")
+        // No system message present -> Phi's default system text is added.
+        let out = ToolCalling.injectToolSystem(
+            into: [["role": "user", "content": "do it"]],
+            tools: [spec], format: .phi)
+        XCTAssertEqual(out.first?["role"], "system")
+        XCTAssertTrue(out.first?["content"]?.contains("with some tools.") ?? false)
+        XCTAssertTrue(out.first?["content"]?.contains("<|tool|>[") ?? false)
+        XCTAssertTrue(out.first?["content"]?.contains("<|/tool|>") ?? false)
+        XCTAssertTrue(out.first?["content"]?.contains("\"type\":\"function\"") ?? false)
+        // The user turn is untouched (no tool block spliced in).
+        XCTAssertEqual(out.last?["content"], "do it")
+        // Existing system content is preserved, tools appended after it.
+        let withSys = ToolCalling.injectToolSystem(
+            into: [["role": "system", "content": "Be terse."],
+                   ["role": "user", "content": "hi"]],
+            tools: [spec], format: .phi)
+        XCTAssertTrue(withSys.first?["content"]?.hasPrefix("Be terse.<|tool|>") ?? false)
+    }
+
+    func testPhiExtractNativeToolCalls() {
+        let (calls, cleaned) = ToolCalling.extractToolCalls(
+            from: "<|tool_call|>[{\"name\": \"add\", \"arguments\": {\"a\": 5}}]<|/tool_call|>",
+            format: .phi)
+        XCTAssertEqual(calls.first?.name, "add")
+        XCTAssertTrue(calls.first?.argumentsJSON.contains("\"a\"") ?? false)
+        XCTAssertEqual(cleaned, "")
+        // Tolerates a missing close marker and leading prose.
+        let sloppy = ToolCalling.extractToolCalls(
+            from: "Sure. <|tool_call|>[{\"name\":\"x\",\"arguments\":{}}]",
+            format: .phi).calls
+        XCTAssertEqual(sloppy.first?.name, "x")
+        // No tool call -> plain text passes through unchanged.
+        let none = ToolCalling.extractToolCalls(from: "The sky is blue.", format: .phi)
+        XCTAssertTrue(none.calls.isEmpty)
+        XCTAssertEqual(none.cleanedText, "The sky is blue.")
     }
 
     func testLlamaInjectionRerendersAllHistoryCalls() {

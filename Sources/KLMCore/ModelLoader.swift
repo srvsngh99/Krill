@@ -379,7 +379,11 @@ private func loadGemma(configData: Data, directory: URL) throws -> LoadedModel {
 private func loadPhi(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(PhiConfig.self, from: configData)
     let model = PhiForCausalLM(config)
-    try loadWeights(into: model, from: directory, quantization: config.quantization)
+    // Phi-4-mini ties its output projection to the input embeddings (no
+    // `lm_head.*` in the checkpoint); the flag skips the embed->lm_head copy
+    // and the model produces logits from the shared embedding matrix.
+    try loadWeights(into: model, from: directory, quantization: config.quantization,
+                    tieWordEmbeddings: config.tieWordEmbeddings)
 
     return LoadedModel(
         module: model,
