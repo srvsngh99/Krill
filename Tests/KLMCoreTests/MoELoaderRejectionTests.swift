@@ -196,22 +196,53 @@ final class MoELoaderRejectionTests: XCTestCase {
         }
     }
 
+    /// OLMoE now has a native runtime; it must reach the native arm and fail
+    /// at weight load (empty config dir) rather than the bridge rejection.
+    func testOLMoENativeReachesNativeArm() throws {
+        let dir = try writeConfig([
+            "architectures": ["OlmoeForCausalLM"],
+            "model_type": "olmoe",
+            "hidden_size": 2048,
+            "intermediate_size": 1024,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 16,
+            "num_hidden_layers": 16,
+            "vocab_size": 50304,
+            "num_experts": 64,
+            "num_experts_per_tok": 8,
+        ], dirSlug: "olmoe-native")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        do {
+            _ = try loadModel(from: dir)
+            XCTFail("Expected WeightLoadError.noSafetensorsFiles for an empty config dir")
+        } catch let error as WeightLoadError {
+            guard case .noSafetensorsFiles = error else {
+                XCTFail("Expected noSafetensorsFiles, got \(error)")
+                return
+            }
+        } catch let error as ModelLoadError {
+            if case .unsupportedArchitecture(let msg) = error {
+                XCTFail("OLMoE native arm must not throw unsupportedArchitecture; got: \(msg)")
+            } else {
+                XCTFail("Unexpected ModelLoadError: \(error)")
+            }
+        }
+    }
+
     func testUnportedMoEFamiliesStillRouteToBridge() throws {
-        // The not-yet-ported MoE families (OLMoE / DeepSeek) keep the bridge
-        // fallback until their native ports land. This pins the contract so a
-        // native PR cannot silently drop the bridge rejection for an
-        // unmigrated family.
+        // DeepSeek is the last MoE family without a native runtime; it keeps
+        // the bridge fallback until its native port lands. This pins the
+        // contract so a native PR cannot silently drop the bridge rejection.
         for (arch, modelType, slug) in [
-            ("OlmoeForCausalLM", "olmoe", "olmoe-still-bridge"),
             ("DeepseekV3ForCausalLM", "deepseek_v3", "deepseek-still-bridge"),
+            ("DeepseekV2ForCausalLM", "deepseek_v2", "deepseekv2-still-bridge"),
         ] {
             let dir = try writeConfig([
                 "architectures": [arch],
                 "model_type": modelType,
                 "hidden_size": 2048,
                 "vocab_size": 151936,
-                "num_experts": 64,
-                "num_experts_per_tok": 8,
             ], dirSlug: slug)
             defer { try? FileManager.default.removeItem(at: dir) }
 

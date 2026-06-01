@@ -199,10 +199,13 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
         // always-on sigmoid-gated shared expert. Replaces the mlx-lm bridge
         // for this family.
         return try loadQwen2MoE(configData: configData, directory: directory)
-    } else if arch.contains("olmoe")
-        || modelType == "olmoe"
-        || arch.contains("deepseek") || modelType == "deepseek_v3"
-    {
+    } else if arch.contains("olmoe") || modelType == "olmoe" {
+        // OLMoE: native Swift+MLX sparse-MoE runtime. GQA attention with a
+        // whole-projection q/k RMSNorm (OLMoE's delta vs Qwen 3's per-head
+        // norm) + an `mlp` router and `gatherQuantizedMM` SwitchGLU; no
+        // shared expert. Replaces the mlx-lm bridge for this family.
+        return try loadOLMoE(configData: configData, directory: directory)
+    } else if arch.contains("deepseek") || modelType == "deepseek_v3" {
         // Remaining MoE families run through `MoEEngine` (Python
         // sidecar / mlx-lm), not the native causal-LM dispatcher.
         // `loadModel` is the entry point for native Swift+MLX
@@ -218,8 +221,8 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
             + "(compatible_fallback tier). Use POST /api/chat or "
             + "/v1/chat/completions - the server routes MoE manifests to "
             + "MoEEngine. Native Swift+MLX router + expert dispatch landed "
-            + "for Qwen 3 MoE, Mixtral, and Qwen2-MoE; OLMoE / DeepSeek are "
-            + "follow-ups. Detected arch=\(arch), model_type=\(modelType).")
+            + "for Qwen 3 MoE, Mixtral, Qwen2-MoE, and OLMoE; DeepSeek is a "
+            + "follow-up. Detected arch=\(arch), model_type=\(modelType).")
     } else if arch.contains("llama") || modelType == "llama" {
         return try loadLlama(configData: configData, directory: directory)
     } else if arch.contains("qwen") || modelType.hasPrefix("qwen") {
@@ -700,6 +703,37 @@ private func loadQwen2MoE(configData: Data, directory: URL) throws -> LoadedMode
     // stay `Linear` and are quantized by `loadWeights`' quantize pass; the
     // switched linears are born quantized and load their packed parameters
     // directly. No key rewrite needed.
+    try loadWeights(
+        into: model, from: directory,
+        quantization: config.quantization,
+        tieWordEmbeddings: config.tieWordEmbeddings,
+        strictVerify: true)
+
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "moe",
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
+        multimodalForward: nil,
+        batchedDecodeForward: { tokens, caches, mask, rowOffsets in
+            model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
+        vocabSize: config.vocabSize
+    )
+}
+
+private func loadOLMoE(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(OLMoEConfig.self, from: configData)
+    let model = OLMoEForCausalLM(config)
+    // mlx-community OLMoE checkpoints ship the experts as stacked
+    // `mlp.switch_mlp.{gate_proj,up_proj,down_proj}.*` tensors (mlx-lm's
+    // sanitize stacks any per-expert `mlp.experts.{e}.*` at convert time),
+    // binding directly to `OLMoESparseMLP.switchMLP`. The router `mlp.gate`
+    // and the attention/embedding Linears are quantized by `loadWeights`'
+    // quantize pass; the switched linears are born quantized.
     try loadWeights(
         into: model, from: directory,
         quantization: config.quantization,
