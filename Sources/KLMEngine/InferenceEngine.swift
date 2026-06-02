@@ -608,8 +608,19 @@ public final class InferenceEngine: @unchecked Sendable {
         let llavaModel = (loadedModel.family == "llava")
             ? (loadedModel.module as? LlavaForCausalLM) : nil
 
+        // WS3: the per-family load-time decisions (prompt tokenization,
+        // int8-KV support) are read off the declarative `ModelAdapter` once
+        // per request instead of scattered `family == "..."` string compares.
+        // An unrecognized family string (only the Llama fallback loader emits
+        // one, and it sets "llama") maps to `.llama` -> the safe default
+        // policies.
+        let archAdapter = ModelAdapter(
+            family: ModelFamily(rawValue: loadedModel.family) ?? .llama)
+
+        // Native audio is gated on the audioInput capability, which only the
+        // Gemma 4 family declares today; `canUseNativeAudio` already encodes
+        // that, so no family-string check is needed here.
         let nativeAudioChosen = audioData != nil && canUseNativeAudio
-            && loadedModel.family == "gemma4"
         let nativeAudio: AudioPreprocessor.Features?
         if nativeAudioChosen, let aud = audioData {
             do {
@@ -649,58 +660,70 @@ public final class InferenceEngine: @unchecked Sendable {
             // parse/eval failure, falling through to the built-in path so
             // an exotic Modelfile never hard-fails a request.
             promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(rendered)
-        } else if let llava = llavaModel {
-            // LLaVA-1.5: render the vicuna prompt and place
-            // `(image_size/patch_size)^2` image tokens (one per CLIP patch,
-            // CLS dropped) directly, so the multimodal forward finds exactly
-            // that many positions to splice the projected CLIP features into.
-            let padCount = imageData != nil ? llava.config.visionConfig.numPatches : 0
-            promptTokensBuilt = tokenizer.formatLlavaTokenIds(
-                messages: preparedMessages,
-                imageTokenId: llava.config.imageTokenIndex,
-                imagePadCount: padCount)
-        } else if loadedModel.family == "gemma4" {
-            promptTokensBuilt = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
-        } else if loadedModel.family == "phi" {
-            // Phi-4-mini's tokenizer is the o200k (GPT-4o / tiktoken) BPE.
-            // ROOT CAUSE: swift-transformers' direct `applyChatTemplateTokens`
-            // mis-tokenizes the message *body* against that BPE - the ids
-            // decode back to the right text but use non-canonical token
-            // boundaries (different merges than `encode` picks), so the model
-            // sees an off-distribution prompt and degenerates into fluent
-            // garbage. Proven by isolation: raw `/v1/completions` (which goes
-            // through `encode`) generates coherently on the same checkpoint;
-            // only the chat path garbled.
-            //
-            // FIX: render the template to a string and re-encode through the
-            // canonical `encode` path, which tokenizes both the body and the
-            // `<|user|>`/`<|end|>`/`<|assistant|>` special tokens correctly.
-            // This is the SAME decode->re-encode round-trip the `else` branch
-            // below warns against - but the trade-off inverts per tokenizer:
-            // for Qwen 3 Coder the round-trip drops ChatML/FIM specials and the
-            // DIRECT path is correct; for phi's o200k BPE the DIRECT path is
-            // the broken one and the round-trip is correct. Hence the explicit
-            // per-family split. Covered by a live-gated golden in
-            // PhiPromptTokenizationTests (KLM_PHI_MODEL_PATH).
-            let formatted = tokenizer.applyChatTemplate(messages: preparedMessages)
-            promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(formatted)
-        } else if let direct = tokenizer.applyChatTemplateTokens(messages: preparedMessages) {
-            // Same loss-avoidance principle as the Gemma 4 branch, but
-            // for every other family whose tokenizer can render via the
-            // swift-transformers Jinja engine (embedded template or the
-            // newer separate `chat_template.jinja`): keep the IDs the
-            // library already produced instead of decoding to text and
-            // re-encoding, which silently drops ChatML / FIM / tool
-            // special tokens on Qwen 3 Coder and similar checkpoints
-            // and rots generation into pure special-token loops.
-            promptTokensBuilt = direct
         } else {
-            // Last resort: the wrapper's manual Llama 3 fallback path,
-            // for checkpoints with neither an embedded nor an external
-            // template. Lossy round-trip but the alternative is no
-            // chat formatting at all.
-            let formatted = tokenizer.applyChatTemplate(messages: preparedMessages)
-            promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(formatted)
+            // Family-specific prompt tokenization, selected by the declarative
+            // `ModelAdapter.tokenizerPrompt` policy (WS3) rather than a chain of
+            // `family == "..."` compares.
+            switch archAdapter.tokenizerPrompt {
+            case .llavaVicuna:
+                // LLaVA-1.5: render the vicuna prompt and place
+                // `(image_size/patch_size)^2` image tokens (one per CLIP patch,
+                // CLS dropped) directly, so the multimodal forward finds exactly
+                // that many positions to splice the projected CLIP features into.
+                // (`llavaModel` is non-nil whenever the family resolves to llava.)
+                if let llava = llavaModel {
+                    let padCount = imageData != nil ? llava.config.visionConfig.numPatches : 0
+                    promptTokensBuilt = tokenizer.formatLlavaTokenIds(
+                        messages: preparedMessages,
+                        imageTokenId: llava.config.imageTokenIndex,
+                        imagePadCount: padCount)
+                } else if let direct = tokenizer.applyChatTemplateTokens(messages: preparedMessages) {
+                    promptTokensBuilt = direct
+                } else {
+                    promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(
+                        tokenizer.applyChatTemplate(messages: preparedMessages))
+                }
+            case .gemma4DirectIds:
+                promptTokensBuilt = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
+            case .phiRenderReencode:
+                // Phi-4-mini's tokenizer is the o200k (GPT-4o / tiktoken) BPE.
+                // ROOT CAUSE: swift-transformers' direct `applyChatTemplateTokens`
+                // mis-tokenizes the message *body* against that BPE - the ids
+                // decode back to the right text but use non-canonical token
+                // boundaries (different merges than `encode` picks), so the model
+                // sees an off-distribution prompt and degenerates into fluent
+                // garbage. Proven by isolation: raw `/v1/completions` (which goes
+                // through `encode`) generates coherently on the same checkpoint;
+                // only the chat path garbled.
+                //
+                // FIX: render the template to a string and re-encode through the
+                // canonical `encode` path, which tokenizes both the body and the
+                // `<|user|>`/`<|end|>`/`<|assistant|>` special tokens correctly.
+                // This is the SAME decode->re-encode round-trip the default path
+                // warns against - but the trade-off inverts per tokenizer: for
+                // Qwen 3 Coder the round-trip drops ChatML/FIM specials and the
+                // DIRECT path is correct; for phi's o200k BPE the DIRECT path is
+                // the broken one and the round-trip is correct. Covered by a
+                // live-gated golden in PhiPromptTokenizationTests.
+                let formatted = tokenizer.applyChatTemplate(messages: preparedMessages)
+                promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(formatted)
+            case .directTokenIdsWithRenderFallback:
+                if let direct = tokenizer.applyChatTemplateTokens(messages: preparedMessages) {
+                    // Keep the IDs swift-transformers produced (embedded template
+                    // or the separate `chat_template.jinja`) instead of decoding
+                    // to text and re-encoding, which silently drops ChatML / FIM /
+                    // tool special tokens on Qwen 3 Coder and similar checkpoints
+                    // and rots generation into pure special-token loops.
+                    promptTokensBuilt = direct
+                } else {
+                    // Last resort: the wrapper's manual Llama 3 fallback path, for
+                    // checkpoints with neither an embedded nor an external
+                    // template. Lossy round-trip but the alternative is no chat
+                    // formatting at all.
+                    let formatted = tokenizer.applyChatTemplate(messages: preparedMessages)
+                    promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(formatted)
+                }
+            }
         }
 
         // WS-D D4: honor a context-length cap (num_ctx / KRILL_CONTEXT_LENGTH).
@@ -799,7 +822,7 @@ public final class InferenceEngine: @unchecked Sendable {
         // decoding also assumes fp16 target/draft caches.
         let useInt8KV: Bool = {
             guard self.usesQuantizedKVCache else { return false }
-            if loadedModel.family != "gemma4" {
+            if archAdapter.kvCacheQuantization != .supportsInt8 {
                 FileHandle.standardError.write(Data(
                     "[KrillLM] warning: int8 KV cache is supported for Gemma 4 only; falling back to fp16 for family=\(loadedModel.family).\n".utf8))
                 return false
