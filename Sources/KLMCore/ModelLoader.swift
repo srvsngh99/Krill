@@ -208,6 +208,17 @@ let architectureRules: [ArchitectureRule] = [
                 + "Detected arch=\(arch), model_type=\(mt).")
         }),
 
+    // LLaVA-1.5: CLIP ViT vision tower + multi-modal projector + Llama text
+    // backbone. Must precede the generic dense rules (its text stack is Llama).
+    // The llava-next / llava-bunny variants are NOT supported (different image
+    // handling); only model_type "llava".
+    ArchitectureRule(
+        id: "llava",
+        matches: { arch, mt in
+            mt == "llava" || arch.contains("llavaforconditionalgeneration")
+        },
+        action: .load { try loadLlava(configData: $0, directory: $1) }),
+
     ArchitectureRule(
         id: "gemma4",
         matches: { arch, mt in
@@ -360,6 +371,55 @@ private func loadLlama(configData: Data, directory: URL) throws -> LoadedModel {
         multimodalForward: nil,
         batchedDecodeForward: { tokens, caches, mask, rowOffsets in
             model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
+        vocabSize: config.vocabSize
+    )
+}
+
+private func loadLlava(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(LlavaConfig.self, from: configData)
+    let model = LlavaForCausalLM(config)
+    // Real LLaVA 4-bit checkpoints quantize the language + vision Linears
+    // (the patch-embed Conv2d stays fp; the quantize predicate only matches
+    // Linear/Embedding). The tiny synthetic parity fixture is unquantized.
+    // `verify: []` tolerates tied-embedding checkpoints that omit lm_head.
+    if let q = config.quantization {
+        quantize(model: model, groupSize: q.groupSize, bits: q.bits) { name, module in
+            (module is Linear || module is Embedding) && !name.contains("patch_embedding")
+        }
+    }
+    var flatWeights = try loadWeightArrays(from: directory)
+    // CLIP's patch embed is a Conv2d. HF checkpoints ship its weight in
+    // PyTorch `[out, in, kH, kW]` layout; MLX Conv2d wants `[out, kH, kW, in]`.
+    // Transpose when the tensor is not already in MLX layout (mlx-community
+    // checkpoints are pre-sanitized; raw HF ones are not). Mirrors mlx-vlm's
+    // VisionModel.sanitize / check_array_shape.
+    let patchKey = "vision_tower.vision_model.embeddings.patch_embedding.weight"
+    if let w = flatWeights[patchKey], w.ndim == 4 {
+        let s = w.shape
+        let isMLXLayout = s[0] >= s[1] && s[0] >= s[2] && s[1] == s[2]
+        if !isMLXLayout { flatWeights[patchKey] = w.transposed(0, 2, 3, 1) }
+    }
+    let nested = ModuleParameters.unflattened(flatWeights.map { ($0.key, $0.value) })
+    // Strict verify: llava-1.5 has a real lm_head (untied), so every model
+    // parameter must be set by the checkpoint and no key may go unused -- a
+    // mismatch is a load bug, not something to swallow silently.
+    try model.update(parameters: nested, verify: [.all])
+
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "llava",
+        // Text-only turns run straight through the Llama backbone.
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        // Multimodal: the engine passes the preprocessed `[1, C, H, W]` pixel
+        // tensor as the third argument; the model embeds, splices the projected
+        // CLIP features at the image-token positions, and runs the text stack.
+        multimodalForward: { tokens, caches, pixelValues, _, _, _ in
+            guard let pixelValues else {
+                return model(tokens, caches: caches as? [KVCache])
+            }
+            return model(tokens, pixelValues: pixelValues, caches: caches as? [KVCache])
         },
         vocabSize: config.vocabSize
     )

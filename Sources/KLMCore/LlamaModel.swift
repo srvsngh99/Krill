@@ -28,9 +28,14 @@ class LlamaModelInner: Module {
         _ tokens: MLXArray,
         mask: MLXArray? = nil,
         caches: [KVCache]? = nil,
-        rowOffsets: [Int]? = nil
+        rowOffsets: [Int]? = nil,
+        inputsEmbeds: MLXArray? = nil
     ) -> MLXArray {
-        var x = embedTokens(tokens)
+        // VLMs on a Llama backbone (e.g. LLaVA) merge projected image features
+        // into the token embeddings and forward from there; `inputsEmbeds`
+        // bypasses the token embedding lookup. Default nil keeps the standard
+        // token-id path unchanged.
+        var x = inputsEmbeds ?? embedTokens(tokens)
 
         // Create causal mask. For an empty-cache prefill this is the
         // classic (seqLen, seqLen) lower-triangular mask. For multi-token
@@ -110,6 +115,17 @@ public class LlamaForCausalLM: Module {
             let last = hidden.dim(1) - 1
             hidden = hidden[0..., last ..< (last + 1), 0...]
         }
+        return lmHead(hidden)
+    }
+
+    /// Forward from pre-merged input embeddings (a VLM path: e.g. LLaVA splices
+    /// projected image features into the token embeddings, then runs the text
+    /// stack from those). `tokens` is still passed for cache/mask shaping but
+    /// its embeddings are not used. Returns logits `[B, L, vocab]`.
+    public func callAsFunction(
+        _ tokens: MLXArray, inputsEmbeds: MLXArray, caches: [KVCache]? = nil
+    ) -> MLXArray {
+        let hidden = model(tokens, caches: caches, inputsEmbeds: inputsEmbeds)
         return lmHead(hidden)
     }
 

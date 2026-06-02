@@ -49,7 +49,9 @@ Not broadly supported:
 
 ```text
 MoE base models (Qwen 3 MoE has an experimental native path)
-Llama vision / LLaVA-style models
+Llama-vision / LLaVA-next (LLaVA-1.5 now has a native Swift+MLX runtime:
+  `LlavaForCausalLM` - CLIP ViT + projector + Llama backbone, mlx-vlm
+  logit-parity-verified; llava-next / llava-bunny still unsupported)
 Whisper/ASR
 TTS
 Rerankers/cross-encoders
