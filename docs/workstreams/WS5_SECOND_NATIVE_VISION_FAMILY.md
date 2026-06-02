@@ -28,11 +28,17 @@ oracle baseline.
   of `patch_size * spatial_merge_size`, and returns the per-patch
   batch together with the actual - generally non-square - post-merge
   grid. No more square-grid assumption.
-- Window-attention mask. `Qwen25VLVisionTower.windowAttentionMask`
-  builds a block-diagonal additive mask (a patch attends only
-  same-window patches; `fullatt_block_indexes` layers attend
-  globally) from the real grid. Equivalent to the HF
-  permutation + `cu_window_seqlens` scheme without reordering.
+- Window attention. `Qwen25VLVisionTower.windowedAttentionPlan` groups
+  patches into per-window mini-sequences and runs them as a batched
+  `[numWindows, windowSize, hidden]` attention, dropping the windowed-block
+  SDPA cost from O(L^2) to O(L * windowSize). It now covers BOTH uniform and
+  ragged grids: a ragged edge window (image dims not a multiple of the window
+  edge) is padded up to the uniform window size with an additive padding mask
+  that zeroes the padded keys. The original `windowAttentionMask` (a
+  block-diagonal additive mask, equivalent to the HF permutation +
+  `cu_window_seqlens` scheme without reordering) is retained as the numerical
+  reference the equivalence test checks against, and now only serves the
+  single-window degenerate case at runtime.
 - Engine + tokenizer. `InferenceEngine.generate` detects a VL model
   and routes through `generateQwen25VL`, which preprocesses the
   image and renders the ChatML prompt with the `<|image_pad|>` run

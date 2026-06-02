@@ -733,10 +733,13 @@ public class Qwen25VLVisionTower: Module {
     /// it is built once per image grid and reused across the 28
     /// windowed blocks.
     ///
-    /// The plan applies only when windows tile the grid evenly
-    /// (i.e. `llmH` and `llmW` are multiples of `vitWin`). When
-    /// the grid is ragged, the plan is `nil` and the tower falls
-    /// back to the original additive-mask path.
+    /// The plan covers both uniform grids (windows tile evenly) and ragged
+    /// grids (an edge window holds fewer patches): ragged edge windows are
+    /// padded up to the full `windowSize` and the padding is masked out of
+    /// attention (`paddingMask`), so the batched fast path applies to every
+    /// multi-window grid, not just the canonical-bench uniform ones. The plan
+    /// is `nil` only when there is a single window (full attention) or an
+    /// invalid grid.
     struct WindowedAttentionPlan {
         /// Forward permutation: index array of shape `[L]` such
         /// that `h.take(perm, axis: 1)` groups window-0 patches
@@ -749,16 +752,27 @@ public class Qwen25VLVisionTower: Module {
         let invPerm: MLXArray
         /// Number of windows (the batch dimension after grouping).
         let numWindows: Int
-        /// Patches per window (the per-window sequence length).
+        /// Patches per window (the per-window sequence length). For a ragged
+        /// grid this is the MAX window size; short edge windows are padded up
+        /// to it and the padding is masked out (see `paddingMask`).
         let windowSize: Int
+        /// Additive key mask `[numWindows, 1, 1, windowSize]` (`-1e4` at padded
+        /// slots, `0` at real ones) for ragged grids whose edge windows hold
+        /// fewer than `windowSize` patches; `nil` for a uniform grid (no
+        /// padding, so the batched attention needs no mask -- the uniform path
+        /// stays bit-identical to before).
+        let paddingMask: MLXArray?
     }
 
-    /// Build the batched-windowed-attention plan when the windows
-    /// tile the grid evenly; otherwise return `nil` so the tower
-    /// falls back to the additive-mask path. The plan computes a
-    /// host-side `Int32` index array, materializes it as an
-    /// `MLXArray`, and constructs the inverse permutation by
-    /// scattering positions back to original indices.
+    /// Build the batched-windowed-attention plan for any multi-window grid.
+    /// Windows are sized at the full `vitWin x vitWin` LLM-token edge; a ragged
+    /// grid (an edge window with fewer rows/cols) pads that window's slots up
+    /// to the uniform `patchesPerWindow` and records a `paddingMask` so the
+    /// padded keys are masked out of attention -- the batched
+    /// `[numWindows, windowSize, hidden]` reshape needs a rectangular tensor.
+    /// Returns `nil` only for a single-window or invalid grid (the tower then
+    /// runs full attention). The plan is host-side `Int32` index arithmetic
+    /// materialized as `MLXArray`s.
     static func windowedAttentionPlan(
         gridHFull: Int, gridWFull: Int,
         vision: Qwen25VLConfig.VisionConfig
@@ -768,14 +782,11 @@ public class Qwen25VLVisionTower: Module {
         let llmW = gridWFull / ms
         guard llmH > 0, llmW > 0 else { return nil }
         let vitWin = max(1, vision.windowSize / vision.patchSize / ms)
-        // Only the uniform case is batched; ragged windows (image
-        // dims that are not a multiple of the window edge) need
-        // padding or per-window seq-len handling, which adds
-        // complexity for a case that does not show up on the
-        // 224x224 / 336x336 / etc. canonical bench inputs.
-        guard llmH % vitWin == 0, llmW % vitWin == 0 else { return nil }
-        let numWinW = llmW / vitWin
-        let numWinH = llmH / vitWin
+        // ceil division: a ragged edge window (llmH/llmW not a multiple of
+        // vitWin) still gets its own window, just with fewer LLM tokens. This
+        // matches `windowAttentionMask`'s window-id assignment exactly.
+        let numWinW = (llmW + vitWin - 1) / vitWin
+        let numWinH = (llmH + vitWin - 1) / vitWin
         let numWindows = numWinH * numWinW
         // Skip the optimization if there is only one window - the
         // additive-mask path returns nil for that case too.
@@ -783,34 +794,51 @@ public class Qwen25VLVisionTower: Module {
 
         let patchesPerMerge = ms * ms
         let nPatches = gridHFull * gridWFull
-        // Per-patch window id, computed the same way as
-        // `windowAttentionMask`. Stable sort by winId gives the
-        // permutation; using a bucket fill keeps the operation
-        // O(n) and preserves original order within each window.
+        // Per-patch window id, computed the same way as `windowAttentionMask`.
+        // A bucket fill keeps the operation O(n) and preserves original order
+        // within each window. `patchesPerWindow` is the MAX (interior) window
+        // size; ragged edge windows fill fewer slots and pad the rest.
         let patchesPerWindow = vitWin * vitWin * patchesPerMerge
-        precondition(numWindows * patchesPerWindow == nPatches,
-            "Uniform windowing must consume every patch: "
-            + "numWindows=\(numWindows) * patchesPerWindow="
-            + "\(patchesPerWindow) != nPatches=\(nPatches)")
+        let paddedLen = numWindows * patchesPerWindow
+        precondition(paddedLen >= nPatches,
+            "padded window grid must cover every patch: paddedLen=\(paddedLen)"
+            + " < nPatches=\(nPatches)")
 
-        var perm = [Int32](repeating: 0, count: nPatches)
+        // Padded slots gather patch 0 as a harmless dummy (masked out of
+        // attention and never read back through invPerm).
+        var perm = [Int32](repeating: 0, count: paddedLen)
         var invPerm = [Int32](repeating: 0, count: nPatches)
         var nextSlot = [Int](repeating: 0, count: numWindows)
+        var isPad = [Bool](repeating: true, count: paddedLen)
         for p in 0 ..< nPatches {
             let merged = p / patchesPerMerge
             let r = merged / llmW
             let c = merged % llmW
             let wId = (r / vitWin) * numWinW + (c / vitWin)
+            precondition(nextSlot[wId] < patchesPerWindow,
+                "window \(wId) overflowed its \(patchesPerWindow) slots")
             let slot = wId * patchesPerWindow + nextSlot[wId]
             nextSlot[wId] += 1
             perm[slot] = Int32(p)
             invPerm[p] = Int32(slot)
+            isPad[slot] = false
+        }
+
+        // A uniform grid fills every slot (no padding) -> no mask, so the path
+        // stays bit-identical to the pre-ragged implementation. A ragged grid
+        // builds an additive key mask that zeroes padded slots' attention.
+        var paddingMask: MLXArray? = nil
+        if paddedLen != nPatches {
+            var maskVals = [Float](repeating: 0, count: paddedLen)
+            for s in 0 ..< paddedLen where isPad[s] { maskVals[s] = -1e4 }
+            paddingMask = MLXArray(maskVals).reshaped(numWindows, 1, 1, patchesPerWindow)
         }
         return WindowedAttentionPlan(
             perm: MLXArray(perm),
             invPerm: MLXArray(invPerm),
             numWindows: numWindows,
-            windowSize: patchesPerWindow)
+            windowSize: patchesPerWindow,
+            paddingMask: paddingMask)
     }
 
     /// Run a windowed vision block as `numWindows` parallel
@@ -825,22 +853,24 @@ public class Qwen25VLVisionTower: Module {
     ///   `h` in:  `[1, L, hidden]`
     ///   intermediate batched form: `[numWindows, windowSize, hidden]`
     ///   `h` out: `[1, L, hidden]` (original patch order restored)
-    private func runWindowedBlock(
+    func runWindowedBlock(
         _ h: MLXArray, block: Qwen25VLVisionBlock,
         plan: WindowedAttentionPlan
     ) -> MLXArray {
-        // Squeeze the leading batch dim, gather by `plan.perm` so
-        // window members are contiguous, then reshape to
-        // `[numWindows, windowSize, hidden]`. The vision block's
-        // attention treats axis 0 as batch and axis 1 as seq, so
-        // each window attends only to its own members - no mask
-        // needed.
+        // Squeeze the leading batch dim, gather by `plan.perm` so window
+        // members are contiguous (padded slots gather a dummy patch), then
+        // reshape to `[numWindows, windowSize, hidden]`. The vision block's
+        // attention treats axis 0 as batch and axis 1 as seq, so each window
+        // attends only to its own members. A uniform grid needs no mask; a
+        // ragged grid passes the additive padding mask so real patches do not
+        // attend the padded slots (the padded slots' own outputs are garbage
+        // but are never read back through `invPerm`).
         let flat = h.squeezed(axis: 0)  // [L, hidden]
         let grouped = flat.take(plan.perm, axis: 0)
             .reshaped(plan.numWindows, plan.windowSize, flat.dim(1))
-        let attended = block(grouped, mask: nil)
-        // Flatten back to [L, hidden], invert the permutation, and
-        // restore the leading batch dim.
+        let attended = block(grouped, mask: plan.paddingMask?.asType(h.dtype))
+        // Flatten back to [paddedLen, hidden], invert the permutation (which
+        // only points at real slots), and restore the leading batch dim.
         let restored = attended
             .reshaped(plan.numWindows * plan.windowSize, attended.dim(2))
             .take(plan.invPerm, axis: 0)
@@ -861,12 +891,14 @@ public class Qwen25VLVisionTower: Module {
     ///
     /// - Parameter gridHWFull: the FULL patch-grid `(h, w)` of the
     ///   image. When supplied, windowed blocks attend with the
-    ///   batched-per-window path (or the `windowAttentionMask`
-    ///   fall-back when the grid is ragged) and
-    ///   `fullAttnBlockIndexes` layers attend globally - matching
-    ///   the HF reference. When `nil`, every block runs full
-    ///   attention (the back-compatible path used by module-level
-    ///   tests that do not have a grid).
+    ///   batched-per-window path (uniform AND ragged grids, the
+    ///   latter via padded windows) and `fullAttnBlockIndexes`
+    ///   layers attend globally - matching the HF reference. The
+    ///   `windowAttentionMask` path now only serves the
+    ///   single-window degenerate case (where it returns nil =
+    ///   full attention). When `gridHWFull` is `nil`, every block
+    ///   runs full attention (the back-compatible path used by
+    ///   module-level tests that do not have a grid).
     public func callAsFunction(
         _ patchBatch: MLXArray, gridHWFull: (Int, Int)? = nil
     ) -> MLXArray {
