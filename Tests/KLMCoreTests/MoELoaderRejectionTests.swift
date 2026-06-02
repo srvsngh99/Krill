@@ -234,25 +234,33 @@ final class MoELoaderRejectionTests: XCTestCase {
         }
     }
 
-    /// DeepSeek-V3 uses an absorbed MLA layout the native runtime does not load
-    /// yet; it must fail fast with a clear message (not a cryptic strict-verify
-    /// error), naming the V2/V2-Lite native support and the backlog follow-up.
-    func testDeepSeekV3GivesClearAbsorbedMLAError() throws {
+    /// DeepSeek-V3's absorbed MLA layout (embed_q / unembed_out + latent KV
+    /// cache) now loads natively, so the loader must NOT reject it as an
+    /// unsupported architecture. With a config-only dir (no weights), it must
+    /// fall through to weight loading and fail with `noSafetensorsFiles` -- the
+    /// same shape as the V2 native arm above -- proving V3 is routed to the
+    /// native runtime, not rejected. (End-to-end logit parity is gated in
+    /// `DeepSeekParityTests` behind `KLM_DEEPSEEK_V3_PARITY_DIR`.)
+    func testDeepSeekV3IsAcceptedByNativeRuntime() throws {
         let dir = try writeConfig(
             deepSeekConfig(arch: "DeepseekV3ForCausalLM", modelType: "deepseek_v3"),
             dirSlug: "deepseekv3-absorbed")
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        XCTAssertThrowsError(try loadModel(from: dir)) { error in
-            guard let modelError = error as? ModelLoadError,
-                  case .unsupportedArchitecture(let msg) = modelError else {
-                XCTFail("Expected unsupportedArchitecture for deepseek_v3, got \(error)")
+        do {
+            _ = try loadModel(from: dir)
+            XCTFail("Expected WeightLoadError.noSafetensorsFiles for deepseek_v3")
+        } catch let error as WeightLoadError {
+            guard case .noSafetensorsFiles = error else {
+                XCTFail("Expected noSafetensorsFiles, got \(error)")
                 return
             }
-            XCTAssertTrue(msg.contains("absorbed"),
-                "V3 rejection must explain the absorbed-MLA limitation")
-            XCTAssertTrue(msg.contains("V2-Lite") || msg.contains("V2 / V2-Lite"),
-                "V3 rejection must point at the native V2/V2-Lite support")
+        } catch let error as ModelLoadError {
+            if case .unsupportedArchitecture(let msg) = error {
+                XCTFail("DeepSeek-V3 must now load natively, not be rejected; got: \(msg)")
+            } else {
+                XCTFail("Unexpected ModelLoadError: \(error)")
+            }
         }
     }
 
