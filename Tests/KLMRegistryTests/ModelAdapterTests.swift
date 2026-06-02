@@ -92,6 +92,47 @@ final class ModelAdapterTests: XCTestCase {
     /// which IS Qwen's native `<tool_call>` format, so it is
     /// excused.) `ModelAdapter` and `ModelCapabilities` are sibling
     /// tables; this test pins that they stay consistent.
+    // MARK: - Load-time policies (WS3 completion)
+
+    /// Pins the prompt-tokenization policy for every family. These mirror the
+    /// engine's old `family == "..."` chain exactly; a change here is a
+    /// deliberate, reviewed behavior change to prompt construction.
+    func testTokenizerPromptPolicyPerFamily() {
+        XCTAssertEqual(ModelAdapter(family: .gemma4).tokenizerPrompt, .gemma4DirectIds)
+        XCTAssertEqual(ModelAdapter(family: .phi).tokenizerPrompt, .phiRenderReencode)
+        XCTAssertEqual(ModelAdapter(family: .llava).tokenizerPrompt, .llavaVicuna)
+        // Everyone else takes the direct-token-id-with-render-fallback path.
+        let directFallback: [ModelFamily] = [
+            .llama, .qwen, .qwen25vl, .mistral, .gemma, .glm, .deepseek,
+            .bert, .reranker, .moe,
+        ]
+        for family in directFallback {
+            XCTAssertEqual(ModelAdapter(family: family).tokenizerPrompt,
+                .directTokenIdsWithRenderFallback,
+                "\(family) must take the default prompt-tokenization path")
+        }
+    }
+
+    /// Only Gemma 4 supports the int8 KV cache; every other family is
+    /// fp16-only (its forward closure assumes `[KVCache]`).
+    func testKVCacheQuantizationPolicyPerFamily() {
+        XCTAssertEqual(ModelAdapter(family: .gemma4).kvCacheQuantization, .supportsInt8)
+        for family in ModelFamily.allCases where family != .gemma4 {
+            XCTAssertEqual(ModelAdapter(family: family).kvCacheQuantization, .fp16Only,
+                "\(family) must be fp16-only KV")
+        }
+    }
+
+    /// Every family must resolve to a policy - the switches are exhaustive, so
+    /// a newly added family fails to compile until given one.
+    func testEveryFamilyHasLoadTimePolicies() {
+        for family in ModelFamily.allCases {
+            let a = ModelAdapter(family: family)
+            XCTAssertTrue(TokenizerPromptPolicy.allCases.contains(a.tokenizerPrompt))
+            XCTAssertTrue(KVCacheQuantizationPolicy.allCases.contains(a.kvCacheQuantization))
+        }
+    }
+
     func testNativeToolCapabilityAgreesWithTemplate() {
         for family in ModelFamily.allCases where family != .qwen25vl {
             if ModelCapabilities.capabilities(for: family).contains(.tools) {
