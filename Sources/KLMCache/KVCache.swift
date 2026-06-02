@@ -136,3 +136,84 @@ public final class KVCache: KVCacheProtocol, @unchecked Sendable {
 public func makeKVCaches(numLayers: Int) -> [KVCache] {
     (0 ..< numLayers).map { _ in KVCache() }
 }
+
+// MARK: - Updatable conformance
+
+/// `KVCache` is MLX `Updatable` so it can be passed as `inputs:` / `outputs:`
+/// to `MLX.compile` (and to `eval`). `innerState()` is the compacted full K/V
+/// -- the mutable state a compiled block forward reads and writes. This is the
+/// prerequisite for compiling a text decoder block that mutates the cache (the
+/// vision blocks already compile because they hold no cache). It does not
+/// change `update`/decode behaviour; the production decode path is untouched.
+extension KVCache: Updatable {
+    public func innerState() -> [MLXArray] {
+        compact()
+        return [_keys, _values].compactMap { $0 }
+    }
+}
+
+// MARK: - Fixed-buffer cache (shape-stable, for compiled decode)
+
+/// A KV cache backed by a pre-allocated, fixed-size `[B, H, capacity, D]`
+/// buffer written in place at a *dynamic* offset, so the attention it feeds
+/// keeps a constant shape across decode steps.
+///
+/// ## Why a separate cache
+///
+/// The default `KVCache` returns a slice `[..., :offset, :]` that grows by one
+/// row per decode step, so a block forward built on it changes input shape
+/// every step -- `MLX.compile` would re-trace each step and the compiled graph
+/// would never be reused. A fixed `capacity` buffer keeps the attention shape
+/// constant, and an additive position mask hides the `>= offset` tail. The
+/// write position is a *runtime* index (an `MLXArray`, via scatter), NOT a
+/// static slice bound -- a static bound would bake into the traced graph and
+/// force a re-trace every step, defeating the purpose.
+///
+/// Used by the compiled-decode probe (`KLM_DECODE_PROBE`); not yet wired into
+/// the production engine.
+public final class FixedBufferKVCache: Updatable, @unchecked Sendable {
+    public private(set) var keys: MLXArray
+    public private(set) var values: MLXArray
+    /// Number of valid (written) positions. Host-side; used only to build the
+    /// runtime offset index and the position mask, never as a slice bound.
+    public private(set) var offset: Int
+    public let capacity: Int
+
+    public init(
+        batch: Int, heads: Int, headDim: Int, valueDim: Int,
+        capacity: Int, dtype: DType = .float16
+    ) {
+        self.capacity = capacity
+        self.offset = 0
+        self.keys = MLXArray.zeros([batch, heads, capacity, headDim], dtype: dtype)
+        self.values = MLXArray.zeros([batch, heads, capacity, valueDim], dtype: dtype)
+    }
+
+    public func innerState() -> [MLXArray] { [keys, values] }
+
+    /// Write one decode step's `[B, H, 1, D]` key/value at the current offset
+    /// (dynamic index) and advance. The buffers keep their fixed shape, so a
+    /// compiled forward built over them is traced once and replayed.
+    public func writeStep(keys newK: MLXArray, values newV: MLXArray) {
+        let idx = MLXArray(Int32(offset))
+        keys[0..., 0..., idx, 0...] = newK.squeezed(axis: 2)
+        values[0..., 0..., idx, 0...] = newV.squeezed(axis: 2)
+        offset += 1
+    }
+
+    /// Additive position mask `[1, 1, 1, capacity]`: `0` for written positions
+    /// (`< offset`), a large negative for the unwritten tail. Added to the
+    /// single query's attention scores so the padded buffer behaves like a
+    /// length-`offset` cache.
+    public func positionMask(dtype: DType) -> MLXArray {
+        let pos = MLXArray(Int32(0) ..< Int32(capacity))
+        let invalid = pos .>= MLXArray(Int32(offset))
+        return (invalid.asType(dtype) * Float(-30000.0)).reshaped(1, 1, 1, capacity)
+    }
+
+    public func reset() {
+        offset = 0
+        keys = MLXArray.zeros(keys.shape, dtype: keys.dtype)
+        values = MLXArray.zeros(values.shape, dtype: values.dtype)
+    }
+}
