@@ -127,110 +127,219 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
         throw ModelLoadError.invalidConfig("Cannot parse config.json")
     }
 
-    // Detect family
+    // Detect the architecture and dispatch to the matching family loader.
+    // Detection is a declarative, ordered table (`architectureRules`): the
+    // first rule whose matcher claims the (arch, model_type) pair wins, so the
+    // table is ordered specific-before-generic. Adding a family is a new table
+    // row, not a new branch hand-placed in an if/else chain. The hot decode
+    // path is untouched -- this runs once, at load.
     let architectures = configJSON["architectures"] as? [String] ?? []
     let modelType = configJSON["model_type"] as? String ?? ""
     let arch = architectures.first?.lowercased() ?? ""
 
-    // Order matters: check specific patterns before generic ones
-    if arch.contains("qwen2_5_vl") || arch.contains("qwen2vl")
-        || modelType == "qwen2_5_vl" || modelType == "qwen2_vl"
-    {
-        // Qwen 2.5-VL native Swift+MLX runtime: vision tower + 3D
-        // mRoPE text tower + multimodal forward. WS5 retired the
-        // `Qwen25VLEngine` Python bridge - the native path is now
-        // the only runtime for this family.
-        return try loadQwen25VL(configData: configData, directory: directory)
-    } else if arch.contains("forsequenceclassification") || arch.contains("crossencoder") {
-        // Cross-encoder rerankers (BGE Reranker, Cohere Rerank,
-        // etc.) are loaded through the dedicated `RerankEngine`,
-        // not through the causal-LM dispatcher here. `loadModel`
-        // is only the entry point for causal LMs; the reranker
-        // family routes through Server / RerankEngine, so we
-        // refuse to instantiate one as a causal LM. This keeps
-        // /api/generate / /v1/chat callers from accidentally
-        // dispatching a reranker through the chat path; they hit
-        // a clear "not a causal LM" error here instead of a
-        // garbage forward pass.
+    guard let rule = architectureRules.first(where: { $0.matches(arch, modelType) }) else {
+        // Unreachable: the table's last rule (`fallback`) matches any input.
         throw ModelLoadError.unsupportedArchitecture(
-            "Reranker is not a causal LM. Use POST /v1/rerank instead. "
-            + "Detected arch=\(arch), model_type=\(modelType).")
-    } else if arch.contains("gemma4") || modelType == "gemma4_text" || modelType == "gemma4" {
-        return try loadGemma4(configData: configData, directory: directory)
-    } else if arch.contains("chatglm") || arch.contains("glm") || modelType == "chatglm" {
-        return try loadGLM(configData: configData, directory: directory)
-    } else if arch.contains("qwen3moe") || modelType == "qwen3_moe" {
-        // Qwen 3 MoE: native Swift+MLX runtime is the DEFAULT. Expert
-        // dispatch is a single `gatherQuantizedMM` per projection
-        // (`Qwen3SwitchGLU`, mirroring Gemma 4's PR #82) -- no Swift
-        // per-expert loop, no per-layer host sync. Decode benches 2.7x
-        // faster than the old scatter dispatch (24 -> 66 tok/s on
-        // 30B-A3B, PR #85), and the #87 sort path recovers long-prompt
-        // prefill (229 -> 536 tok/s) so prefill is at parity too. Native
-        // is the only Qwen3-MoE path: the `KRILL_NATIVE_MOE=0` opt-out and
-        // the mlx-lm MoE bridge it routed to were removed once every MoE
-        // family went native.
-        return try loadQwen3MoE(configData: configData, directory: directory)
-    } else if arch.contains("mixtral") || modelType == "mixtral" {
-        // Mixtral: native Swift+MLX sparse-MoE runtime. Mistral attention
-        // + a `block_sparse_moe` router and `gatherQuantizedMM` SwitchGLU
-        // expert dispatch (`MixtralSwitchGLU`), mirroring the Qwen 3 MoE
-        // path (PR #85/#87). Replaces the legacy mlx-lm MoE bridge for
-        // this family.
-        return try loadMixtral(configData: configData, directory: directory)
-    } else if arch.contains("qwen2moe") || modelType == "qwen2_moe" {
-        // Qwen 2 MoE: native Swift+MLX sparse-MoE runtime. Dense Qwen 2
-        // attention (QKV bias, no q/k-norm) + a `mlp` router, a
-        // `gatherQuantizedMM` SwitchGLU for the routed experts, and an
-        // always-on sigmoid-gated shared expert. Replaces the mlx-lm bridge
-        // for this family.
-        return try loadQwen2MoE(configData: configData, directory: directory)
-    } else if arch.contains("olmoe") || modelType == "olmoe" {
-        // OLMoE: native Swift+MLX sparse-MoE runtime. GQA attention with a
-        // whole-projection q/k RMSNorm (OLMoE's delta vs Qwen 3's per-head
-        // norm) + an `mlp` router and `gatherQuantizedMM` SwitchGLU; no
-        // shared expert. Replaces the mlx-lm bridge for this family.
-        return try loadOLMoE(configData: configData, directory: directory)
-    } else if arch.contains("deepseek") || modelType == "deepseek_v2"
-        || modelType == "deepseek_v3"
-    {
-        // DeepSeek-V2 / V2-Lite: native Swift+MLX runtime. MLA attention
-        // (low-rank Q/KV bottleneck, split rope/nope head dims) + YaRN RoPE +
-        // a `gatherQuantizedMM` SwitchGLU for the routed experts, an always-on
-        // shared expert, a dense-layer prefix (first_k_dense_replace), and
-        // softmax / group_limited_greedy gating. `loadDeepSeek` rejects the V3
-        // absorbed-MLA layout with a clear message (docs/BACKLOG.md); the V3
-        // `noaux_tc` gating is implemented in the shared gate. Replaces the
-        // mlx-lm bridge for this family.
-        return try loadDeepSeek(configData: configData, directory: directory)
-    } else if arch.contains("llama") || modelType == "llama" {
-        return try loadLlama(configData: configData, directory: directory)
-    } else if arch.contains("qwen") || modelType.hasPrefix("qwen") {
-        return try loadQwen(configData: configData, directory: directory)
-    } else if arch.contains("mistral") || modelType == "mistral" {
-        return try loadMistral(configData: configData, directory: directory)
-    } else if arch.contains("gemma") || modelType.hasPrefix("gemma") {
-        return try loadGemma(configData: configData, directory: directory)
-    } else if arch.contains("phi") || modelType.hasPrefix("phi") {
-        return try loadPhi(configData: configData, directory: directory)
-    } else if let specialized = detectSpecializedModelType(arch: arch, modelType: modelType) {
-        // WS7 specialized model types (ASR / TTS / diffusion / video /
-        // OCR). KrillLM has no native runtime for these; rejecting
-        // here with a specific error is the roadmap's "Unsupported
-        // tier" - far better than mis-loading them via the Llama
-        // fallback below and emitting a garbage forward pass.
-        throw ModelLoadError.specializedModelUnsupported(
-            "KrillLM does not support \(specialized.displayName) models. "
-            + "These are WS7 specialized model types with no native "
-            + "runtime in this build (of the WS7 types, only rerankers "
-            + "have shipped - use POST /v1/rerank for those; see "
-            + "docs/workstreams/WS7_SPECIALIZED_MODEL_TYPES.md). KrillLM "
-            + "serves causal text LMs, Gemma 4 vision/audio, embeddings, "
-            + "and rerankers. Detected arch=\(arch), model_type=\(modelType).")
-    } else {
-        // Fallback: try as Llama (most common architecture)
-        return try loadLlama(configData: configData, directory: directory)
+            "No architecture rule matched arch=\(arch), model_type=\(modelType).")
     }
+    switch rule.action {
+    case .load(let loader):
+        return try loader(configData, directory)
+    case .reject(let makeError):
+        throw makeError(arch, modelType)
+    }
+}
+
+// MARK: - Architecture detection table
+
+/// What an `ArchitectureRule` does once it claims a config: load the
+/// checkpoint as a family, or deliberately refuse it.
+enum ArchitectureAction: Sendable {
+    /// Instantiate + load the checkpoint as this family.
+    case load(@Sendable (_ configData: Data, _ directory: URL) throws -> LoadedModel)
+    /// Refuse this architecture (not a causal LM, or no native runtime),
+    /// building the error from the detected `arch` + `model_type`.
+    case reject(@Sendable (_ arch: String, _ modelType: String) -> ModelLoadError)
+}
+
+/// One architecture-detection rule: a named matcher plus the action it
+/// dispatches to. Rules live in an ordered table evaluated first-match-wins,
+/// so the specific-before-generic ordering that was previously an implicit
+/// invariant of a hand-written if/else chain is now explicit and testable.
+struct ArchitectureRule: Sendable {
+    /// Stable identifier for the matched architecture (diagnostics + tests).
+    let id: String
+    /// True when this rule claims the lowercased `arch` / raw `model_type`.
+    let matches: @Sendable (_ arch: String, _ modelType: String) -> Bool
+    /// Load or reject.
+    let action: ArchitectureAction
+}
+
+/// The architecture-detection table, ordered specific-before-generic. The
+/// last rule (`fallback`) matches any input, so `loadModel`'s lookup never
+/// fails. Order is load-bearing: e.g. `qwen3_moe` must precede the generic
+/// `qwen` rule, or a MoE checkpoint would load as a dense Qwen.
+let architectureRules: [ArchitectureRule] = [
+    // Qwen 2.5-VL native Swift+MLX runtime: vision tower + 3D mRoPE text
+    // tower + multimodal forward. WS5 retired the `Qwen25VLEngine` Python
+    // bridge - the native path is now the only runtime for this family.
+    ArchitectureRule(
+        id: "qwen2_5_vl",
+        matches: { arch, mt in
+            arch.contains("qwen2_5_vl") || arch.contains("qwen2vl")
+                || mt == "qwen2_5_vl" || mt == "qwen2_vl"
+        },
+        action: .load { try loadQwen25VL(configData: $0, directory: $1) }),
+
+    // Cross-encoder rerankers (BGE Reranker, Cohere Rerank, etc.) load
+    // through the dedicated `RerankEngine`, not the causal-LM dispatcher.
+    // `loadModel` is only the entry point for causal LMs, so we refuse to
+    // instantiate a reranker as one. This keeps /api/generate / /v1/chat
+    // callers from dispatching a reranker through the chat path; they hit a
+    // clear "not a causal LM" error here instead of a garbage forward pass.
+    ArchitectureRule(
+        id: "reranker",
+        matches: { arch, _ in
+            arch.contains("forsequenceclassification") || arch.contains("crossencoder")
+        },
+        action: .reject { arch, mt in
+            .unsupportedArchitecture(
+                "Reranker is not a causal LM. Use POST /v1/rerank instead. "
+                + "Detected arch=\(arch), model_type=\(mt).")
+        }),
+
+    ArchitectureRule(
+        id: "gemma4",
+        matches: { arch, mt in
+            arch.contains("gemma4") || mt == "gemma4_text" || mt == "gemma4"
+        },
+        action: .load { try loadGemma4(configData: $0, directory: $1) }),
+
+    ArchitectureRule(
+        id: "glm",
+        matches: { arch, mt in
+            arch.contains("chatglm") || arch.contains("glm") || mt == "chatglm"
+        },
+        action: .load { try loadGLM(configData: $0, directory: $1) }),
+
+    // Qwen 3 MoE: native Swift+MLX runtime is the DEFAULT. Expert dispatch is
+    // a single `gatherQuantizedMM` per projection (shared `MoESwitchGLU`) --
+    // no Swift per-expert loop, no per-layer host sync. Decode benches 2.7x
+    // faster than the old scatter dispatch (24 -> 66 tok/s on 30B-A3B, PR
+    // #85), and the #87 sort path recovers long-prompt prefill (229 -> 536
+    // tok/s) so prefill is at parity too. Native is the only Qwen3-MoE path:
+    // the `KRILL_NATIVE_MOE=0` opt-out and the mlx-lm MoE bridge it routed to
+    // were removed once every MoE family went native.
+    ArchitectureRule(
+        id: "qwen3_moe",
+        matches: { arch, mt in arch.contains("qwen3moe") || mt == "qwen3_moe" },
+        action: .load { try loadQwen3MoE(configData: $0, directory: $1) }),
+
+    // Mixtral: native Swift+MLX sparse-MoE runtime. Mistral attention + a
+    // `block_sparse_moe` router and `gatherQuantizedMM` SwitchGLU expert
+    // dispatch, mirroring the Qwen 3 MoE path (PR #85/#87). Replaces the
+    // legacy mlx-lm MoE bridge for this family.
+    ArchitectureRule(
+        id: "mixtral",
+        matches: { arch, mt in arch.contains("mixtral") || mt == "mixtral" },
+        action: .load { try loadMixtral(configData: $0, directory: $1) }),
+
+    // Qwen 2 MoE: native Swift+MLX sparse-MoE runtime. Dense Qwen 2 attention
+    // (QKV bias, no q/k-norm) + a `mlp` router, a `gatherQuantizedMM`
+    // SwitchGLU for the routed experts, and an always-on sigmoid-gated shared
+    // expert. Replaces the mlx-lm bridge for this family.
+    ArchitectureRule(
+        id: "qwen2_moe",
+        matches: { arch, mt in arch.contains("qwen2moe") || mt == "qwen2_moe" },
+        action: .load { try loadQwen2MoE(configData: $0, directory: $1) }),
+
+    // OLMoE: native Swift+MLX sparse-MoE runtime. GQA attention with a
+    // whole-projection q/k RMSNorm (OLMoE's delta vs Qwen 3's per-head norm)
+    // + an `mlp` router and `gatherQuantizedMM` SwitchGLU; no shared expert.
+    // Replaces the mlx-lm bridge for this family.
+    ArchitectureRule(
+        id: "olmoe",
+        matches: { arch, mt in arch.contains("olmoe") || mt == "olmoe" },
+        action: .load { try loadOLMoE(configData: $0, directory: $1) }),
+
+    // DeepSeek-V2 / V2-Lite: native Swift+MLX runtime. MLA attention (low-rank
+    // Q/KV bottleneck, split rope/nope head dims) + YaRN RoPE + a
+    // `gatherQuantizedMM` SwitchGLU for the routed experts, an always-on
+    // shared expert, a dense-layer prefix (first_k_dense_replace), and softmax
+    // / group_limited_greedy gating. `loadDeepSeek` rejects the V3
+    // absorbed-MLA layout with a clear message (docs/BACKLOG.md); the V3
+    // `noaux_tc` gating is implemented in the shared gate. Replaces the mlx-lm
+    // bridge for this family.
+    ArchitectureRule(
+        id: "deepseek",
+        matches: { arch, mt in
+            arch.contains("deepseek") || mt == "deepseek_v2" || mt == "deepseek_v3"
+        },
+        action: .load { try loadDeepSeek(configData: $0, directory: $1) }),
+
+    ArchitectureRule(
+        id: "llama",
+        matches: { arch, mt in arch.contains("llama") || mt == "llama" },
+        action: .load { try loadLlama(configData: $0, directory: $1) }),
+
+    ArchitectureRule(
+        id: "qwen",
+        matches: { arch, mt in arch.contains("qwen") || mt.hasPrefix("qwen") },
+        action: .load { try loadQwen(configData: $0, directory: $1) }),
+
+    ArchitectureRule(
+        id: "mistral",
+        matches: { arch, mt in arch.contains("mistral") || mt == "mistral" },
+        action: .load { try loadMistral(configData: $0, directory: $1) }),
+
+    ArchitectureRule(
+        id: "gemma",
+        matches: { arch, mt in arch.contains("gemma") || mt.hasPrefix("gemma") },
+        action: .load { try loadGemma(configData: $0, directory: $1) }),
+
+    ArchitectureRule(
+        id: "phi",
+        matches: { arch, mt in arch.contains("phi") || mt.hasPrefix("phi") },
+        action: .load { try loadPhi(configData: $0, directory: $1) }),
+
+    // WS7 specialized model types (ASR / TTS / diffusion / video / OCR).
+    // KrillLM has no native runtime for these; rejecting here with a specific
+    // error is the roadmap's "Unsupported tier" - far better than mis-loading
+    // them via the Llama fallback below and emitting a garbage forward pass.
+    ArchitectureRule(
+        id: "specialized",
+        matches: { arch, mt in detectSpecializedModelType(arch: arch, modelType: mt) != nil },
+        action: .reject { arch, mt in
+            let specialized = detectSpecializedModelType(arch: arch, modelType: mt)
+            let name = specialized?.displayName ?? "specialized"
+            return .specializedModelUnsupported(
+                "KrillLM does not support \(name) models. "
+                + "These are WS7 specialized model types with no native "
+                + "runtime in this build (of the WS7 types, only rerankers "
+                + "have shipped - use POST /v1/rerank for those; see "
+                + "docs/workstreams/WS7_SPECIALIZED_MODEL_TYPES.md). KrillLM "
+                + "serves causal text LMs, Gemma 4 vision/audio, embeddings, "
+                + "and rerankers. Detected arch=\(arch), model_type=\(mt).")
+        }),
+
+    // Fallback: most checkpoints in the wild are Llama-architecture, so an
+    // unrecognized config is loaded as Llama. Matches any input, so it must
+    // stay last.
+    ArchitectureRule(
+        id: "fallback",
+        matches: { _, _ in true },
+        action: .load { try loadLlama(configData: $0, directory: $1) }),
+]
+
+/// The id of the architecture rule that claims this `(architectures,
+/// model_type)` pair (e.g. `"qwen3_moe"`, `"deepseek"`, `"fallback"`). Pure:
+/// no disk, no weights, no model instantiation. Exposed so tests can pin the
+/// detection table's ordering without a real checkpoint -- the regression net
+/// for "a generic rule shadows a specific one".
+public func detectedArchitectureID(architectures: [String], modelType: String) -> String {
+    let arch = architectures.first?.lowercased() ?? ""
+    // Force-unwrap is safe: the table's last rule matches any input.
+    return architectureRules.first(where: { $0.matches(arch, modelType) })!.id
 }
 
 // MARK: - Per-Family Loaders
