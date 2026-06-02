@@ -961,17 +961,78 @@ final class Qwen25VLRuntimeFoundationTests: XCTestCase {
         }
     }
 
-    /// A ragged grid (where the image dimensions are not a multiple
-    /// of the window edge) returns nil so the tower falls back to
-    /// the additive-mask path.
-    func testWindowedAttentionPlanNilOnRaggedGrid() throws {
+    /// A ragged grid (image dims not a multiple of the window edge) now yields
+    /// a batched plan with a padding mask (instead of the old `nil` -> mask
+    /// fallback). The plan pads short edge windows up to the uniform window
+    /// size; `invPerm` round-trips every real patch, and the padding mask
+    /// marks exactly the padded slots.
+    func testWindowedAttentionPlanHandlesRaggedGridWithPadding() throws {
         let vision = try visionConfig(windowSize: 56)
         // 10x6 patch grid -> 5x3 LLM grid. vitWin = 56/14/2 = 2.
-        // 5 % 2 = 1 (non-zero) -> ragged.
-        XCTAssertNil(Qwen25VLVisionTower.windowedAttentionPlan(
+        // 5 % 2 = 1, 3 % 2 = 1 -> ragged on both axes.
+        let plan = try XCTUnwrap(Qwen25VLVisionTower.windowedAttentionPlan(
             gridHFull: 10, gridWFull: 6, vision: vision),
-            "ragged grid must return nil so the tower falls back "
-            + "to the additive-mask path")
+            "ragged grid must now yield a padded batched plan")
+        // ceil(5/2)=3 window rows, ceil(3/2)=2 window cols -> 6 windows.
+        XCTAssertEqual(plan.numWindows, 6)
+        // patchesPerWindow = vitWin^2 * merge^2 = 4 * 4 = 16.
+        XCTAssertEqual(plan.windowSize, 16)
+        let nPatches = 10 * 6  // 60
+        // invPerm must map every real patch to a distinct slot (round-trip).
+        eval(plan.perm, plan.invPerm)
+        let perm = plan.perm.asArray(Int32.self)
+        let invPerm = plan.invPerm.asArray(Int32.self)
+        XCTAssertEqual(invPerm.count, nPatches)
+        XCTAssertEqual(perm.count, plan.numWindows * plan.windowSize)  // 96 padded
+        for p in 0 ..< nPatches {
+            XCTAssertEqual(perm[Int(invPerm[p])], Int32(p),
+                "invPerm must round-trip real patch \(p)")
+        }
+        // The padding mask must exist and mark exactly paddedLen - nPatches
+        // slots (96 - 60 = 36) with -1e4, the rest 0.
+        let mask = try XCTUnwrap(plan.paddingMask, "ragged grid needs a padding mask")
+        eval(mask)
+        let m = mask.asArray(Float.self)
+        XCTAssertEqual(m.count, plan.numWindows * plan.windowSize)
+        let padded = m.filter { $0 < 0 }.count
+        XCTAssertEqual(padded, plan.numWindows * plan.windowSize - nPatches,
+            "padding mask must mark exactly the padded slots")
+    }
+
+    /// The batched-with-padding path must be numerically equivalent to the
+    /// additive-mask path on a ragged grid: a real patch attends exactly its
+    /// same-window peers in both. Run one windowed vision block both ways on
+    /// the same weights and assert the outputs match within fp tolerance.
+    func testRaggedBatchedAttentionMatchesAdditiveMask() throws {
+        let vision = try visionConfig(windowSize: 56, depth: 2)
+        let tower = Qwen25VLVisionTower(vision)
+        // Block 0 is windowed (fullatt_block_indexes = [1]).
+        let block = tower.blocks[0]
+        let gridH = 10, gridW = 6   // ragged 5x3 LLM grid
+        let nPatches = gridH * gridW
+        let hidden = vision.hiddenSize
+        // Deterministic pseudo-random input [1, L, hidden].
+        let h = MLXRandom.normal([1, nPatches, hidden], key: MLXRandom.key(7))
+        eval(h)
+
+        let plan = try XCTUnwrap(Qwen25VLVisionTower.windowedAttentionPlan(
+            gridHFull: gridH, gridWFull: gridW, vision: vision))
+        let batched = tower.runWindowedBlock(h, block: block, plan: plan)
+
+        let mask = try XCTUnwrap(Qwen25VLVisionTower.windowAttentionMask(
+            gridHFull: gridH, gridWFull: gridW, vision: vision, dtype: h.dtype),
+            "ragged multi-window grid must produce an additive mask")
+        let masked = block(h, mask: mask)
+
+        eval(batched, masked)
+        XCTAssertEqual(batched.shape, masked.shape)
+        let a = batched.asArray(Float.self)
+        let b = masked.asArray(Float.self)
+        var maxAbs: Float = 0
+        for i in 0 ..< a.count { maxAbs = max(maxAbs, abs(a[i] - b[i])) }
+        XCTAssertLessThan(maxAbs, 1e-3,
+            "batched-with-padding output must match the additive-mask path "
+            + "(max abs diff \(maxAbs))")
     }
 
     /// The plan groups patches by window id correctly: in the
