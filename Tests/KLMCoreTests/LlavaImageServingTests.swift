@@ -65,4 +65,53 @@ final class LlavaImageServingTests: XCTestCase {
         XCTAssertThrowsError(try LlavaImagePreprocessor.preprocess(Data(), imageSize: 336))
     }
     #endif
+
+    // MARK: - Minimal text_config decoding
+
+    /// The canonical mlx-community/llava-1.5-7b-4bit `config.json` ships a
+    /// MINIMAL `text_config` that omits hidden_size / intermediate_size /
+    /// num_attention_heads / num_hidden_layers / rope_theta and relies on
+    /// transformers' LlamaConfig defaults (vicuna-7b dims). `LlavaConfig` must
+    /// decode it by filling the HF base-Llama defaults rather than failing on
+    /// the missing keys.
+    func testDecodesMinimalTextConfigWithLlamaDefaults() throws {
+        let json = """
+        {
+          "architectures": ["LlavaForConditionalGeneration"],
+          "image_token_index": 32000,
+          "model_type": "llava",
+          "quantization": {"group_size": 64, "bits": 4},
+          "text_config": {
+            "architectures": ["LlamaForCausalLM"],
+            "max_position_embeddings": 4096,
+            "model_type": "llama",
+            "rms_norm_eps": 1e-05,
+            "vocab_size": 32064
+          },
+          "vision_config": {
+            "hidden_size": 1024, "image_size": 336, "intermediate_size": 4096,
+            "model_type": "clip_vision_model", "num_attention_heads": 16,
+            "num_hidden_layers": 24, "patch_size": 14
+          },
+          "vision_feature_layer": -2,
+          "vision_feature_select_strategy": "default",
+          "vocab_size": 32064
+        }
+        """
+        let cfg = try JSONDecoder().decode(LlavaConfig.self, from: Data(json.utf8))
+        // HF base-Llama defaults == vicuna-7b dims.
+        XCTAssertEqual(cfg.textConfig.hiddenSize, 4096)
+        XCTAssertEqual(cfg.textConfig.intermediateSize, 11_008)
+        XCTAssertEqual(cfg.textConfig.numAttentionHeads, 32)
+        XCTAssertEqual(cfg.textConfig.numKeyValueHeads, 32)
+        XCTAssertEqual(cfg.textConfig.numHiddenLayers, 32)
+        // rope_theta must default to the vicuna/Llama-2 value (10000), NOT
+        // KrillLM's Llama-3 default (500000).
+        XCTAssertEqual(cfg.textConfig.ropeTheta, 10_000.0)
+        // Present keys are honored.
+        XCTAssertEqual(cfg.textConfig.maxPositionEmbeddings, 4096)
+        XCTAssertEqual(cfg.textConfig.vocabSize, 32_064)
+        XCTAssertEqual(cfg.imageTokenIndex, 32_000)
+        XCTAssertEqual(cfg.visionConfig.numPatches, 576, "(336/14)^2")
+    }
 }

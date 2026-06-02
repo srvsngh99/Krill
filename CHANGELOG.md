@@ -17,7 +17,12 @@ reverse chronological order. Versioning follows
   builds the vicuna prompt with the per-patch image-token run placed inline. You can
   now POST an image to a llava-1.5 model and get a vision-grounded answer; text-only
   turns run straight through the Llama backbone. Tier: `experimental` (parity-gated;
-  a serving benchmark gate is pending).
+  a serving benchmark gate is pending). Verified end-to-end on
+  mlx-community/llava-1.5-7b-4bit (red image -> "Red", blue -> "Blue", text-only ->
+  correct). Also fixes `LlavaConfig` decoding to fill HF base-Llama defaults for the
+  minimal `text_config` real llava-1.5 checkpoints ship (they omit the Llama dims and
+  rely on transformers' LlamaConfig defaults), which previously made the canonical
+  checkpoint fail to load.
 
 ## [0.4.0] - 2026-06-01
 
