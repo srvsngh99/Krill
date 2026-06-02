@@ -388,9 +388,23 @@ private func loadLlava(configData: Data, directory: URL) throws -> LoadedModel {
             (module is Linear || module is Embedding) && !name.contains("patch_embedding")
         }
     }
-    let flatWeights = try loadWeightArrays(from: directory)
+    var flatWeights = try loadWeightArrays(from: directory)
+    // CLIP's patch embed is a Conv2d. HF checkpoints ship its weight in
+    // PyTorch `[out, in, kH, kW]` layout; MLX Conv2d wants `[out, kH, kW, in]`.
+    // Transpose when the tensor is not already in MLX layout (mlx-community
+    // checkpoints are pre-sanitized; raw HF ones are not). Mirrors mlx-vlm's
+    // VisionModel.sanitize / check_array_shape.
+    let patchKey = "vision_tower.vision_model.embeddings.patch_embedding.weight"
+    if let w = flatWeights[patchKey], w.ndim == 4 {
+        let s = w.shape
+        let isMLXLayout = s[0] >= s[1] && s[0] >= s[2] && s[1] == s[2]
+        if !isMLXLayout { flatWeights[patchKey] = w.transposed(0, 2, 3, 1) }
+    }
     let nested = ModuleParameters.unflattened(flatWeights.map { ($0.key, $0.value) })
-    try model.update(parameters: nested, verify: [])
+    // Strict verify: llava-1.5 has a real lm_head (untied), so every model
+    // parameter must be set by the checkpoint and no key may go unused -- a
+    // mismatch is a load bug, not something to swallow silently.
+    try model.update(parameters: nested, verify: [.all])
 
     return LoadedModel(
         module: model,

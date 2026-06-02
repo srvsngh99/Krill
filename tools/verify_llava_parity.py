@@ -34,7 +34,7 @@ IMAGE_TOKEN = 1                               # an id inside the small vocab
 VISION_LAYERS = 3                             # feature_layer=-2 -> after layer 1
 
 
-def build(outdir: str) -> None:
+def build(outdir: str, pytorch_conv: bool = False) -> None:
     os.makedirs(outdir, exist_ok=True)
 
     text = TextConfig(
@@ -57,6 +57,14 @@ def build(outdir: str) -> None:
     mx.eval(model.parameters())
 
     weights = dict(tree_flatten(model.parameters()))
+    # Optional: emit the CLIP patch-embed Conv2d weight in PyTorch
+    # `[out, in, kH, kW]` layout (what a raw HF llava-1.5 checkpoint ships)
+    # instead of MLX `[out, kH, kW, in]`, so the loader's transpose path is
+    # exercised. The reference logits are computed before this re-layout, so
+    # they are unchanged -- the native loader must transpose back to match.
+    if pytorch_conv:
+        pk = "vision_tower.vision_model.embeddings.patch_embedding.weight"
+        weights[pk] = mx.transpose(weights[pk], (0, 3, 1, 2))
     mx.save_safetensors(os.path.join(outdir, "model.safetensors"), weights)
 
     # input_ids: [BOS, <image>*N_PATCH, some text]; pixel_values [1,3,H,W].
@@ -94,7 +102,10 @@ def build(outdir: str) -> None:
     with open(os.path.join(outdir, "config.json"), "w") as f:
         json.dump(config, f, indent=2)
 
-    mx.save_safetensors(os.path.join(outdir, "pixel_values.safetensors"),
+    # pixels live in a subdir so the model weight loader (top-level *.safetensors
+    # glob) does not slurp them as a stray model key under strict verify.
+    os.makedirs(os.path.join(outdir, "inputs"), exist_ok=True)
+    mx.save_safetensors(os.path.join(outdir, "inputs", "pixel_values.safetensors"),
                         {"pixel_values": pixel_values.astype(mx.float32)})
     ref = {
         "tokens": tokens,
@@ -112,7 +123,8 @@ def build(outdir: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)
-    build(sys.argv[1])
+    pytorch = len(sys.argv) > 2 and sys.argv[2] == "pytorch"
+    build(sys.argv[1], pytorch_conv=pytorch)
