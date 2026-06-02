@@ -100,6 +100,12 @@ public enum ModelCapabilities {
             // validated against a real checkpoint and the recorded
             // mlx-vlm oracle.
             return [.textGeneration, .visionInput, .tools]
+        case .llava:
+            // LLaVA-1.5: native CLIP + projector + Llama runtime (PR #129)
+            // with engine image-serving wiring. Vision input is supported;
+            // tools are NOT advertised (no parity-tested tool template -
+            // the vicuna-style prompt is built directly).
+            return [.textGeneration, .visionInput]
         case .moe:
             // WS6 foundation: the family DECLARES textGeneration +
             // moe + tools (the initial targets - Mixtral, Qwen 3
@@ -132,6 +138,14 @@ public enum ModelCapabilities {
             // passed the recorded mlx-vlm oracle on a real
             // checkpoint; the Python bridge was then retired.
             return .productionNative
+        case .llava:
+            // LLaVA-1.5 has a native Swift+MLX load+run path and an
+            // mlx-vlm logit-parity gate (LlavaParityTests, both MLX and
+            // PyTorch conv layouts). It is `experimental` rather than
+            // productionNative until a serving benchmark gate (vs a
+            // reference) lands, mirroring how WS5/WS7 families are promoted
+            // only after their benchmark gate is green.
+            return .experimental
         case .moe:
             // Every MoE family is native Swift+MLX now (Qwen 3 MoE,
             // Mixtral, Qwen2-MoE, OLMoE; DeepSeek-V2 lives under the
