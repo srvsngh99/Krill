@@ -140,6 +140,21 @@ def build(outdir: str) -> None:
     with open(os.path.join(outdir, "reference_logits.json"), "w") as f:
         json.dump(ref, f)
 
+    # Text-only reference (no image): exercises the cross-attention no-image
+    # split-query fallback, which the image path does not reach.
+    text_out = model(input_ids)
+    text_logits = text_out.logits if hasattr(text_out, "logits") else text_out
+    mx.eval(text_logits)
+    text_last = text_logits[0, -1, :]
+    text_ref = {
+        "tokens": tokens,
+        "vocab_size": VOCAB,
+        "last_token_logits": [float(v) for v in text_last.tolist()],
+        "argmax": int(mx.argmax(text_last).item()),
+    }
+    with open(os.path.join(outdir, "reference_text_logits.json"), "w") as f:
+        json.dump(text_ref, f)
+
     print(f"Wrote tiny mllama + reference logits to {outdir}")
     print(f"  tokens={tokens}  vocab={VOCAB}")
     print(f"  argmax(last_token_logits) = {ref['argmax']}")

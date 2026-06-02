@@ -68,4 +68,41 @@ final class MllamaParityTests: XCTestCase {
         XCTAssertGreaterThan(cosine, 0.9999, "logits cosine \(cosine) too low")
         XCTAssertLessThan(maxAbs, 1e-2, "max abs logit diff \(maxAbs) too large")
     }
+
+    /// Text-only (no image): exercises the cross-attention no-image
+    /// split-query fallback, which the image path does not reach.
+    func testNativeMllamaTextOnlyMatchesMLXVLMLogits() throws {
+        guard let dirPath = ProcessInfo.processInfo.environment["KLM_MLLAMA_PARITY_DIR"] else {
+            throw XCTSkip("Set KLM_MLLAMA_PARITY_DIR (see tools/verify_mllama_parity.py)")
+        }
+        let dir = URL(fileURLWithPath: dirPath)
+        let refData = try Data(contentsOf: dir.appendingPathComponent("reference_text_logits.json"))
+        let ref = try JSONDecoder().decode(Reference.self, from: refData)
+
+        let loaded = try loadModel(from: dir)
+        guard let model = loaded.module as? Llama32VisionForCausalLM else {
+            return XCTFail("expected Llama32VisionForCausalLM, got \(type(of: loaded.module))")
+        }
+        let inputIds = MLXArray(ref.tokens.map { Int32($0) }).reshaped([1, ref.tokens.count])
+
+        let logits = model(inputIds)   // no image
+        let last = logits[0, ref.tokens.count - 1, 0...]
+        eval(last)
+        let got = last.asArray(Float.self)
+
+        var maxIdx = 0
+        for i in 1 ..< got.count where got[i] > got[maxIdx] { maxIdx = i }
+        XCTAssertEqual(maxIdx, ref.argmax,
+            "text-only native argmax \(maxIdx) != mlx-vlm argmax \(ref.argmax)")
+
+        var dot: Double = 0, na: Double = 0, nb: Double = 0, maxAbs: Double = 0
+        for i in 0 ..< got.count {
+            let a = Double(got[i]), b = Double(ref.last_token_logits[i])
+            dot += a * b; na += a * a; nb += b * b
+            maxAbs = max(maxAbs, abs(a - b))
+        }
+        let cosine = dot / (na.squareRoot() * nb.squareRoot())
+        XCTAssertGreaterThan(cosine, 0.9999, "text-only logits cosine \(cosine) too low")
+        XCTAssertLessThan(maxAbs, 1e-2, "text-only max abs logit diff \(maxAbs) too large")
+    }
 }

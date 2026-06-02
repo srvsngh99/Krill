@@ -457,13 +457,22 @@ private func loadLlava(configData: Data, directory: URL) throws -> LoadedModel {
 private func loadLlamaVision(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(Llama32VisionConfig.self, from: configData)
     let model = Llama32VisionForCausalLM(config)
-    // Real mllama 4-bit checkpoints quantize the Linear/Embedding modules; the
-    // vision patch-embed Conv2d and the raw gate / position parameters stay fp
-    // (the predicate only matches Linear/Embedding, and skips patch_embedding).
-    // The synthetic parity fixture is unquantized.
+    // Quantize the Linear layers and the text token embedding. The vision
+    // patch-embed Conv2d, the raw gate / position parameters, and the vision
+    // tower's small aspect-ratio / tile / position Embedding tables stay fp
+    // (those tables are typically NOT quantized in 4-bit dumps; quantizing them
+    // would mismatch a real checkpoint's fp weights at strict load). The
+    // synthetic parity fixture is unquantized; the exact real-4bit-checkpoint
+    // quantization layout is validated when the image-serving follow-up runs a
+    // real checkpoint on a larger box (the 11B run is RAM-blocked here).
     if let q = config.quantization {
         quantize(model: model, groupSize: q.groupSize, bits: q.bits) { name, module in
-            (module is Linear || module is Embedding) && !name.contains("patch_embedding")
+            guard module is Linear || module is Embedding else { return false }
+            if name.contains("patch_embedding") { return false }
+            // Skip the vision tower's Embedding tables (tile / aspect-ratio /
+            // position), keep the text `embed_tokens`.
+            if module is Embedding && name.contains("vision_tower") { return false }
+            return true
         }
     }
     var flatWeights = try loadWeightArrays(from: directory)

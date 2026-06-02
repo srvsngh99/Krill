@@ -555,8 +555,8 @@ class MllamaTextCrossAttention: Module {
         mask: MLXArray?
     ) -> (MLXArray, (MLXArray, MLXArray)?) {
         let B = x.dim(0), L = x.dim(1)
-        var q = qProj(x).reshaped(B, L, numHeads, headDim).transposed(0, 2, 1, 3)
-        q = qNorm(q)
+        let qRaw = qProj(x).reshaped(B, L, numHeads, headDim).transposed(0, 2, 1, 3)
+        let q = qNorm(qRaw)
 
         var k: MLXArray
         var v: MLXArray
@@ -571,12 +571,15 @@ class MllamaTextCrossAttention: Module {
             k = cachedKV.0
             v = cachedKV.1
         } else {
-            // No image: degenerate path (matches the reference's split-query
-            // fallback). Cross-attention then contributes ~nothing through the
-            // zero-initialized gate.
-            let half = max(1, L / 2)
-            k = kNorm(q[0..., 0..., 0 ..< half, 0...])
-            v = q[0..., 0..., half ..< (2 * half <= L ? 2 * half : L), 0...]
+            // No image + no cache (text-only): mirror the reference's
+            // `mx.split(query, 2, axis=1)` fallback -- split the PRE-norm query
+            // along the HEAD axis into two halves (k from the first, v from the
+            // second), then k_norm the key half. Cross-attention contributes
+            // ~nothing through the (near-)zero gate on a trained checkpoint, but
+            // the split must match the reference to stay bit-for-bit.
+            let h2 = numHeads / 2
+            k = kNorm(qRaw[0..., 0 ..< h2, 0..., 0...])
+            v = qRaw[0..., h2 ..< numHeads, 0..., 0...]
         }
         let out = MLXFast.scaledDotProductAttention(
             queries: q, keys: k, values: v, scale: scale, mask: mask)
