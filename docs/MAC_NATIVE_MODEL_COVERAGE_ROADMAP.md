@@ -51,7 +51,10 @@ Not broadly supported:
 MoE base models (Qwen 3 MoE has an experimental native path)
 Llama-vision / LLaVA-next (LLaVA-1.5 now has a native Swift+MLX runtime:
   `LlavaForCausalLM` - CLIP ViT + projector + Llama backbone, mlx-vlm
-  logit-parity-verified; llava-next / llava-bunny still unsupported)
+  logit-parity-verified, and wired end-to-end for image serving -- registered
+  `llava` family + `LlavaImagePreprocessor` (CLIP 336) + vicuna prompt with the
+  image-token run; POST an image and it answers. llava-next / llava-bunny still
+  unsupported)
 Whisper/ASR
 TTS
 Rerankers/cross-encoders

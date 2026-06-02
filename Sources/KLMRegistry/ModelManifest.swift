@@ -133,6 +133,17 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     /// mRoPE, and image preprocessing land in follow-up PRs (see
     /// docs/workstreams/WS5_SECOND_NATIVE_VISION_FAMILY.md).
     case qwen25vl = "qwen2_5_vl"
+    /// LLaVA-1.5 vision-language family. A CLIP ViT vision tower + a
+    /// multi-modal projector (linear -> gelu -> linear) + a Llama text
+    /// backbone; the projected CLIP features are spliced into the token
+    /// embeddings at the `<image>` placeholder positions and the Llama
+    /// stack runs over the merged embeddings (no cross-attention, unlike
+    /// mllama). Native Swift+MLX runtime landed in PR #129
+    /// (`LlavaForCausalLM`, mlx-vlm logit-parity-verified); the engine
+    /// image-serving wiring (preprocessing + prompt construction +
+    /// generation) is this family's entry here. Only `model_type` "llava"
+    /// (llava-1.5) is supported; llava-next / llava-bunny are not.
+    case llava
     /// Mixture-of-experts text LMs. Architectural deltas vs the
     /// dense families: each transformer block's MLP is replaced by
     /// a router + N expert FFNs, where the router picks the top-K
@@ -193,6 +204,11 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         if archLower.contains("gemma") { return .gemma }
         if archLower.contains("chatglm") || archLower.contains("glm") { return .glm }
         if archLower.contains("deepseek") { return .deepseek }
+        // LLaVA-1.5 (`LlavaForConditionalGeneration`) must be matched BEFORE
+        // the generic `llama` arm: its text backbone is Llama, so the arch
+        // name would otherwise need to (and does not) contain "llama". A
+        // raw HF llava checkpoint declares `LlavaForConditionalGeneration`.
+        if archLower.contains("llavaforconditionalgeneration") { return .llava }
         if archLower.contains("llama") { return .llama }
         // MoE arms are matched BEFORE the generic qwen / mistral
         // arms so a Qwen 3 MoE or Mixtral checkpoint never silently
@@ -217,6 +233,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         case "gemma", "gemma2", "gemma3": return .gemma
         case "gemma4", "gemma4_text": return .gemma4
         case "qwen2_5_vl", "qwen2_vl": return .qwen25vl
+        case "llava": return .llava
         case "mixtral", "qwen3_moe", "qwen2_moe", "olmoe": return .moe
         case "phi", "phi3": return .phi
         case "chatglm", "glm", "glm4_moe": return .glm

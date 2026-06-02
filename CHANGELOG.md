@@ -4,6 +4,21 @@ All notable changes to KrillLM are recorded here. Entries are in
 reverse chronological order. Versioning follows
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **LLaVA-1.5 image serving.** The native LLaVA-1.5 runtime (`LlavaForCausalLM`
+  — CLIP ViT + multi-modal projector + Llama backbone, landed previously and
+  mlx-vlm logit-parity-verified) is now wired end-to-end through the engine: the
+  `llava` family is registered (detection, capabilities, adapter routing), a CLIP
+  image preprocessor (`LlavaImagePreprocessor`: resize shortest-edge → center-crop
+  336 → CLIP-normalize) feeds the generic multimodal path, and `formatLlavaTokenIds`
+  builds the vicuna prompt with the per-patch image-token run placed inline. You can
+  now POST an image to a llava-1.5 model and get a vision-grounded answer; text-only
+  turns run straight through the Llama backbone. Tier: `experimental` (parity-gated;
+  a serving benchmark gate is pending).
+
 ## [0.4.0] - 2026-06-01
 
 Headline: KrillLM is now a fully native Swift+MLX inference stack with no

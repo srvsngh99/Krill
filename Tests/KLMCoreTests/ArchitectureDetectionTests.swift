@@ -23,6 +23,14 @@ final class ArchitectureDetectionTests: XCTestCase {
         XCTAssertEqual(id(modelType: "qwen2_vl"), "qwen2_5_vl")
     }
 
+    func testLlavaDetection() {
+        // llava's text backbone is Llama, but its arch string is
+        // `LlavaForConditionalGeneration` (no "llama" substring), so the rule
+        // must claim it explicitly and BEFORE the generic llama rule.
+        XCTAssertEqual(id(arch: "LlavaForConditionalGeneration"), "llava")
+        XCTAssertEqual(id(modelType: "llava"), "llava")
+    }
+
     func testRerankerRejectionRule() {
         XCTAssertEqual(id(arch: "BertForSequenceClassification"), "reranker")
         XCTAssertEqual(id(arch: "XLMRobertaCrossEncoder"), "reranker")
