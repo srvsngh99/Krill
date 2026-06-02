@@ -857,22 +857,13 @@ private func loadOLMoE(configData: Data, directory: URL) throws -> LoadedModel {
 
 private func loadDeepSeek(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(DeepSeekConfig.self, from: configData)
-    if config.usesAbsorbedMLA {
-        // DeepSeek-V3 ships an absorbed MLA representation (embed_q /
-        // unembed_out per-head linears + a latent KV cache) distinct from the
-        // V2 kv_b_proj form this native runtime implements. Fail fast with a
-        // useful message rather than a cryptic strict-verify keyNotFound on
-        // `embed_q`. The native runtime serves DeepSeek-V2 / V2-Lite today;
-        // the V3 attention + real-checkpoint verification (RAM-blocked here)
-        // is a tracked follow-up (docs/BACKLOG.md).
-        throw ModelLoadError.unsupportedArchitecture(
-            "DeepSeek-V3 uses an absorbed Multi-head Latent Attention layout "
-            + "(embed_q / unembed_out) that the native runtime does not load yet; "
-            + "it serves DeepSeek-V2 / V2-Lite (MLA + YaRN + shared experts + "
-            + "group gating). V3 absorbed-MLA support is a tracked follow-up "
-            + "(see docs/BACKLOG.md) and the 671B V3 is RAM-blocked on this host. "
-            + "Detected model_type=\(config.modelType).")
-    }
+    // DeepSeek-V2 / V2-Lite use the `kv_b_proj` MLA expansion; V3 (and V3.2)
+    // use the absorbed `embed_q` / unembed_out per-head linears + a latent KV
+    // cache. `DeepSeekDecoderLayer` builds the right attention per
+    // `config.usesAbsorbedMLA`; both share the YaRN RoPE, shared expert,
+    // dense-layer prefix, and (for V3) the `noaux_tc` sigmoid group gate. The
+    // 671B real V3 is RAM-blocked on a small host, but the runtime + synthetic
+    // logit parity (`tools/verify_deepseek_parity.py <dir> v3`) run here.
     let model = DeepSeekForCausalLM(config)
     // mlx-community DeepSeek checkpoints ship the routed experts as stacked
     // `mlp.switch_mlp.{gate_proj,up_proj,down_proj}.*` tensors (mlx-lm's

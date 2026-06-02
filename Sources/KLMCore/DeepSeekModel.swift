@@ -382,6 +382,230 @@ class DeepSeekAttention: Module {
     }
 }
 
+// MARK: - V3 absorbed-MLA per-head quantized linear
+
+/// A stacked per-head quantized linear, mirroring mlx-lm's
+/// `mla.QuantizedMultiLinear`. Holds a `[numHeads, outputDims, inputDims]`
+/// weight quantized along the last (`inputDims`) axis, and contracts a
+/// per-head matmul in a single `quantizedMatmul` -- the matrix the absorbed-MLA
+/// `embed_q` / `unembed_out` apply per head.
+///
+/// `transpose` selects which axis the matmul contracts (matching mlx's
+/// `quantized_matmul` semantics on one packed tensor):
+///   - `true`  (default): `x @ W.T`, contracts the packed `inputDims` axis,
+///     so `x: [..., H, ..., inputDims] -> [..., H, ..., outputDims]`.
+///   - `false`: `x @ W`, contracts `outputDims`, so
+///     `x: [..., H, ..., outputDims] -> [..., H, ..., inputDims]`.
+/// The same packed tensor serves both, which is exactly how V3 uses `embed_q`
+/// (transpose at decode to project the query into the latent space; no-transpose
+/// at prefill to expand the latent into per-head nope-keys).
+///
+/// Born quantized (like the SwitchGLU experts): the loader's quantize pass only
+/// touches `nn.Linear`-shaped modules, so this pre-allocates the packed
+/// `weight` / `scales` / `biases` at the checkpoint's shapes and binds them
+/// directly.
+class DeepSeekQuantizedMultiLinear: Module {
+    @ParameterInfo(key: "weight") var weight: MLXArray
+    @ParameterInfo(key: "scales") var scales: MLXArray
+    @ParameterInfo(key: "biases") var biases: MLXArray
+
+    let groupSize: Int
+    let bits: Int
+
+    init(inputDims: Int, outputDims: Int, numHeads: Int, groupSize: Int, bits: Int) {
+        self.groupSize = groupSize
+        self.bits = bits
+        let packedIn = inputDims * bits / 32
+        let groupsIn = inputDims / groupSize
+        _weight = ParameterInfo(
+            wrappedValue: MLXArray.zeros([numHeads, outputDims, packedIn], dtype: .uint32),
+            key: "weight")
+        _scales = ParameterInfo(
+            wrappedValue: MLXArray.zeros([numHeads, outputDims, groupsIn], dtype: .bfloat16),
+            key: "scales")
+        _biases = ParameterInfo(
+            wrappedValue: MLXArray.zeros([numHeads, outputDims, groupsIn], dtype: .bfloat16),
+            key: "biases")
+    }
+
+    func callAsFunction(_ x: MLXArray, transpose: Bool = true) -> MLXArray {
+        return quantizedMatmul(
+            x, weight, scales: scales, biases: biases,
+            transpose: transpose, groupSize: groupSize, bits: bits, mode: .affine)
+    }
+}
+
+// MARK: - V3 absorbed Multi-head Latent Attention
+
+/// DeepSeek-V3 attention. Same low-rank Q/KV projections and YaRN RoPE as V2,
+/// but the `kv_b_proj` expansion is *absorbed* into two per-head linears
+/// (`embed_q` / `unembed_out`) and the KV cache stores the compressed latent
+/// (`kv_latent`) plus the shared rope key (`k_pe`) instead of full keys/values.
+/// Mirrors `mlx_lm.models.deepseek_v3.DeepseekV3Attention`.
+///
+/// The rope-slice scores are computed separately (`pe_scores`) and folded into
+/// the attention as an additive bias, so the nope-slice attention can run in
+/// the compact latent space:
+///   - **decode (L == 1):** project the query nope-slice into the latent with
+///     `embed_q`, attend directly against the cached `kv_latent` (k == v ==
+///     latent), then map the latent output back to `v_head_dim` with
+///     `unembed_out`. Keeps the per-step KV footprint at `kv_lora_rank + rope`.
+///   - **prefill (L > 1):** expand the latent into per-head nope-keys
+///     (`embed_q`, no transpose) and values (`unembed_out`) and run a standard
+///     SDPA.
+/// Both paths are the same identity, so they produce equal logits.
+class DeepSeekV3Attention: Module {
+    let numHeads: Int
+    let kvLoraRank: Int
+    let qkRopeHeadDim: Int
+    let qkNopeHeadDim: Int
+    let vHeadDim: Int
+    let qHeadDim: Int
+    let scale: Float
+
+    @ModuleInfo(key: "q_proj") var qProj: Linear?
+    @ModuleInfo(key: "q_a_proj") var qAProj: Linear?
+    @ModuleInfo(key: "q_a_layernorm") var qANorm: RMSNorm?
+    @ModuleInfo(key: "q_b_proj") var qBProj: Linear?
+
+    @ModuleInfo(key: "kv_a_proj_with_mqa") var kvAProj: Linear
+    @ModuleInfo(key: "kv_a_layernorm") var kvANorm: RMSNorm
+    @ModuleInfo(key: "embed_q") var embedQ: DeepSeekQuantizedMultiLinear
+    @ModuleInfo(key: "unembed_out") var unembedOut: DeepSeekQuantizedMultiLinear
+    @ModuleInfo(key: "o_proj") var oProj: Linear
+
+    let rope: DeepSeekYaRNRoPE
+
+    init(_ config: DeepSeekConfig) {
+        self.numHeads = config.numAttentionHeads
+        self.kvLoraRank = config.kvLoraRank
+        self.qkRopeHeadDim = config.qkRopeHeadDim
+        self.qkNopeHeadDim = config.qkNopeHeadDim
+        self.vHeadDim = config.vHeadDim
+        self.qHeadDim = config.qkNopeHeadDim + config.qkRopeHeadDim
+
+        var s = 1.0 / Float(qHeadDim).squareRoot()
+        if config.ropeScaling.mscaleAllDim != 0 {
+            let m = yarnGetMscale(config.ropeScaling.factor, config.ropeScaling.mscaleAllDim)
+            s = s * m * m
+        }
+        self.scale = s
+
+        let dim = config.hiddenSize
+        let bias = config.attentionBias
+        if let qLora = config.qLoraRank {
+            _qAProj = ModuleInfo(
+                wrappedValue: Linear(dim, qLora, bias: bias), key: "q_a_proj")
+            _qANorm = ModuleInfo(
+                wrappedValue: RMSNorm(dimensions: qLora, eps: 1e-6), key: "q_a_layernorm")
+            _qBProj = ModuleInfo(
+                wrappedValue: Linear(qLora, numHeads * qHeadDim, bias: false), key: "q_b_proj")
+        } else {
+            _qProj = ModuleInfo(
+                wrappedValue: Linear(dim, numHeads * qHeadDim, bias: false), key: "q_proj")
+        }
+
+        _kvAProj = ModuleInfo(
+            wrappedValue: Linear(dim, kvLoraRank + qkRopeHeadDim, bias: bias),
+            key: "kv_a_proj_with_mqa")
+        _kvANorm = ModuleInfo(
+            wrappedValue: RMSNorm(dimensions: kvLoraRank, eps: 1e-6), key: "kv_a_layernorm")
+        // embed_q: per-head [numHeads, kvLoraRank, qkNopeHeadDim]; unembed_out:
+        // [numHeads, vHeadDim, kvLoraRank]. quantization (group_size / bits)
+        // comes from the checkpoint, matching how mlx-lm quantizes these.
+        let groupSize = config.quantization?.groupSize ?? 64
+        let bits = config.quantization?.bits ?? 4
+        _embedQ = ModuleInfo(
+            wrappedValue: DeepSeekQuantizedMultiLinear(
+                inputDims: qkNopeHeadDim, outputDims: kvLoraRank,
+                numHeads: numHeads, groupSize: groupSize, bits: bits),
+            key: "embed_q")
+        _unembedOut = ModuleInfo(
+            wrappedValue: DeepSeekQuantizedMultiLinear(
+                inputDims: kvLoraRank, outputDims: vHeadDim,
+                numHeads: numHeads, groupSize: groupSize, bits: bits),
+            key: "unembed_out")
+        _oProj = ModuleInfo(
+            wrappedValue: Linear(numHeads * vHeadDim, dim, bias: bias), key: "o_proj")
+
+        self.rope = DeepSeekYaRNRoPE(
+            dim: qkRopeHeadDim, base: config.ropeTheta, scaling: config.ropeScaling)
+    }
+
+    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil,
+                        rowOffsets: [Int]? = nil) -> MLXArray {
+        let B = x.dim(0)
+        let L = x.dim(1)
+
+        let q: MLXArray
+        if let qProj {
+            q = qProj(x)
+        } else {
+            q = qBProj!(qANorm!(qAProj!(x)))
+        }
+        let qHeads = q.reshaped(B, L, numHeads, qHeadDim).transposed(0, 2, 1, 3)
+        let qParts = split(qHeads, indices: [qkNopeHeadDim], axis: -1)
+        let qNope = qParts[0]                                  // [B, H, L, nope]
+        var qPe = qParts[1]                                    // [B, H, L, rope]
+
+        let compressed = kvAProj(x)
+        let kvParts = split(compressed, indices: [kvLoraRank], axis: -1)
+        let compressedKv = kvParts[0]                          // [B, L, kvLoraRank]
+        var kPe = kvParts[1].reshaped(B, L, 1, qkRopeHeadDim).transposed(0, 2, 1, 3) // [B,1,L,rope]
+        // [B, 1, L, kvLoraRank] -- one "head" so the latent cache stays compact.
+        var kvLatent = kvANorm(compressedKv).reshaped(B, 1, L, kvLoraRank)
+
+        // RoPE on the rope slice only (the nope slice is rope-free).
+        if let rowOffsets {
+            qPe = rope.perRow(qPe, offsets: rowOffsets)
+            kPe = rope.perRow(kPe, offsets: rowOffsets)
+        } else {
+            let offset = cache?.sequenceLength ?? 0
+            qPe = rope(qPe, offset: offset)
+            kPe = rope(kPe, offset: offset)
+        }
+
+        // Cache the compressed latent + shared rope key (not full K/V): store
+        // kv_latent as the cache's "keys" and k_pe as its "values".
+        if let cache {
+            (kvLatent, kPe) = cache.update(keys: kvLatent, values: kPe)
+        }
+
+        // Rope-slice scores, folded into the additive attention bias. k_pe has
+        // one head and broadcasts over the query heads (MQA-style). The causal
+        // mask (additive float; nil at decode) is added on top.
+        var peBias = matmul(qPe * scale, kPe.swappedAxes(-1, -2))   // [B, H, L, Lk]
+        if let mask {
+            peBias = peBias + mask
+        }
+
+        let qAttn: MLXArray
+        let keys: MLXArray
+        let vals: MLXArray
+        if L == 1 {
+            // Decode: project the query nope-slice into the latent and attend
+            // directly against the cached latent (k == v == latent).
+            qAttn = embedQ(qNope)                               // [B, H, 1, kvLoraRank]
+            keys = kvLatent                                     // [B, 1, Lk, kvLoraRank]
+            vals = kvLatent
+        } else {
+            // Prefill: expand the latent into per-head nope-keys and values.
+            qAttn = qNope                                       // [B, H, L, nope]
+            keys = embedQ(kvLatent, transpose: false)           // [B, H, Lk, nope]
+            vals = unembedOut(kvLatent)                         // [B, H, Lk, vHeadDim]
+        }
+
+        var output = MLXFast.scaledDotProductAttention(
+            queries: qAttn, keys: keys, values: vals, scale: scale, mask: peBias)
+        if L == 1 {
+            // Map the latent-space attention output back to v_head_dim.
+            output = unembedOut(output)                         // [B, H, 1, vHeadDim]
+        }
+
+        return oProj(output.transposed(0, 2, 1, 3).reshaped(B, L, -1))
+    }
+}
+
 // MARK: - Dense MLP (SwiGLU)
 
 class DeepSeekMLP: Module {
@@ -570,7 +794,11 @@ class DeepSeekMoE: Module {
 // MARK: - Decoder layer (dense prefix, then MoE)
 
 class DeepSeekDecoderLayer: Module {
-    @ModuleInfo(key: "self_attn") var selfAttn: DeepSeekAttention
+    // V2 uses `DeepSeekAttention` (kv_b_proj), V3 the absorbed
+    // `DeepSeekV3Attention` (embed_q / unembed_out + latent cache). Declared as
+    // `Module` so one layer type serves both; the concrete instance's own
+    // @ModuleInfo keys bind the checkpoint, and `callAsFunction` casts.
+    @ModuleInfo(key: "self_attn") var selfAttn: Module
     @ModuleInfo(key: "mlp") var mlp: Module
     @ModuleInfo(key: "input_layernorm") var inputLayernorm: RMSNorm
     @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayernorm: RMSNorm
@@ -578,7 +806,10 @@ class DeepSeekDecoderLayer: Module {
     let isMoE: Bool
 
     init(_ config: DeepSeekConfig, layerIndex: Int) {
-        _selfAttn = ModuleInfo(wrappedValue: DeepSeekAttention(config), key: "self_attn")
+        let attn: Module = config.usesAbsorbedMLA
+            ? DeepSeekV3Attention(config)
+            : DeepSeekAttention(config)
+        _selfAttn = ModuleInfo(wrappedValue: attn, key: "self_attn")
         self.isMoE = config.isMoELayer(layerIndex)
         let mlpModule: Module = isMoE
             ? DeepSeekMoE(config)
@@ -594,7 +825,16 @@ class DeepSeekDecoderLayer: Module {
 
     func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil,
                         rowOffsets: [Int]? = nil) -> MLXArray {
-        let h = x + selfAttn(inputLayernorm(x), mask: mask, cache: cache, rowOffsets: rowOffsets)
+        let normed = inputLayernorm(x)
+        let attnOut: MLXArray
+        if let v3 = selfAttn as? DeepSeekV3Attention {
+            attnOut = v3(normed, mask: mask, cache: cache, rowOffsets: rowOffsets)
+        } else if let v2 = selfAttn as? DeepSeekAttention {
+            attnOut = v2(normed, mask: mask, cache: cache, rowOffsets: rowOffsets)
+        } else {
+            fatalError("DeepSeekDecoderLayer.selfAttn must be DeepSeekAttention or DeepSeekV3Attention")
+        }
+        let h = x + attnOut
         let postAttn = postAttentionLayernorm(h)
         let mlpOut: MLXArray
         if let moe = mlp as? DeepSeekMoE {
