@@ -125,6 +125,7 @@ let package = Package(
                 "KLMCache",
                 "KLMRuntime",
                 "KLMRegistry",
+                "KLMKernels",
                 .product(name: "MLX", package: "mlx-swift"),
             ]
         ),
