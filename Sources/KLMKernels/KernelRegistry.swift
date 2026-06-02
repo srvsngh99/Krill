@@ -62,6 +62,91 @@ public enum KLMKernels {
         return results[0]
     }
 
+    // MARK: - Fused Q4-affine dequant + GEMV (decode probe)
+
+    /// JIT-compiled fused affine-4bit dequant + GEMV for the decode (single
+    /// query row) shape. One thread per output row `o` reads the packed 4-bit
+    /// weights, dequantizes on the fly (`w = q * scale + bias`, MLX's affine
+    /// convention), and accumulates `sum_i x[i] * w[o, i]` in fp32 -- no
+    /// dequantized weight matrix is ever materialized.
+    ///
+    /// This is a PROBE to test whether a hand-fused kernel can beat MLX's
+    /// built-in `quantizedMatmul` on M-series decode. Layout matches MLX's
+    /// affine pack: `w` is `[O, I/8]` uint32 (8 nibbles per word), `scales` /
+    /// `biases` are `[O, I/groupSize]`. `params` is int32 `[O, I, groupSize]`.
+    private static let _fusedQ4GemvKernel: MLXFast.MLXFastKernel = {
+        MLXFast.metalKernel(
+            name: "fused_q4_gemv",
+            inputNames: ["x", "w", "scales", "biases", "params"],
+            outputNames: ["out"],
+            source: """
+                uint o = thread_position_in_grid.x;
+                int O = params[0];
+                int I = params[1];
+                int gs = params[2];
+                if (o >= (uint)O) { return; }
+                uint wordsPerRow = (uint)(I / 8);
+                uint groupsPerRow = (uint)(I / gs);
+                uint wBase = o * wordsPerRow;
+                uint gBase = o * groupsPerRow;
+                float acc = 0.0f;
+                for (uint word = 0; word < wordsPerRow; word++) {
+                    uint packed = w[wBase + word];
+                    uint i0 = word * 8u;
+                    for (uint k = 0; k < 8u; k++) {
+                        uint i = i0 + k;
+                        uint q = (packed >> (4u * k)) & 0xFu;
+                        uint g = i / (uint)gs;
+                        float s = float(scales[gBase + g]);
+                        float b = float(biases[gBase + g]);
+                        acc += float(x[i]) * (float(q) * s + b);
+                    }
+                }
+                out[o] = acc;
+            """,
+            ensureRowContiguous: true
+        )
+    }()
+
+    /// Fused affine-4bit dequant + GEMV: `out = x @ dequant(w)^T` for a single
+    /// query row, bit-compatible with
+    /// `MLX.quantizedMatmul(x, w, scales:, biases:, transpose: true, bits: 4)`.
+    ///
+    /// - Parameters:
+    ///   - x: `[1, I]` (or `[I]`) activation row.
+    ///   - w: `[O, I/8]` uint32 packed 4-bit weights (MLX affine pack).
+    ///   - scales / biases: `[O, I/groupSize]`.
+    ///   - groupSize: affine group size (32 / 64 / 128).
+    /// - Returns: `[1, O]` in `x`'s dtype.
+    ///
+    /// PROBE ONLY: not wired into the decode hot path (see
+    /// docs/FUSED_Q4_PROBE.md). MLX's built-in quantizedMatmul is the shipped
+    /// path.
+    public static func fusedQ4Gemv(
+        x: MLXArray, w: MLXArray, scales: MLXArray, biases: MLXArray, groupSize: Int
+    ) -> MLXArray {
+        let O = w.dim(0)
+        let I = x.size
+        let params = MLXArray([Int32(O), Int32(I), Int32(groupSize)])
+        let threadGroup = min(256, O)
+        let grid = (O + threadGroup - 1) / threadGroup * threadGroup
+        let results = _fusedQ4GemvKernel(
+            [x.reshaped([I]), w, scales, biases, params],
+            grid: (grid, 1, 1),
+            threadGroup: (threadGroup, 1, 1),
+            outputShapes: [[1, O]],
+            outputDTypes: [x.dtype]
+        )
+        return results[0]
+    }
+
+    /// Whether the fused-Q4 decode probe is opted in (`KRILL_FUSED_Q4=1`). Off
+    /// by default: the probe is not wired into the decode path regardless (the
+    /// flag exists for benchmark harnesses and a possible future wiring).
+    public static var fusedQ4Enabled: Bool {
+        ProcessInfo.processInfo.environment["KRILL_FUSED_Q4"] == "1"
+    }
+
     /// Custom kernels are always available (JIT compiled via MLX metalKernel API).
     public static var isAvailable: Bool { true }
 

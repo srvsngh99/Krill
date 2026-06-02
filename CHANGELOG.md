@@ -8,6 +8,14 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **Fused Q4-affine matmul probe (closed lever).** `KLMKernels.fusedQ4Gemv` - a
+  JIT Metal kernel that fuses affine-4bit dequant + GEMV for the decode shape,
+  numerically matching MLX's `quantizedMatmul` (cosine > 0.9999 across group
+  sizes). Benchmarked at ~2.9x SLOWER than MLX's tuned built-in on M-series, so
+  it is landed as a probe (correctness gate + benchmark) but NOT wired into the
+  decode hot path - the same disposition as the compiled-decode lever (#128).
+  See `docs/FUSED_Q4_PROBE.md`. `MLX.quantizedMatmul` remains the shipped path.
+
 - **Native Llama-3.2-Vision (mllama) runtime.** `Llama32VisionForCausalLM` - a
   tiled ViT vision tower (Conv2d patch embed, gated aspect-ratio + position
   embeddings, a local transformer + a gated global transformer, intermediate-layer
