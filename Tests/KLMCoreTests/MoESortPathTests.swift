@@ -142,7 +142,7 @@ final class MoESortPathTests: XCTestCase {
     }
 
     /// End-to-end cover for the *production* quantized kernel path: build
-    /// a real `Qwen3SwitchGLU` with quantized random weights and assert
+    /// a real `MoESwitchGLU` with quantized random weights and assert
     /// that the sorted-batch dispatch (`N*topK >= 64`, the prefill path
     /// through `gatherQuantizedMM(sortedIndices: true)`) produces the
     /// same per-`(token, slot)` output as running each token alone
@@ -156,9 +156,9 @@ final class MoESortPathTests: XCTestCase {
         // group size must be one of {32, 64, 128} for mlx's quantize op;
         // both projection input dims (H and I) must be divisible by it.
         let H = 64, I = 64, E = 8, gs = 32, bits = 4, topK = 8
-        let glu = Qwen3SwitchGLU(
+        let glu = MoESwitchGLU(
             inputDims: H, hiddenDims: I, numExperts: E,
-            groupSize: gs, bits: bits)
+            groupSize: gs, bits: bits, activation: .swiglu)
 
         // The module is born with zero packed placeholders; fill the
         // three stacked projections with quantized random weights via
@@ -197,6 +197,96 @@ final class MoESortPathTests: XCTestCase {
         let unsorted = concatenated(rows, axis: 0)  // [N, topK, H]
         assertAllClose(sorted, unsorted, tol: 5e-3,
             "quantized sorted kernel vs unsorted per-token dispatch")
+    }
+
+    /// Same production-path cover as above, but for the GeGLU activation
+    /// (Gemma 4) on the shared `MoESwitchGLU`. Locks the `.geglu` wiring
+    /// through the real quantized `gather_qmm` sorted-indices kernel and
+    /// asserts the sorted prefill dispatch matches the unsorted per-token
+    /// decode dispatch over non-zero weights -- the activation closure must
+    /// not perturb the sort/unsort permutation algebra.
+    func testQuantizedGeGLUSwitchGLUSortedMatchesUnsorted() throws {
+        MLXRandom.seed(11)
+        let H = 64, I = 64, E = 8, gs = 32, bits = 4, topK = 8
+        let glu = MoESwitchGLU(
+            inputDims: H, hiddenDims: I, numExperts: E,
+            groupSize: gs, bits: bits, activation: .geglu)
+
+        var flat: [(String, MLXArray)] = []
+        func addProj(_ name: String, outDim: Int, inDim: Int) {
+            let wf = MLXRandom.normal([E, outDim, inDim]).asType(.float32) * 0.1
+            let (wq, scales, biases) = quantized(wf, groupSize: gs, bits: bits)
+            flat.append(("\(name).weight", wq))
+            flat.append(("\(name).scales", scales.asType(.bfloat16)))
+            flat.append((
+                "\(name).biases",
+                (biases ?? MLXArray.zeros(scales.shape)).asType(.bfloat16)))
+        }
+        addProj("gate_proj", outDim: I, inDim: H)
+        addProj("up_proj", outDim: I, inDim: H)
+        addProj("down_proj", outDim: H, inDim: I)
+        try glu.update(
+            parameters: ModuleParameters.unflattened(flat), verify: [.all])
+
+        let N = 8
+        let x = MLXRandom.normal([N, H]).asType(.float32)
+        let indices = MLXRandom.randInt(0 ..< Int32(E), [N, topK])
+        XCTAssertTrue(moeShouldSort(n: N, topK: topK))
+
+        let sorted = glu(x, indices: indices)
+        var rows = [MLXArray]()
+        for i in 0..<N {
+            XCTAssertFalse(moeShouldSort(n: 1, topK: topK))
+            rows.append(glu(x[i ..< (i + 1)], indices: indices[i ..< (i + 1)]))
+        }
+        let unsorted = concatenated(rows, axis: 0)
+        assertAllClose(sorted, unsorted, tol: 5e-3,
+            "quantized GeGLU sorted kernel vs unsorted per-token dispatch")
+    }
+
+    /// The two activations must actually differ: a SwiGLU and a GeGLU
+    /// `MoESwitchGLU` sharing identical quantized weights must produce
+    /// different outputs (guards against the activation closure being
+    /// dropped or wired to a constant).
+    func testSwiGLUAndGeGLUDifferOnIdenticalWeights() throws {
+        MLXRandom.seed(13)
+        let H = 64, I = 64, E = 8, gs = 32, bits = 4, topK = 4
+        func build(_ act: MoEActivation) throws -> MoESwitchGLU {
+            let glu = MoESwitchGLU(
+                inputDims: H, hiddenDims: I, numExperts: E,
+                groupSize: gs, bits: bits, activation: act)
+            MLXRandom.seed(99)  // same weights for both modules
+            var flat: [(String, MLXArray)] = []
+            func addProj(_ name: String, outDim: Int, inDim: Int) {
+                let wf = MLXRandom.normal([E, outDim, inDim]).asType(.float32) * 0.1
+                let (wq, scales, biases) = quantized(wf, groupSize: gs, bits: bits)
+                flat.append(("\(name).weight", wq))
+                flat.append(("\(name).scales", scales.asType(.bfloat16)))
+                flat.append((
+                    "\(name).biases",
+                    (biases ?? MLXArray.zeros(scales.shape)).asType(.bfloat16)))
+            }
+            addProj("gate_proj", outDim: I, inDim: H)
+            addProj("up_proj", outDim: I, inDim: H)
+            addProj("down_proj", outDim: H, inDim: I)
+            try glu.update(
+                parameters: ModuleParameters.unflattened(flat), verify: [.all])
+            return glu
+        }
+        let swiglu = try build(.swiglu)
+        let geglu = try build(.geglu)
+
+        MLXRandom.seed(5)
+        let x = MLXRandom.normal([4, H]).asType(.float32)
+        let indices = MLXRandom.randInt(0 ..< Int32(E), [4, topK])
+        let a = swiglu(x, indices: indices)
+        let b = geglu(x, indices: indices)
+        eval(a, b)
+        let av = a.asArray(Float.self), bv = b.asArray(Float.self)
+        var maxDiff: Float = 0
+        for i in 0..<av.count { maxDiff = max(maxDiff, abs(av[i] - bv[i])) }
+        XCTAssertGreaterThan(maxDiff, 1e-3,
+            "SwiGLU and GeGLU must produce materially different outputs")
     }
 
     /// Decode (`N = 1`) stays below the sort threshold so the unsorted

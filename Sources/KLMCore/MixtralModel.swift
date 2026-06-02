@@ -89,133 +89,12 @@ public struct MixtralConfig: ModelConfig, Codable, Sendable {
     }
 }
 
-// MARK: - Quantized stacked switched linear (one projection, all experts)
-
-/// One stacked quantized SwitchLinear inside the Mixtral `SwitchGLU` block.
-///
-/// Copy of `Qwen3QuantizedSwitchedLinear` (the cross-family consolidation
-/// into one generic module is tracked in `docs/BACKLOG.md`). Holds the
-/// `[numExperts, outputDims, inputDims_packed]` quantized weight plus
-/// per-expert scales/biases and dispatches the chosen top-K experts in a
-/// single `gatherQuantizedMM`. Parameter layout matches mlx-community's
-/// packed Mixtral format (`block_sparse_moe.switch_mlp.{proj}.{weight,
-/// scales,biases}`), so the loader binds it with no per-expert unpacking.
-class MixtralQuantizedSwitchedLinear: Module {
-    @ParameterInfo(key: "weight") var weight: MLXArray
-    @ParameterInfo(key: "scales") var scales: MLXArray
-    @ParameterInfo(key: "biases") var biases: MLXArray
-
-    let inputDims: Int
-    let outputDims: Int
-    let numExperts: Int
-    let groupSize: Int
-    let bits: Int
-
-    init(
-        inputDims: Int, outputDims: Int, numExperts: Int,
-        groupSize: Int, bits: Int
-    ) {
-        self.inputDims = inputDims
-        self.outputDims = outputDims
-        self.numExperts = numExperts
-        self.groupSize = groupSize
-        self.bits = bits
-
-        let packedIn = inputDims * bits / 32
-        let groupsIn = inputDims / groupSize
-        _weight = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, packedIn], dtype: .uint32),
-            key: "weight")
-        _scales = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
-            key: "scales")
-        _biases = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
-            key: "biases")
-    }
-
-    func callAsFunction(
-        _ x: MLXArray, indices: MLXArray, sortedIndices: Bool = false
-    ) -> MLXArray {
-        return gatherQuantizedMM(
-            x, weight,
-            scales: scales, biases: biases,
-            rhsIndices: indices,
-            transpose: true,
-            groupSize: groupSize, bits: bits, mode: .affine,
-            sortedIndices: sortedIndices)
-    }
-}
-
-// MARK: - SwitchGLU (router-dispatched SwiGLU experts)
-
-/// Mixtral experts as three stacked quantized switched linears
-/// (`gate_proj`/`up_proj`/`down_proj`) plus SwiGLU. SiLU activation, same
-/// as Qwen 3 MoE (Mixtral and Qwen share SwiGLU; Gemma 4 uses GeGLU).
-///
-/// The weight key map from the original HF Mixtral expert tensors is
-/// `w1 -> gate_proj`, `w3 -> up_proj`, `w2 -> down_proj`; mlx-community
-/// checkpoints already ship the stacked `switch_mlp.{proj}` layout, so the
-/// loader binds these directly. Decode/prefill dispatch + the `(token,
-/// expert)` sort path are shared via `MoESortPath.swift`.
-class MixtralSwitchGLU: Module {
-    @ModuleInfo(key: "gate_proj") var gateProj: MixtralQuantizedSwitchedLinear
-    @ModuleInfo(key: "up_proj") var upProj: MixtralQuantizedSwitchedLinear
-    @ModuleInfo(key: "down_proj") var downProj: MixtralQuantizedSwitchedLinear
-
-    init(
-        inputDims: Int, hiddenDims: Int, numExperts: Int,
-        groupSize: Int, bits: Int
-    ) {
-        _gateProj = ModuleInfo(
-            wrappedValue: MixtralQuantizedSwitchedLinear(
-                inputDims: inputDims, outputDims: hiddenDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "gate_proj")
-        _upProj = ModuleInfo(
-            wrappedValue: MixtralQuantizedSwitchedLinear(
-                inputDims: inputDims, outputDims: hiddenDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "up_proj")
-        _downProj = ModuleInfo(
-            wrappedValue: MixtralQuantizedSwitchedLinear(
-                inputDims: hiddenDims, outputDims: inputDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "down_proj")
-    }
-
-    /// - Parameters:
-    ///   - x: `[N, H]` flattened token activations.
-    ///   - indices: `[N, topK]` Int32 expert ids per token.
-    /// - Returns: `[N, topK, H]` per-expert outputs; caller does the topK
-    ///   weighted sum.
-    func callAsFunction(_ x: MLXArray, indices: MLXArray) -> MLXArray {
-        let N = x.dim(0)
-        let H = x.dim(1)
-        let topK = indices.dim(indices.ndim - 1)
-
-        // Prefill: sort (token, expert) by expert id so each expert's gather
-        // slice is contiguous and the gather_qmm sortedIndices fast path
-        // applies (recovers long-prompt throughput). See `MoESortPath.swift`.
-        if moeShouldSort(n: N, topK: topK) {
-            let (xs, idx, invOrder) = moeGatherSort(x, indices: indices)
-            let xGate = gateProj(xs, indices: idx, sortedIndices: true)
-            let xUp = upProj(xs, indices: idx, sortedIndices: true)
-            let activated = silu(xGate) * xUp
-            let out = downProj(activated, indices: idx, sortedIndices: true)
-            return moeScatterUnsort(out, invOrder: invOrder, n: N, topK: topK)
-        }
-
-        // Decode / short prompts: direct unsorted dispatch.
-        let xExp = x.reshaped(N, 1, 1, H)
-        let idx = indices.asType(.int32)
-        let xGate = gateProj(xExp, indices: idx)
-        let xUp = upProj(xExp, indices: idx)
-        let activated = silu(xGate) * xUp
-        let out = downProj(activated, indices: idx)
-        return out.squeezed(axis: -2)
-    }
-}
+// MARK: - MoE experts: shared `MoESwitchGLU` (see MoESwitchGLU.swift)
+//
+// The stacked `gatherQuantizedMM` expert dispatch
+// (`MoEQuantizedSwitchedLinear` + `MoESwitchGLU`, with the prefill
+// `(token, expert)` sort path in `MoESortPath.swift`) is shared across all
+// native MoE families. This family uses `MoEActivation.swiglu`.
 
 // MARK: - Sparse MoE block (router + SwitchGLU experts)
 
@@ -229,7 +108,7 @@ class MixtralSwitchGLU: Module {
 /// the survivors. The two are not equivalent; Mixtral softmaxes first.)
 class MixtralSparseMLP: Module {
     @ModuleInfo(key: "gate") var gate: Linear
-    @ModuleInfo(key: "switch_mlp") var switchMLP: MixtralSwitchGLU
+    @ModuleInfo(key: "switch_mlp") var switchMLP: MoESwitchGLU
 
     let numExperts: Int
     let topK: Int
@@ -257,11 +136,12 @@ class MixtralSparseMLP: Module {
         let groupSize = config.quantization?.groupSize ?? 64
         let bits = config.quantization?.bits ?? 4
         _switchMLP = ModuleInfo(
-            wrappedValue: MixtralSwitchGLU(
+            wrappedValue: MoESwitchGLU(
                 inputDims: config.hiddenSize,
                 hiddenDims: config.intermediateSize,
                 numExperts: config.numLocalExperts,
-                groupSize: groupSize, bits: bits),
+                groupSize: groupSize, bits: bits,
+                activation: .swiglu),
             key: "switch_mlp")
     }
 
