@@ -134,111 +134,12 @@ public struct Qwen2MoEConfig: ModelConfig, Codable, Sendable {
     }
 }
 
-// MARK: - Quantized stacked switched linear (one projection, all experts)
-
-/// Copy of `Qwen3QuantizedSwitchedLinear` for Qwen 2 MoE. (The shared
-/// generic-module refactor is tracked in `docs/BACKLOG.md`.) Stacked
-/// `[numExperts, outputDims, inputDims_packed]` quantized weight +
-/// scales/biases, dispatched in a single `gatherQuantizedMM`. Binds the
-/// in-checkpoint `mlp.switch_mlp.{proj}.{weight,scales,biases}` tensors
-/// directly.
-class Qwen2MoEQuantizedSwitchedLinear: Module {
-    @ParameterInfo(key: "weight") var weight: MLXArray
-    @ParameterInfo(key: "scales") var scales: MLXArray
-    @ParameterInfo(key: "biases") var biases: MLXArray
-
-    let groupSize: Int
-    let bits: Int
-
-    init(
-        inputDims: Int, outputDims: Int, numExperts: Int,
-        groupSize: Int, bits: Int
-    ) {
-        self.groupSize = groupSize
-        self.bits = bits
-        let packedIn = inputDims * bits / 32
-        let groupsIn = inputDims / groupSize
-        _weight = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, packedIn], dtype: .uint32),
-            key: "weight")
-        _scales = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
-            key: "scales")
-        _biases = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
-            key: "biases")
-    }
-
-    func callAsFunction(
-        _ x: MLXArray, indices: MLXArray, sortedIndices: Bool = false
-    ) -> MLXArray {
-        return gatherQuantizedMM(
-            x, weight, scales: scales, biases: biases,
-            rhsIndices: indices, transpose: true,
-            groupSize: groupSize, bits: bits, mode: .affine,
-            sortedIndices: sortedIndices)
-    }
-}
-
-// MARK: - SwitchGLU (router-dispatched SwiGLU experts)
-
-/// Qwen 2 MoE routed experts: three stacked quantized switched linears +
-/// SwiGLU (SiLU). Decode/prefill dispatch + the `(token, expert)` sort path
-/// are shared via `MoESortPath.swift`. Copy of `Qwen3SwitchGLU`.
-class Qwen2MoESwitchGLU: Module {
-    @ModuleInfo(key: "gate_proj") var gateProj: Qwen2MoEQuantizedSwitchedLinear
-    @ModuleInfo(key: "up_proj") var upProj: Qwen2MoEQuantizedSwitchedLinear
-    @ModuleInfo(key: "down_proj") var downProj: Qwen2MoEQuantizedSwitchedLinear
-
-    init(
-        inputDims: Int, hiddenDims: Int, numExperts: Int,
-        groupSize: Int, bits: Int
-    ) {
-        _gateProj = ModuleInfo(
-            wrappedValue: Qwen2MoEQuantizedSwitchedLinear(
-                inputDims: inputDims, outputDims: hiddenDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "gate_proj")
-        _upProj = ModuleInfo(
-            wrappedValue: Qwen2MoEQuantizedSwitchedLinear(
-                inputDims: inputDims, outputDims: hiddenDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "up_proj")
-        _downProj = ModuleInfo(
-            wrappedValue: Qwen2MoEQuantizedSwitchedLinear(
-                inputDims: hiddenDims, outputDims: inputDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "down_proj")
-    }
-
-    /// - Parameters:
-    ///   - x: `[N, H]` flattened token activations.
-    ///   - indices: `[N, topK]` Int32 expert ids per token.
-    /// - Returns: `[N, topK, H]` per-expert outputs; caller does the topK
-    ///   weighted sum.
-    func callAsFunction(_ x: MLXArray, indices: MLXArray) -> MLXArray {
-        let N = x.dim(0)
-        let H = x.dim(1)
-        let topK = indices.dim(indices.ndim - 1)
-
-        if moeShouldSort(n: N, topK: topK) {
-            let (xs, idx, invOrder) = moeGatherSort(x, indices: indices)
-            let xGate = gateProj(xs, indices: idx, sortedIndices: true)
-            let xUp = upProj(xs, indices: idx, sortedIndices: true)
-            let activated = silu(xGate) * xUp
-            let out = downProj(activated, indices: idx, sortedIndices: true)
-            return moeScatterUnsort(out, invOrder: invOrder, n: N, topK: topK)
-        }
-
-        let xExp = x.reshaped(N, 1, 1, H)
-        let idx = indices.asType(.int32)
-        let xGate = gateProj(xExp, indices: idx)
-        let xUp = upProj(xExp, indices: idx)
-        let activated = silu(xGate) * xUp
-        let out = downProj(activated, indices: idx)
-        return out.squeezed(axis: -2)
-    }
-}
+// MARK: - MoE experts: shared `MoESwitchGLU` (see MoESwitchGLU.swift)
+//
+// The stacked `gatherQuantizedMM` expert dispatch
+// (`MoEQuantizedSwitchedLinear` + `MoESwitchGLU`, with the prefill
+// `(token, expert)` sort path in `MoESortPath.swift`) is shared across all
+// native MoE families. This family uses `MoEActivation.swiglu`.
 
 // MARK: - Sparse MoE block (router + routed experts + shared expert)
 
@@ -252,7 +153,7 @@ class Qwen2MoESwitchGLU: Module {
 /// expert output is added to the routed mixture.
 class Qwen2MoESparseMLP: Module {
     @ModuleInfo(key: "gate") var gate: Linear
-    @ModuleInfo(key: "switch_mlp") var switchMLP: Qwen2MoESwitchGLU
+    @ModuleInfo(key: "switch_mlp") var switchMLP: MoESwitchGLU
     @ModuleInfo(key: "shared_expert") var sharedExpert: QwenMLP
     @ModuleInfo(key: "shared_expert_gate") var sharedExpertGate: Linear
 
@@ -280,11 +181,12 @@ class Qwen2MoESparseMLP: Module {
         let groupSize = config.quantization?.groupSize ?? 64
         let bits = config.quantization?.bits ?? 4
         _switchMLP = ModuleInfo(
-            wrappedValue: Qwen2MoESwitchGLU(
+            wrappedValue: MoESwitchGLU(
                 inputDims: config.hiddenSize,
                 hiddenDims: config.moeIntermediateSize,
                 numExperts: config.numExperts,
-                groupSize: groupSize, bits: bits),
+                groupSize: groupSize, bits: bits,
+                activation: .swiglu),
             key: "switch_mlp")
         _sharedExpert = ModuleInfo(
             wrappedValue: QwenMLP(config.sharedExpertConfig),

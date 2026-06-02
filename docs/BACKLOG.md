@@ -9,6 +9,19 @@ the in-repo companion to the owner's out-of-repo board
 
 ## Extract a shared MoE `SwitchGLU` / `QuantizedSwitchedLinear` module
 
+**Status:** DONE — `Sources/KLMCore/MoESwitchGLU.swift` (`MoEQuantizedSwitchedLinear`
++ `MoESwitchGLU`, parameterized by `MoEActivation.{swiglu,geglu}`). All six families
+(Qwen3-MoE, Gemma 4, Mixtral, Qwen2-MoE, OLMoE, DeepSeek-V2) refactored onto it; the
+per-family copies are deleted (net −421 lines). Bit-exact gated: the four synthetic
+mlx-lm logit-parity fixtures (Mixtral/OLMoE/Qwen2-MoE/DeepSeek-V2) pass post-refactor,
+the quantized SwitchGLU sorted-vs-unsorted cover runs for both `.swiglu` and `.geglu`
+(`MoESortPathTests`), and gemma-4-26b-a4b (GeGLU) + Qwen3-Coder-30B-A3B (SwiGLU) both
+generate coherent output on the real checkpoints.
+
+---
+
+### Original write-up (kept for context)
+
 **Status:** deferred (owner decision, native-MoE workstream).
 
 **Context.** The `gatherQuantizedMM`-based expert dispatch (a stacked

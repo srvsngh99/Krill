@@ -164,103 +164,12 @@ class OLMoEAttention: Module {
     }
 }
 
-// MARK: - Quantized stacked switched linear
-
-/// Copy of `Qwen3QuantizedSwitchedLinear` for OLMoE (shared-module refactor
-/// tracked in `docs/BACKLOG.md`). Binds the stacked
-/// `mlp.switch_mlp.{proj}.{weight,scales,biases}` tensors.
-class OLMoEQuantizedSwitchedLinear: Module {
-    @ParameterInfo(key: "weight") var weight: MLXArray
-    @ParameterInfo(key: "scales") var scales: MLXArray
-    @ParameterInfo(key: "biases") var biases: MLXArray
-
-    let groupSize: Int
-    let bits: Int
-
-    init(
-        inputDims: Int, outputDims: Int, numExperts: Int,
-        groupSize: Int, bits: Int
-    ) {
-        self.groupSize = groupSize
-        self.bits = bits
-        let packedIn = inputDims * bits / 32
-        let groupsIn = inputDims / groupSize
-        _weight = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, packedIn], dtype: .uint32),
-            key: "weight")
-        _scales = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
-            key: "scales")
-        _biases = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
-            key: "biases")
-    }
-
-    func callAsFunction(
-        _ x: MLXArray, indices: MLXArray, sortedIndices: Bool = false
-    ) -> MLXArray {
-        return gatherQuantizedMM(
-            x, weight, scales: scales, biases: biases,
-            rhsIndices: indices, transpose: true,
-            groupSize: groupSize, bits: bits, mode: .affine,
-            sortedIndices: sortedIndices)
-    }
-}
-
-// MARK: - SwitchGLU (router-dispatched SwiGLU experts)
-
-/// OLMoE routed experts: three stacked quantized switched linears + SwiGLU
-/// (SiLU). Decode/prefill dispatch + the `(token, expert)` sort path are
-/// shared via `MoESortPath.swift`. Copy of `Qwen3SwitchGLU`.
-class OLMoESwitchGLU: Module {
-    @ModuleInfo(key: "gate_proj") var gateProj: OLMoEQuantizedSwitchedLinear
-    @ModuleInfo(key: "up_proj") var upProj: OLMoEQuantizedSwitchedLinear
-    @ModuleInfo(key: "down_proj") var downProj: OLMoEQuantizedSwitchedLinear
-
-    init(
-        inputDims: Int, hiddenDims: Int, numExperts: Int,
-        groupSize: Int, bits: Int
-    ) {
-        _gateProj = ModuleInfo(
-            wrappedValue: OLMoEQuantizedSwitchedLinear(
-                inputDims: inputDims, outputDims: hiddenDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "gate_proj")
-        _upProj = ModuleInfo(
-            wrappedValue: OLMoEQuantizedSwitchedLinear(
-                inputDims: inputDims, outputDims: hiddenDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "up_proj")
-        _downProj = ModuleInfo(
-            wrappedValue: OLMoEQuantizedSwitchedLinear(
-                inputDims: hiddenDims, outputDims: inputDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "down_proj")
-    }
-
-    func callAsFunction(_ x: MLXArray, indices: MLXArray) -> MLXArray {
-        let N = x.dim(0)
-        let H = x.dim(1)
-        let topK = indices.dim(indices.ndim - 1)
-
-        if moeShouldSort(n: N, topK: topK) {
-            let (xs, idx, invOrder) = moeGatherSort(x, indices: indices)
-            let xGate = gateProj(xs, indices: idx, sortedIndices: true)
-            let xUp = upProj(xs, indices: idx, sortedIndices: true)
-            let activated = silu(xGate) * xUp
-            let out = downProj(activated, indices: idx, sortedIndices: true)
-            return moeScatterUnsort(out, invOrder: invOrder, n: N, topK: topK)
-        }
-
-        let xExp = x.reshaped(N, 1, 1, H)
-        let idx = indices.asType(.int32)
-        let xGate = gateProj(xExp, indices: idx)
-        let xUp = upProj(xExp, indices: idx)
-        let activated = silu(xGate) * xUp
-        let out = downProj(activated, indices: idx)
-        return out.squeezed(axis: -2)
-    }
-}
+// MARK: - MoE experts: shared `MoESwitchGLU` (see MoESwitchGLU.swift)
+//
+// The stacked `gatherQuantizedMM` expert dispatch
+// (`MoEQuantizedSwitchedLinear` + `MoESwitchGLU`, with the prefill
+// `(token, expert)` sort path in `MoESortPath.swift`) is shared across all
+// native MoE families. This family uses `MoEActivation.swiglu`.
 
 // MARK: - Sparse MoE block (router + routed experts; no shared expert)
 
@@ -270,7 +179,7 @@ class OLMoESwitchGLU: Module {
 /// ONLY when `norm_topk_prob` is set (default false for OLMoE-1B-7B).
 class OLMoESparseMLP: Module {
     @ModuleInfo(key: "gate") var gate: Linear
-    @ModuleInfo(key: "switch_mlp") var switchMLP: OLMoESwitchGLU
+    @ModuleInfo(key: "switch_mlp") var switchMLP: MoESwitchGLU
 
     let numExperts: Int
     let topK: Int
@@ -298,11 +207,12 @@ class OLMoESparseMLP: Module {
         let groupSize = config.quantization?.groupSize ?? 64
         let bits = config.quantization?.bits ?? 4
         _switchMLP = ModuleInfo(
-            wrappedValue: OLMoESwitchGLU(
+            wrappedValue: MoESwitchGLU(
                 inputDims: config.hiddenSize,
                 hiddenDims: config.intermediateSize,
                 numExperts: config.numExperts,
-                groupSize: groupSize, bits: bits),
+                groupSize: groupSize, bits: bits,
+                activation: .swiglu),
             key: "switch_mlp")
     }
 
