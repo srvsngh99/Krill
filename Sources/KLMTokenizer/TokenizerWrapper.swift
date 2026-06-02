@@ -696,6 +696,14 @@ public final class KLMTokenizer: @unchecked Sendable {
             if !s.isEmpty { systemText = s }
             turns.removeFirst()
         }
+        // An image request with no user turn (e.g. system-only messages) must
+        // still place its token run somewhere, or the engine forwards the
+        // pixels with zero image positions and `LlavaForCausalLM`'s
+        // `imagePositions.count == features` precondition aborts the process on
+        // client input. Synthesize an empty user turn to carry the image.
+        if imagePadCount > 0 && !turns.contains(where: { ($0["role"] ?? "") == "user" }) {
+            turns.append(["role": "user", "content": ""])
+        }
         let firstUserIndex = turns.firstIndex { ($0["role"] ?? "") == "user" }
 
         var tokens: [Int] = [bos]

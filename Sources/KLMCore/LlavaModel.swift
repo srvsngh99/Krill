@@ -366,15 +366,20 @@ public class LlavaForCausalLM: Module {
     }
 
     /// Text-only forward (no image): straight through the Llama backbone.
-    public func callAsFunction(_ inputIds: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
-        languageModel(inputIds, caches: caches)
+    /// `lastTokenOnly` slices the prefill output to the final position before
+    /// the vocab projection (the sampler reads only that row).
+    public func callAsFunction(
+        _ inputIds: MLXArray, caches: [KVCache]? = nil, lastTokenOnly: Bool = false
+    ) -> MLXArray {
+        languageModel(inputIds, caches: caches, lastTokenOnly: lastTokenOnly)
     }
 
     /// Splice the projected image features into the token embeddings at the
     /// `<image>` placeholder positions (contiguous, one image), then run the
     /// Llama text stack. Returns logits `[1, L, vocab]`.
     public func callAsFunction(
-        _ inputIds: MLXArray, pixelValues: MLXArray, caches: [KVCache]? = nil
+        _ inputIds: MLXArray, pixelValues: MLXArray, caches: [KVCache]? = nil,
+        lastTokenOnly: Bool = false
     ) -> MLXArray {
         var inputEmbeds = languageModel.model.embedTokens(inputIds)   // [1, L, H]
         let features = imageFeatures(pixelValues)
@@ -392,6 +397,8 @@ public class LlavaForCausalLM: Module {
         inputEmbeds = concatenated(
             [before, features.asType(inputEmbeds.dtype), after], axis: 1)
 
-        return languageModel(inputIds, inputsEmbeds: inputEmbeds, caches: caches)
+        return languageModel(
+            inputIds, inputsEmbeds: inputEmbeds, caches: caches,
+            lastTokenOnly: lastTokenOnly)
     }
 }

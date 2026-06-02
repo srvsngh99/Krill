@@ -412,6 +412,13 @@ private func loadLlava(configData: Data, directory: URL) throws -> LoadedModel {
         family: "llava",
         // Text-only turns run straight through the Llama backbone.
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        // Prefill slices to the last position before the vocab projection (the
+        // sampler reads only that row), so the long image prefill does not pay
+        // a full `[1, L, hidden] -> [1, L, vocab]` lm_head matmul over ~L-1
+        // unused rows. Matches every dense family's prefill path.
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
         // Multimodal: the engine passes the preprocessed `[1, C, H, W]` pixel
         // tensor as the third argument; the model embeds, splices the projected
         // CLIP features at the image-token positions, and runs the text stack.
@@ -420,6 +427,16 @@ private func loadLlava(configData: Data, directory: URL) throws -> LoadedModel {
                 return model(tokens, caches: caches as? [KVCache])
             }
             return model(tokens, pixelValues: pixelValues, caches: caches as? [KVCache])
+        },
+        // Last-token-only multimodal prefill: same lm_head saving as the text
+        // path, on the (long, image-bearing) prompt forward.
+        multimodalPrefillForward: { tokens, caches, pixelValues, _, _, _ in
+            guard let pixelValues else {
+                return model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+            }
+            return model(
+                tokens, pixelValues: pixelValues, caches: caches as? [KVCache],
+                lastTokenOnly: true)
         },
         vocabSize: config.vocabSize
     )

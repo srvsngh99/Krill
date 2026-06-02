@@ -49,6 +49,20 @@ final class LlavaPromptTokenizationTests: XCTestCase {
         XCTAssertGreaterThan(first, 0, "BOS + system preamble must precede the image run")
     }
 
+    func testSystemOnlyImageRequestStillPlacesImageRun() async throws {
+        // Regression: a request whose only message is a system turn but which
+        // carries an image must still emit the image-token run -- otherwise the
+        // engine forwards pixels with zero image positions and the model's
+        // `imagePositions.count == features` precondition aborts the process.
+        let tok = try await requireTokenizer()
+        let tokens = tok.formatLlavaTokenIds(
+            messages: [["role": "system", "content": "Describe the image."]],
+            imageTokenId: 32_000,
+            imagePadCount: 576)
+        XCTAssertEqual(tokens.filter { $0 == 32_000 }.count, 576,
+            "a system-only request with an image must still place the image run")
+    }
+
     func testTextOnlyHasNoImageTokens() async throws {
         let tok = try await requireTokenizer()
         let tokens = tok.formatLlavaTokenIds(
