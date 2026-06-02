@@ -8,6 +8,22 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **Native Llama-3.2-Vision (mllama) runtime.** `Llama32VisionForCausalLM` - a
+  tiled ViT vision tower (Conv2d patch embed, gated aspect-ratio + position
+  embeddings, a local transformer + a gated global transformer, intermediate-layer
+  concatenation), a multi-modal projector, and a Llama text decoder whose
+  `cross_attention_layers` cross-attend to the projected vision features (gated
+  cross-attention with q/k RMSNorm; vision enters via cross-attention, unlike
+  LLaVA's prefix-embed splice). The `llama_vision` family is detected, loaded
+  (`loadLlamaVision`, with the `vision_model`->`vision_tower` key rename and the
+  PyTorch->MLX conv transpose), and registered. Verified for logit parity against
+  mlx-vlm on a tiny synthetic checkpoint with ALL parameters randomized so the
+  gated cross-attention genuinely contributes (argmax + cosine > 0.9999). Image
+  serving (tile/aspect-ratio preprocessing + a cross-KV decode driver) is a
+  follow-up, so the family advertises text generation only for now; tier
+  `experimental`. The real Llama-3.2-11B-Vision run is RAM-blocked on the 24GB
+  dev box.
+
 - **LLaVA-1.5 image serving.** The native LLaVA-1.5 runtime (`LlavaForCausalLM`
   — CLIP ViT + multi-modal projector + Llama backbone, landed previously and
   mlx-vlm logit-parity-verified) is now wired end-to-end through the engine: the

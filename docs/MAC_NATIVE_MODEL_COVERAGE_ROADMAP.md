@@ -49,12 +49,21 @@ Not broadly supported:
 
 ```text
 MoE base models (Qwen 3 MoE has an experimental native path)
-Llama-vision / LLaVA-next (LLaVA-1.5 now has a native Swift+MLX runtime:
+LLaVA-next (LLaVA-1.5 now has a native Swift+MLX runtime:
   `LlavaForCausalLM` - CLIP ViT + projector + Llama backbone, mlx-vlm
   logit-parity-verified, and wired end-to-end for image serving -- registered
   `llava` family + `LlavaImagePreprocessor` (CLIP 336) + vicuna prompt with the
   image-token run; POST an image and it answers. llava-next / llava-bunny still
   unsupported)
+Llama-3.2-Vision / mllama (NOW has a native Swift+MLX runtime:
+  `Llama32VisionForCausalLM` - tiled ViT vision tower (gated aspect-ratio /
+  position embeddings, local + gated global transformers, intermediate-layer
+  concat) + multi-modal projector + a Llama text decoder whose
+  `cross_attention_layers` cross-attend to the vision features; mlx-vlm
+  logit-parity-verified on a synthetic checkpoint. Detection + loader +
+  registration landed; image-serving wiring (tile/aspect-ratio preprocessing +
+  cross-KV decode driver) is the follow-up, so it advertises text generation
+  only for now. Real-checkpoint run is RAM-blocked on the 24GB dev box.)
 Whisper/ASR
 TTS
 Rerankers/cross-encoders

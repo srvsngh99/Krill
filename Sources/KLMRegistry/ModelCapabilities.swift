@@ -106,6 +106,14 @@ public enum ModelCapabilities {
             // tools are NOT advertised (no parity-tested tool template -
             // the vicuna-style prompt is built directly).
             return [.textGeneration, .visionInput]
+        case .llamaVision:
+            // Llama-3.2-Vision (mllama) native runtime. The model + loader +
+            // mlx-vlm parity have landed; the image-serving path (tile
+            // preprocessing + cross-KV decode driver) is a follow-up, so vision
+            // input is NOT advertised yet (a checkpoint loads and serves text;
+            // an image would otherwise be silently dropped). visionInput is
+            // added when the serving wiring lands.
+            return [.textGeneration]
         case .moe:
             // WS6 foundation: the family DECLARES textGeneration +
             // moe + tools (the initial targets - Mixtral, Qwen 3
@@ -145,6 +153,11 @@ public enum ModelCapabilities {
             // productionNative until a serving benchmark gate (vs a
             // reference) lands, mirroring how WS5/WS7 families are promoted
             // only after their benchmark gate is green.
+            return .experimental
+        case .llamaVision:
+            // Native runtime + loader + mlx-vlm synthetic logit parity, but no
+            // serving benchmark and no real-checkpoint run yet (RAM-blocked on
+            // the dev box), so `.experimental`.
             return .experimental
         case .moe:
             // Every MoE family is native Swift+MLX now (Qwen 3 MoE,
