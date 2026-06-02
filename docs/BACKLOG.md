@@ -53,7 +53,7 @@ and their numerics are pinned by parity tests.
 
 ## DeepSeek-V3 absorbed-MLA attention + real-checkpoint verification
 
-**Status:** deferred (RAM-blocked here; distinct attention representation).
+**Status:** DONE (synthetic parity); only the 671B real-checkpoint run is RAM-blocked here.
 
 **Context.** The native DeepSeek runtime (`Sources/KLMCore/DeepSeekModel.swift`) serves
 **DeepSeek-V2 / V2-Lite** end-to-end: MLA with the standard `kv_b_proj` decompression,
@@ -61,21 +61,26 @@ YaRN RoPE, the always-on shared expert, the `first_k_dense_replace` dense prefix
 V2 softmax / `group_limited_greedy` router. This is numerically verified against mlx-lm
 (`DeepSeekParityTests`, V2 fixture: argmax + cosine > 0.9999 on identical 4-bit weights).
 
-The **V3 router gating** (`noaux_tc`: sigmoid scores + `e_score_correction_bias` for
-selection + group top-2-sum + `norm_topk_prob`) is implemented in the shared
-`DeepSeekMoEGate` and structurally tested.
+**What landed.** The absorbed V3 representation is now implemented and parity-verified:
+- `DeepSeekV3Attention` + `DeepSeekQuantizedMultiLinear` (per-head `embed_q` / `unembed_out`
+  via `quantizedMatmul` with the `transpose` flag, mirroring mlx-lm's `mla.MultiLinear`).
+- A **latent KV cache** (the standard `KVCache` stores `kv_latent` as keys + `k_pe` as
+  values, both with one head -- no new cache type needed; it already handles V2's
+  differing key/value dims).
+- The split attention: rope-slice `pe_scores` folded into the additive attention bias, the
+  L==1 decode path (query projected into the latent, attention over the cached latent,
+  `unembed_out` back to value space) and the L>1 prefill path (expand latent to per-head
+  nope-keys / values).
+- The `noaux_tc` group gate (`DeepSeekMoEGate`: sigmoid + `e_score_correction_bias` for
+  selection, group top-2-sum, `norm_topk_prob`) is now exercised end-to-end (V2 never hit
+  it -- `n_group=1`).
+- `DeepSeekDecoderLayer` picks V2 vs V3 attention by `config.usesAbsorbedMLA`; the loader no
+  longer rejects V3.
 
-**What's left.** mlx-lm's `deepseek_v3` uses an *absorbed* MLA representation that is
-structurally different from V2: per-head `MultiLinear` `embed_q` / `unembed_out` weights
-(instead of `kv_b_proj`), a **latent KV cache** (it caches `kv_latent` + `k_pe`, not full
-keys/values), and a split attention with separate `pe_scores` plus distinct L==1 (decode)
-vs L>1 (prefill) code paths. A real mlx-community DeepSeek-V3 checkpoint ships
-`embed_q`/`unembed_out`, so the V2 loader rejects it with a clear message
-(`loadDeepSeek` -> `usesAbsorbedMLA`). Implementing it requires a `MultiLinear` (per-head)
-layer, a latent-KV cache variant (the current `KVCache` stores `[B, H, L, headDim]`
-keys/values), and the absorbed forward with the L==1 / L>1 branches and manual rope-pe
-attention.
-
-It is verifiable against mlx-lm on a tiny synthetic V3 fixture
-(`tools/verify_deepseek_parity.py <dir> v3`), but the 671B real V3 is RAM-blocked on this
-24 GB host - run the real-checkpoint parity on a bigger box.
+Verified by `tools/verify_deepseek_parity.py <dir> v3` -> `DeepSeekParityTests`
+(`KLM_DEEPSEEK_V3_PARITY_DIR`): logit parity vs mlx-lm (argmax + cosine > 0.9999), plus a
+decode-matches-prefill self-consistency test for the L==1 latent-cache path. The parity
+tool randomizes the V3 router (its gate weight initializes to zero, which would make every
+routed score tie at 0.5 and decide selection by tie-break artifact rather than numerics).
+Only the 671B real V3 is RAM-blocked on a small host -- run the real-checkpoint parity on a
+bigger box.

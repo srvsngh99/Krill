@@ -102,6 +102,20 @@ def build(outdir: str, variant: str) -> None:
 
     mx.random.seed(0)
     model = Model(args)
+    # The MoE router gate (`MoEGate.weight`) and `e_score_correction_bias`
+    # initialize to zeros and are not randomized by model construction. Left at
+    # zero every routed score is sigmoid(0) = 0.5, so the group-select scores
+    # tie exactly and the expert selection is decided purely by the runtime's
+    # tie-break order -- which is an artifact, not the numerics a real
+    # checkpoint exercises. Randomize them (V3 only; V2 has no group select) so
+    # the synthetic model routes through a non-degenerate `noaux_tc` gate.
+    if variant == "v3":
+        for layer in model.model.layers:
+            mlp = layer.mlp
+            if hasattr(mlp, "gate"):
+                mlp.gate.weight = mx.random.normal(mlp.gate.weight.shape) * 0.02
+                mlp.gate.e_score_correction_bias = (
+                    mx.random.normal(mlp.gate.e_score_correction_bias.shape) * 0.02)
     mx.eval(model.parameters())
     nn.quantize(model, group_size=GROUP_SIZE, bits=BITS)
     mx.eval(model.parameters())
