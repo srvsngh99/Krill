@@ -219,6 +219,18 @@ let architectureRules: [ArchitectureRule] = [
         },
         action: .load { try loadLlava(configData: $0, directory: $1) }),
 
+    // Llama-3.2-Vision (mllama): tiled ViT vision tower + multi-modal projector
+    // + a Llama text decoder whose cross_attention_layers attend to the vision
+    // features. Must precede the generic llama rule (its arch is
+    // `MllamaForConditionalGeneration`, which does not contain "llama" as the
+    // dispatch substring would need, and model_type is "mllama").
+    ArchitectureRule(
+        id: "mllama",
+        matches: { arch, mt in
+            arch.contains("mllamaforconditionalgeneration") || mt == "mllama"
+        },
+        action: .load { try loadLlamaVision(configData: $0, directory: $1) }),
+
     ArchitectureRule(
         id: "gemma4",
         matches: { arch, mt in
@@ -439,6 +451,68 @@ private func loadLlava(configData: Data, directory: URL) throws -> LoadedModel {
                 lastTokenOnly: true)
         },
         vocabSize: config.vocabSize
+    )
+}
+
+private func loadLlamaVision(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(Llama32VisionConfig.self, from: configData)
+    let model = Llama32VisionForCausalLM(config)
+    // Quantize the Linear layers and the text token embedding. The vision
+    // patch-embed Conv2d, the raw gate / position parameters, and the vision
+    // tower's small aspect-ratio / tile / position Embedding tables stay fp
+    // (those tables are typically NOT quantized in 4-bit dumps; quantizing them
+    // would mismatch a real checkpoint's fp weights at strict load). The
+    // synthetic parity fixture is unquantized; the exact real-4bit-checkpoint
+    // quantization layout is validated when the image-serving follow-up runs a
+    // real checkpoint on a larger box (the 11B run is RAM-blocked here).
+    if let q = config.quantization {
+        quantize(model: model, groupSize: q.groupSize, bits: q.bits) { name, module in
+            guard module is Linear || module is Embedding else { return false }
+            if name.contains("patch_embedding") { return false }
+            // Skip the vision tower's Embedding tables (tile / aspect-ratio /
+            // position), keep the text `embed_tokens`.
+            if module is Embedding && name.contains("vision_tower") { return false }
+            return true
+        }
+    }
+    var flatWeights = try loadWeightArrays(from: directory)
+    // HF ships the vision tower under `vision_model.*`; our module key is
+    // `vision_tower.*` (mirrors mlx-vlm's sanitize rename). Also drop the
+    // precomputed rotary inv_freq / position_ids buffers mlx-vlm discards.
+    var renamed: [String: MLXArray] = [:]
+    for (k, v) in flatWeights {
+        if k.contains("rotary_emb.inv_freq") || k.contains("position_ids") { continue }
+        var key = k
+        if key.hasPrefix("vision_model.") {
+            key = "vision_tower." + key.dropFirst("vision_model.".count)
+        }
+        renamed[key] = v
+    }
+    flatWeights = renamed
+    // The vision patch embed is a Conv2d: PyTorch `[out, in, kH, kW]` ->
+    // MLX `[out, kH, kW, in]` (transpose when not already in MLX layout).
+    let patchKey = "vision_tower.patch_embedding.weight"
+    if let w = flatWeights[patchKey], w.ndim == 4 {
+        let s = w.shape
+        let isMLXLayout = s[0] >= s[1] && s[0] >= s[2] && s[1] == s[2]
+        if !isMLXLayout { flatWeights[patchKey] = w.transposed(0, 2, 3, 1) }
+    }
+    let nested = ModuleParameters.unflattened(flatWeights.map { ($0.key, $0.value) })
+    // Strict verify: mllama has an untied lm_head, so every model parameter must
+    // be set and no checkpoint key may go unused.
+    try model.update(parameters: nested, verify: [.all])
+
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "llama_vision",
+        // Text-only turns run through the decoder (the cross-attention layers
+        // contribute ~nothing through their zero-initialized gates). Image
+        // serving (tile preprocessing + a cross-KV decode driver) is wired in a
+        // follow-up; the model's image forward is reachable via `module`.
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        multimodalForward: nil,
+        vocabSize: config.textConfig.vocabSize
     )
 }
 

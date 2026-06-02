@@ -144,6 +144,15 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     /// generation) is this family's entry here. Only `model_type` "llava"
     /// (llava-1.5) is supported; llava-next / llava-bunny are not.
     case llava
+    /// Llama-3.2-Vision (mllama) vision-language family. A tiled ViT vision
+    /// tower + multi-modal projector + a Llama text decoder whose
+    /// `cross_attention_layers` attend to the projected vision features (vision
+    /// enters via cross-attention, unlike LLaVA's prefix-embed splice). Native
+    /// Swift+MLX runtime (`Llama32VisionForCausalLM`), mlx-vlm logit-parity
+    /// verified on a synthetic checkpoint. Image-serving wiring (tile /
+    /// aspect-ratio preprocessing + a cross-KV decode driver) is a follow-up, so
+    /// this declares text generation only for now.
+    case llamaVision = "llama_vision"
     /// Mixture-of-experts text LMs. Architectural deltas vs the
     /// dense families: each transformer block's MLP is replaced by
     /// a router + N expert FFNs, where the router picks the top-K
@@ -209,6 +218,9 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         // name would otherwise need to (and does not) contain "llama". A
         // raw HF llava checkpoint declares `LlavaForConditionalGeneration`.
         if archLower.contains("llavaforconditionalgeneration") { return .llava }
+        // mllama (Llama-3.2-Vision) before generic llama: arch is
+        // `MllamaForConditionalGeneration`.
+        if archLower.contains("mllama") { return .llamaVision }
         if archLower.contains("llama") { return .llama }
         // MoE arms are matched BEFORE the generic qwen / mistral
         // arms so a Qwen 3 MoE or Mixtral checkpoint never silently
@@ -234,6 +246,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         case "gemma4", "gemma4_text": return .gemma4
         case "qwen2_5_vl", "qwen2_vl": return .qwen25vl
         case "llava": return .llava
+        case "mllama": return .llamaVision
         case "mixtral", "qwen3_moe", "qwen2_moe", "olmoe": return .moe
         case "phi", "phi3": return .phi
         case "chatglm", "glm", "glm4_moe": return .glm

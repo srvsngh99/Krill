@@ -31,6 +31,14 @@ final class ArchitectureDetectionTests: XCTestCase {
         XCTAssertEqual(id(modelType: "llava"), "llava")
     }
 
+    func testMllamaDetection() {
+        // Llama-3.2-Vision. Its text backbone is Llama, but the arch is
+        // `MllamaForConditionalGeneration` and model_type "mllama"; it must be
+        // claimed before the generic llama rule and route to loadLlamaVision.
+        XCTAssertEqual(id(arch: "MllamaForConditionalGeneration"), "mllama")
+        XCTAssertEqual(id(modelType: "mllama"), "mllama")
+    }
+
     func testRerankerRejectionRule() {
         XCTAssertEqual(id(arch: "BertForSequenceClassification"), "reranker")
         XCTAssertEqual(id(arch: "XLMRobertaCrossEncoder"), "reranker")
