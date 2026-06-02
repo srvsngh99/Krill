@@ -1,8 +1,9 @@
 # WS3: Model Adapter And Capability Registry
 
 Status: capability metadata layer landed; server-side `ModelAdapter`
-routing landed; load-time adapter polymorphism (`detect` / `load` /
-tokenizer / cache) remains deferred.
+routing landed; **load-time `detect` landed as a declarative table**; the
+rest of load-time polymorphism (`load` / tokenizer / cache as adapter
+methods) remains deferred.
 Detailed usage: [../MODEL_REGISTRY.md](../MODEL_REGISTRY.md)
 
 ## What landed in the foundational PR (#25)
@@ -59,12 +60,19 @@ is now warranted and shipped:
 
 ## What this still does NOT do
 
-- No load-time adapter polymorphism. The WS3 design sketch also lists
-  `detect`, `load`, `tokenizerPolicy`, and `cachePolicy`. Folding
-  those in would force a rewrite of every loader and engine for an
-  abstraction whose hot decode path must stay zero-cost. They remain
-  in `ModelLoader` / the per-family engines and can adopt `ModelAdapter`
-  incrementally.
+- Partial load-time polymorphism. The WS3 design sketch lists `detect`,
+  `load`, `tokenizerPolicy`, and `cachePolicy`. **`detect` has landed**:
+  `loadModel`'s order-sensitive `if/else` architecture chain is now a
+  declarative, ordered `architectureRules` table in `ModelLoader.swift`
+  (one `ArchitectureRule` per family/rejection, first-match-wins). Adding
+  a family is a new table row, not a hand-placed branch, and the pure
+  `detectedArchitectureID(architectures:modelType:)` lets tests pin the
+  ordering without a checkpoint (`ArchitectureDetectionTests`). The hot
+  decode path is untouched -- detection runs once, at load. `load`,
+  `tokenizerPolicy`, and `cachePolicy` are still per-family functions /
+  engine logic; folding those into adapter methods would force a wider
+  rewrite for an abstraction whose hot path must stay zero-cost, so they
+  can adopt `ModelAdapter` incrementally.
 - `Server.swift` still has a couple of family-keyed branches that are
   model-mechanics decisions (audio token IDs) rather than routing or
   capability decisions, and those stay family-keyed by design.
