@@ -103,6 +103,84 @@ public struct ModelAdapter: Sendable, Equatable {
             return .hermes
         }
     }
+
+    // MARK: - Load-time policies (WS3 completion)
+    //
+    // `detect` landed as the declarative `architectureRules` table in
+    // `ModelLoader`; these two properties fold the remaining load-time
+    // family-keyed decisions the engine used to make with `family ==
+    // "gemma4"` / `"phi"` string compares into the same declarative adapter.
+    // They are read ONCE per request (prompt build / cache allocation), never
+    // per decode step, so the hot path stays zero-cost. `load` itself is
+    // already per-architecture (one loader per `architectureRules` row).
+
+    /// How the engine must build the prompt token ids for this family. The
+    /// per-family split exists because the right tokenization path is not
+    /// uniform: Gemma 4 needs direct turn-special ids, phi's o200k BPE needs a
+    /// render+re-encode round-trip, LLaVA needs the vicuna prompt with the
+    /// image-token run placed inline, and everyone else prefers the
+    /// swift-transformers direct template with a render+encode fallback.
+    public var tokenizerPrompt: TokenizerPromptPolicy {
+        switch family {
+        case .gemma4:
+            // Direct token-id construction keeps the 105/106/107 turn
+            // specials that a decode -> re-encode round-trip would drop.
+            return .gemma4DirectIds
+        case .phi:
+            // o200k (GPT-4o / tiktoken) BPE: the swift-transformers DIRECT
+            // path mis-tokenizes the body, so render the template to a string
+            // and re-encode through the canonical encode path instead.
+            return .phiRenderReencode
+        case .llava:
+            // Vicuna prompt with the per-CLIP-patch image-token run placed
+            // inline (`formatLlavaTokenIds`).
+            return .llavaVicuna
+        case .llama, .qwen, .qwen25vl, .mistral, .gemma, .glm, .deepseek,
+             .bert, .reranker, .moe:
+            // Try the swift-transformers direct token-id template (keeps
+            // ChatML / FIM / tool specials), else render + encode.
+            return .directTokenIdsWithRenderFallback
+        }
+    }
+
+    /// Whether this family supports the int8 quantized KV cache. Only Gemma 4
+    /// today: every other family's forward closure downcasts caches to
+    /// `[KVCache]`, so handing it a `[QuantizedKVCache]` would crash at the
+    /// first attention. (The int8 batched-decode path is separately gated on
+    /// the model exposing a `batchedDecodeForwardQuantized` closure, which is
+    /// also Gemma-4-only, so it needs no family check.)
+    public var kvCacheQuantization: KVCacheQuantizationPolicy {
+        switch family {
+        case .gemma4:
+            return .supportsInt8
+        case .llama, .qwen, .qwen25vl, .llava, .mistral, .gemma, .phi,
+             .glm, .deepseek, .bert, .reranker, .moe:
+            return .fp16Only
+        }
+    }
+}
+
+/// How the engine builds the prompt token ids for a family. A stable,
+/// module-neutral identifier; the engine maps each case to its concrete
+/// tokenizer call. Declaring a new family's policy here (a compile error until
+/// done, since the `switch` is exhaustive) is the single deliberate decision.
+public enum TokenizerPromptPolicy: String, Sendable, Equatable, CaseIterable {
+    /// Gemma 4: `formatGemma4TokenIds` (direct turn-special ids).
+    case gemma4DirectIds
+    /// Phi: render the chat template, then `encodeWithoutExtraBOS`.
+    case phiRenderReencode
+    /// LLaVA-1.5: `formatLlavaTokenIds` (vicuna prompt + inline image run).
+    case llavaVicuna
+    /// Default: `applyChatTemplateTokens` if available, else render + encode.
+    case directTokenIdsWithRenderFallback
+}
+
+/// Whether a family supports the int8 quantized KV cache or runs fp16-only.
+public enum KVCacheQuantizationPolicy: String, Sendable, Equatable, CaseIterable {
+    /// int8 KV cache is safe (and a quantized batched-decode forward exists).
+    case supportsInt8
+    /// fp16 KV only (the family's forward closure assumes `[KVCache]`).
+    case fp16Only
 }
 
 /// Which server chat handler a model family's request is routed to.

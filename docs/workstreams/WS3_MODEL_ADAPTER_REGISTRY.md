@@ -58,24 +58,36 @@ is now warranted and shipped:
   for every `ModelFamily`, and assert the `ToolFormat.forFamily`
   mapping is behaviour-preserving.
 
+## Load-time polymorphism: complete
+
+The WS3 design sketch lists `detect`, `load`, `tokenizerPolicy`, and
+`cachePolicy`. All four have landed.
+
+- **`detect`**: `loadModel`'s order-sensitive `if/else` architecture chain is
+  now a declarative, ordered `architectureRules` table in `ModelLoader.swift`
+  (one `ArchitectureRule` per family/rejection, first-match-wins). Adding a
+  family is a new table row, not a hand-placed branch, and the pure
+  `detectedArchitectureID(architectures:modelType:)` lets tests pin the ordering
+  without a checkpoint (`ArchitectureDetectionTests`). Detection runs once, at
+  load.
+- **`load`**: each `architectureRules` row binds the family to its `loadXxx`
+  loader via the `.load` action, so load dispatch IS the table.
+- **`tokenizerPolicy` + `cachePolicy`**: `ModelAdapter` exposes `tokenizerPrompt`
+  (`TokenizerPromptPolicy`: gemma4 direct ids / phi render-reencode / llava
+  vicuna / direct-with-render-fallback) and `kvCacheQuantization`
+  (`KVCacheQuantizationPolicy`: supportsInt8 / fp16Only). The engine reads these
+  off the adapter ONCE per request, replacing the old `family == "gemma4"` /
+  `"phi"` string compares in the prompt-build and cache-allocation paths; the
+  hot decode path is untouched. `ModelAdapterTests` pins the policy for every
+  family, and the refactor is output-byte-identical (verified by a before/after
+  greedy generation diff on gemma-4-e2b, phi-4-mini, and llama-3.2-3b).
+
 ## What this still does NOT do
 
-- Partial load-time polymorphism. The WS3 design sketch lists `detect`,
-  `load`, `tokenizerPolicy`, and `cachePolicy`. **`detect` has landed**:
-  `loadModel`'s order-sensitive `if/else` architecture chain is now a
-  declarative, ordered `architectureRules` table in `ModelLoader.swift`
-  (one `ArchitectureRule` per family/rejection, first-match-wins). Adding
-  a family is a new table row, not a hand-placed branch, and the pure
-  `detectedArchitectureID(architectures:modelType:)` lets tests pin the
-  ordering without a checkpoint (`ArchitectureDetectionTests`). The hot
-  decode path is untouched -- detection runs once, at load. `load`,
-  `tokenizerPolicy`, and `cachePolicy` are still per-family functions /
-  engine logic; folding those into adapter methods would force a wider
-  rewrite for an abstraction whose hot path must stay zero-cost, so they
-  can adopt `ModelAdapter` incrementally.
-- `Server.swift` still has a couple of family-keyed branches that are
-  model-mechanics decisions (audio token IDs) rather than routing or
-  capability decisions, and those stay family-keyed by design.
+- `Server.swift` / `ModelLoader.swift` still have a couple of family-keyed
+  branches that are model-mechanics decisions (e.g. Gemma 4's image/audio token
+  IDs read from the checkpoint config) rather than routing, tokenizer, or cache
+  decisions, and those stay family-keyed by design.
 
 ## Goal
 
