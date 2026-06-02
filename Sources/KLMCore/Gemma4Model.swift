@@ -616,190 +616,12 @@ class Gemma4MoERouter: Module {
     }
 }
 
-// MARK: - Gemma 4 MoE Experts (26B-A4B)
-
-/// One stacked SwitchLinear inside the Gemma 4 SwitchGLU block. Holds
-/// the quantized `[numExperts, outputDims, inputDims_packed]` weight
-/// tensor plus per-expert scales and biases, and dispatches across the
-/// chosen top-K experts in a single `gatherQuantizedMM` call instead
-/// of per-expert matmuls. The scatter-dispatch path that landed in
-/// the first MoE PR walked the experts in a Swift `for` loop, which
-/// forced a per-layer host sync (the loop bounds came from a CPU read
-/// of per-expert token counts); decoding 1 token per step paid the
-/// sync once per layer, dominating the FFN math itself and putting
-/// 26B-A4B's decode behind Ollama. The `gather_qmm` form keeps the
-/// dispatch entirely on the GPU and matches `mlx_lm/models/
-/// switch_layers.QuantizedSwitchLinear` bit for bit.
-///
-/// Parameter layout (matches mlx-community's packed format directly,
-/// so the loader no longer has to unpack `experts.switch_glu.*`):
-///   - `weight: [E, O, I/(32/bits)]` int-packed
-///   - `scales: [E, O, I/groupSize]`
-///   - `biases: [E, O, I/groupSize]`
-class Gemma4QuantizedSwitchedLinear: Module {
-    @ParameterInfo(key: "weight") var weight: MLXArray
-    @ParameterInfo(key: "scales") var scales: MLXArray
-    @ParameterInfo(key: "biases") var biases: MLXArray
-
-    let inputDims: Int
-    let outputDims: Int
-    let numExperts: Int
-    let groupSize: Int
-    let bits: Int
-
-    init(
-        inputDims: Int, outputDims: Int, numExperts: Int,
-        groupSize: Int, bits: Int
-    ) {
-        self.inputDims = inputDims
-        self.outputDims = outputDims
-        self.numExperts = numExperts
-        self.groupSize = groupSize
-        self.bits = bits
-
-        // Pre-allocate the parameter tensors with the SAME shape the
-        // mlx-community checkpoint ships so the loader's
-        // `model.update(parameters:)` binds them via shape match. The
-        // initial fill values are placeholders and are overwritten by
-        // the checkpoint at load time.
-        let packedIn = inputDims * bits / 32
-        let groupsIn = inputDims / groupSize
-        _weight = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, packedIn], dtype: .uint32),
-            key: "weight")
-        _scales = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
-            key: "scales")
-        _biases = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
-            key: "biases")
-    }
-
-    /// Per-token expert dispatch.
-    /// - Parameters:
-    ///   - x: Input activations shaped so the last two dims feed
-    ///        `gather_qmm`'s `[..., M, K]` matmul slot. The
-    ///        SwitchGLU caller expands to `[..., 1, 1, I]` so each
-    ///        token contributes one M=1 row per chosen expert.
-    ///   - indices: `[..., K]` Int32 expert ids; flat indices into the
-    ///        weight tensor's leading `numExperts` batch dim.
-    ///   - sortedIndices: When true the caller has pre-sorted
-    ///        `indices` by expert id so MLX's gather kernel can use
-    ///        the faster sorted-indices path.
-    func callAsFunction(
-        _ x: MLXArray, indices: MLXArray, sortedIndices: Bool = false
-    ) -> MLXArray {
-        return gatherQuantizedMM(
-            x, weight,
-            scales: scales, biases: biases,
-            rhsIndices: indices,
-            transpose: true,
-            groupSize: groupSize, bits: bits, mode: .affine,
-            sortedIndices: sortedIndices)
-    }
-}
-
-/// SwitchGLU: three stacked SwitchLinears (`gate_proj`, `up_proj`,
-/// `down_proj`) plus the GeGLU activation. Mirrors mlx-lm's
-/// `switch_layers.SwitchGLU` (with `activation=GeGLU()`), so the
-/// in-checkpoint key path `experts.switch_glu.{proj}.{weight,scales,
-/// biases}` lines up with the module hierarchy directly. No
-/// per-expert weight unpacking required.
-///
-/// Forward pass:
-///   1. Reshape input from `[N, H]` to `[N, 1, 1, H]` so each row
-///      participates in `topK` expert matmuls (one per chosen expert).
-///   2. `gate_proj(x, indices)` and `up_proj(x, indices)` via
-///      `gatherQuantizedMM` on the stacked weight tensors. Each call
-///      lands a single device-side kernel that picks the right
-///      expert per (token, slot) pair and contracts the M=1 row.
-///      Output shape: `[N, topK, 1, moeIntermediate]`.
-///   3. GeGLU activation: `gelu_approx(gate) * up`.
-///   4. `down_proj` back to `[N, topK, 1, H]`.
-///   5. Squeeze the M=1 axis to `[N, topK, H]`. The caller does the
-///      topK weighted sum.
-///
-/// At high token counts (`indices.size >= moeSortThreshold`, i.e.
-/// prefill) the forward sorts the `(token, expert)` assignments by
-/// expert id so each expert's gather slice is contiguous and MLX's
-/// `gather_qmm` `sortedIndices` fast path applies, recovering the
-/// long-prompt prefill throughput the unsorted dispatch regresses.
-/// Decode (`indices.size` below the threshold) stays on the unsorted
-/// path so its win is untouched. See `MoESortPath.swift` for the sort
-/// helpers and the mlx-swift vs Python shape-contract notes.
-class Gemma4SwitchGLU: Module {
-    @ModuleInfo(key: "gate_proj") var gateProj: Gemma4QuantizedSwitchedLinear
-    @ModuleInfo(key: "up_proj") var upProj: Gemma4QuantizedSwitchedLinear
-    @ModuleInfo(key: "down_proj") var downProj: Gemma4QuantizedSwitchedLinear
-
-    init(
-        inputDims: Int, hiddenDims: Int, numExperts: Int,
-        groupSize: Int, bits: Int
-    ) {
-        _gateProj = ModuleInfo(
-            wrappedValue: Gemma4QuantizedSwitchedLinear(
-                inputDims: inputDims, outputDims: hiddenDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "gate_proj")
-        _upProj = ModuleInfo(
-            wrappedValue: Gemma4QuantizedSwitchedLinear(
-                inputDims: inputDims, outputDims: hiddenDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "up_proj")
-        _downProj = ModuleInfo(
-            wrappedValue: Gemma4QuantizedSwitchedLinear(
-                inputDims: hiddenDims, outputDims: inputDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "down_proj")
-    }
-
-    /// - Parameters:
-    ///   - x: `[N, H]` flattened token activations (caller has already
-    ///        reshaped any batch / sequence axes into `N`).
-    ///   - indices: `[N, topK]` Int32 expert ids per token, in router
-    ///        score order.
-    /// - Returns: `[N, topK, H]` per-expert outputs. The caller does
-    ///   the topK weighted sum (Gemma's `Experts.__call__` shape).
-    func callAsFunction(_ x: MLXArray, indices: MLXArray) -> MLXArray {
-        let N = x.dim(0)
-        let H = x.dim(1)
-        let topK = indices.dim(indices.ndim - 1)
-
-        // Prefill (many assignments): sort (token, expert) by expert id
-        // so each expert's gather slice is contiguous and the gather_qmm
-        // `sortedIndices` fast path applies, recovering long-prompt
-        // throughput the unsorted dispatch regresses. Output is unsorted
-        // back to (token, slot) order so the caller's weighted sum is
-        // unchanged. See `MoESortPath.swift`.
-        if moeShouldSort(n: N, topK: topK) {
-            let (xs, idx, invOrder) = moeGatherSort(x, indices: indices)
-            // xs: [N*topK, 1, H] -- one M=1 row per assignment, sorted.
-            let xUp = upProj(xs, indices: idx, sortedIndices: true)
-            let xGate = gateProj(xs, indices: idx, sortedIndices: true)
-            let activated = geluApproximate(xGate) * xUp
-            let out = downProj(activated, indices: idx, sortedIndices: true)
-            // out: [N*topK, 1, H_out] -- unsort to [N, topK, H].
-            return moeScatterUnsort(out, invOrder: invOrder, n: N, topK: topK)
-        }
-
-        // Decode / short prompts (assignments below the sort threshold):
-        // expand to [N, 1, 1, H] so each (token, slot) sees an M=1 row
-        // inside the gather. The [N, 1] outer batch combined with the
-        // [N, topK] indices yields [N, topK, 1, H_out] for each
-        // projection -- no Swift loop, no per-layer host sync, the
-        // entire dispatch lands in one device kernel per projection.
-        let xExp = x.reshaped(N, 1, 1, H)
-        let idx = indices.asType(.int32)
-
-        let xUp = upProj(xExp, indices: idx)
-        let xGate = gateProj(xExp, indices: idx)
-        let activated = geluApproximate(xGate) * xUp
-        let out = downProj(activated, indices: idx)
-
-        // out: [N, topK, 1, H_out] -- squeeze the M=1 inner axis.
-        return out.squeezed(axis: -2)
-    }
-}
+// MARK: - MoE experts: shared `MoESwitchGLU` (see MoESwitchGLU.swift)
+//
+// The stacked `gatherQuantizedMM` expert dispatch
+// (`MoEQuantizedSwitchedLinear` + `MoESwitchGLU`, with the prefill
+// `(token, expert)` sort path in `MoESortPath.swift`) is shared across all
+// native MoE families. This family uses `MoEActivation.geglu`.
 
 /// Holder module that owns the `switch_glu` sub-module under the
 /// block's `experts.` key. Matches the in-checkpoint key path:
@@ -807,17 +629,18 @@ class Gemma4SwitchGLU: Module {
 /// biases}`. Optional inside the block so non-MoE layers can leave it
 /// nil; MoE layers allocate the SwitchGLU sized from the config.
 class Gemma4MoEExpertsHolder: Module {
-    @ModuleInfo(key: "switch_glu") var switchGLU: Gemma4SwitchGLU
+    @ModuleInfo(key: "switch_glu") var switchGLU: MoESwitchGLU
 
     init(_ config: Gemma4Config, groupSize: Int, bits: Int) {
         let hidden = config.hiddenSize
         let inter = config.moeIntermediateSize ?? 704
         let numExperts = config.numExperts ?? 0
         _switchGLU = ModuleInfo(
-            wrappedValue: Gemma4SwitchGLU(
+            wrappedValue: MoESwitchGLU(
                 inputDims: hidden, hiddenDims: inter,
                 numExperts: numExperts,
-                groupSize: groupSize, bits: bits),
+                groupSize: groupSize, bits: bits,
+                activation: .geglu),
             key: "switch_glu")
     }
 }

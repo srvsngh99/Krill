@@ -403,89 +403,12 @@ class DeepSeekMLP: Module {
     }
 }
 
-// MARK: - Quantized stacked switched linear + SwitchGLU (copy)
-
-class DeepSeekQuantizedSwitchedLinear: Module {
-    @ParameterInfo(key: "weight") var weight: MLXArray
-    @ParameterInfo(key: "scales") var scales: MLXArray
-    @ParameterInfo(key: "biases") var biases: MLXArray
-
-    let groupSize: Int
-    let bits: Int
-
-    init(inputDims: Int, outputDims: Int, numExperts: Int, groupSize: Int, bits: Int) {
-        self.groupSize = groupSize
-        self.bits = bits
-        let packedIn = inputDims * bits / 32
-        let groupsIn = inputDims / groupSize
-        _weight = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, packedIn], dtype: .uint32),
-            key: "weight")
-        _scales = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
-            key: "scales")
-        _biases = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
-            key: "biases")
-    }
-
-    func callAsFunction(
-        _ x: MLXArray, indices: MLXArray, sortedIndices: Bool = false
-    ) -> MLXArray {
-        return gatherQuantizedMM(
-            x, weight, scales: scales, biases: biases,
-            rhsIndices: indices, transpose: true,
-            groupSize: groupSize, bits: bits, mode: .affine,
-            sortedIndices: sortedIndices)
-    }
-}
-
-class DeepSeekSwitchGLU: Module {
-    @ModuleInfo(key: "gate_proj") var gateProj: DeepSeekQuantizedSwitchedLinear
-    @ModuleInfo(key: "up_proj") var upProj: DeepSeekQuantizedSwitchedLinear
-    @ModuleInfo(key: "down_proj") var downProj: DeepSeekQuantizedSwitchedLinear
-
-    init(inputDims: Int, hiddenDims: Int, numExperts: Int, groupSize: Int, bits: Int) {
-        _gateProj = ModuleInfo(
-            wrappedValue: DeepSeekQuantizedSwitchedLinear(
-                inputDims: inputDims, outputDims: hiddenDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "gate_proj")
-        _upProj = ModuleInfo(
-            wrappedValue: DeepSeekQuantizedSwitchedLinear(
-                inputDims: inputDims, outputDims: hiddenDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "up_proj")
-        _downProj = ModuleInfo(
-            wrappedValue: DeepSeekQuantizedSwitchedLinear(
-                inputDims: hiddenDims, outputDims: inputDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "down_proj")
-    }
-
-    func callAsFunction(_ x: MLXArray, indices: MLXArray) -> MLXArray {
-        let N = x.dim(0)
-        let H = x.dim(1)
-        let topK = indices.dim(indices.ndim - 1)
-
-        if moeShouldSort(n: N, topK: topK) {
-            let (xs, idx, invOrder) = moeGatherSort(x, indices: indices)
-            let xGate = gateProj(xs, indices: idx, sortedIndices: true)
-            let xUp = upProj(xs, indices: idx, sortedIndices: true)
-            let activated = silu(xGate) * xUp
-            let out = downProj(activated, indices: idx, sortedIndices: true)
-            return moeScatterUnsort(out, invOrder: invOrder, n: N, topK: topK)
-        }
-
-        let xExp = x.reshaped(N, 1, 1, H)
-        let idx = indices.asType(.int32)
-        let xGate = gateProj(xExp, indices: idx)
-        let xUp = upProj(xExp, indices: idx)
-        let activated = silu(xGate) * xUp
-        let out = downProj(activated, indices: idx)
-        return out.squeezed(axis: -2)
-    }
-}
+// MARK: - MoE experts: shared `MoESwitchGLU` (see MoESwitchGLU.swift)
+//
+// The stacked `gatherQuantizedMM` expert dispatch
+// (`MoEQuantizedSwitchedLinear` + `MoESwitchGLU`, with the prefill
+// `(token, expert)` sort path in `MoESortPath.swift`) is shared across all
+// native MoE families. This family uses `MoEActivation.swiglu`.
 
 // MARK: - MoE gate (V2 softmax/group_limited_greedy + V3 noaux_tc sigmoid)
 
@@ -579,7 +502,7 @@ class DeepSeekMoEGate: Module {
 
 class DeepSeekMoE: Module {
     @ModuleInfo(key: "gate") var gate: DeepSeekMoEGate
-    @ModuleInfo(key: "switch_mlp") var switchMLP: DeepSeekSwitchGLU
+    @ModuleInfo(key: "switch_mlp") var switchMLP: MoESwitchGLU
     @ModuleInfo(key: "shared_experts") var sharedExperts: DeepSeekMLP?
 
     let numExperts: Int
@@ -601,11 +524,12 @@ class DeepSeekMoE: Module {
         let groupSize = config.quantization?.groupSize ?? 64
         let bits = config.quantization?.bits ?? 4
         _switchMLP = ModuleInfo(
-            wrappedValue: DeepSeekSwitchGLU(
+            wrappedValue: MoESwitchGLU(
                 inputDims: config.hiddenSize,
                 hiddenDims: config.moeIntermediateSize,
                 numExperts: config.nRoutedExperts,
-                groupSize: groupSize, bits: bits),
+                groupSize: groupSize, bits: bits,
+                activation: .swiglu),
             key: "switch_mlp")
         if config.nSharedExperts > 0 {
             _sharedExperts = ModuleInfo(

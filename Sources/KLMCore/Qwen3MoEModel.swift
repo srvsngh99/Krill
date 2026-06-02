@@ -182,176 +182,12 @@ public struct Qwen3MoEConfig: ModelConfig, Codable, Sendable {
     }
 }
 
-// MARK: - Quantized stacked switched linear (one projection, all experts)
-
-/// One stacked quantized SwitchLinear inside the Qwen3 `SwitchGLU`
-/// block. Holds the `[numExperts, outputDims, inputDims_packed]`
-/// quantized weight plus per-expert scales and biases, and dispatches
-/// across the chosen top-K experts in a single `gatherQuantizedMM`
-/// call instead of a Swift `for` loop over per-expert matmuls.
-///
-/// This mirrors `Gemma4QuantizedSwitchedLinear` (PR #82). The earlier
-/// Qwen3-MoE runtime used a scatter dispatch that walked the experts
-/// in a Swift loop, forcing a per-layer host sync (the loop bounds
-/// came from a CPU read of per-expert token counts); decoding one
-/// token per step paid that sync once per layer and dominated the FFN
-/// math, leaving 30B-A3B behind Ollama. `gather_qmm` keeps the whole
-/// dispatch on the GPU and matches `mlx_lm/models/switch_layers.
-/// QuantizedSwitchLinear` bit for bit.
-///
-/// Parameter layout matches mlx-community's packed Qwen3-MoE format
-/// directly, so the loader binds `mlp.switch_mlp.{proj}.*` with no
-/// per-expert unpacking:
-///   - `weight: [E, O, I/(32/bits)]` int-packed
-///   - `scales: [E, O, I/groupSize]`
-///   - `biases: [E, O, I/groupSize]`
-class Qwen3QuantizedSwitchedLinear: Module {
-    @ParameterInfo(key: "weight") var weight: MLXArray
-    @ParameterInfo(key: "scales") var scales: MLXArray
-    @ParameterInfo(key: "biases") var biases: MLXArray
-
-    let inputDims: Int
-    let outputDims: Int
-    let numExperts: Int
-    let groupSize: Int
-    let bits: Int
-
-    init(
-        inputDims: Int, outputDims: Int, numExperts: Int,
-        groupSize: Int, bits: Int
-    ) {
-        self.inputDims = inputDims
-        self.outputDims = outputDims
-        self.numExperts = numExperts
-        self.groupSize = groupSize
-        self.bits = bits
-
-        // Pre-allocate the parameter tensors with the SAME shape the
-        // mlx-community checkpoint ships so the loader's
-        // `model.update(parameters:)` binds them by shape match. The
-        // fill values are placeholders overwritten at load time.
-        let packedIn = inputDims * bits / 32
-        let groupsIn = inputDims / groupSize
-        _weight = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, packedIn], dtype: .uint32),
-            key: "weight")
-        _scales = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
-            key: "scales")
-        _biases = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
-            key: "biases")
-    }
-
-    /// Per-token expert dispatch. `x` is shaped so the last two dims
-    /// feed `gather_qmm`'s `[..., M, K]` matmul slot (the SwitchGLU
-    /// caller expands to `[..., 1, 1, I]`); `indices` is `[..., K]`
-    /// Int32 expert ids into the weight tensor's leading batch dim.
-    /// - Parameter sortedIndices: When true the caller has pre-sorted
-    ///   `indices` by expert id so MLX's gather kernel can use the
-    ///   faster sorted-indices path (the prefill sort path).
-    func callAsFunction(
-        _ x: MLXArray, indices: MLXArray, sortedIndices: Bool = false
-    ) -> MLXArray {
-        return gatherQuantizedMM(
-            x, weight,
-            scales: scales, biases: biases,
-            rhsIndices: indices,
-            transpose: true,
-            groupSize: groupSize, bits: bits, mode: .affine,
-            sortedIndices: sortedIndices)
-    }
-}
-
-// MARK: - SwitchGLU (router-dispatched SwiGLU experts)
-
-/// Qwen3 experts as three stacked quantized switched linears
-/// (`gate_proj`, `up_proj`, `down_proj`) plus the SwiGLU activation.
-/// Mirrors mlx-lm's `switch_layers.SwitchGLU` (with `silu`, unlike
-/// Gemma 4's GeGLU). The in-checkpoint key path
-/// `switch_mlp.{proj}.{weight,scales,biases}` lines up with this
-/// module hierarchy directly.
-///
-/// Forward:
-///   1. Reshape `[N, H]` to `[N, 1, 1, H]` so each row participates in
-///      `topK` expert matmuls (one per chosen expert).
-///   2. `gate_proj` / `up_proj` via `gatherQuantizedMM` -> `[N, topK,
-///      1, moeIntermediate]` in a single device kernel each.
-///   3. SwiGLU activation: `silu(gate) * up`.
-///   4. `down_proj` back to `[N, topK, 1, H]`.
-///   5. Squeeze the M=1 axis to `[N, topK, H]`. The caller does the
-///      topK weighted sum.
-class Qwen3SwitchGLU: Module {
-    @ModuleInfo(key: "gate_proj") var gateProj: Qwen3QuantizedSwitchedLinear
-    @ModuleInfo(key: "up_proj") var upProj: Qwen3QuantizedSwitchedLinear
-    @ModuleInfo(key: "down_proj") var downProj: Qwen3QuantizedSwitchedLinear
-
-    init(
-        inputDims: Int, hiddenDims: Int, numExperts: Int,
-        groupSize: Int, bits: Int
-    ) {
-        _gateProj = ModuleInfo(
-            wrappedValue: Qwen3QuantizedSwitchedLinear(
-                inputDims: inputDims, outputDims: hiddenDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "gate_proj")
-        _upProj = ModuleInfo(
-            wrappedValue: Qwen3QuantizedSwitchedLinear(
-                inputDims: inputDims, outputDims: hiddenDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "up_proj")
-        _downProj = ModuleInfo(
-            wrappedValue: Qwen3QuantizedSwitchedLinear(
-                inputDims: hiddenDims, outputDims: inputDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
-            key: "down_proj")
-    }
-
-    /// - Parameters:
-    ///   - x: `[N, H]` flattened token activations.
-    ///   - indices: `[N, topK]` Int32 expert ids per token (router
-    ///     score order).
-    /// - Returns: `[N, topK, H]` per-expert outputs; the caller does
-    ///   the topK weighted sum.
-    func callAsFunction(_ x: MLXArray, indices: MLXArray) -> MLXArray {
-        let N = x.dim(0)
-        let H = x.dim(1)
-        let topK = indices.dim(indices.ndim - 1)
-
-        // Prefill (many assignments): sort (token, expert) by expert id
-        // so each expert's gather slice is contiguous and the gather_qmm
-        // `sortedIndices` fast path applies, recovering long-prompt
-        // throughput the unsorted dispatch regresses. Output is unsorted
-        // back to (token, slot) order so the caller's weighted sum is
-        // unchanged. See `MoESortPath.swift`.
-        if moeShouldSort(n: N, topK: topK) {
-            let (xs, idx, invOrder) = moeGatherSort(x, indices: indices)
-            // xs: [N*topK, 1, H] -- one M=1 row per assignment, sorted.
-            let xGate = gateProj(xs, indices: idx, sortedIndices: true)
-            let xUp = upProj(xs, indices: idx, sortedIndices: true)
-            let activated = silu(xGate) * xUp
-            let out = downProj(activated, indices: idx, sortedIndices: true)
-            // out: [N*topK, 1, H_out] -- unsort to [N, topK, H].
-            return moeScatterUnsort(out, invOrder: invOrder, n: N, topK: topK)
-        }
-
-        // Decode / short prompts (assignments below the sort threshold):
-        // expand to [N, 1, 1, H] so each (token, slot) sees an M=1 row
-        // inside the gather. [N, 1] outer batch x [N, topK] indices ->
-        // [N, topK, 1, H_out] per projection: no Swift loop, no
-        // per-layer host sync, one device kernel per projection.
-        let xExp = x.reshaped(N, 1, 1, H)
-        let idx = indices.asType(.int32)
-
-        let xGate = gateProj(xExp, indices: idx)
-        let xUp = upProj(xExp, indices: idx)
-        let activated = silu(xGate) * xUp
-        let out = downProj(activated, indices: idx)
-
-        // out: [N, topK, 1, H_out] -- squeeze the M=1 inner axis.
-        return out.squeezed(axis: -2)
-    }
-}
+// MARK: - MoE experts: shared `MoESwitchGLU` (see MoESwitchGLU.swift)
+//
+// The stacked `gatherQuantizedMM` expert dispatch
+// (`MoEQuantizedSwitchedLinear` + `MoESwitchGLU`, with the prefill
+// `(token, expert)` sort path in `MoESortPath.swift`) is shared across all
+// native MoE families. This family uses `MoEActivation.swiglu`.
 
 // MARK: - Expert-utilization accumulator (off the compute path)
 
@@ -389,7 +225,7 @@ final class ExpertCountAccumulator {
 ///   mirroring Gemma 4's #82 SwitchGLU rewrite).
 class Qwen3MoESparseMLP: Module {
     @ModuleInfo(key: "gate") var gate: Linear
-    @ModuleInfo(key: "switch_mlp") var switchMLP: Qwen3SwitchGLU
+    @ModuleInfo(key: "switch_mlp") var switchMLP: MoESwitchGLU
 
     let numExperts: Int
     let topK: Int
@@ -447,11 +283,12 @@ class Qwen3MoESparseMLP: Module {
         let groupSize = config.quantization?.groupSize ?? 64
         let bits = config.quantization?.bits ?? 4
         _switchMLP = ModuleInfo(
-            wrappedValue: Qwen3SwitchGLU(
+            wrappedValue: MoESwitchGLU(
                 inputDims: config.hiddenSize,
                 hiddenDims: config.moeIntermediateSize,
                 numExperts: config.numExperts,
-                groupSize: groupSize, bits: bits),
+                groupSize: groupSize, bits: bits,
+                activation: .swiglu),
             key: "switch_mlp")
     }
 
