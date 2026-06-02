@@ -9,9 +9,9 @@ import MLXNN
 /// product fed to `down_proj`.
 ///
 /// The native MoE families split into exactly two activations:
-///   - `.swiglu` — `silu(gate) * up` — Qwen3-MoE, Qwen2-MoE, Mixtral,
+///   - `.swiglu` -- `silu(gate) * up` -- Qwen3-MoE, Qwen2-MoE, Mixtral,
 ///     OLMoE, DeepSeek-V2/V2-Lite.
-///   - `.geglu` — `geluApproximate(gate) * up` — Gemma 4 (26B-A4B).
+///   - `.geglu` -- `geluApproximate(gate) * up` -- Gemma 4 (26B-A4B).
 ///
 /// `silu` and `geluApproximate` resolve to MLXNN's public functions, i.e.
 /// the exact same ops the per-family copies called before this module was
@@ -29,9 +29,9 @@ enum MoEActivation {
     }
 }
 
-/// One stacked quantized switched-linear projection — the
+/// One stacked quantized switched-linear projection -- the
 /// `[numExperts, outputDims, inputDims_packed]` quantized weight plus
-/// per-expert scales and biases — that dispatches across the chosen
+/// per-expert scales and biases -- that dispatches across the chosen
 /// top-K experts in a single `gatherQuantizedMM` call instead of a Swift
 /// `for` loop over per-expert matmuls.
 ///
@@ -46,7 +46,7 @@ enum MoEActivation {
 /// bit for bit.
 ///
 /// Parameter layout matches mlx-community's packed MoE format directly, so
-/// the loader binds `…switch_mlp.{proj}.{weight,scales,biases}` (or
+/// the loader binds `...switch_mlp.{proj}.{weight,scales,biases}` (or
 /// `experts.switch_glu.{proj}.*` for Gemma 4) with no per-expert unpacking:
 ///   - `weight: [E, O, I/(32/bits)]` int-packed
 ///   - `scales: [E, O, I/groupSize]`
@@ -114,13 +114,13 @@ class MoEQuantizedSwitchedLinear: Module {
 /// `switch_layers.SwitchGLU`, parameterized by `MoEActivation` so the one
 /// module serves both the SwiGLU families (Qwen3/Qwen2-MoE/Mixtral/OLMoE/
 /// DeepSeek) and Gemma 4's GeGLU. The in-checkpoint key path
-/// `…{proj}.{weight,scales,biases}` lines up with this module hierarchy
+/// `...{proj}.{weight,scales,biases}` lines up with this module hierarchy
 /// directly, so no per-family subclass is needed.
 ///
 /// Forward:
 ///   1. Reshape `[N, H]` to `[N, 1, 1, H]` so each row participates in
 ///      `topK` expert matmuls (one per chosen expert).
-///   2. `gate_proj` / `up_proj` via `gatherQuantizedMM` → `[N, topK, 1,
+///   2. `gate_proj` / `up_proj` via `gatherQuantizedMM` -> `[N, topK, 1,
 ///      hiddenDims]` in a single device kernel each.
 ///   3. The `MoEActivation` gate: `act(gate) * up`.
 ///   4. `down_proj` back to `[N, topK, 1, H]`.
@@ -132,7 +132,7 @@ class MoEQuantizedSwitchedLinear: Module {
 /// expert's gather slice is contiguous and MLX's `gather_qmm`
 /// `sortedIndices` fast path applies, recovering the long-prompt prefill
 /// throughput the unsorted dispatch regresses. Decode (`indices.size` below
-/// the threshold) stays on the unsorted path so its 2.7× win is untouched.
+/// the threshold) stays on the unsorted path so its 2.7x win is untouched.
 /// See `MoESortPath.swift` for the sort helpers and the mlx-swift vs Python
 /// shape-contract notes.
 class MoESwitchGLU: Module {
@@ -185,18 +185,18 @@ class MoESwitchGLU: Module {
         // unchanged. See `MoESortPath.swift`.
         if moeShouldSort(n: N, topK: topK) {
             let (xs, idx, invOrder) = moeGatherSort(x, indices: indices)
-            // xs: [N*topK, 1, H] — one M=1 row per assignment, sorted.
+            // xs: [N*topK, 1, H] -- one M=1 row per assignment, sorted.
             let xGate = gateProj(xs, indices: idx, sortedIndices: true)
             let xUp = upProj(xs, indices: idx, sortedIndices: true)
             let activated = activation(xGate, xUp)
             let out = downProj(activated, indices: idx, sortedIndices: true)
-            // out: [N*topK, 1, H_out] — unsort to [N, topK, H].
+            // out: [N*topK, 1, H_out] -- unsort to [N, topK, H].
             return moeScatterUnsort(out, invOrder: invOrder, n: N, topK: topK)
         }
 
         // Decode / short prompts (assignments below the sort threshold):
         // expand to [N, 1, 1, H] so each (token, slot) sees an M=1 row
-        // inside the gather. [N, 1] outer batch × [N, topK] indices →
+        // inside the gather. [N, 1] outer batch x [N, topK] indices ->
         // [N, topK, 1, H_out] per projection: no Swift loop, no per-layer
         // host sync, one device kernel per projection.
         let xExp = x.reshaped(N, 1, 1, H)
@@ -207,7 +207,7 @@ class MoESwitchGLU: Module {
         let activated = activation(xGate, xUp)
         let out = downProj(activated, indices: idx)
 
-        // out: [N, topK, 1, H_out] — squeeze the M=1 inner axis.
+        // out: [N, topK, 1, H_out] -- squeeze the M=1 inner axis.
         return out.squeezed(axis: -2)
     }
 }
