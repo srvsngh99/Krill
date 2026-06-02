@@ -123,9 +123,14 @@ public class LlamaForCausalLM: Module {
     /// stack from those). `tokens` is still passed for cache/mask shaping but
     /// its embeddings are not used. Returns logits `[B, L, vocab]`.
     public func callAsFunction(
-        _ tokens: MLXArray, inputsEmbeds: MLXArray, caches: [KVCache]? = nil
+        _ tokens: MLXArray, inputsEmbeds: MLXArray, caches: [KVCache]? = nil,
+        lastTokenOnly: Bool = false
     ) -> MLXArray {
-        let hidden = model(tokens, caches: caches, inputsEmbeds: inputsEmbeds)
+        var hidden = model(tokens, caches: caches, inputsEmbeds: inputsEmbeds)
+        if lastTokenOnly {
+            let last = hidden.dim(1) - 1
+            hidden = hidden[0..., last ..< (last + 1), 0...]
+        }
         return lmHead(hidden)
     }
 

@@ -653,6 +653,77 @@ public final class KLMTokenizer: @unchecked Sendable {
         tokens += newline
         return tokens
     }
+
+    /// Encode messages as LLaVA-1.5 token ids, manually rendering the vicuna-v1
+    /// conversation the model was fine-tuned on and placing the image-token run
+    /// directly (mirrors `formatQwen25VLTokenIds`).
+    ///
+    /// LLaVA-1.5's processor inserts a single `<image>` placeholder and relies
+    /// on a separate image processor to expand it to one token per CLIP patch;
+    /// the native runtime instead injects the full `imagePadCount` × image-token
+    /// run inline (the engine already produced `imagePadCount =
+    /// (image_size / patch_size)^2` vision features), so
+    /// `LlavaForCausalLM`'s forward finds exactly that many image positions to
+    /// splice the projected CLIP features into. The image attaches to the FIRST
+    /// user turn. `imagePadCount == 0` renders a plain text-only prompt.
+    ///
+    /// Vicuna-v1 format: a system preamble, then ` USER: {content}` /
+    /// ` ASSISTANT: {content}` turns joined by spaces (assistant answers are
+    /// terminated by `</s>`), ending with a trailing ` ASSISTANT:` cue. A
+    /// leading `system` message overrides the default preamble. `imageTokenId`
+    /// is the checkpoint's `image_token_index` (32000 for llava-1.5).
+    public func formatLlavaTokenIds(
+        messages: [[String: String]],
+        imageTokenId: Int,
+        imagePadCount: Int
+    ) -> [Int] {
+        let defaultSystem =
+            "A chat between a curious human and an artificial intelligence assistant. "
+            + "The assistant gives helpful, detailed, and polite answers to the human's questions."
+        let bos = bosTokenId
+        // The underlying tokenizer may prepend BOS to a segment; we own BOS
+        // placement (one leading BOS), so strip it from each piece.
+        func enc(_ s: String) -> [Int] {
+            var t = tokenizer.encode(text: s)
+            if t.first == bos { t.removeFirst() }
+            return t
+        }
+
+        var systemText = defaultSystem
+        var turns = messages
+        if let first = turns.first, (first["role"] ?? "") == "system" {
+            let s = first["content"] ?? ""
+            if !s.isEmpty { systemText = s }
+            turns.removeFirst()
+        }
+        // An image request with no user turn (e.g. system-only messages) must
+        // still place its token run somewhere, or the engine forwards the
+        // pixels with zero image positions and `LlavaForCausalLM`'s
+        // `imagePositions.count == features` precondition aborts the process on
+        // client input. Synthesize an empty user turn to carry the image.
+        if imagePadCount > 0 && !turns.contains(where: { ($0["role"] ?? "") == "user" }) {
+            turns.append(["role": "user", "content": ""])
+        }
+        let firstUserIndex = turns.firstIndex { ($0["role"] ?? "") == "user" }
+
+        var tokens: [Int] = [bos]
+        tokens += enc(systemText)
+        for (i, msg) in turns.enumerated() {
+            let role = msg["role"] ?? "user"
+            let content = msg["content"] ?? ""
+            let label = (role == "assistant") ? "ASSISTANT" : "USER"
+            tokens += enc(" \(label): ")
+            if i == firstUserIndex && imagePadCount > 0 {
+                tokens += Array(repeating: imageTokenId, count: imagePadCount)
+                tokens += enc("\n")
+            }
+            tokens += enc(content)
+            // Vicuna terminates a completed assistant turn with </s>.
+            if role == "assistant" { tokens.append(eosTokenId) }
+        }
+        tokens += enc(" ASSISTANT:")
+        return tokens
+    }
 }
 
 // MARK: - Errors

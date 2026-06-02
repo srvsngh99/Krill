@@ -42,7 +42,7 @@ public struct ModelAdapter: Sendable, Equatable {
     /// Which server chat handler a request for this family needs.
     public var chatRouting: ChatRouting {
         switch family {
-        case .llama, .qwen, .qwen25vl, .mistral, .gemma, .gemma4,
+        case .llama, .qwen, .qwen25vl, .llava, .mistral, .gemma, .gemma4,
              .phi, .glm, .deepseek, .bert, .reranker, .moe:
             // Native Swift+MLX path. WS5 made Qwen 2.5-VL native, so
             // a VL manifest routes here too - the standard chat path
@@ -67,7 +67,7 @@ public struct ModelAdapter: Sendable, Equatable {
     /// kept so a future image-only family can opt back in.
     public var requiresImageInput: Bool {
         switch family {
-        case .llama, .qwen, .qwen25vl, .mistral, .gemma, .gemma4,
+        case .llama, .qwen, .qwen25vl, .llava, .mistral, .gemma, .gemma4,
              .phi, .glm, .deepseek, .bert, .reranker, .moe:
             return false
         }
@@ -95,9 +95,11 @@ public struct ModelAdapter: Sendable, Equatable {
             // Phi-3.5 / Phi-4 native `<|tool|>…<|/tool|>` definitions and
             // `<|tool_call|>…<|/tool_call|>` call format.
             return .phi
-        case .gemma, .glm, .deepseek, .bert, .qwen25vl, .reranker:
+        case .gemma, .glm, .deepseek, .bert, .qwen25vl, .llava, .reranker:
             // The generic Hermes-style `<tool_call>{…}</tool_call>`
             // prompt: an acceptable fallback, not a native template.
+            // LLaVA does not advertise tools; its vicuna-style multimodal
+            // prompt is built directly in the engine, not via this policy.
             return .hermes
         }
     }

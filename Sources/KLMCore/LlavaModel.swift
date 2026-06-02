@@ -79,7 +79,14 @@ public struct LlavaConfig: Codable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        textConfig = try c.decode(LlamaConfig.self, forKey: .textConfig)
+        // The canonical llava-1.5 checkpoints ship a MINIMAL `text_config`
+        // (e.g. mlx-community/llava-1.5-7b-4bit omits hidden_size,
+        // intermediate_size, num_attention_heads, num_hidden_layers,
+        // rope_theta), relying on transformers' `LlamaConfig` class defaults --
+        // which are exactly the vicuna-7b dims. `LlamaConfig`'s own decoder
+        // requires those keys, so decode the text config through a defaulting
+        // shim that fills the HF base-Llama defaults for whatever is absent.
+        textConfig = try c.decode(LlavaTextConfig.self, forKey: .textConfig).toLlamaConfig()
         visionConfig = try c.decode(ClipVisionConfig.self, forKey: .visionConfig)
         imageTokenIndex = try c.decodeIfPresent(Int.self, forKey: .imageTokenIndex) ?? 32_000
         visionFeatureLayer = try c.decodeIfPresent(Int.self, forKey: .visionFeatureLayer) ?? -2
@@ -88,6 +95,64 @@ public struct LlavaConfig: Codable, Sendable {
         vocabSize = try c.decodeIfPresent(Int.self, forKey: .vocabSize) ?? textConfig.vocabSize
         quantization = try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantization)
             ?? textConfig.quantization
+    }
+}
+
+/// Defaulting decoder for a llava `text_config`. Real llava-1.5 checkpoints
+/// omit most Llama dims and lean on transformers' `LlamaConfig` class defaults
+/// (which match vicuna-7b); a 13b checkpoint instead spells the dims out, and
+/// `decodeIfPresent` honors those. The defaults below are the HF `LlamaConfig`
+/// base defaults (NOT KrillLM's Llama-3-oriented `rope_theta=500000` /
+/// `max_position_embeddings=131072`, which would be wrong for vicuna).
+struct LlavaTextConfig: Codable, Sendable {
+    let hiddenSize: Int
+    let intermediateSize: Int
+    let numAttentionHeads: Int
+    let numKeyValueHeads: Int
+    let numHiddenLayers: Int
+    let vocabSize: Int
+    let rmsNormEps: Float
+    let ropeTheta: Float
+    let maxPositionEmbeddings: Int
+
+    enum CodingKeys: String, CodingKey {
+        case hiddenSize = "hidden_size"
+        case intermediateSize = "intermediate_size"
+        case numAttentionHeads = "num_attention_heads"
+        case numKeyValueHeads = "num_key_value_heads"
+        case numHiddenLayers = "num_hidden_layers"
+        case vocabSize = "vocab_size"
+        case rmsNormEps = "rms_norm_eps"
+        case ropeTheta = "rope_theta"
+        case maxPositionEmbeddings = "max_position_embeddings"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        hiddenSize = try c.decodeIfPresent(Int.self, forKey: .hiddenSize) ?? 4096
+        intermediateSize = try c.decodeIfPresent(Int.self, forKey: .intermediateSize) ?? 11_008
+        numAttentionHeads = try c.decodeIfPresent(Int.self, forKey: .numAttentionHeads) ?? 32
+        numKeyValueHeads = try c.decodeIfPresent(Int.self, forKey: .numKeyValueHeads)
+            ?? numAttentionHeads
+        numHiddenLayers = try c.decodeIfPresent(Int.self, forKey: .numHiddenLayers) ?? 32
+        vocabSize = try c.decodeIfPresent(Int.self, forKey: .vocabSize) ?? 32_000
+        rmsNormEps = try c.decodeIfPresent(Float.self, forKey: .rmsNormEps) ?? 1e-5
+        ropeTheta = try c.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10_000.0
+        maxPositionEmbeddings = try c.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings) ?? 2048
+    }
+
+    func toLlamaConfig() -> LlamaConfig {
+        LlamaConfig(
+            hiddenSize: hiddenSize,
+            intermediateSize: intermediateSize,
+            numAttentionHeads: numAttentionHeads,
+            numKeyValueHeads: numKeyValueHeads,
+            numHiddenLayers: numHiddenLayers,
+            vocabSize: vocabSize,
+            rmsNormEps: rmsNormEps,
+            ropeTheta: ropeTheta,
+            maxPositionEmbeddings: maxPositionEmbeddings,
+            quantization: nil)
     }
 }
 
@@ -301,15 +366,20 @@ public class LlavaForCausalLM: Module {
     }
 
     /// Text-only forward (no image): straight through the Llama backbone.
-    public func callAsFunction(_ inputIds: MLXArray, caches: [KVCache]? = nil) -> MLXArray {
-        languageModel(inputIds, caches: caches)
+    /// `lastTokenOnly` slices the prefill output to the final position before
+    /// the vocab projection (the sampler reads only that row).
+    public func callAsFunction(
+        _ inputIds: MLXArray, caches: [KVCache]? = nil, lastTokenOnly: Bool = false
+    ) -> MLXArray {
+        languageModel(inputIds, caches: caches, lastTokenOnly: lastTokenOnly)
     }
 
     /// Splice the projected image features into the token embeddings at the
     /// `<image>` placeholder positions (contiguous, one image), then run the
     /// Llama text stack. Returns logits `[1, L, vocab]`.
     public func callAsFunction(
-        _ inputIds: MLXArray, pixelValues: MLXArray, caches: [KVCache]? = nil
+        _ inputIds: MLXArray, pixelValues: MLXArray, caches: [KVCache]? = nil,
+        lastTokenOnly: Bool = false
     ) -> MLXArray {
         var inputEmbeds = languageModel.model.embedTokens(inputIds)   // [1, L, H]
         let features = imageFeatures(pixelValues)
@@ -327,6 +397,8 @@ public class LlavaForCausalLM: Module {
         inputEmbeds = concatenated(
             [before, features.asType(inputEmbeds.dtype), after], axis: 1)
 
-        return languageModel(inputIds, inputsEmbeds: inputEmbeds, caches: caches)
+        return languageModel(
+            inputIds, inputsEmbeds: inputEmbeds, caches: caches,
+            lastTokenOnly: lastTokenOnly)
     }
 }

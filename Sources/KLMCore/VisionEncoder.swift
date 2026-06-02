@@ -730,6 +730,100 @@ public func preprocessImage(
     #endif
 }
 
+// MARK: - LLaVA / CLIP image preprocessing
+
+/// Image preprocessing for the native LLaVA-1.5 runtime, matching HF's
+/// `CLIPImageProcessor` (the processor llava-1.5 ships): resize the shortest
+/// edge to `imageSize` preserving aspect ratio, center-crop to a square
+/// `imageSize x imageSize`, rescale to `[0, 1]`, then normalize with the CLIP
+/// channel mean/std. Returns a channels-first `[1, 3, imageSize, imageSize]`
+/// float32 tensor -- the layout `LlavaForCausalLM.imageFeatures` transposes to
+/// channels-last before the CLIP patch-embed Conv2d.
+///
+/// This is the LLaVA analogue of `preprocessImage` (the Gemma 4 longest-side /
+/// block-aligned preprocessor); the two differ in resize geometry and in that
+/// CLIP normalizes, so LLaVA gets its own path rather than overloading the
+/// Gemma one.
+public enum LlavaImagePreprocessor {
+    /// CLIP ViT-L/14-336 normalization constants (OpenAI CLIP; HF
+    /// `image_mean` / `image_std` for the llava-1.5 processor).
+    public static let imageMean: [Float] = [0.48145466, 0.4578275, 0.40821073]
+    public static let imageStd: [Float] = [0.26862954, 0.26130258, 0.27577711]
+
+    /// Preprocess raw image bytes into `[1, 3, imageSize, imageSize]` float32.
+    /// `imageSize` is the CLIP tower's `image_size` (336 for llava-1.5).
+    public static func preprocess(_ imageData: Data, imageSize: Int = 336) throws -> MLXArray {
+        guard !imageData.isEmpty else {
+            throw MultimodalPreprocessingError.emptyImageData
+        }
+
+        #if canImport(CoreGraphics) && canImport(ImageIO)
+        guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw MultimodalPreprocessingError.emptyImageData
+        }
+
+        let origW = cgImage.width
+        let origH = cgImage.height
+        guard origW > 0, origH > 0 else {
+            throw MultimodalPreprocessingError.emptyImageData
+        }
+
+        // Resize the SHORTEST edge to `imageSize`, preserving aspect ratio
+        // (HF `CLIPImageProcessor` size={"shortest_edge": imageSize}).
+        let scale = Float(imageSize) / Float(min(origW, origH))
+        let resizedW = max(imageSize, Int((Float(origW) * scale).rounded()))
+        let resizedH = max(imageSize, Int((Float(origH) * scale).rounded()))
+
+        let bytesPerRow = resizedW * 4
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(
+            data: nil, width: resizedW, height: resizedH,
+            bitsPerComponent: 8, bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            throw MultimodalPreprocessingError.emptyImageData
+        }
+        context.interpolationQuality = .high
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: resizedW, height: resizedH))
+
+        guard let data = context.data else {
+            throw MultimodalPreprocessingError.emptyImageData
+        }
+        let ptr = data.bindMemory(to: UInt8.self, capacity: resizedW * resizedH * 4)
+
+        // Center-crop a square `imageSize x imageSize` window out of the
+        // resized image (HF `do_center_crop`, crop_size=imageSize). Read RGB
+        // directly into channel-first planes, flipping rows (CGContext stores
+        // bottom-to-top) and normalizing in the same pass.
+        let cropX = (resizedW - imageSize) / 2
+        let cropY = (resizedH - imageSize) / 2
+        let plane = imageSize * imageSize
+        var floats = [Float](repeating: 0, count: 3 * plane)
+        for row in 0 ..< imageSize {
+            // Destination row `row` is top-to-bottom; the source crop row maps
+            // to a bottom-to-top CGContext row.
+            let srcRow = resizedH - 1 - (cropY + row)
+            for col in 0 ..< imageSize {
+                let srcIdx = (srcRow * resizedW + (cropX + col)) * 4
+                let dstIdx = row * imageSize + col
+                let r = Float(ptr[srcIdx]) / 255.0
+                let g = Float(ptr[srcIdx + 1]) / 255.0
+                let b = Float(ptr[srcIdx + 2]) / 255.0
+                floats[dstIdx] = (r - imageMean[0]) / imageStd[0]
+                floats[plane + dstIdx] = (g - imageMean[1]) / imageStd[1]
+                floats[2 * plane + dstIdx] = (b - imageMean[2]) / imageStd[2]
+            }
+        }
+        return MLXArray(floats, [1, 3, imageSize, imageSize])
+
+        #else
+        throw MultimodalPreprocessingError.imagePreprocessingUnavailable
+        #endif
+    }
+}
+
 /// GELU approximate activation matching PyTorch's gelu_pytorch_tanh.
 private func geluApproximate(_ x: MLXArray) -> MLXArray {
     // gelu_approx(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))

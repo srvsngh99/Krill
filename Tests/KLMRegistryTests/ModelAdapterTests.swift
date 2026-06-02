@@ -23,7 +23,7 @@ final class ModelAdapterTests: XCTestCase {
         // so it routes through the native dense engine path. `.moe` joined
         // this group once the MoE sidecar was deleted.
         let dense: [ModelFamily] = [
-            .llama, .qwen, .qwen25vl, .mistral, .gemma, .gemma4, .phi,
+            .llama, .qwen, .qwen25vl, .llava, .mistral, .gemma, .gemma4, .phi,
             .glm, .deepseek, .bert, .reranker, .moe,
         ]
         for family in dense {
@@ -76,7 +76,7 @@ final class ModelAdapterTests: XCTestCase {
         // generic Hermes prompt. (Mistral and Phi gained native adapters
         // 2026-06-01 and are asserted in testNativeToolTemplateFamilies.)
         let hermes: [ModelFamily] = [
-            .gemma, .glm, .deepseek, .bert, .qwen25vl, .reranker,
+            .gemma, .glm, .deepseek, .bert, .qwen25vl, .llava, .reranker,
         ]
         for family in hermes {
             XCTAssertEqual(ModelAdapter(family: family).chatTemplate, .hermes,

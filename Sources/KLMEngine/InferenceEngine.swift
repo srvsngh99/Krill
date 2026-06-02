@@ -599,6 +599,15 @@ public final class InferenceEngine: @unchecked Sendable {
         // log-mel + validity once, up front, so the `<|audio|>` placeholder
         // count matches the encoder frame count.
         // Audio is always native when the model is audio-capable.
+        // LLaVA-1.5 reuses this generic multimodal path (its loader wires
+        // `multimodalForward`); the family-specific seams are the image
+        // preprocessing (CLIP 336 + normalize) and the prompt construction
+        // (the vicuna prompt with the image-token run placed directly), both
+        // handled below. No dedicated driver is needed -- unlike Qwen 2.5-VL,
+        // LLaVA uses standard 1D RoPE, so the generic decode loop is correct.
+        let llavaModel = (loadedModel.family == "llava")
+            ? (loadedModel.module as? LlavaForCausalLM) : nil
+
         let nativeAudioChosen = audioData != nil && canUseNativeAudio
             && loadedModel.family == "gemma4"
         let nativeAudio: AudioPreprocessor.Features?
@@ -616,9 +625,14 @@ public final class InferenceEngine: @unchecked Sendable {
             nativeAudio = nil
         }
 
-        let preparedMessages = injectMediaPlaceholders(
-            into: messages, imageData: imageData, audioData: audioData,
-            audioTokenCount: nativeAudio?.numTokens ?? 1)
+        // LLaVA places its image-token run inside `formatLlavaTokenIds`, so it
+        // skips the `<|image|>` text-placeholder injection the Gemma 4 / VL
+        // path relies on.
+        let preparedMessages = llavaModel != nil
+            ? messages
+            : injectMediaPlaceholders(
+                into: messages, imageData: imageData, audioData: audioData,
+                audioTokenCount: nativeAudio?.numTokens ?? 1)
 
         // Use direct token ID path for Gemma4 to avoid decode→re-encode
         // round-trip that loses special tokens (105, 106, 107).
@@ -635,6 +649,16 @@ public final class InferenceEngine: @unchecked Sendable {
             // parse/eval failure, falling through to the built-in path so
             // an exotic Modelfile never hard-fails a request.
             promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(rendered)
+        } else if let llava = llavaModel {
+            // LLaVA-1.5: render the vicuna prompt and place
+            // `(image_size/patch_size)^2` image tokens (one per CLIP patch,
+            // CLS dropped) directly, so the multimodal forward finds exactly
+            // that many positions to splice the projected CLIP features into.
+            let padCount = imageData != nil ? llava.config.visionConfig.numPatches : 0
+            promptTokensBuilt = tokenizer.formatLlavaTokenIds(
+                messages: preparedMessages,
+                imageTokenId: llava.config.imageTokenIndex,
+                imagePadCount: padCount)
         } else if loadedModel.family == "gemma4" {
             promptTokensBuilt = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
         } else if loadedModel.family == "phi" {
@@ -762,6 +786,12 @@ public final class InferenceEngine: @unchecked Sendable {
             let audioMask: MLXArray?
             let moeModel: Qwen3MoEForCausalLM?
             let grammarMask: (any GrammarLogitMask)?
+            // Family-specific image preprocessing. Gemma 4 / VL use the
+            // longest-side block-aligned `preprocessImage`; LLaVA uses the
+            // CLIP shortest-edge + center-crop + normalize path. Captured as a
+            // closure so the Task body picks the right one without a
+            // family string compare in the hot prefill.
+            let preprocessImageFn: @Sendable (Data) throws -> MLXArray
         }
         // int8 KV is gated to Gemma 4: other model loaders downcast caches to
         // [KVCache] in their forward closures (see ModelLoader.swift), so a
@@ -815,7 +845,14 @@ public final class InferenceEngine: @unchecked Sendable {
             audioMel: nativeAudio?.mel,
             audioMask: nativeAudio?.validMask,
             moeModel: loadedModel.module as? Qwen3MoEForCausalLM,
-            grammarMask: grammarMask
+            grammarMask: grammarMask,
+            preprocessImageFn: {
+                if let llava = llavaModel {
+                    let size = llava.config.visionConfig.imageSize
+                    return { try LlavaImagePreprocessor.preprocess($0, imageSize: size) }
+                }
+                return { try preprocessImage($0) }
+            }()
         )
 
         // int8 KV + prefix cache coexist via the quantized snapshot path
@@ -855,6 +892,7 @@ public final class InferenceEngine: @unchecked Sendable {
                 let capturedAudioMask = captures.audioMask
                 let capturedMoEModel = captures.moeModel
                 let capturedGrammarMask = captures.grammarMask
+                let capturedPreprocessImage = captures.preprocessImageFn
 
                 let startTime = CFAbsoluteTimeGetCurrent()
                 // Scope expert-utilization telemetry to this generation
@@ -940,7 +978,7 @@ public final class InferenceEngine: @unchecked Sendable {
                         var pixelValues: MLXArray? = nil
                         var imageHash: String? = nil
                         if let imgData = capturedImageData {
-                            pixelValues = try preprocessImage(imgData)
+                            pixelValues = try capturedPreprocessImage(imgData)
                             // Only key the vision cache for pure-image
                             // requests (combined audio bypasses the cache).
                             imageHash = capturedAudioMel == nil
