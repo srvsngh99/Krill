@@ -8,6 +8,13 @@ request; concurrency is the lever (one weight read serves many decode rows).
 
 ## Result (qwen2.5-3b 4-bit, M-series, max_tokens=96, distinct prompts per stream)
 
+> **Variance caveat.** Every table below is a single-config point measurement
+> (one host, one model, one quantization, `--runs 3` averaged) and reports no
+> spread. Batch-formation timing is noisy run to run, so treat absolute tok/s as
+> ±10–15% and the *ratios/speedups* (engine-vs-engine, spec-vs-plain at the same
+> N) as the durable signal — those hold across re-runs even when the absolute
+> numbers drift. Re-run `make bench-concurrent` on your own host before quoting.
+
 **KrillLM batched (`KRILL_NUM_PARALLEL=16`, `KRILL_NGRAM_SPEC=1`) vs Ollama 0.24:**
 
 | N | KrillLM agg tok/s | Ollama agg tok/s | ratio | KrillLM p99 TTFT | Ollama p99 TTFT |
