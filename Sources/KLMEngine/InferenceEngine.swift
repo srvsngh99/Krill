@@ -57,6 +57,17 @@ public final class InferenceEngine: @unchecked Sendable {
     /// and by paths that must match a non-spec reference).
     private var autoUseSpec: Bool = false
 
+    /// When true, greedy requests default to **n-gram (prompt-lookup)**
+    /// speculative decode (no draft model — the draft is matched from the
+    /// context). Enabled by `KRILL_NGRAM_SPEC=1` or `setNgramSpec(true)`. A
+    /// loaded draft model takes precedence; n-gram is the default speculative
+    /// path when no curated draft pair exists. An explicit
+    /// `useNgramSpeculative: false` opts out even when enabled.
+    private var autoUseNgram: Bool = {
+        guard let v = ProcessInfo.processInfo.environment["KRILL_NGRAM_SPEC"] else { return false }
+        return v == "1" || v.lowercased() == "true"
+    }()
+
     /// True while a model swap is in progress. Checked by server to return 503.
     private let _isSwapping = OSAllocatedUnfairLock(initialState: false)
     public var isSwapping: Bool { _isSwapping.withLock { $0 } }
@@ -363,6 +374,17 @@ public final class InferenceEngine: @unchecked Sendable {
     /// non-penalized, fp16-cache request.
     public var willUseSpeculativeByDefault: Bool { autoUseSpec }
 
+    /// Toggle the n-gram (prompt-lookup) speculative default. No draft model is
+    /// required — the proposer matches against the running context. Used by the
+    /// load-adaptive scheduler and by parity tests.
+    public func setNgramSpec(_ enabled: Bool) {
+        self.autoUseNgram = enabled
+    }
+
+    /// True if the engine will take the n-gram speculative path by default on a
+    /// greedy, non-penalized, fp16-cache request (and no draft model loaded).
+    public var willUseNgramByDefault: Bool { autoUseNgram }
+
     /// Prepend `<|image|>` and/or `<|audio|>` placeholder runs to the first
     /// user message's content. The vision encoder produces N soft tokens, so
     /// we insert N copies of `<|image|>` for `injectEmbeddings` to fill.
@@ -530,7 +552,8 @@ public final class InferenceEngine: @unchecked Sendable {
         audioData: Data? = nil,
         contextLimit: Int? = nil,
         promptTemplateOverride: String? = nil,
-        format: OutputFormat? = nil
+        format: OutputFormat? = nil,
+        useNgramSpeculative: Bool? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
@@ -544,7 +567,8 @@ public final class InferenceEngine: @unchecked Sendable {
                         imageData: imageData, audioData: audioData,
                         contextLimit: contextLimit,
                         promptTemplateOverride: promptTemplateOverride,
-                        format: format)
+                        format: format,
+                        useNgramSpeculative: useNgramSpeculative)
     }
 
     /// Generate tokens from a full conversation history, streaming results.
@@ -570,7 +594,8 @@ public final class InferenceEngine: @unchecked Sendable {
         audioData: Data? = nil,
         contextLimit: Int? = nil,
         promptTemplateOverride: String? = nil,
-        format: OutputFormat? = nil
+        format: OutputFormat? = nil,
+        useNgramSpeculative: Bool? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         guard let loadedModel, let tokenizer else {
             let emptyStream = AsyncStream<TokenEvent> { $0.finish() }
@@ -803,6 +828,8 @@ public final class InferenceEngine: @unchecked Sendable {
             let tokenizer: KLMTokenizer
             let prefixCache: PrefixCache
             let specDecoder: SpeculativeDecoder?
+            let ngramDecoder: SpeculativeDecoder?
+            let ngramProposer: NgramProposer?
             let modelId: String
             let imageData: Data?
             let audioMel: MLXArray?
@@ -855,6 +882,17 @@ public final class InferenceEngine: @unchecked Sendable {
         // honor a per-step mask, so a format request disables spec.
         let shouldSpec = wantsSpec && specDecoder != nil && !useInt8KV
             && !params.penaltiesActive && greedyRequest && grammarMask == nil
+        // N-gram (prompt-lookup) speculative decode shares every guard with the
+        // draft path (greedy, fp16, no penalties, no grammar), needs no draft
+        // model, and yields only when draft spec is NOT taken (a loaded draft
+        // pair wins). The decoder + proposer are per-request (the proposer owns
+        // generation-local token history), so they are built here, not stored.
+        let wantsNgram = useNgramSpeculative ?? autoUseNgram
+        let shouldNgram = wantsNgram && !shouldSpec && !useInt8KV
+            && !params.penaltiesActive && greedyRequest && grammarMask == nil
+        let ngramDecoder = shouldNgram ? SpeculativeDecoder.ngram(targetModel: loadedModel) : nil
+        let ngramProposer = shouldNgram
+            ? NgramProposer(config: NgramProposer.Config(), eosIds: stopIds) : nil
         let captures = Captures(
             forward: forwardFn,
             prefillForward: prefillForwardFn,
@@ -863,6 +901,8 @@ public final class InferenceEngine: @unchecked Sendable {
             tokenizer: tokenizer,
             prefixCache: self.prefixCache,
             specDecoder: self.specDecoder,
+            ngramDecoder: ngramDecoder,
+            ngramProposer: ngramProposer,
             modelId: self.modelId,
             imageData: imageData,
             audioMel: nativeAudio?.mel,
@@ -909,6 +949,8 @@ public final class InferenceEngine: @unchecked Sendable {
                 let capturedTokenizer = captures.tokenizer
                 let capturedPrefixCache = captures.prefixCache
                 let capturedSpecDecoder = captures.specDecoder
+                let capturedNgramDecoder = captures.ngramDecoder
+                let capturedNgramProposer = captures.ngramProposer
                 let capturedModelId = captures.modelId
                 let capturedImageData = captures.imageData
                 let capturedAudioMel = captures.audioMel
@@ -1101,7 +1143,7 @@ public final class InferenceEngine: @unchecked Sendable {
 
                 var nextToken: Int
                 var nextTokenArr: MLXArray
-                if shouldSpec {
+                if shouldSpec || shouldNgram {
                     nextToken = sampler.sample(prefillLogits)
                     nextTokenArr = MLXArray(Int32(nextToken))
                 } else {
@@ -1209,6 +1251,56 @@ public final class InferenceEngine: @unchecked Sendable {
                         nextToken = accepted.last ?? eosId
                         if stopIds.contains(nextToken) || generatedCount >= maxTokens { break }
                     }
+                } else if shouldNgram, let ngramDec = capturedNgramDecoder,
+                          let proposer = capturedNgramProposer, let fp16Caches {
+                    // === N-gram (prompt-lookup) speculative path ===
+                    // No draft model / no draft cache: the proposer matches the
+                    // running context. Seed it with the FULL prompt (not the
+                    // prefix-trimmed input) + the prefill-sampled first token. Each
+                    // accepted token is the target's greedy argmax, so output
+                    // matches the standard path except at fp16 verify-vs-decode
+                    // near-ties (same as the batched decoder).
+                    proposer.reset(prompt: promptTokens)
+
+                    // Emit the first token (ngramStep returns tokens AFTER lastToken).
+                    if stopIds.contains(nextToken) {
+                        continuation.yield(TokenEvent(
+                            tokenId: nextToken, text: "",
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
+                    } else {
+                        proposer.append([nextToken])
+                        let firstText = capturedTokenizer.decode(token: nextToken)
+                        continuation.yield(TokenEvent(
+                            tokenId: nextToken, text: firstText,
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                        generatedCount += 1
+                    }
+
+                    while generatedCount < maxTokens && !stopIds.contains(nextToken) {
+                        // ngramStep appends accepted tokens to the proposer itself.
+                        let accepted = ngramDec.ngramStep(
+                            lastToken: nextToken,
+                            targetCaches: fp16Caches,
+                            proposer: proposer)
+
+                        for token in accepted {
+                            if stopIds.contains(token) {
+                                continuation.yield(TokenEvent(
+                                    tokenId: token, text: "",
+                                    elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
+                                break
+                            }
+                            let text = capturedTokenizer.decode(token: token)
+                            continuation.yield(TokenEvent(
+                                tokenId: token, text: text,
+                                elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                            generatedCount += 1
+                            if generatedCount >= maxTokens { break }
+                        }
+
+                        nextToken = accepted.last ?? eosId
+                        if stopIds.contains(nextToken) || generatedCount >= maxTokens { break }
+                    }
                 } else {
                     // === Standard Decode Path ===
                     // WS-D D3: only when the request opts into penalties /
@@ -1290,6 +1382,14 @@ public final class InferenceEngine: @unchecked Sendable {
                         acceptedTokens: specDec.totalAccepted,
                         finalK: specDec.currentK,
                         acceptanceRate: specDec.acceptanceRate
+                    )
+                } else if shouldNgram, let ngramDec = capturedNgramDecoder, ngramDec.totalRounds > 0 {
+                    // finalK is 0 for n-gram (K is proposer-driven, not adaptive).
+                    specStats = SpeculativeStats(
+                        rounds: ngramDec.totalRounds,
+                        acceptedTokens: ngramDec.totalAccepted,
+                        finalK: ngramDec.currentK,
+                        acceptanceRate: ngramDec.acceptanceRate
                     )
                 } else {
                     specStats = nil
