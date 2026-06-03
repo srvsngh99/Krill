@@ -465,6 +465,36 @@ final class MultimodalEndpointsTests: XCTestCase {
         case unexpectedResponsePart
     }
 
+    /// Guard for the multi-image plumbing: every generate handler loads its
+    /// images through `DecodedMedia.loadImages()`, which must return BOTH the
+    /// first image (single-image runtimes) and the full ordered list (mllama). A
+    /// regression here would silently drop all but the first image of a
+    /// multi-image Llama-3.2-Vision request while the prompt still emits N
+    /// `<|image|>` tokens.
+    func testLoadImagesReturnsFirstAndAll() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-loadimages-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var paths: [String] = []
+        for i in 0 ..< 3 {
+            let p = dir.appendingPathComponent("img\(i).bin").path
+            try Data([UInt8(i), UInt8(i), UInt8(i)]).write(to: URL(fileURLWithPath: p))
+            paths.append(p)
+        }
+
+        let (first, all) = DecodedMedia(imagePaths: paths).loadImages()
+        XCTAssertEqual(all.count, 3, "all three images must load")
+        XCTAssertEqual(first, all.first, "first must equal the head of the list")
+        XCTAssertEqual(Array(all[0]), [0, 0, 0])
+        XCTAssertEqual(Array(all[2]), [2, 2, 2], "order preserved")
+
+        // Empty media yields no images.
+        XCTAssertNil(DecodedMedia().loadImages().first)
+        XCTAssertTrue(DecodedMedia().loadImages().all.isEmpty)
+    }
+
     /// Build a minimal solid-color PNG via CoreGraphics + ImageIO.
     fileprivate func makeTinyPNG(width: Int, height: Int, r: UInt8, g: UInt8, b: UInt8) -> Data {
         let colorSpace = CGColorSpaceCreateDeviceRGB()

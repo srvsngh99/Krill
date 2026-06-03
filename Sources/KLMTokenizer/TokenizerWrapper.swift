@@ -724,6 +724,56 @@ public final class KLMTokenizer: @unchecked Sendable {
         tokens += enc(" ASSISTANT:")
         return tokens
     }
+
+    /// Build the Llama-3.2-Vision (mllama) prompt token ids. Uses the Llama-3
+    /// chat structure (`<|start_header_id|>` / `<|end_header_id|>` / `<|eot_id|>`)
+    /// and places `imageCount` `<|image|>` tokens at the START of the first user
+    /// turn (one per supplied image) -- the cross-attention markers that the
+    /// driver's `cross_attention_mask` keys off. Unlike LLaVA's `<image>` run,
+    /// these are not soft-token placeholders: the image enters via cross-attention,
+    /// so one marker per image is enough. `<|image|>` and the header tokens are
+    /// special tokens in the mllama vocab, so encoding their literals yields the
+    /// single ids; we own the one leading BOS (strip any the tokenizer re-adds).
+    public func formatLlamaVisionTokenIds(
+        messages: [[String: String]], imageTokenId: Int, imageCount: Int
+    ) -> [Int] {
+        let bos = bosTokenId
+        func enc(_ s: String) -> [Int] {
+            var t = tokenizer.encode(text: s)
+            if t.first == bos { t.removeFirst() }
+            return t
+        }
+
+        var turns = messages
+        var systemText: String? = nil
+        if let first = turns.first, (first["role"] ?? "") == "system" {
+            let s = first["content"] ?? ""
+            if !s.isEmpty { systemText = s }
+            turns.removeFirst()
+        }
+        // An image request with no user turn must still place its markers, or
+        // the prompt carries no image positions and the cross mask is empty.
+        if imageCount > 0 && !turns.contains(where: { ($0["role"] ?? "") == "user" }) {
+            turns.append(["role": "user", "content": ""])
+        }
+        let firstUserIndex = turns.firstIndex { ($0["role"] ?? "") == "user" }
+
+        var tokens: [Int] = [bos]
+        if let systemText {
+            tokens += enc("<|start_header_id|>system<|end_header_id|>\n\n\(systemText)<|eot_id|>")
+        }
+        for (i, msg) in turns.enumerated() {
+            let role = msg["role"] ?? "user"
+            let content = msg["content"] ?? ""
+            tokens += enc("<|start_header_id|>\(role)<|end_header_id|>\n\n")
+            if i == firstUserIndex && imageCount > 0 {
+                tokens += Array(repeating: imageTokenId, count: imageCount)
+            }
+            tokens += enc("\(content)<|eot_id|>")
+        }
+        tokens += enc("<|start_header_id|>assistant<|end_header_id|>\n\n")
+        return tokens
+    }
 }
 
 // MARK: - Errors

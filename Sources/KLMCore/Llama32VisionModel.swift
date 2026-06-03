@@ -639,6 +639,20 @@ class MllamaDecoderLayer: Module {
     }
 }
 
+// MARK: - Cross-attention KV cache
+
+/// Holds the per-cross-layer vision K/V produced once at image prefill and
+/// reused on every decode step (the image is consumed in the prompt, so the
+/// vision K/V never grow). Keyed by absolute decoder-layer index so only the
+/// `cross_attention_layers` populate entries; self-attention layers use the
+/// ordinary `[KVCache]`. An empty cache signals "prefill not yet run" — the
+/// first forward with `crossStates` fills it.
+public final class MllamaCrossKVCache {
+    public var entries: [Int: (MLXArray, MLXArray)] = [:]
+    public init() {}
+    public var isPopulated: Bool { !entries.isEmpty }
+}
+
 // MARK: - Top-level model
 
 /// Native Llama-3.2-Vision (mllama). Mirrors `mlx_vlm.models.mllama.Model`:
@@ -683,17 +697,28 @@ public class Llama32VisionForCausalLM: Module {
         pixelValues: MLXArray? = nil,
         aspectRatioIds: MLXArray? = nil,
         aspectRatioMask: MLXArray? = nil,
-        caches: [KVCache]? = nil
+        caches: [KVCache]? = nil,
+        crossKV: MllamaCrossKVCache? = nil,
+        crossMask: MLXArray? = nil,
+        fullRowMask: MLXArray? = nil,
+        lastTokenOnly: Bool = false
     ) -> MLXArray {
+        // Recompute the vision K/V source only when pixels are supplied AND the
+        // cross-KV cache has not been filled yet (image prefill). On decode the
+        // caller passes a populated `crossKV` and no pixels, so the vision tower
+        // is skipped entirely.
         var crossStates: MLXArray? = nil
-        if let pixelValues, let aspectRatioIds, let aspectRatioMask {
+        if crossKV?.isPopulated != true,
+           let pixelValues, let aspectRatioIds, let aspectRatioMask {
             crossStates = crossAttentionStates(
                 pixelValues: pixelValues, aspectRatioIds: aspectRatioIds,
                 aspectRatioMask: aspectRatioMask)
         }
         return languageModel(
             inputIds, crossStates: crossStates, caches: caches,
-            crossAttentionLayers: crossAttentionLayers)
+            crossAttentionLayers: crossAttentionLayers,
+            crossKV: crossKV, crossMask: crossMask, fullRowMask: fullRowMask,
+            lastTokenOnly: lastTokenOnly)
     }
 }
 
@@ -714,12 +739,19 @@ public class MllamaLanguageModel: Module {
 
     func callAsFunction(
         _ inputIds: MLXArray, crossStates: MLXArray?, caches: [KVCache]?,
-        crossAttentionLayers: Set<Int>
+        crossAttentionLayers: Set<Int>,
+        crossKV: MllamaCrossKVCache? = nil,
+        crossMask: MLXArray? = nil, fullRowMask: MLXArray? = nil,
+        lastTokenOnly: Bool = false
     ) -> MLXArray {
         let h = model(
             inputIds, crossStates: crossStates, caches: caches,
-            crossAttentionLayers: crossAttentionLayers)
-        return lmHead(h)
+            crossAttentionLayers: crossAttentionLayers,
+            crossKV: crossKV, crossMask: crossMask, fullRowMask: fullRowMask)
+        // Project only the last row when the caller just needs the next-token
+        // logits (prefill / decode), skipping the lm_head over the other rows.
+        let hh = lastTokenOnly ? h[0..., (h.dim(1) - 1)..., 0...] : h
+        return lmHead(hh)
     }
 }
 
@@ -746,7 +778,9 @@ public class MllamaTextInner: Module {
 
     func callAsFunction(
         _ inputIds: MLXArray, crossStates: MLXArray?, caches: [KVCache]?,
-        crossAttentionLayers: Set<Int>
+        crossAttentionLayers: Set<Int>,
+        crossKV: MllamaCrossKVCache? = nil,
+        crossMask: MLXArray? = nil, fullRowMask: MLXArray? = nil
     ) -> MLXArray {
         var h = embedTokens(inputIds)
         let seqLen = h.dim(1)
@@ -754,9 +788,16 @@ public class MllamaTextInner: Module {
         let causal = createCachedCausalMask(newLen: seqLen, cacheLen: cacheLen, dtype: h.dtype)
         for (i, layer) in layers.enumerated() {
             if layer.isCross {
-                let (out, _) = layer.callCross(
-                    h, crossStates: crossStates, cachedKV: nil,
-                    crossMask: nil, fullRowMask: nil)
+                // A populated entry means prefill already produced this layer's
+                // vision K/V; reuse it (decode step) rather than recomputing from
+                // `crossStates`. On the prefill forward the entry is absent, so we
+                // pass `crossStates`, capture the produced K/V, and store it.
+                let cached = crossKV?.entries[i]
+                let states = cached == nil ? crossStates : nil
+                let (out, produced) = layer.callCross(
+                    h, crossStates: states, cachedKV: cached,
+                    crossMask: crossMask, fullRowMask: fullRowMask)
+                if let produced, let crossKV { crossKV.entries[i] = produced }
                 h = out
             } else {
                 h = layer.callSelf(h, mask: causal, cache: caches?[i])

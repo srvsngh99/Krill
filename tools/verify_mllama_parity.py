@@ -140,6 +140,56 @@ def build(outdir: str) -> None:
     with open(os.path.join(outdir, "reference_logits.json"), "w") as f:
         json.dump(ref, f)
 
+    # Multi-image reference: TWO images + a sparse cross_attention_mask, so the
+    # gated cross-attention attends each text span to the correct image's tiles
+    # (the serving path's full-multi-image mask machinery). The model prepares
+    # the dense int mask into the additive form internally.
+    from mlx_vlm.models.mllama.processing_mllama import (
+        convert_sparse_cross_attention_mask_to_dense,
+        get_cross_attention_token_mask,
+    )
+
+    image_token_id = 128256
+    # tokens: <img> a b <img> c d e  -> two image spans
+    mi_tokens = [image_token_id, 11, 12, image_token_id, 13, 14, 15]
+    mi_input_ids = mx.array([mi_tokens])
+    mi_pixels = mx.random.normal(
+        [1, 2, NUM_TILES, 3, IMAGE_SIZE, IMAGE_SIZE], key=mx.random.key(7))
+    mi_aspect_ids = mx.array([[ASPECT_ID, ASPECT_ID]])
+    mi_aspect_mask = mx.ones([1, 2, MAX_TILES], dtype=mx.int32)
+    mx.eval(mi_pixels)
+
+    token_mask = [get_cross_attention_token_mask(mi_tokens, image_token_id)]
+    dense = convert_sparse_cross_attention_mask_to_dense(
+        token_mask, num_tiles=[[NUM_TILES, NUM_TILES]],
+        max_num_tiles=MAX_TILES, length=len(mi_tokens))
+    mi_cross_mask = mx.array(dense)
+
+    mi_out = model(
+        mi_input_ids, mi_pixels,
+        aspect_ratio_ids=mi_aspect_ids, aspect_ratio_mask=mi_aspect_mask,
+        cross_attention_mask=mi_cross_mask)
+    mi_logits = mi_out.logits if hasattr(mi_out, "logits") else mi_out
+    mx.eval(mi_logits)
+    mi_last = mi_logits[0, -1, :]
+    mx.save_safetensors(
+        os.path.join(outdir, "inputs", "multiimage_inputs.safetensors"),
+        {
+            "pixel_values": mi_pixels.astype(mx.float32),
+            "aspect_ratio_ids": mi_aspect_ids.astype(mx.int32),
+            "aspect_ratio_mask": mi_aspect_mask.astype(mx.int32),
+        })
+    mi_ref = {
+        "tokens": mi_tokens,
+        "vocab_size": VOCAB,
+        "image_token_id": image_token_id,
+        "num_tiles": [NUM_TILES, NUM_TILES],
+        "last_token_logits": [float(v) for v in mi_last.tolist()],
+        "argmax": int(mx.argmax(mi_last).item()),
+    }
+    with open(os.path.join(outdir, "reference_multiimage_logits.json"), "w") as f:
+        json.dump(mi_ref, f)
+
     # Text-only reference (no image): exercises the cross-attention no-image
     # split-query fallback, which the image path does not reach.
     text_out = model(input_ids)
