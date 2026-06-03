@@ -45,14 +45,31 @@ request; concurrency is the lever (one weight read serves many decode rows).
   therefore **opt-in** (`KRILL_NGRAM_SPEC`), workload-gated by the operator; the
   default server is unaffected.
 
-## Scaling past N=8 (averaged, 3 runs)
+## Scaling shape (averaged, 3 runs, 24 distinct prompts)
 
-A finer averaged sweep (qwen2.5-3b, max_tokens=128): 97 -> 152 -> 167 -> 180 -> 270
-tok/s at N=1,2,4,8,16. Aggregate keeps climbing (2.78x at N=16), but the N=8 slope
-is genuinely soft (180, only 1.86x) and reproduces across runs — a continuous-batcher
-coalescing characteristic (some rows miss the cold-start window and decode in a
-second wave) worth a future look; not a hard ceiling. The benchmark averages
-`--runs` passes per level because a single pass at moderate N is noisy.
+Averaged wall-based aggregate (qwen2.5-3b, max_tokens=128): 97 -> 139 -> 162 -> 174
+-> 255 tok/s at N=1,2,4,8,16. The aggregate is non-monotonic in efficiency (the
+N=4->8 step adds little, N=8->16 jumps), which initially looks like a batcher
+scheduling artifact. It is not. Two things explain it:
+
+1. **Prefix-cache contamination (a benchmark bug, now fixed).** With only 8 distinct
+   prompts, an N=16 sweep reused prompts -> prefix-cache hits shrink wall time and
+   inflate the wall-based aggregate. The harness now ships >=24 distinct prompts and
+   warns when the sweep exceeds the prompt-set size. (Removing it dropped N=16 from
+   270 to 255 - a real but small effect.)
+
+2. **GPU occupancy (structural, the real driver).** Using the wall-independent
+   per-request decode tok/s (server `eval_count/eval_duration`), the batched step
+   time per token is 9.6 / 13.6 / 23.2 / 43.1 / 55.6 ms at R=1/2/4/8/16 — it grows
+   ~5 ms/row up to R=8, then flattens to +1.6 ms/row at R=16. That is the opposite
+   of compute-bound: MLX's batched matmul does not fill the GPU until ~R=16, so
+   marginal rows are costly at R=4-8 and nearly free at R=16. This is an MLX/hardware
+   occupancy curve, **not** a KrillLM batcher bug (admission + epochs are correct and
+   rolling). There is no KrillLM-side lever — it would take MLX improving small-batch
+   GEMM occupancy. Aggregate still grows monotonically and beats Ollama at every N.
+
+The benchmark averages `--runs` passes per level because a single pass at moderate N
+is noisy.
 
 ## Reproduce
 
