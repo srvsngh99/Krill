@@ -70,11 +70,11 @@ final class NativeAudioRoutingTests: XCTestCase {
 
     /// Regression for BENCHMARK_ISSUES #1: audio frames must reach prefill.
     /// The benchmark diagnosed "audio not ingested" purely from the prompt
-    /// (prefill) token count — a text-only fallback shows a low count, an
+    /// (prefill) token count - a text-only fallback shows a low count, an
     /// ingested clip shows the count inflated by the encoder frame run. Assert
     /// that the SAME prompt prefilled WITH audio reports materially more prompt
     /// tokens than the text-only baseline (the `<|audio|>` frame placeholders),
-    /// which the engine's `GenerationStats.promptTokens` exposes — the exact
+    /// which the engine's `GenerationStats.promptTokens` exposes - the exact
     /// signal the benchmark measured. Skips unless KLM_GEMMA4_MODEL_PATH points
     /// at a real checkpoint.
     func testLiveNativeAudioInflatesPromptTokens() async throws {

@@ -7,7 +7,7 @@ engine on macOS." Ordered by impact on that goal.
 
 ---
 
-## 1. [RESOLVED — not reproducible] Server HTTP API audio ingestion
+## 1. [RESOLVED - not reproducible] Server HTTP API audio ingestion
 
 **Status: NOT A BUG on current `main`.** Re-checked 2026-06-04 against a freshly
 built `.build/release/krillm` (and, separately, the Homebrew v0.4.0 binary):
@@ -23,9 +23,9 @@ audio"):
 | CLI `krillm run --audio`                        | 110               | exact transcript |
 | `/api/generate` top-level `"audio"`+`audio_format` | 110            | exact transcript |
 | `/api/chat` message-level `"audio"`             | 110               | exact transcript |
-| text-only baseline (same prompt, no audio)      | 13                | — |
+| text-only baseline (same prompt, no audio)      | 13                | - |
 
-The ~97-token jump (13 → 110) is the audio encoder frame run reaching prefill —
+The ~97-token jump (13 -> 110) is the audio encoder frame run reaching prefill -
 exactly the signal the benchmark used to (wrongly) conclude "not ingested." Both
 Ollama-compat handlers route audio through `BatchScheduler.submit` → serial →
 `engine.generate(messages:…, audioData:)`, identical to the CLI's
@@ -34,10 +34,10 @@ Ollama-compat handlers route audio through `BatchScheduler.submit` → serial �
 - **Vision over HTTP also works** (`/api/generate` `images:[…]` → correct answer),
   confirming the shared multimodal prefill plumbing.
 - **Regression gates added** (this PR), so the wiring can't silently regress:
-  - `MultimodalEndpointsTests.testOllamaChatRequestAcceptsAudioPerMessage` —
+  - `MultimodalEndpointsTests.testOllamaChatRequestAcceptsAudioPerMessage` -
     CI-runnable; locks `/api/chat` message-level `audio` → `request.media.audio`
     (the one parse→media link the benchmark flagged) + a two-clip rejection.
-  - `NativeAudioRoutingTests.testLiveNativeAudioInflatesPromptTokens` —
+  - `NativeAudioRoutingTests.testLiveNativeAudioInflatesPromptTokens` -
     env-gated (`KLM_GEMMA4_MODEL_PATH`); asserts audio inflates
     `GenerationStats.promptTokens` past the text-only baseline by the encoder
     frame count, the exact prefill-token signal the benchmark measured.
