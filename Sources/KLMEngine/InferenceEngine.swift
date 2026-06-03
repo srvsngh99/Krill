@@ -1231,11 +1231,19 @@ public final class InferenceEngine: @unchecked Sendable {
                             draftCaches: draftCaches
                         )
 
+                        // A stop token can appear before the end of an accepted
+                        // run (a draft EOS that was verified, then a bonus token
+                        // forwarded past it). Stop the WHOLE generation at the
+                        // first stop id, not just the inner loop — otherwise the
+                        // non-stop bonus becomes the next lastToken and the outer
+                        // loop emits content after `isEnd`.
+                        var hitStop = false
                         for token in accepted {
                             if stopIds.contains(token) {
                                 continuation.yield(TokenEvent(
                                     tokenId: token, text: "",
                                     elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
+                                hitStop = true
                                 break
                             }
 
@@ -1247,6 +1255,7 @@ public final class InferenceEngine: @unchecked Sendable {
 
                             if generatedCount >= maxTokens { break }
                         }
+                        if hitStop { break }
 
                         nextToken = accepted.last ?? eosId
                         if stopIds.contains(nextToken) || generatedCount >= maxTokens { break }
@@ -1283,11 +1292,16 @@ public final class InferenceEngine: @unchecked Sendable {
                             targetCaches: fp16Caches,
                             proposer: proposer)
 
+                        // Stop the whole generation at the first stop id in the
+                        // accepted run (a verified EOS draft followed by a bonus),
+                        // not just the inner loop — see the draft-spec path above.
+                        var hitStop = false
                         for token in accepted {
                             if stopIds.contains(token) {
                                 continuation.yield(TokenEvent(
                                     tokenId: token, text: "",
                                     elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
+                                hitStop = true
                                 break
                             }
                             let text = capturedTokenizer.decode(token: token)
@@ -1297,6 +1311,7 @@ public final class InferenceEngine: @unchecked Sendable {
                             generatedCount += 1
                             if generatedCount >= maxTokens { break }
                         }
+                        if hitStop { break }
 
                         nextToken = accepted.last ?? eosId
                         if stopIds.contains(nextToken) || generatedCount >= maxTokens { break }

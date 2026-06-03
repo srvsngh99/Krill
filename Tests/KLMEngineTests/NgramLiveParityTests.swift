@@ -40,11 +40,16 @@ final class NgramLiveParityTests: XCTestCase {
             useSpeculative: false, usePrefixCache: false,
             useNgramSpeculative: ngram)
         var toks: [Int] = []
+        var sawEnd = false
         // Drain to natural completion (not `break` on isEnd): the producer sets
         // stats and only THEN calls finish(), so reading stats() after the loop
         // ends avoids racing the producer. isEnd carries no token, so skip it.
+        // Invariant: isEnd must be terminal — no content event may follow it.
+        // (Regression guard for the EOS-inside-a-fully-accepted-run bug, where a
+        // bonus token was emitted past the stop id.)
         for await ev in s {
-            if ev.isEnd { continue }
+            if ev.isEnd { sawEnd = true; continue }
+            XCTAssertFalse(sawEnd, "a content token was emitted after isEnd (post-stop emission)")
             toks.append(ev.tokenId)
         }
         return (toks, stats())
