@@ -97,6 +97,59 @@ final class BatchedVerifyTests: XCTestCase {
         }
     }
 
+    /// Production-path parity: the continuous batcher WITH n-gram spec enabled
+    /// must produce, for every concurrent row, the same tokens as the plain
+    /// batched path up to the shorter length (prefix consistency; both use the
+    /// batched fp16 GEMM, so this isolates the spec round from fp16 batched
+    /// tie-flips). Drives the real `submitBatched` -> `ContinuousBatcher` path.
+    func testContinuousBatcherSpecMatchesPlainBatchedPerRow() async throws {
+        let dir = try requireModelDirectory()
+        let texts = [
+            "Repeat exactly three times: alpha beta gamma, alpha beta gamma,",
+            "The capital of Japan is",
+            "List three fruits:",
+        ]
+
+        func runBatched(ngram: Bool) async throws -> [[Int]] {
+            let engine = InferenceEngine(modelDirectory: dir)
+            try await engine.load()
+            guard engine.supportsBatchedDecode else { throw XCTSkip("not batch-eligible") }
+            if ngram { engine.setNgramSpec(true) }
+            let results = texts.map { t in
+                engine.submitBatched(
+                    BatchGenRequest(messages: [["role": "user", "content": t]],
+                                    params: .greedy, maxTokens: 48),
+                    maxRows: 4, windowMs: 30)
+            }
+            var out = [[Int]](repeating: [], count: texts.count)
+            await withTaskGroup(of: (Int, [Int]).self) { group in
+                for (i, r) in results.enumerated() {
+                    guard let res = r else { continue }
+                    group.addTask {
+                        var toks: [Int] = []
+                        for await ev in res.stream where !ev.isEnd { toks.append(ev.tokenId) }
+                        return (i, toks)
+                    }
+                }
+                for await (i, toks) in group { out[i] = toks }
+            }
+            return out
+        }
+
+        let plain = try await runBatched(ngram: false)
+        let spec = try await runBatched(ngram: true)
+        for r in 0 ..< texts.count {
+            var lcp = 0
+            while lcp < plain[r].count && lcp < spec[r].count && plain[r][lcp] == spec[r][lcp] {
+                lcp += 1
+            }
+            XCTAssertGreaterThan(spec[r].count, 0, "row \(r) produced no tokens under spec")
+            XCTAssertEqual(lcp, min(plain[r].count, spec[r].count),
+                "row \(r): batcher spec must match plain batched up to the shorter length "
+                + "(LCP=\(lcp), plain=\(plain[r].count), spec=\(spec[r].count))")
+        }
+    }
+
     /// Wall-clock observation (gated): batched n-gram spec vs batched greedy on an
     /// echo-heavy batch at R=4 and R=8 — the regime where the wider verify forward
     /// should fill the under-occupied GPU and commit multiple tokens/round. Prints

@@ -1985,7 +1985,11 @@ extension InferenceEngine {
                 numLayers: model.numLayers,
                 useQuantizedKV: useQuantizedBatched(model),
                 decode: { tokenizer.decode(token: $0) },
-                stopIds: stopIds)
+                stopIds: stopIds,
+                // Batched n-gram speculation when enabled + fp16 (the spec round
+                // commits to fp16 KVCache). Degenerates to one token/round on
+                // non-repetitive input, so it never loses to the plain path.
+                specEnabled: autoUseNgram && !useQuantizedBatched(model))
             continuousBatcher = ContinuousBatcher(
                 deps: deps, maxRows: maxRows, windowMs: windowMs)
         }
