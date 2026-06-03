@@ -261,14 +261,29 @@ def main() -> int:
     print("-" * len(hdr))
     k_rows = {r["concurrency"]: r for r in report["engines"].get("krillm", []) if "concurrency" in r}
     o_rows = {r["concurrency"]: r for r in report["engines"].get("ollama", []) if "concurrency" in r}
+    saw_failure = False
     for n in sweep:
         k = k_rows.get(n, {})
         o = o_rows.get(n, {})
         ktps = k.get("aggregate_decode_tps")
         otps = o.get("aggregate_decode_tps")
         ratio = (ktps / otps) if (ktps and otps) else None
-        print(f"{n:>3} | {fmt(ktps):>17} | {fmt(otps):>17} | {fmt(ratio,2):>6} | "
+        # Aggregate tok/s = (successful streams' tokens) / wall. A failed stream
+        # contributes no tokens but its slot still freed the GPU, so a partial
+        # failure makes the number an optimistic, lower-effective-N reading —
+        # mark it so it isn't trusted as a clean N-stream result.
+        kfail = k.get("failed") or 0
+        ofail = o.get("failed") or 0
+        saw_failure = saw_failure or bool(kfail or ofail)
+        kcell = fmt(ktps) + ("*" if kfail else "")
+        ocell = fmt(otps) + ("*" if ofail else "")
+        print(f"{n:>3} | {kcell:>17} | {ocell:>17} | {fmt(ratio,2):>6} | "
               f"{fmt(k.get('ttft_ms_p99')):>16} | {fmt(o.get('ttft_ms_p99')):>16}")
+    if saw_failure:
+        print("\n* one or more streams failed at this N; the aggregate tok/s "
+              "sums only the surviving streams over the full wall, so it is an "
+              "optimistic (lower-effective-N) reading — not a clean N-stream "
+              "measurement. See per-level `failed` in the JSON.")
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as fh:
