@@ -31,17 +31,34 @@ linked detail doc.
 
 - **Goal:** draft-model speculative decoding hitting the >= 1.5x decode speedup
   the workstream targeted.
-- **Status:** CLOSED as a strict gate. Batched verification landed (PR #41);
-  the >= 1.5x gate was demoted to advisory (PR #42/#43). A hard >= 1.0x floor
-  (never slower than non-spec) holds and is enforced.
-- **Why it's capped:** on M-series the verification forward is bandwidth-bound
-  and the draft overhead eats most of the acceptance win; the arithmetic-light
-  decode step does not amortize a second model. Empirically and structurally
-  unreachable with vanilla draft-model spec.
-- **Re-attempt trigger:** a *different algorithm* -- Medusa heads or
-  tree-attention (multiple candidate continuations verified in one forward, no
-  separate draft model). That is a new workstream, not a tuning pass.
-- **Detail:** `docs/workstreams/WS2_SPECULATIVE_DECODING.md`.
+- **Status (draft-model):** CLOSED as a strict gate. Batched verification landed
+  (PR #41); the >= 1.5x gate was demoted to advisory (PR #42/#43). A hard
+  >= 1.0x floor (never slower than non-spec) holds and is enforced.
+- **Why the draft path capped:** on M-series the verification forward is
+  bandwidth-bound and the draft overhead (`alpha ~ 1/8`) eats most of the
+  acceptance win. WS2 fitted a per-round overhead `beta ~ 0.78`, ceiling
+  `1/(alpha+beta) ~ 1.10x`.
+- **RE-OPENED and partially solved via a different algorithm (n-gram /
+  prompt-lookup).** The WS2 `beta` was *fitted*, never profiled. A direct probe
+  (`Tests/KLMCoreTests/VerifyProfileTests.swift`, `docs/VERIFY_PROFILE.md`)
+  measured the clean width-K verify cost: `beta ~ 0.23` at K=16 (ceiling
+  3.2-4.3x), because `tK` *saturates* in K (extra positions ride along on one
+  weight stream). Removing the draft model (n-gram drafts from context,
+  `alpha -> 0`) lands a real win: **echo-heavy single-stream 1.85x** on
+  llama-3.2-3b, **~floor (>=0.95x via an acceptance-adaptive draft cap)** on
+  non-echo. Shipped opt-in (`KRILL_NGRAM_SPEC`), greedy-only, prefix-consistent
+  with standard decode (differs only at fp16 verify-vs-decode near-ties, same as
+  the batched decoder). The single-stream lever's marginal value shrinks under
+  concurrency, so a load-adaptive gate (`KRILL_SPEC_CONCURRENCY_MAX`, default 1)
+  uses n-gram solo and **continuous batching** above the crossover (N*=2), where
+  KrillLM already beats Ollama 1.9-2.3x on aggregate throughput
+  (`docs/CONCURRENT_THROUGHPUT.md`).
+- **Still open:** the strict >= 1.5x gate for the *general* (non-echo) case, and
+  tree-attention / Medusa heads (multiple candidate continuations verified in one
+  forward) to lift acceptance on non-repetitive workloads. The n-gram verify path
+  + parity harness are the template for that next attempt.
+- **Detail:** `docs/workstreams/WS2_SPECULATIVE_DECODING.md`, `docs/VERIFY_PROFILE.md`,
+  `docs/CONCURRENT_THROUGHPUT.md`.
 
 ### 2. Compiled text-decode block (`MLX.compile`)
 

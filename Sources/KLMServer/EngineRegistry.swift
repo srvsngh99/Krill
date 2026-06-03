@@ -215,6 +215,14 @@ public actor EngineRegistry {
         await entries[key]?.keepAlive.beginRequest()
     }
 
+    /// Current in-flight request count for `engine`'s model (includes the caller
+    /// once it has `retain()`-ed). Drives the load-adaptive spec/batch decision
+    /// in ``BatchScheduler``: 1 == this request is solo. 0 if not pooled.
+    public func inFlightCount(for engine: InferenceEngine?) -> Int {
+        guard let engine, let key = key(for: engine) else { return 0 }
+        return inFlight[key] ?? 0
+    }
+
     /// Release a live-generation hold taken by ``retain(_:)``.
     public func release(_ engine: InferenceEngine?) async {
         guard let engine, let key = key(for: engine) else { return }

@@ -557,12 +557,15 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         format: OutputFormat? = nil
     ) async -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         if let sched = await engines.scheduler(for: eng) {
+            // Current concurrency drives the load-adaptive spec/batch decision in
+            // the scheduler (retain() already counted this request).
+            let concurrency = await engines.inFlightCount(for: eng)
             return await sched.submit(
                 messages: messages, params: params, maxTokens: maxTokens,
                 useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
                 imageData: imageData, audioData: audioData,
                 contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
-                format: format)
+                format: format, currentConcurrency: concurrency)
         }
         return eng.generate(
             messages: messages, params: params, maxTokens: maxTokens,
