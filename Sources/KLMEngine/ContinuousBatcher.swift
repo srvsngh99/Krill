@@ -495,9 +495,13 @@ final class ContinuousBatcher: @unchecked Sendable {
             var a = 0
             while a < k && p(a) == drafts[i][a] { accepted.append(drafts[i][a]); a += 1 }
             let allAccepted = (a == k)
-            let cacheEntries: Int
-            if allAccepted { accepted.append(p(k)); cacheEntries = k + 1 }
-            else { accepted.append(p(a)); cacheEntries = a + 1 }
+            // One verifier token always lands after the accepted draft prefix
+            // (`p(k)` when the whole draft held, else the first rejection
+            // `p(a)`), so `accepted` is non-empty below — no fallback needed
+            // for `row.current`.
+            let finalToken = allAccepted ? p(k) : p(a)
+            let cacheEntries = allAccepted ? k + 1 : a + 1
+            accepted.append(finalToken)
 
             for l in 0 ..< row.caches.count {
                 guard let snap = snaps[l], let dst = row.caches[l] as? KVCache else { continue }
@@ -515,7 +519,7 @@ final class ContinuousBatcher: @unchecked Sendable {
             for tok in accepted where !row.isFinished {
                 _ = emit(row, token: tok, now: now)
             }
-            row.current = accepted.last ?? 0
+            row.current = finalToken
         }
 
         // Realize all committed slices in one eval, then append (mirrors

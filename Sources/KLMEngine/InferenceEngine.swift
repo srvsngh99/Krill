@@ -377,6 +377,14 @@ public final class InferenceEngine: @unchecked Sendable {
     /// Toggle the n-gram (prompt-lookup) speculative default. No draft model is
     /// required — the proposer matches against the running context. Used by the
     /// load-adaptive scheduler and by parity tests.
+    ///
+    /// Note: the continuous batcher captures `specEnabled` from this flag when
+    /// it is first constructed (lazily, on the first `submitBatched`). Flipping
+    /// this *after* the batcher exists only affects the single-stream path; the
+    /// already-built batcher keeps its cached value for its lifetime. This is
+    /// fine for the env/startup path (`KRILL_NGRAM_SPEC` / `serve --ngram-spec`
+    /// set the flag before any request arrives) — set it before serving to
+    /// govern the batched path.
     public func setNgramSpec(_ enabled: Bool) {
         self.autoUseNgram = enabled
     }
