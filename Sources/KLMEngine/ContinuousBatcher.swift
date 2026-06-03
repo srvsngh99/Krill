@@ -44,6 +44,13 @@ final class ContinuousBatcher: @unchecked Sendable {
         let useQuantizedKV: Bool
         let decode: (Int) -> String
         let stopIds: Set<Int>
+        /// When true (and fp16 KV), each batched round is an n-gram speculative
+        /// round: every row proposes prompt-lookup drafts, all verified in one
+        /// wide `[R, W]` forward, committing multiple tokens per row per round.
+        /// Fills the moderate-R GPU-occupancy gap; degenerates to one-token-per-
+        /// round (== the plain path) when no row has a match. Default false keeps
+        /// the standard batched path byte-for-byte unchanged.
+        var specEnabled: Bool = false
     }
 
     /// Thread-safe cancellation flag for one row (set from the stream's
@@ -104,6 +111,7 @@ final class ContinuousBatcher: @unchecked Sendable {
         var epochBaseLen = 0    // cache length at the current epoch's start
         var isFinished = false  // set once by finalize(); guards double-finish
         var decodeStartedAt: Double?   // wall time of this row's first batched step
+        var proposer: NgramProposer?   // per-row n-gram draft source (spec path only)
         init(promptLen: Int, sampler: Sampler, cont: AsyncStream<TokenEvent>.Continuation,
              stats: StatsBox, cancelled: CancelFlag, maxTokens: Int, caches: [KVCacheProtocol],
              current: Int, recent: [Int], prefillTime: Double, admittedAt: Double) {
@@ -281,57 +289,68 @@ final class ContinuousBatcher: @unchecked Sendable {
                 perRow: rows.map { $0.caches }, lengths: rows.map { $0.epochBaseLen })
             let kDtype = stacked.first?.snapshot()?.keys.dtype ?? .float16
 
-            // --- Decode within the epoch until the set changes. ---
-            var step = 0
-            var cancelledMidEpoch = false
-            while true {
-                if Task.isCancelled { cancelledMidEpoch = true; break }
-                let R = rows.count
-                let offsets = rows.map { $0.epochBaseLen + step }
-                let totalLen = sMax + step + 1
-                let mask = buildBatchedDecodeMask(
-                    lengths: rows.map { $0.epochBaseLen }, sMax: sMax,
-                    totalLen: totalLen, dtype: kDtype)
-                let input = MLXArray(rows.map { Int32($0.current) }).reshaped(R, 1)
-                let logits = deps.batchedForward(input, stacked, mask, offsets)
-                MLX.eval(logits)
-                step += 1
+            if deps.specEnabled {
+                // --- One n-gram speculative round (commits per-row directly;
+                //     no scatterBack — the outer loop re-stacks next round). ---
+                if decodeSpecRound(rows: rows, stacked: stacked, sMax: sMax, kDtype: kDtype) {
+                    for row in rows {
+                        finalize(row, decodeEnd: CFAbsoluteTimeGetCurrent(), emitTerminal: true)
+                    }
+                    return
+                }
+            } else {
+                // --- Decode within the epoch until the set changes. ---
+                var step = 0
+                var cancelledMidEpoch = false
+                while true {
+                    if Task.isCancelled { cancelledMidEpoch = true; break }
+                    let R = rows.count
+                    let offsets = rows.map { $0.epochBaseLen + step }
+                    let totalLen = sMax + step + 1
+                    let mask = buildBatchedDecodeMask(
+                        lengths: rows.map { $0.epochBaseLen }, sMax: sMax,
+                        totalLen: totalLen, dtype: kDtype)
+                    let input = MLXArray(rows.map { Int32($0.current) }).reshaped(R, 1)
+                    let logits = deps.batchedForward(input, stacked, mask, offsets)
+                    MLX.eval(logits)
+                    step += 1
 
-                let now = CFAbsoluteTimeGetCurrent()
-                var setChanged = false
-                for i in 0 ..< R {
-                    let row = rows[i]
-                    // Per-row decode clock starts at the row's first batched step,
-                    // so decodeTime excludes prefill + admission/epoch wait.
-                    if row.decodeStartedAt == nil { row.decodeStartedAt = now }
-                    if row.needsHistory { row.recent.append(row.current) }
-                    let next = row.sampler.sample(logits[i ..< (i + 1)], recent: row.recent)
-                    row.current = next
-                    if emit(row, token: next, now: now) { setChanged = true }
-                    if row.cancelled.isCancelled { setChanged = true }
+                    let now = CFAbsoluteTimeGetCurrent()
+                    var setChanged = false
+                    for i in 0 ..< R {
+                        let row = rows[i]
+                        // Per-row decode clock starts at the row's first batched step,
+                        // so decodeTime excludes prefill + admission/epoch wait.
+                        if row.decodeStartedAt == nil { row.decodeStartedAt = now }
+                        if row.needsHistory { row.recent.append(row.current) }
+                        let next = row.sampler.sample(logits[i ..< (i + 1)], recent: row.recent)
+                        row.current = next
+                        if emit(row, token: next, now: now) { setChanged = true }
+                        if row.cancelled.isCancelled { setChanged = true }
+                    }
+
+                    // Break the epoch (scatter + re-stack) when the active set must
+                    // change: a row finished/cancelled, or a newcomer is waiting.
+                    if setChanged || !pendingIsEmpty() { break }
                 }
 
-                // Break the epoch (scatter + re-stack) when the active set must
-                // change: a row finished/cancelled, or a newcomer is waiting.
-                if setChanged || !pendingIsEmpty() { break }
-            }
-
-            if cancelledMidEpoch {
-                // stop() cancelled us: do NOT scatter back (the model is being
-                // torn down); just finish every in-flight row's stream.
-                for row in rows {
-                    finalize(row, decodeEnd: CFAbsoluteTimeGetCurrent(), emitTerminal: true)
+                if cancelledMidEpoch {
+                    // stop() cancelled us: do NOT scatter back (the model is being
+                    // torn down); just finish every in-flight row's stream.
+                    for row in rows {
+                        finalize(row, decodeEnd: CFAbsoluteTimeGetCurrent(), emitTerminal: true)
+                    }
+                    return
                 }
-                return
-            }
 
-            // Scatter the grown stacked cache back into each row's own cache so
-            // per-row caches stay authoritative across the next epoch rebuild.
-            // scatterBack forces evaluation of the sliced K/V so each row owns
-            // realized, independent storage (not a lazy view aliasing `stacked`,
-            // which is discarded when the next epoch re-stacks).
-            if step > 0 {
-                scatterBack(stacked: stacked, rows: rows, sMax: sMax, steps: step)
+                // Scatter the grown stacked cache back into each row's own cache so
+                // per-row caches stay authoritative across the next epoch rebuild.
+                // scatterBack forces evaluation of the sliced K/V so each row owns
+                // realized, independent storage (not a lazy view aliasing `stacked`,
+                // which is discarded when the next epoch re-stacks).
+                if step > 0 {
+                    scatterBack(stacked: stacked, rows: rows, sMax: sMax, steps: step)
+                }
             }
             // Finished/cancelled rows are dropped at the top of the next iteration.
             rows = rows.filter { !$0.isFinished }
@@ -363,6 +382,16 @@ final class ContinuousBatcher: @unchecked Sendable {
             caches: caches, current: firstTok,
             recent: p.sampler.needsHistory ? Array(p.promptTokens.suffix(512)) : [],
             prefillTime: prefillTime, admittedAt: CFAbsoluteTimeGetCurrent())
+
+        // Spec path (fp16 only): seed this row's n-gram proposer with the full
+        // prompt + the prefill-sampled first token (the running context the
+        // verify forward attends to).
+        if deps.specEnabled && !deps.useQuantizedKV {
+            let prop = NgramProposer(config: .init(), eosIds: deps.stopIds)
+            prop.reset(prompt: p.promptTokens)
+            prop.append([firstTok])
+            row.proposer = prop
+        }
 
         // Emit the first (prefill-sampled) token, matching the serial path which
         // yields the prefill token before the decode loop.
@@ -410,6 +439,90 @@ final class ContinuousBatcher: @unchecked Sendable {
             decodeTime: max(0, decodeEnd - decodeStart))
         row.cont.finish()
         row.isFinished = true
+    }
+
+    /// One n-gram speculative round over the stacked epoch (fp16 only): each row
+    /// proposes prompt-lookup drafts, all verified in one block-causal `[R, W]`
+    /// forward (W = 1 + max draft len), ragged per-row accept, and the kept new
+    /// KV committed straight into each row's own cache (so the outer loop's
+    /// re-stack from per-row caches is correct next round — no `scatterBack`).
+    /// Returns true if the loop was cancelled (tear-down). Mirrors the verified
+    /// standalone `batchedNgramSpecDecode`, emitting via the batcher's `emit`.
+    private func decodeSpecRound(
+        rows: [Row], stacked: [KVCacheProtocol], sMax: Int, kDtype: DType
+    ) -> Bool {
+        if Task.isCancelled { return true }
+        let R = rows.count
+
+        // Propose per row (epochBaseLen == that row's current cache length).
+        var drafts = [[Int]](repeating: [], count: R)
+        for i in 0 ..< R where !rows[i].cancelled.isCancelled {
+            drafts[i] = rows[i].proposer?.propose() ?? []
+        }
+        let W = (drafts.map { $0.count }.max() ?? 0) + 1
+
+        // Per-row verify input [R, W] = [current_r, draft_r..., pad-with-last].
+        var flat = [Int32](repeating: 0, count: R * W)
+        for i in 0 ..< R {
+            let seq = [rows[i].current] + drafts[i]
+            for j in 0 ..< W { flat[i * W + j] = Int32(seq[min(j, seq.count - 1)]) }
+        }
+        let offsets = rows.map { $0.epochBaseLen }
+        let mask = buildBatchedVerifyMask(lengths: offsets, sMax: sMax, newLen: W, dtype: kDtype)
+        let bl = deps.batchedForward(MLXArray(flat).reshaped(R, W), stacked, mask, offsets)
+        MLX.eval(bl)
+        let predFlat = argMax(bl, axis: -1).asType(.int32).reshaped(-1)
+            .asArray(Int32.self).map(Int.init)
+
+        // The forward grew the stacked cache by W per row. Snapshot each layer once.
+        let snaps: [(keys: MLXArray, values: MLXArray)?] = stacked.map {
+            ($0 as? KVCache)?.snapshot()
+        }
+        let now = CFAbsoluteTimeGetCurrent()
+
+        // Per-row accept + emit; gather cache commits to realize in one eval.
+        var commits: [(dst: KVCache, k: MLXArray, v: MLXArray)] = []
+        for i in 0 ..< R {
+            let row = rows[i]
+            if row.decodeStartedAt == nil { row.decodeStartedAt = now }
+            if row.cancelled.isCancelled {
+                finalize(row, decodeEnd: now, emitTerminal: false)
+                continue
+            }
+            let k = drafts[i].count
+            func p(_ j: Int) -> Int { predFlat[i * W + j] }
+            var accepted: [Int] = []
+            var a = 0
+            while a < k && p(a) == drafts[i][a] { accepted.append(drafts[i][a]); a += 1 }
+            let allAccepted = (a == k)
+            let cacheEntries: Int
+            if allAccepted { accepted.append(p(k)); cacheEntries = k + 1 }
+            else { accepted.append(p(a)); cacheEntries = a + 1 }
+
+            for l in 0 ..< row.caches.count {
+                guard let snap = snaps[l], let dst = row.caches[l] as? KVCache else { continue }
+                commits.append((
+                    dst,
+                    snap.keys[i ..< (i + 1), 0..., sMax ..< (sMax + cacheEntries), 0...],
+                    snap.values[i ..< (i + 1), 0..., sMax ..< (sMax + cacheEntries), 0...]))
+            }
+            if k > 0 {
+                row.proposer?.recordOutcome(
+                    acceptedDraft: allAccepted ? k : accepted.count - 1, proposed: k)
+            }
+            row.proposer?.append(accepted)
+
+            for tok in accepted where !row.isFinished {
+                _ = emit(row, token: tok, now: now)
+            }
+            row.current = accepted.last ?? 0
+        }
+
+        // Realize all committed slices in one eval, then append (mirrors
+        // scatterBack: avoid lazy views that pin `stacked` across the round).
+        MLX.eval(commits.flatMap { [$0.k, $0.v] })
+        for c in commits { _ = c.dst.update(keys: c.k, values: c.v) }
+        return false
     }
 
     /// Slice each row's own (non-pad) suffix out of the grown stacked cache and
