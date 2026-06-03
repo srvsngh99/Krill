@@ -63,6 +63,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--concurrency-sweep", default="1,2,4,8,16",
                    help="Comma-separated concurrency levels to sweep.")
     p.add_argument("--max-tokens", type=int, default=128, help="Tokens generated per request.")
+    p.add_argument("--runs", type=int, default=3, help="Measured runs per concurrency level (averaged — batch-formation timing is noisy, so >1 is recommended).")
+    p.add_argument("--warmup", type=int, default=1, help="Warmup runs per concurrency level (discarded).")
     p.add_argument("--temperature", type=float, default=0.0)
     p.add_argument("--top-p", type=float, default=1.0)
     p.add_argument("--timeout", type=float, default=600.0)
@@ -168,6 +170,28 @@ def run_concurrency(base_url: str, model: str, n: int, ps: list[str],
     }
 
 
+_AVG_KEYS = [
+    "aggregate_decode_tps", "wall_s", "total_generated_tokens",
+    "per_request_decode_tps_p50", "per_request_decode_tps_p99",
+    "ttft_ms_p50", "ttft_ms_p99",
+]
+
+
+def averaged_concurrency(base_url: str, model: str, n: int, ps: list[str],
+                         args: argparse.Namespace) -> dict[str, Any]:
+    """Warmup (discarded) + `runs` measured passes, averaged — batch-formation
+    timing varies run to run, so a single pass at moderate N is noisy."""
+    for _ in range(max(0, args.warmup)):
+        run_concurrency(base_url, model, n, ps, args)
+    rows = [run_concurrency(base_url, model, n, ps, args) for _ in range(max(1, args.runs))]
+    out: dict[str, Any] = {"concurrency": n, "runs": len(rows),
+                           "failed": sum(r.get("failed", 0) for r in rows)}
+    for k in _AVG_KEYS:
+        vals = [r[k] for r in rows if isinstance(r.get(k), (int, float))]
+        out[k] = statistics.mean(vals) if vals else None
+    return out
+
+
 def environment() -> dict[str, Any]:
     return {
         "platform": platform.platform(),
@@ -200,7 +224,7 @@ def main() -> int:
         rows = []
         for n in sweep:
             try:
-                rows.append(run_concurrency(url, model, n, ps, args))
+                rows.append(averaged_concurrency(url, model, n, ps, args))
             except Exception as exc:  # noqa: BLE001 — report, don't abort the sweep
                 rows.append({"concurrency": n, "error": str(exc)})
         report["engines"][name] = rows

@@ -45,17 +45,28 @@ request; concurrency is the lever (one weight read serves many decode rows).
   therefore **opt-in** (`KRILL_NGRAM_SPEC`), workload-gated by the operator; the
   default server is unaffected.
 
+## Scaling past N=8 (averaged, 3 runs)
+
+A finer averaged sweep (qwen2.5-3b, max_tokens=128): 97 -> 152 -> 167 -> 180 -> 270
+tok/s at N=1,2,4,8,16. Aggregate keeps climbing (2.78x at N=16), but the N=8 slope
+is genuinely soft (180, only 1.86x) and reproduces across runs — a continuous-batcher
+coalescing characteristic (some rows miss the cold-start window and decode in a
+second wave) worth a future look; not a hard ceiling. The benchmark averages
+`--runs` passes per level because a single pass at moderate N is noisy.
+
 ## Reproduce
+
+Enable n-gram with the `--ngram-spec` serve flag (equivalent to `KRILL_NGRAM_SPEC=1`):
 
 ```bash
 # batched arm
-KRILL_NUM_PARALLEL=16 KRILL_NGRAM_SPEC=1 krillm serve --model qwen2.5-3b --port 11500 &
+KRILL_NUM_PARALLEL=16 krillm serve --ngram-spec --model qwen2.5-3b --port 11500 &
 make bench-concurrent KRILLM_URL=http://127.0.0.1:11500 KRILL_MODEL=qwen2.5-3b \
      OLLAMA_HOST=http://127.0.0.1:11434 OLLAMA_MODEL=qwen2.5:3b \
-     CONCURRENCY_SWEEP=1,4,8 SERVER_ARM=batched
+     CONCURRENCY_SWEEP=1,2,4,8,16 SERVER_ARM=batched BENCH_RUNS=3 BENCH_WARMUP=1
 
 # serial baseline (find the crossover)
 KRILL_NUM_PARALLEL=1 krillm serve --model qwen2.5-3b --port 11500 &
 make bench-concurrent KRILLM_URL=http://127.0.0.1:11500 KRILL_MODEL=qwen2.5-3b \
-     CONCURRENCY_SWEEP=1,4,8 SERVER_ARM=serial
+     CONCURRENCY_SWEEP=1,2,4,8,16 SERVER_ARM=serial BENCH_RUNS=3
 ```

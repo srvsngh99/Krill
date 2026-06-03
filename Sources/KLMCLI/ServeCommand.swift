@@ -26,7 +26,16 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Draft model for speculative decoding (alias, path, or 'auto'). Also reads KRILL_DRAFT_MODEL.")
     var draftModel: String?
 
+    @Flag(name: .long, help: "Enable n-gram (prompt-lookup) speculative decode for greedy requests. No draft model needed; wins on repetitive workloads (RAG, code, structured output). Also reads KRILL_NGRAM_SPEC.")
+    var ngramSpec: Bool = false
+
     func run() async throws {
+        // An n-gram opt-in must reach EVERY engine the server builds (the
+        // pre-loaded one AND the on-demand pool), so set the env the engine
+        // reads at init before any engine is constructed. A bare `--ngram-spec`
+        // flag and `KRILL_NGRAM_SPEC=1` are equivalent.
+        if ngramSpec { setenv("KRILL_NGRAM_SPEC", "1", 1) }
+
         // Precedence (CLI flag > env > config.toml > default): KrillConfig.load()
         // already folds OLLAMA_HOST/OLLAMA_MODELS (and KRILL_* which win over
         // them) into serverHost/serverPort/modelsDir; an explicit CLI flag,

@@ -152,6 +152,7 @@ bench-concurrent:
 		$(if $(OLLAMA_HOST),--ollama-host "$(OLLAMA_HOST)" --ollama-model "$(OLLAMA_MODEL)",) \
 		--concurrency-sweep "$(CONCURRENCY_SWEEP)" \
 		--max-tokens $(BENCH_MAX_TOKENS) \
+		--runs $(BENCH_RUNS) --warmup $(BENCH_WARMUP) \
 		--server-arm "$(SERVER_ARM)" \
 		--output "$(BENCH_CONCURRENT_OUTPUT)"
 
