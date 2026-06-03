@@ -25,14 +25,14 @@ final class MllamaFoundationTests: XCTestCase {
         XCTAssertEqual(ModelFamily.detect(from: cfg), .llamaVision)
     }
 
-    func testDeclaresTextOnlyForNow() {
-        // Runtime + parity have landed; serving (tile preprocessing + cross-KV
-        // decode driver) is a follow-up, so vision input is intentionally NOT
-        // advertised yet (an image would otherwise be silently dropped).
+    func testDeclaresVisionInput() {
+        // Image serving has landed (tile / aspect-ratio preprocessing, sparse
+        // cross-attention mask, cross-KV decode driver), so the family now
+        // advertises vision input alongside text generation.
         let caps = ModelCapabilities.capabilities(for: .llamaVision)
         XCTAssertTrue(caps.contains(.textGeneration))
-        XCTAssertFalse(caps.contains(.visionInput),
-            "vision input must wait for the image-serving wiring follow-up")
+        XCTAssertTrue(caps.contains(.visionInput),
+            "vision input is advertised now that mllama image serving is wired")
     }
 
     func testIsExperimental() {

@@ -242,6 +242,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return try? Data(contentsOf: URL(fileURLWithPath: path))
     }
 
+    /// Load a request's decoded image temp files: the FIRST image (single-image
+    /// runtimes) and the FULL ordered list (multi-image mllama). Delegates to
+    /// ``DecodedMedia/loadImages()`` so the contract is tested in one place.
+    static func loadImages(_ media: DecodedMedia?) -> (first: Data?, all: [Data]) {
+        media?.loadImages() ?? (nil, [])
+    }
+
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let part = unwrapInboundIn(data)
 
@@ -554,7 +561,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         audioData: Data? = nil,
         contextLimit: Int? = nil,
         promptTemplateOverride: String? = nil,
-        format: OutputFormat? = nil
+        format: OutputFormat? = nil,
+        imagesData: [Data] = []
     ) async -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         if let sched = await engines.scheduler(for: eng) {
             // Current concurrency drives the load-adaptive spec/batch decision in
@@ -565,14 +573,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
                 imageData: imageData, audioData: audioData,
                 contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
-                format: format, currentConcurrency: concurrency)
+                format: format, currentConcurrency: concurrency, imagesData: imagesData)
         }
         return eng.generate(
             messages: messages, params: params, maxTokens: maxTokens,
             useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
             imageData: imageData, audioData: audioData,
             contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
-            format: format)
+            format: format, imagesData: imagesData)
     }
 
     /// Prompt-shaped convenience over ``runGenerate(_:messages:...)`` mirroring
@@ -591,7 +599,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         audioData: Data? = nil,
         contextLimit: Int? = nil,
         promptTemplateOverride: String? = nil,
-        format: OutputFormat? = nil
+        format: OutputFormat? = nil,
+        imagesData: [Data] = []
     ) async -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
@@ -603,7 +612,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
             imageData: imageData, audioData: audioData,
             contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
-            format: format)
+            format: format, imagesData: imagesData)
     }
 
     /// Apply a created model's Modelfile `PARAMETER` overrides (WS-C) as
@@ -967,7 +976,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let eng = engine
-        let imageData = Self.loadDataIfPath(media?.imagePath)
+        let (imageData, imagesData) = Self.loadImages(media)
         let audioData = Self.loadDataIfPath(media?.audioPath)
         let mediaCopy = media
         let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
@@ -987,7 +996,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 maxTokens: maxTokens, imageData: imageData,
                 audioData: audioData,
                 contextLimit: toolCtx,
-                promptTemplateOverride: modelTemplateOverride())
+                promptTemplateOverride: modelTemplateOverride(),
+                imagesData: imagesData)
 
             var full = ""
             for await event in tokenStream {
@@ -1109,7 +1119,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     /// Pre-flight checks that don't require a loaded model.
     private func validateMediaShape(_ payload: ServerMediaPayload) throws {
-        if payload.images.count > 1 {
+        // Multiple images are accepted only by a runtime that attends each one
+        // separately (mllama); every other VLM is single-image.
+        if payload.images.count > 1 && !engine.supportsMultiImage {
             throw MediaDecodeError.tooManyImages
         }
         try ServerMultimodal.validatePayloadSizes(payload)
@@ -1131,13 +1143,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             )
         }
 
-        var imagePath: String? = nil
+        var imagePaths: [String] = []
         var audioPath: String? = nil
 
-        if let img = payload.images.first {
-            imagePath = try ServerMultimodal.decodeAndWrite(
-                base64: img, field: "images", sniffImage: true
-            )
+        // Decode every image for a multi-image runtime; otherwise just the first
+        // (validateMediaShape already rejected >1 for single-image runtimes).
+        let imagesToDecode = engine.supportsMultiImage
+            ? payload.images : Array(payload.images.prefix(1))
+        for (idx, img) in imagesToDecode.enumerated() {
+            let path = try ServerMultimodal.decodeAndWrite(
+                base64: img,
+                field: payload.images.count > 1 ? "images[\(idx)]" : "images",
+                sniffImage: true)
+            imagePaths.append(path)
         }
         if let aud = payload.audio {
             let ext = (payload.audioFormat?.lowercased()).flatMap {
@@ -1148,7 +1166,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             )
         }
 
-        return DecodedMedia(imagePath: imagePath, audioPath: audioPath)
+        return DecodedMedia(imagePaths: imagePaths, audioPath: audioPath)
     }
 
 
@@ -1173,7 +1191,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         nonisolated(unsafe) let ctx = context
         let eng = engine
-        let imageData = Self.loadDataIfPath(media?.imagePath)
+        let (imageData, imagesData) = Self.loadImages(media)
         let audioData = Self.loadDataIfPath(media?.audioPath)
         let mediaCopy = media
 
@@ -1198,7 +1216,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 imageData: imageData, audioData: audioData,
                 contextLimit: contextLimit,
                 promptTemplateOverride: modelTemplateOverride(),
-                format: StructuredOutput.engineFormat(for: responseFormat))
+                format: StructuredOutput.engineFormat(for: responseFormat),
+                imagesData: imagesData)
 
             let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
             // Strip <think>/<thinking> from streamed chunks. Holds
@@ -1251,7 +1270,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let eng = engine
-        let imageData = Self.loadDataIfPath(media?.imagePath)
+        let (imageData, imagesData) = Self.loadImages(media)
         let audioData = Self.loadDataIfPath(media?.audioPath)
         let mediaCopy = media
 
@@ -1265,7 +1284,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 imageData: imageData, audioData: audioData,
                 contextLimit: contextLimit,
                 promptTemplateOverride: modelTemplateOverride(),
-                format: StructuredOutput.engineFormat(for: responseFormat))
+                format: StructuredOutput.engineFormat(for: responseFormat),
+                imagesData: imagesData)
 
             var fullContent = ""
             for await event in tokenStream {
@@ -1504,7 +1524,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         nonisolated(unsafe) let ctx = context
         let eng = engine
         let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
-        let imageData = Self.loadDataIfPath(decodedMedia?.imagePath)
+        let (imageData, imagesData) = Self.loadImages(decodedMedia)
         let audioData = Self.loadDataIfPath(decodedMedia?.audioPath)
         let mediaCopy = decodedMedia
 
@@ -1545,7 +1565,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 audioData: audioData,
                 contextLimit: ocCtx,
                 promptTemplateOverride: modelTemplateOverride(),
-                format: StructuredOutput.engineFormat(for: respFormat))
+                format: StructuredOutput.engineFormat(for: respFormat),
+                imagesData: imagesData)
 
             if request.stream {
                 var firstTokenTime: Double?
@@ -1701,7 +1722,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let eng = engine
-        let imageData = Self.loadDataIfPath(decodedMedia?.imagePath)
+        let (imageData, imagesData) = Self.loadImages(decodedMedia)
         let audioData = Self.loadDataIfPath(decodedMedia?.audioPath)
         let mediaCopy = decodedMedia
 
@@ -1742,7 +1763,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 audioData: audioData,
                 contextLimit: ogCtx,
                 promptTemplateOverride: modelTemplateOverride(),
-                format: StructuredOutput.engineFormat(for: respFormat))
+                format: StructuredOutput.engineFormat(for: respFormat),
+                imagesData: imagesData)
 
             if request.stream {
                 var firstTokenTime: Double?

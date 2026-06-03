@@ -55,15 +55,19 @@ LLaVA-next (LLaVA-1.5 now has a native Swift+MLX runtime:
   `llava` family + `LlavaImagePreprocessor` (CLIP 336) + vicuna prompt with the
   image-token run; POST an image and it answers. llava-next / llava-bunny still
   unsupported)
-Llama-3.2-Vision / mllama (NOW has a native Swift+MLX runtime:
-  `Llama32VisionForCausalLM` - tiled ViT vision tower (gated aspect-ratio /
-  position embeddings, local + gated global transformers, intermediate-layer
-  concat) + multi-modal projector + a Llama text decoder whose
-  `cross_attention_layers` cross-attend to the vision features; mlx-vlm
-  logit-parity-verified on a synthetic checkpoint. Detection + loader +
-  registration landed; image-serving wiring (tile/aspect-ratio preprocessing +
-  cross-KV decode driver) is the follow-up, so it advertises text generation
-  only for now. Real-checkpoint run is RAM-blocked on the 24GB dev box.)
+Llama-3.2-Vision / mllama (native Swift+MLX runtime WIRED end-to-end for image
+  serving: `Llama32VisionForCausalLM` - tiled ViT vision tower (gated
+  aspect-ratio / position embeddings, local + gated global transformers,
+  intermediate-layer concat) + multi-modal projector + a Llama text decoder
+  whose `cross_attention_layers` cross-attend to the vision features. Image
+  serving = `MllamaProcessing` (tile / aspect-ratio canvas preprocessing + the
+  sparse cross-attention mask) + `MllamaRuntime` (a dedicated cross-KV decode
+  driver: vision K/V computed once at prefill, reused every decode step). POST
+  one OR MORE images and it answers; each `<|image|>` is cross-attended to its
+  own image via the sparse mask. Validated by synthetic mlx-vlm logit parity
+  (single + multi-image), a cross-KV decode self-consistency gate, and pure
+  tiling/mask unit tests; advertises `visionInput`. Real-checkpoint run is
+  RAM-blocked on the 24GB dev box.)
 Whisper/ASR
 TTS
 Rerankers/cross-encoders

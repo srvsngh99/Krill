@@ -507,11 +507,22 @@ private func loadLlamaVision(configData: Data, directory: URL) throws -> LoadedM
         numLayers: config.numHiddenLayers,
         family: "llama_vision",
         // Text-only turns run through the decoder (the cross-attention layers
-        // contribute ~nothing through their zero-initialized gates). Image
-        // serving (tile preprocessing + a cross-KV decode driver) is wired in a
-        // follow-up; the model's image forward is reachable via `module`.
+        // contribute ~nothing through their zero-initialized gates).
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
-        multimodalForward: nil,
+        // Unreachable sentinel. `InferenceEngine.generate` intercepts every
+        // mllama request (`loadedModel.module as? Llama32VisionForCausalLM`) and
+        // routes it through `MllamaRuntime`, which owns the cross-KV cache and
+        // the sparse cross-attention mask - neither expressible through the
+        // generic six-argument closure. This closure exists ONLY so
+        // `multimodalForward != nil` keeps the `.visionInput` capability
+        // advertised; if it is ever invoked the mllama interception has
+        // regressed, so fail loudly rather than serve a wrong (mask-less) image.
+        multimodalForward: { _, _, _, _, _, _ in
+            fatalError(
+                "Llama-3.2-Vision must run via MllamaRuntime, not the generic "
+                + "multimodalForward closure. The mllama interception in "
+                + "InferenceEngine.generate has regressed.")
+        },
         vocabSize: config.textConfig.vocabSize
     )
 }
