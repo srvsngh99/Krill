@@ -22,7 +22,7 @@ GEMMA4_BENCH_WARMUP ?= 1
 KRILLM_PYTHON ?= $(HOME)/.krillm/venv/bin/python3
 KRILLM_VENV_PYTHON ?= python3
 
-.PHONY: build release install uninstall clean test bench bench-compare bench-gemma4-multimodal bench-release-gate parity-gate metallib dist version
+.PHONY: build release install uninstall clean test bench bench-compare bench-concurrent bench-gemma4-multimodal bench-release-gate parity-gate metallib dist version
 
 # Debug build (default)
 build:
@@ -136,6 +136,24 @@ bench-compare:
 			--warmup $(BENCH_WARMUP) \
 			--output "$(BENCH_OUTPUT)"; \
 	fi
+
+# Concurrent-throughput sweep (aggregate tok/s under N simultaneous streams),
+# the axis where KrillLM's continuous batcher beats Ollama. Server-mode only:
+# point at a running KrillLM server (launch with KRILL_NUM_PARALLEL>=16, and
+# KRILL_NGRAM_SPEC=1 for the low-concurrency n-gram win) and/or an Ollama daemon.
+# A serial-vs-batched A/B (find the crossover N*) is two runs with the KrillLM
+# server launched at KRILL_NUM_PARALLEL=1 then =16, passing SERVER_ARM=serial/batched.
+CONCURRENCY_SWEEP ?= 1,2,4,8,16
+BENCH_CONCURRENT_OUTPUT ?= .build/benchmarks/concurrent-throughput.json
+SERVER_ARM ?= unspecified
+bench-concurrent:
+	@python3 tools/krillm_concurrent_benchmark.py \
+		$(if $(KRILLM_URL),--krillm-url "$(KRILLM_URL)" --krill-model "$(KRILL_MODEL)",) \
+		$(if $(OLLAMA_HOST),--ollama-host "$(OLLAMA_HOST)" --ollama-model "$(OLLAMA_MODEL)",) \
+		--concurrency-sweep "$(CONCURRENCY_SWEEP)" \
+		--max-tokens $(BENCH_MAX_TOKENS) \
+		--server-arm "$(SERVER_ARM)" \
+		--output "$(BENCH_CONCURRENT_OUTPUT)"
 
 # Gemma 4 text/image/audio comparison against Ollama. All KrillLM paths are
 # native (the mlx-vlm bridge was removed in WS6 Step 4): native_cli runs the
