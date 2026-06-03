@@ -81,6 +81,37 @@ final class BatchSchedulerTests: XCTestCase {
                            BatchScheduler.defaultWindowMs)
         }
     }
+
+    /// The spec-vs-batch concurrency threshold default is used when unset.
+    func testSpecConcurrencyMaxDefaultFromEnvironment() {
+        if ProcessInfo.processInfo.environment["KRILL_SPEC_CONCURRENCY_MAX"] == nil {
+            XCTAssertEqual(BatchScheduler.specConcurrencyMaxFromEnvironment(),
+                           BatchScheduler.defaultSpecConcurrencyMax)
+        }
+    }
+
+    /// With n-gram enabled on the engine, a solo (low-concurrency) greedy request
+    /// takes the serial path so the n-gram branch can engage; a high-concurrency
+    /// one falls through to batching. On an unloaded engine both paths end in the
+    /// same finishing serial stream — this asserts the new `currentConcurrency`
+    /// argument is threaded and neither routing decision hangs or traps.
+    func testNgramAdaptiveRoutingTerminatesAtBothConcurrencies() async {
+        let engine = unloadedEngine("ngram")
+        engine.setNgramSpec(true)
+        XCTAssertTrue(engine.willUseNgramByDefault)
+        let sched = BatchScheduler(engine: engine, numParallel: 4, windowMs: 10)
+        for concurrency in [1, 8] {
+            let (stream, _) = await sched.submit(
+                messages: [["role": "user", "content": "hi"]],
+                params: .greedy, maxTokens: 8,
+                useSpeculative: nil, usePrefixCache: true,
+                imageData: nil, audioData: nil,
+                contextLimit: nil, promptTemplateOverride: nil,
+                format: nil, currentConcurrency: concurrency)
+            for await _ in stream { /* drain */ }
+        }
+        XCTAssertTrue(true)
+    }
 }
 
 /// Submit one canonical request to `sched`. File-scope (not a method) so the
