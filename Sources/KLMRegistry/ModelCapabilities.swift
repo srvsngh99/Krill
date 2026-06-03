@@ -107,13 +107,13 @@ public enum ModelCapabilities {
             // the vicuna-style prompt is built directly).
             return [.textGeneration, .visionInput]
         case .llamaVision:
-            // Llama-3.2-Vision (mllama) native runtime. The model + loader +
-            // mlx-vlm parity have landed; the image-serving path (tile
-            // preprocessing + cross-KV decode driver) is a follow-up, so vision
-            // input is NOT advertised yet (a checkpoint loads and serves text;
-            // an image would otherwise be silently dropped). visionInput is
-            // added when the serving wiring lands.
-            return [.textGeneration]
+            // Llama-3.2-Vision (mllama) native runtime WITH image serving: tile /
+            // aspect-ratio preprocessing, the sparse cross-attention mask, and a
+            // cross-KV decode driver (`MllamaRuntime`), validated by synthetic
+            // mlx-vlm parity (single + multi-image) and a cross-KV decode
+            // self-consistency gate. Multiple images per request are supported.
+            // Tools are NOT advertised (no parity-tested tool template).
+            return [.textGeneration, .visionInput]
         case .moe:
             // WS6 foundation: the family DECLARES textGeneration +
             // moe + tools (the initial targets - Mixtral, Qwen 3

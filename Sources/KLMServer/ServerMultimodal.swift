@@ -5,13 +5,23 @@ import Foundation
 /// `imagePath` and `audioPath` point to temporary files on disk that the
 /// caller must delete (use ``cleanup()``) once inference completes.
 internal struct DecodedMedia: Sendable {
-    let imagePath: String?
+    /// All decoded image temp-file paths, in request order. Single-image
+    /// runtimes use the first; mllama (multi-image) uses them all.
+    let imagePaths: [String]
     let audioPath: String?
+
+    /// The first decoded image, for single-image runtimes.
+    var imagePath: String? { imagePaths.first }
+
+    init(imagePaths: [String] = [], audioPath: String? = nil) {
+        self.imagePaths = imagePaths
+        self.audioPath = audioPath
+    }
 
     /// Best-effort removal of temp files. Safe to call multiple times.
     func cleanup() {
         let fm = FileManager.default
-        if let p = imagePath { try? fm.removeItem(atPath: p) }
+        for p in imagePaths { try? fm.removeItem(atPath: p) }
         if let p = audioPath { try? fm.removeItem(atPath: p) }
     }
 }

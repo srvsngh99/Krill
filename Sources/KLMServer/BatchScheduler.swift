@@ -95,15 +95,20 @@ actor BatchScheduler {
                 useSpeculative: Bool?, usePrefixCache: Bool,
                 imageData: Data?, audioData: Data?,
                 contextLimit: Int?, promptTemplateOverride: String?,
-                format: OutputFormat? = nil, currentConcurrency: Int = 1) async -> GenResult {
+                format: OutputFormat? = nil, currentConcurrency: Int = 1,
+                imagesData: [Data] = []) async -> GenResult {
         func serial() -> GenResult {
             engine.generate(
                 messages: messages, params: params, maxTokens: maxTokens,
                 useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
                 imageData: imageData, audioData: audioData,
                 contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
-                format: format)
+                format: format, imagesData: imagesData)
         }
+        // A multi-image request carries its images in `imagesData` (not the
+        // single `imageData`); treat either as "has image" so the batched/spec
+        // gates below route it to the serial VLM driver.
+        let anyImage: Data? = imageData ?? imagesData.first
         // Grammar-constrained decoding advances a per-sequence JSON automaton
         // each step; the shared-step batched loop cannot isolate per-row
         // masks, so a format request always takes the serial path.
@@ -120,11 +125,11 @@ actor BatchScheduler {
         let fullyGreedy = params.temperature <= 0 && params.topP >= 1.0
             && params.topK <= 0 && params.minP <= 0 && params.mirostat == 0
         if engine.willUseNgramByDefault, useSpeculative != true, fullyGreedy,
-           imageData == nil, audioData == nil,
+           anyImage == nil, audioData == nil,
            currentConcurrency <= Self.specConcurrencyMaxFromEnvironment() {
             return serial()
         }
-        guard isEligible(params: params, imageData: imageData, audioData: audioData,
+        guard isEligible(params: params, imageData: anyImage, audioData: audioData,
                          useSpeculative: useSpeculative) else {
             // Surface the one case where the user asked for two features that
             // do not compose: an explicit speculative opt-in on a request that
@@ -144,7 +149,7 @@ actor BatchScheduler {
             let greedy = params.temperature <= 0 && params.mirostat == 0
             let seedBlocks = params.seed != nil && !greedy
             if useSpeculative == true, numParallel >= 2, engine.supportsBatchedDecode,
-               imageData == nil, audioData == nil, !seedBlocks {
+               anyImage == nil, audioData == nil, !seedBlocks {
                 noteSpecBatchExclusionOnce()
             }
             return serial()

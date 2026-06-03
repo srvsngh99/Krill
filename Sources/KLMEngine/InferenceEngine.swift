@@ -119,6 +119,16 @@ public final class InferenceEngine: @unchecked Sendable {
         capabilities.contains(.visionInput)
     }
 
+    /// Whether the loaded model accepts MORE THAN ONE image in a single request.
+    /// mllama (Llama-3.2-Vision) attends each `<|image|>` token to its own image
+    /// via the sparse cross-attention mask, so it serves interleaved multi-image
+    /// prompts; the other VLM runtimes are single-image and the server caps them
+    /// at one. Gated on a vision-capable mllama model being loaded.
+    public var supportsMultiImage: Bool {
+        guard supportsNativeImage, let loaded = loadedModel else { return false }
+        return loaded.family == "llama_vision"
+    }
+
     /// Whether the loaded model can handle audio input. Audio runs
     /// exclusively on the native Swift+MLX USM path (the mlx-vlm bridge
     /// was retired in WS6 Step 4 after native was validated and
@@ -561,7 +571,8 @@ public final class InferenceEngine: @unchecked Sendable {
         contextLimit: Int? = nil,
         promptTemplateOverride: String? = nil,
         format: OutputFormat? = nil,
-        useNgramSpeculative: Bool? = nil
+        useNgramSpeculative: Bool? = nil,
+        imagesData: [Data] = []
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
@@ -576,7 +587,8 @@ public final class InferenceEngine: @unchecked Sendable {
                         contextLimit: contextLimit,
                         promptTemplateOverride: promptTemplateOverride,
                         format: format,
-                        useNgramSpeculative: useNgramSpeculative)
+                        useNgramSpeculative: useNgramSpeculative,
+                        imagesData: imagesData)
     }
 
     /// Generate tokens from a full conversation history, streaming results.
@@ -603,11 +615,25 @@ public final class InferenceEngine: @unchecked Sendable {
         contextLimit: Int? = nil,
         promptTemplateOverride: String? = nil,
         format: OutputFormat? = nil,
-        useNgramSpeculative: Bool? = nil
+        useNgramSpeculative: Bool? = nil,
+        imagesData: [Data] = []
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         guard let loadedModel, let tokenizer else {
             let emptyStream = AsyncStream<TokenEvent> { $0.finish() }
             return (emptyStream, { nil })
+        }
+
+        // Llama-3.2-Vision (mllama) native runtime. The image enters via gated
+        // cross-attention that every decode step must re-attend to, so (like
+        // Qwen 2.5-VL) every request - image or text-only - routes to the
+        // dedicated `MllamaRuntime` driver, which owns the cross-KV cache and
+        // the sparse cross-attention mask. Supports multiple images per request.
+        if let mllama = loadedModel.module as? Llama32VisionForCausalLM {
+            // Prefer the full image list; fall back to the single `imageData`.
+            let images = !imagesData.isEmpty ? imagesData : (imageData.map { [$0] } ?? [])
+            return generateLlamaVision(
+                model: mllama, tokenizer: tokenizer, messages: messages,
+                params: params, maxTokens: maxTokens, images: images)
         }
 
         // Qwen 2.5-VL native runtime. Its 3D-mRoPE decode loop needs
@@ -1437,6 +1463,109 @@ public final class InferenceEngine: @unchecked Sendable {
     /// the ChatML prompt with the `<|image_pad|>` run, and drive
     /// `Qwen25VLRuntime` (prefill + 3D-mRoPE-correct decode).
     /// Returns the same `(stream, stats)` contract as `generate`.
+    /// OpenAI-CLIP normalization constants (what Llama-3.2-Vision ships),
+    /// overridden by the model's `preprocessor_config.json` when present.
+    private static func mllamaNormalization(modelDirectory: URL) -> (mean: [Float], std: [Float]) {
+        var mean: [Float] = [0.48145466, 0.4578275, 0.40821073]
+        var std: [Float] = [0.26862954, 0.26130258, 0.27577711]
+        if let data = try? Data(
+                contentsOf: modelDirectory.appendingPathComponent("preprocessor_config.json")),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let m = obj["image_mean"] as? [Double], m.count == 3 { mean = m.map { Float($0) } }
+            if let s = obj["image_std"] as? [Double], s.count == 3 { std = s.map { Float($0) } }
+        }
+        return (mean, std)
+    }
+
+    /// Native decode driver entry for Llama-3.2-Vision (mllama). Preprocesses the
+    /// image(s), builds the Llama-3 prompt with one `<|image|>` marker per image,
+    /// and streams `MllamaRuntime.generate` (cross-KV prefill + decode). Text-only
+    /// requests run the decoder with its zero-gated cross-attention.
+    private func generateLlamaVision(
+        model: Llama32VisionForCausalLM,
+        tokenizer: KLMTokenizer,
+        messages: [[String: String]],
+        params: SamplingParams,
+        maxTokens: Int,
+        images: [Data]
+    ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
+        var vision: MllamaProcessing.VisionInputs? = nil
+        if !images.isEmpty {
+            do {
+                let (mean, std) = Self.mllamaNormalization(modelDirectory: modelDirectory)
+                vision = try MllamaProcessing.preprocess(
+                    images: images,
+                    tileSize: model.config.visionConfig.imageSize,
+                    maxTiles: model.config.visionConfig.maxNumTiles,
+                    mean: mean, std: std)
+            } catch {
+                // Never silently answer an image prompt as text-only.
+                return Self.mediaErrorStream(
+                    "Error: Llama-3.2-Vision image preprocessing failed: \(error)")
+            }
+        }
+
+        let promptTokens = tokenizer.formatLlamaVisionTokenIds(
+            messages: messages, imageTokenId: model.config.imageTokenIndex,
+            imageCount: images.count)
+        guard !promptTokens.isEmpty else {
+            let empty = AsyncStream<TokenEvent> { c in
+                c.yield(TokenEvent(tokenId: 0, text: "", elapsed: 0, isEnd: true))
+                c.finish()
+            }
+            return (empty, { nil })
+        }
+
+        let stopIds = Self.stopTokenIds(
+            modelDirectory: modelDirectory, tokenizerEOS: tokenizer.eosTokenId)
+        let statsHolder = StatsHolder()
+        struct Captures: @unchecked Sendable {
+            let model: Llama32VisionForCausalLM
+            let tokenizer: KLMTokenizer
+            let vision: MllamaProcessing.VisionInputs?
+            let prompt: [Int]
+            let stops: Set<Int>
+            let params: SamplingParams
+            let max: Int
+        }
+        let captures = Captures(
+            model: model, tokenizer: tokenizer, vision: vision, prompt: promptTokens,
+            stops: stopIds, params: params, max: maxTokens)
+
+        let stream = AsyncStream<TokenEvent> { continuation in
+            Task { [statsHolder, captures] in
+                let startTime = CFAbsoluteTimeGetCurrent()
+                let output = MllamaRuntime.generate(
+                    model: captures.model,
+                    promptTokens: captures.prompt,
+                    vision: captures.vision,
+                    maxTokens: captures.max,
+                    stopIds: captures.stops,
+                    params: captures.params,
+                    onToken: { token in
+                        guard !captures.stops.contains(token) else { return }
+                        continuation.yield(TokenEvent(
+                            tokenId: token,
+                            text: captures.tokenizer.decode(token: token),
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                    })
+                statsHolder.stats = GenerationStats(
+                    promptTokens: captures.prompt.count,
+                    generatedTokens: output.tokens.count,
+                    prefillTime: output.prefillSeconds,
+                    decodeTime: output.decodeSeconds)
+                let sawStop = output.tokens.last.map { captures.stops.contains($0) } ?? false
+                continuation.yield(TokenEvent(
+                    tokenId: sawStop ? (output.tokens.last ?? -1) : -1,
+                    text: "",
+                    elapsed: CFAbsoluteTimeGetCurrent() - startTime,
+                    isEnd: true))
+                continuation.finish()
+            }
+        }
+        return (stream, { statsHolder.stats })
+    }
+
     private func generateQwen25VL(
         model: Qwen25VLForConditionalGeneration,
         tokenizer: KLMTokenizer,
