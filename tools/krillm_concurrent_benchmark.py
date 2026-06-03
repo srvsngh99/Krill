@@ -41,6 +41,11 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
+# At least as many DISTINCT prompts as the largest swept concurrency, so a high-N
+# run does not reuse a prompt — duplicate prompts hit KrillLM's prefix cache,
+# which shrinks wall time and inflates the wall-based aggregate tok/s (a
+# measurement artifact, not real decode scaling). The harness also warns if the
+# sweep exceeds the prompt-set size.
 DEFAULT_PROMPTS = [
     "Write a short paragraph explaining how photosynthesis works.",
     "List five tips for writing clean, maintainable code.",
@@ -50,6 +55,22 @@ DEFAULT_PROMPTS = [
     "Give step-by-step instructions for making a simple omelette.",
     "What are the main causes of inflation? Explain briefly.",
     "Write a friendly email inviting a colleague to a lunch meeting.",
+    "Explain what a hash table is and when you would use one.",
+    "Describe the water cycle from evaporation to precipitation.",
+    "What is the role of mitochondria in a cell? Keep it short.",
+    "Give three reasons regular exercise improves mental health.",
+    "Explain recursion to someone who has never programmed.",
+    "Summarize how vaccines train the immune system.",
+    "Describe the difference between weather and climate.",
+    "Write a haiku about the ocean at dawn, then explain it.",
+    "Explain how a compiler differs from an interpreter.",
+    "List four ways to reduce household energy consumption.",
+    "Describe what happens during a solar eclipse.",
+    "Explain the concept of supply and demand with an example.",
+    "What makes sourdough bread rise? Explain the chemistry.",
+    "Describe how GPS determines your location.",
+    "Explain why the sky is blue in simple terms.",
+    "Give a brief overview of how the internet routes packets.",
 ]
 
 
@@ -210,6 +231,10 @@ def main() -> int:
         return 77
     sweep = [int(x) for x in args.concurrency_sweep.split(",") if x.strip()]
     ps = prompts(args)
+    if sweep and max(sweep) > len(ps):
+        print(f"warning: max concurrency {max(sweep)} exceeds {len(ps)} distinct prompts; "
+              "reused prompts hit the prefix cache and inflate wall-based throughput. "
+              "Pass a larger --prompt-file for an honest high-N measurement.", file=sys.stderr)
 
     report: dict[str, Any] = {"environment": environment(), "server_arm": args.server_arm,
                               "max_tokens": args.max_tokens, "engines": {}}
