@@ -58,15 +58,29 @@ scheduling artifact. It is not. Two things explain it:
    warns when the sweep exceeds the prompt-set size. (Removing it dropped N=16 from
    270 to 255 - a real but small effect.)
 
-2. **GPU occupancy (structural, the real driver).** Using the wall-independent
-   per-request decode tok/s (server `eval_count/eval_duration`), the batched step
-   time per token is 9.6 / 13.6 / 23.2 / 43.1 / 55.6 ms at R=1/2/4/8/16 — it grows
-   ~5 ms/row up to R=8, then flattens to +1.6 ms/row at R=16. That is the opposite
-   of compute-bound: MLX's batched matmul does not fill the GPU until ~R=16, so
-   marginal rows are costly at R=4-8 and nearly free at R=16. This is an MLX/hardware
-   occupancy curve, **not** a KrillLM batcher bug (admission + epochs are correct and
-   rolling). There is no KrillLM-side lever — it would take MLX improving small-batch
-   GEMM occupancy. Aggregate still grows monotonically and beats Ollama at every N.
+2. **GPU occupancy (structural, the real driver).** Using the per-request decode
+   tok/s (server `eval_count/eval_duration`), the batched step time per token is
+   9.6 / 13.6 / 23.2 / 43.1 / 55.6 ms at R=1/2/4/8/16 — its marginal cost grows
+   ~5 ms/row up to R=8, then the slope drops to +1.6 ms/row at R=16 (the step time
+   is still rising, just much more slowly). That marginal flattening is the opposite
+   of compute-bound: MLX's batched matmul does not fill the GPU until ~R=16, so each
+   added row is costly at R=4-8 and much cheaper at R=16. This is an MLX/hardware
+   occupancy curve, **not** a KrillLM batcher scheduling bug — admission + epochs are
+   correct and rolling. Aggregate grows monotonically (174 -> 255 from R=8 -> 16, a
+   1.47x step, not linear) and beats Ollama at every N.
+
+   Two caveats on the metric, so this is not over-read:
+   - It is *server-measured*, which is the point: it sidesteps any client-side
+     `ThreadPoolExecutor`/GIL confound in the wall-based aggregate. But it is not
+     pure GEMM — `eval_count/eval_duration` folds in the per-epoch `scatterBack`
+     `MLX.eval` (`ContinuousBatcher.swift`). It reads as ~GEMM here only because the
+     benchmark's equal-budget, simultaneously-arriving rows keep the epoch intact
+     (one scatter at the end), so per-step overhead is negligible. A ragged workload
+     (rows finishing at different times -> frequent epoch breaks) would add real
+     scatter/re-stack cost that this run does not show.
+   - The steady-state GEMM step time has no KrillLM-side lever (it is MLX's kernel
+     occupancy). `KRILL_BATCH_WINDOW_MS` and `KRILL_NUM_PARALLEL` are real levers for
+     *coalescing* and the *row cap*, but they do not change the per-step GEMM cost.
 
 The benchmark averages `--runs` passes per level because a single pass at moderate N
 is noisy.
