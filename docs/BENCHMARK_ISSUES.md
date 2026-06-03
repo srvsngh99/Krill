@@ -7,32 +7,45 @@ engine on macOS." Ordered by impact on that goal.
 
 ---
 
-## 1. [KrillLM bug] Server HTTP API does not ingest AUDIO (CLI does)
+## 1. [RESOLVED — not reproducible] Server HTTP API audio ingestion
 
-**Severity: high** (voice is a flagship differentiator; it works in the CLI but
-not over the API that real clients use).
+**Status: NOT A BUG on current `main`.** Re-checked 2026-06-04 against a freshly
+built `.build/release/krillm` (and, separately, the Homebrew v0.4.0 binary):
+audio **is** ingested over HTTP. The original benchmark probe must have hit an
+environmental error (stale/other binary, wrong port, or a server with no model
+loaded); the code path threads `audioData` end-to-end on every handler.
 
-- `krillm run gemma-4-e2b --audio speech.wav "Transcribe"` → **exact transcript**
-  ("The weather in Tokyo today is sunny with a high of 25 degrees"), prefill ~117
-  tokens (audio frames ingested).
-- The HTTP server, same model, advertises `audio` capability (`/api/show` →
-  `["completion","vision","audio","tools"]`) but every audio request comes back
-  **text-only** ("Please provide the audio…"), prefill ~88 (no audio frames):
-  - `/api/generate` with top-level `"audio":"<b64>"` + `"audio_format":"wav"` — ignored.
-  - `/api/chat` with message-level `"audio":"<b64>"` — accepted (no error) but not ingested.
-  - `/api/chat` content-block `input_audio` form — rejected ("content must be a string", see #5).
-- **Vision over HTTP works** (`/api/generate` `images:[…]` → correct answer,
-  prefill 274), so the multimodal prefill plumbing exists; audio is the gap.
-- **Where to look:** `Sources/KLMServer/ServerParsing.swift` parses `json["audio"]`
-  into `media.audio` + `media.audioFormat`, and `Server.swift` decodes it to a
-  temp file (`DecodedMedia.audioPath`) and loads `audioData`. Trace whether
-  `audioData` actually reaches the engine's audio-prefill path on the
-  `/api/generate` + `/api/chat` handlers (it does for the CLI `run` path). Likely
-  the server generate path drops audio where the CLI passes it through, OR the
-  audio decode (WAV → log-mel) isn't invoked server-side. Compare the CLI
-  `RunCommand` audio wiring vs the server handler.
-- **Gate:** add a server-path audio test (e.g. in `MultimodalEndpointsTests` or a
-  smoke test) so this can't regress silently once fixed.
+Reproduction (gemma-4-e2b, `/tmp/klmbench/speech.wav`, prompt "Transcribe this
+audio"):
+
+| Path                                            | prompt_eval_count | response |
+|-------------------------------------------------|-------------------|----------|
+| CLI `krillm run --audio`                        | 110               | exact transcript |
+| `/api/generate` top-level `"audio"`+`audio_format` | 110            | exact transcript |
+| `/api/chat` message-level `"audio"`             | 110               | exact transcript |
+| text-only baseline (same prompt, no audio)      | 13                | — |
+
+The ~97-token jump (13 → 110) is the audio encoder frame run reaching prefill —
+exactly the signal the benchmark used to (wrongly) conclude "not ingested." Both
+Ollama-compat handlers route audio through `BatchScheduler.submit` → serial →
+`engine.generate(messages:…, audioData:)`, identical to the CLI's
+`generate(prompt:…)` path.
+
+- **Vision over HTTP also works** (`/api/generate` `images:[…]` → correct answer),
+  confirming the shared multimodal prefill plumbing.
+- **Regression gates added** (this PR), so the wiring can't silently regress:
+  - `MultimodalEndpointsTests.testOllamaChatRequestAcceptsAudioPerMessage` —
+    CI-runnable; locks `/api/chat` message-level `audio` → `request.media.audio`
+    (the one parse→media link the benchmark flagged) + a two-clip rejection.
+  - `NativeAudioRoutingTests.testLiveNativeAudioInflatesPromptTokens` —
+    env-gated (`KLM_GEMMA4_MODEL_PATH`); asserts audio inflates
+    `GenerationStats.promptTokens` past the text-only baseline by the encoder
+    frame count, the exact prefill-token signal the benchmark measured.
+- **One real residual:** the OpenAI **content-block array** form
+  (`messages[].content: [{type:input_audio}|{type:image_url}|{type:text}]`) is
+  rejected on the Ollama `/api/chat` endpoint with "content must be a string"
+  (it already works on OpenAI `/v1/chat/completions`). Tracked and fixed under
+  **#5** below.
 
 ## 2. [Comparison caveat / opportunity] Ollama `gemma4:e2b` returns EMPTY multimodal output
 
