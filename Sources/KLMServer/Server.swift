@@ -242,6 +242,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return try? Data(contentsOf: URL(fileURLWithPath: path))
     }
 
+    /// Load a request's decoded image temp files: the FIRST image (single-image
+    /// runtimes) and the FULL ordered list (multi-image mllama). Delegates to
+    /// ``DecodedMedia/loadImages()`` so the contract is tested in one place.
+    static func loadImages(_ media: DecodedMedia?) -> (first: Data?, all: [Data]) {
+        media?.loadImages() ?? (nil, [])
+    }
+
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let part = unwrapInboundIn(data)
 
@@ -969,8 +976,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let eng = engine
-        let imageData = Self.loadDataIfPath(media?.imagePath)
-        let imagesData = (media?.imagePaths ?? []).compactMap { Self.loadDataIfPath($0) }
+        let (imageData, imagesData) = Self.loadImages(media)
         let audioData = Self.loadDataIfPath(media?.audioPath)
         let mediaCopy = media
         let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
@@ -1185,8 +1191,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         nonisolated(unsafe) let ctx = context
         let eng = engine
-        let imageData = Self.loadDataIfPath(media?.imagePath)
-        let imagesData = (media?.imagePaths ?? []).compactMap { Self.loadDataIfPath($0) }
+        let (imageData, imagesData) = Self.loadImages(media)
         let audioData = Self.loadDataIfPath(media?.audioPath)
         let mediaCopy = media
 
@@ -1265,8 +1270,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let eng = engine
-        let imageData = Self.loadDataIfPath(media?.imagePath)
-        let imagesData = (media?.imagePaths ?? []).compactMap { Self.loadDataIfPath($0) }
+        let (imageData, imagesData) = Self.loadImages(media)
         let audioData = Self.loadDataIfPath(media?.audioPath)
         let mediaCopy = media
 
@@ -1520,7 +1524,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         nonisolated(unsafe) let ctx = context
         let eng = engine
         let modelName = engine.modelName ?? request.requestedModel ?? "unknown"
-        let imageData = Self.loadDataIfPath(decodedMedia?.imagePath)
+        let (imageData, imagesData) = Self.loadImages(decodedMedia)
         let audioData = Self.loadDataIfPath(decodedMedia?.audioPath)
         let mediaCopy = decodedMedia
 
@@ -1561,7 +1565,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 audioData: audioData,
                 contextLimit: ocCtx,
                 promptTemplateOverride: modelTemplateOverride(),
-                format: StructuredOutput.engineFormat(for: respFormat))
+                format: StructuredOutput.engineFormat(for: respFormat),
+                imagesData: imagesData)
 
             if request.stream {
                 var firstTokenTime: Double?
@@ -1717,7 +1722,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let eng = engine
-        let imageData = Self.loadDataIfPath(decodedMedia?.imagePath)
+        let (imageData, imagesData) = Self.loadImages(decodedMedia)
         let audioData = Self.loadDataIfPath(decodedMedia?.audioPath)
         let mediaCopy = decodedMedia
 
@@ -1758,7 +1763,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 audioData: audioData,
                 contextLimit: ogCtx,
                 promptTemplateOverride: modelTemplateOverride(),
-                format: StructuredOutput.engineFormat(for: respFormat))
+                format: StructuredOutput.engineFormat(for: respFormat),
+                imagesData: imagesData)
 
             if request.stream {
                 var firstTokenTime: Double?

@@ -13,6 +13,18 @@ internal struct DecodedMedia: Sendable {
     /// The first decoded image, for single-image runtimes.
     var imagePath: String? { imagePaths.first }
 
+    /// Load the decoded image temp files into memory: the FIRST image (for
+    /// single-image runtimes) and the FULL ordered list (for multi-image
+    /// mllama). Every generate handler loads images through this one method, so
+    /// a handler can't silently drop all but the first image of a multi-image
+    /// request while the prompt still emits one `<|image|>` per image.
+    func loadImages() -> (first: Data?, all: [Data]) {
+        let all = imagePaths.compactMap { path -> Data? in
+            try? Data(contentsOf: URL(fileURLWithPath: path))
+        }
+        return (all.first, all)
+    }
+
     init(imagePaths: [String] = [], audioPath: String? = nil) {
         self.imagePaths = imagePaths
         self.audioPath = audioPath
