@@ -69,6 +69,17 @@ public final class SpeculativeDecoder: @unchecked Sendable {
         self.init(targetModel: nil, draftModel: nil, initialK: initialK)
     }
 
+    /// Build a draft-model-free (n-gram / prompt-lookup) speculative decoder. The
+    /// draft is supplied by a `NgramProposer` passed to `ngramStep`; there is no
+    /// draft model and no draft KV cache. `K` is proposer-driven, so the adaptive
+    /// `K` machinery is inert here (`ngramStep` never calls `adaptK`).
+    public static func ngram(targetModel: LoadedModel, temperature: Float = 0.0)
+        -> SpeculativeDecoder
+    {
+        SpeculativeDecoder(
+            targetModel: targetModel, draftModel: nil, initialK: 0, temperature: temperature)
+    }
+
     private init(
         targetModel: LoadedModel?,
         draftModel: LoadedModel?,
@@ -220,17 +231,126 @@ public final class SpeculativeDecoder: @unchecked Sendable {
         return accepted
     }
 
-    private func recordVerification(acceptedTokenCount: Int, proposedTokenCount k: Int) -> Double {
+    /// Run one **n-gram (prompt-lookup)** speculative step. The draft comes from
+    /// `proposer.propose()` (a context match), not a draft model — so there is no
+    /// draft loop, no draft model, and no draft cache. The verify / accept /
+    /// rollback / bonus logic is otherwise identical to `step`, operating on the
+    /// target cache only.
+    ///
+    /// Greedy parity: every returned token is the target model's greedy argmax at
+    /// its position, computed from a cache holding exactly the accepted prefix.
+    /// The proposal *source* is irrelevant because each proposed token is verified
+    /// against that argmax. Output matches standard decode token-for-token except
+    /// where the width-K verify forward's argmax differs from the width-1 decode
+    /// forward's at an fp16 near-tie — the same nondeterminism the batched decoder
+    /// already exhibits, not a divergence in the speculation logic.
+    ///
+    /// - Returns: 1 to K+1 accepted tokens (1 on a no-match plain step).
+    public func ngramStep(
+        lastToken: Int,
+        targetCaches: [KVCache],
+        proposer: NgramProposer
+    ) -> [Int] {
+        guard let targetModel else {
+            preconditionFailure("SpeculativeDecoder.ngramStep requires a target model")
+        }
+
+        let draftTokens = proposer.propose()
+        let k = draftTokens.count
+
+        // No match: a single plain decode step. Forwarding just [lastToken] and
+        // taking its argmax is byte-identical to one standard decode step, so the
+        // floor is exactly 1.0x on non-repetitive stretches.
+        if k == 0 {
+            let input = MLXArray([Int32(lastToken)]).reshaped(1, 1)
+            let logits = targetModel.forward(input, targetCaches)
+            MLX.eval(logits)
+            let tok = sampler.sample(logits)
+            proposer.append([tok])
+            recordVerification(acceptedTokenCount: 1, proposedTokenCount: 0, doAdapt: false)
+            return [tok]
+        }
+
+        // Verify all k proposed tokens in one batched forward:
+        // input = [lastToken] + draftTokens[0..<k-1]  (k positions).
+        var verifyTokens = [Int32(lastToken)]
+        for t in draftTokens.dropLast() {
+            verifyTokens.append(Int32(t))
+        }
+        let verifyInput = MLXArray(verifyTokens).reshaped(1, verifyTokens.count)
+
+        // Length before verify so we can roll back rejected tokens. Only the
+        // target cache exists (no draft cache to keep in sync).
+        let previousLength = targetCaches.first?.sequenceLength ?? 0
+
+        let targetLogits = targetModel.forward(verifyInput, targetCaches)
+        MLX.eval(targetLogits)
+
+        // Greedy-gated: argmax all k positions in one batched op (see `step`).
+        let verifiedTokens = argMax(targetLogits, axis: -1).asType(.int32)
+        MLX.eval(verifiedTokens)
+        let targetTokens = verifiedTokens.asArray(Int32.self).map(Int.init)
+
+        var accepted: [Int] = []
+        var allAccepted = true
+        for i in 0 ..< k {
+            if targetTokens[i] == draftTokens[i] {
+                accepted.append(draftTokens[i])
+            } else {
+                accepted.append(targetTokens[i])
+                allAccepted = false
+                break
+            }
+        }
+
+        // Roll back the target cache to exactly the accepted prefix. The verify
+        // wrote k rows; keep `accepted.count` (the rejection replacement is itself
+        // never forwarded, so it is not in the cache). Identical math to `step`'s
+        // target-cache trim, minus the (absent) draft cache.
+        if !allAccepted {
+            let acceptedLength = previousLength + accepted.count
+            for cache in targetCaches {
+                cache.truncate(to: acceptedLength)
+            }
+        }
+
+        // Full acceptance yields a bonus token from position K. The target bonus
+        // forward catches the target cache up by one row; there is no draft cache
+        // to mirror.
+        if allAccepted {
+            let bonusInput = MLXArray([Int32(draftTokens.last!)]).reshaped(1, 1)
+            let bonusLogits = targetModel.forward(bonusInput, targetCaches)
+            MLX.eval(bonusLogits)
+            accepted.append(sampler.sample(bonusLogits))
+        }
+
+        // Feed the adaptive cap: on full acceptance all k drafts were correct;
+        // on rejection at index i, accepted.count-1 drafts matched (the last is
+        // the target replacement, not a draft token).
+        proposer.recordOutcome(acceptedDraft: allAccepted ? k : accepted.count - 1, proposed: k)
+        proposer.append(accepted)
+        recordVerification(acceptedTokenCount: accepted.count, proposedTokenCount: k, doAdapt: false)
+        return accepted
+    }
+
+    @discardableResult
+    private func recordVerification(
+        acceptedTokenCount: Int, proposedTokenCount k: Int, doAdapt: Bool = true
+    ) -> Double {
         // -1 because the last returned token is either a rejection replacement or a bonus token.
-        let rate = Double(acceptedTokenCount - 1) / Double(k)
-        acceptanceHistory.append(rate)
-        if acceptanceHistory.count > historyWindow {
-            acceptanceHistory.removeFirst()
+        // A k==0 round (n-gram no-match plain decode) contributes no acceptance signal.
+        let rate = k > 0 ? Double(acceptedTokenCount - 1) / Double(k) : 0
+        if k > 0 {
+            acceptanceHistory.append(rate)
+            if acceptanceHistory.count > historyWindow {
+                acceptanceHistory.removeFirst()
+            }
         }
         totalAccepted += acceptedTokenCount
         totalRounds += 1
 
-        adaptK()
+        // K is proposer-driven for the n-gram path, so it does not adapt K here.
+        if doAdapt { adaptK() }
 
         return rate
     }

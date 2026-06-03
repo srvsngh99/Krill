@@ -58,6 +58,21 @@ actor BatchScheduler {
         return defaultWindowMs
     }
 
+    /// Concurrency at/below which a fully-greedy request prefers the serial
+    /// n-gram (prompt-lookup) speculative path over batching. Default 1: n-gram
+    /// only when the request is solo (its bandwidth win is largest at batch 1;
+    /// above this, batching amortizes weights across rows and wins instead).
+    /// `KRILL_SPEC_CONCURRENCY_MAX`.
+    static let defaultSpecConcurrencyMax = 1
+
+    static func specConcurrencyMaxFromEnvironment() -> Int {
+        if let v = ProcessInfo.processInfo.environment["KRILL_SPEC_CONCURRENCY_MAX"],
+           let i = Int(v), i >= 0 {
+            return i
+        }
+        return defaultSpecConcurrencyMax
+    }
+
     /// Whether a request can join a batch. Batching helps only at
     /// `numParallel >= 2` on a batch-capable engine; multimodal rows and
     /// per-row seeded non-greedy sampling (whose RNG can't be isolated under a
@@ -80,7 +95,7 @@ actor BatchScheduler {
                 useSpeculative: Bool?, usePrefixCache: Bool,
                 imageData: Data?, audioData: Data?,
                 contextLimit: Int?, promptTemplateOverride: String?,
-                format: OutputFormat? = nil) async -> GenResult {
+                format: OutputFormat? = nil, currentConcurrency: Int = 1) async -> GenResult {
         func serial() -> GenResult {
             engine.generate(
                 messages: messages, params: params, maxTokens: maxTokens,
@@ -93,6 +108,22 @@ actor BatchScheduler {
         // each step; the shared-step batched loop cannot isolate per-row
         // masks, so a format request always takes the serial path.
         if format != nil { return serial() }
+
+        // Load-adaptive spec/batch decision. When n-gram (prompt-lookup)
+        // speculative decode is enabled on the engine and this request is solo
+        // (or below the configured concurrency), take the SERIAL path so the
+        // engine's n-gram branch engages: its bandwidth win is largest at batch
+        // 1. Above the threshold, fall through to batching — one weight read then
+        // serves many rows, and speculation's marginal win shrinks. Only fully
+        // greedy, text-only requests use n-gram (the engine gate is stricter than
+        // `isEligible`'s greedy), so a non-greedy request still batches.
+        let fullyGreedy = params.temperature <= 0 && params.topP >= 1.0
+            && params.topK <= 0 && params.minP <= 0 && params.mirostat == 0
+        if engine.willUseNgramByDefault, useSpeculative != true, fullyGreedy,
+           imageData == nil, audioData == nil,
+           currentConcurrency <= Self.specConcurrencyMaxFromEnvironment() {
+            return serial()
+        }
         guard isEligible(params: params, imageData: imageData, audioData: audioData,
                          useSpeculative: useSpeculative) else {
             // Surface the one case where the user asked for two features that
