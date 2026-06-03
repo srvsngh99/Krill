@@ -85,6 +85,27 @@ scheduling artifact. It is not. Two things explain it:
 The benchmark averages `--runs` passes per level because a single pass at moderate N
 is noisy.
 
+## Batched n-gram speculation (fills the occupancy gap)
+
+The occupancy finding above motivated combining speculation WITH batching: at R=4-8
+the GPU is under-filled, so verifying several draft tokens per row in one wider
+`[R, W]` forward both fills the GPU and commits multiple tokens per round.
+`batchedNgramSpecDecode` (`BatchedDecode.swift`) does exactly that — per-row
+prompt-lookup proposals, one block-causal `[R, W]` verify forward
+(`buildBatchedVerifyMask`), ragged per-row accept, per-row cache commit. Measured on
+llama-3.2-3b, echo-heavy batch, max_tokens=96:
+
+| R | batched greedy | batched n-gram spec | speedup |
+|---|---------------:|--------------------:|--------:|
+| 4 | 169.5 tok/s    | 464.8 tok/s         | 2.74x   |
+| 8 | 172.8 tok/s    | 480.7 tok/s         | 2.78x   |
+
+So on repetitive concurrent workloads (RAG verbatim quoting, code, structured output)
+the batched path goes from ~170 to ~470 tok/s at R=4-8 — vs Ollama's flat ~85, about
+5.5x aggregate. Per-row output is parity-gated against batched greedy (prefix
+consistent, fp16 tie-flips aside). The driver is verified + benchmarked; wiring it
+into the production continuous batcher behind the load-adaptive gate is the next step.
+
 ## Reproduce
 
 Enable n-gram with the `--ngram-spec` serve flag (equivalent to `KRILL_NGRAM_SPEC=1`):

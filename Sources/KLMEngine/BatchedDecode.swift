@@ -277,6 +277,128 @@ extension InferenceEngine {
         return generated
     }
 
+    /// Batched **n-gram speculative** decode: like ``batchedGreedyDecode`` but each
+    /// row proposes prompt-lookup draft tokens and they are verified in one wide
+    /// `[R, W]` batched forward (W = 1 + max draft length), committing multiple
+    /// tokens per row per round. This trades a per-round re-stack for fewer rounds
+    /// and a wider forward that fills the GPU better at moderate R (the occupancy
+    /// gap diagnosed in `docs/CONCURRENT_THROUGHPUT.md`).
+    ///
+    /// Greedy-only (argmax verify), fp16 KV. Per-row output equals that row's
+    /// batched greedy output up to fp16 verify-vs-decode tie-flips. Returns nil if
+    /// the model is not batch-eligible. v1 keeps finished rows in the batch (not
+    /// committed/emitted) — the same simplification as ``batchedGreedyDecode``.
+    func batchedNgramSpecDecode(promptTokens: [[Int]], maxTokens: Int) -> [[Int]]? {
+        guard let model = loadedModelForBatching,
+              let batchedForward = model.batchedDecodeForward,
+              let stopId = tokenizerEOS else { return nil }
+        let R = promptTokens.count
+        guard R > 0 else { return [] }
+        let numLayers = model.numLayers
+        let prefill = model.prefillForward ?? model.forward
+        let sampler = Sampler(params: .greedy)
+
+        // Per-row prefill + a per-row proposer seeded with the prompt + first token.
+        var perRowCaches: [[KVCache]] = []
+        var lengths: [Int] = []
+        var current: [Int] = []        // each row's lastToken, NOT yet in its cache
+        var proposers: [NgramProposer] = []
+        for tokens in promptTokens {
+            let caches = makeKVCaches(numLayers: numLayers)
+            let pl = prefill(MLXArray(tokens.map { Int32($0) }).reshaped(1, tokens.count), caches)
+            MLX.eval(pl)
+            let first = sampler.sample(pl)
+            perRowCaches.append(caches)
+            lengths.append(tokens.count)
+            current.append(first)
+            let p = NgramProposer(config: .init(), eosIds: [stopId])
+            p.reset(prompt: tokens)
+            p.append([first])
+            proposers.append(p)
+        }
+        var generated: [[Int]] = current.map { [$0] }
+        var done = current.map { $0 == stopId }
+        var rounds = 0
+        let roundCap = maxTokens + 8   // safety bound
+
+        while (0 ..< R).contains(where: { !done[$0] && generated[$0].count < maxTokens }) {
+            rounds += 1
+            if rounds > roundCap { break }
+            let active = (0 ..< R).filter { !done[$0] && generated[$0].count < maxTokens }
+            if active.isEmpty { break }
+
+            // Propose per active row; verify width W = 1 + max draft length.
+            var drafts = [[Int]](repeating: [], count: R)
+            for r in active { drafts[r] = proposers[r].propose() }
+            let maxK = active.map { drafts[$0].count }.max() ?? 0
+            let W = maxK + 1
+
+            // Per-row verify input [R, W] = [current_r, draft_r..., pad]. Padding
+            // (and inactive rows) repeat the last token; their predictions are
+            // ignored and their KV is never committed.
+            var flat = [Int32](repeating: 0, count: R * W)
+            for r in 0 ..< R {
+                let seq = [current[r]] + drafts[r]
+                for j in 0 ..< W { flat[r * W + j] = Int32(seq[min(j, seq.count - 1)]) }
+            }
+
+            let sMax = lengths.max() ?? 0
+            let caches = stackCachesLeftPadded(perRow: perRowCaches, lengths: lengths)
+            let kDtype = caches.first?.snapshot()?.keys.dtype ?? .float16
+            let mask = buildBatchedVerifyMask(lengths: lengths, sMax: sMax, newLen: W, dtype: kDtype)
+            let bl = batchedForward(
+                MLXArray(flat).reshaped(R, W), caches, mask, lengths)   // [R, W, vocab]
+            MLX.eval(bl)
+            let pred = argMax(bl, axis: -1).asType(.int32)              // [R, W]
+            MLX.eval(pred)
+            let predFlat = pred.reshaped(-1).asArray(Int32.self).map(Int.init)
+            func p(_ r: Int, _ j: Int) -> Int { predFlat[r * W + j] }
+
+            for r in active {
+                let k = drafts[r].count
+                // Accept drafts up to the first mismatch: p(r,i) is the model's
+                // greedy token after input position i, which must equal draft_r[i].
+                var accepted: [Int] = []
+                var i = 0
+                while i < k && p(r, i) == drafts[r][i] { accepted.append(drafts[r][i]); i += 1 }
+                let allAccepted = (i == k)
+                let cacheEntries: Int          // new KV positions to keep for row r
+                if allAccepted {
+                    accepted.append(p(r, k))   // bonus (input was draft_r[k-1], or current if k==0)
+                    cacheEntries = k + 1       // current + all k drafts are now context
+                } else {
+                    accepted.append(p(r, i))   // target replacement at the mismatch
+                    cacheEntries = i + 1       // current + the i accepted drafts
+                }
+
+                // Commit the kept new KV (stacked positions [sMax, sMax+cacheEntries))
+                // into row r's own per-row cache, preserving per-row isolation.
+                for layer in 0 ..< numLayers {
+                    guard let snap = caches[layer].snapshot() else { continue }
+                    let ks = snap.keys[r ..< (r + 1), 0..., sMax ..< (sMax + cacheEntries), 0...]
+                    let vs = snap.values[r ..< (r + 1), 0..., sMax ..< (sMax + cacheEntries), 0...]
+                    _ = perRowCaches[r][layer].update(keys: ks, values: vs)
+                }
+                lengths[r] += cacheEntries
+                if k > 0 {
+                    proposers[r].recordOutcome(
+                        acceptedDraft: allAccepted ? k : accepted.count - 1, proposed: k)
+                }
+                proposers[r].append(accepted)
+
+                // Emit, stopping the row at the first stop id or maxTokens.
+                for tok in accepted {
+                    if tok == stopId { done[r] = true; break }
+                    generated[r].append(tok)
+                    if generated[r].count >= maxTokens { break }
+                }
+                current[r] = accepted.last ?? stopId
+                if current[r] == stopId { done[r] = true }
+            }
+        }
+        return generated
+    }
+
     /// Dtype-independent cross-row contamination gate: run `row` (teacher-forced
     /// with its own greedy continuation) in TWO batches that share the same
     /// width and the same neighbor LENGTHS but use different neighbor CONTENT,
