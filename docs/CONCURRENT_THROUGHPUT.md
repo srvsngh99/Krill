@@ -101,10 +101,30 @@ llama-3.2-3b, echo-heavy batch, max_tokens=96:
 | 8 | 172.8 tok/s    | 480.7 tok/s         | 2.78x   |
 
 So on repetitive concurrent workloads (RAG verbatim quoting, code, structured output)
-the batched path goes from ~170 to ~470 tok/s at R=4-8 — vs Ollama's flat ~85, about
-5.5x aggregate. Per-row output is parity-gated against batched greedy (prefix
-consistent, fp16 tie-flips aside). The driver is verified + benchmarked; wiring it
-into the production continuous batcher behind the load-adaptive gate is the next step.
+the standalone driver goes from ~170 to ~470 tok/s at R=4-8 — vs Ollama's flat ~85,
+about 5.5x aggregate. Per-row output is parity-gated against batched greedy (prefix
+consistent, fp16 tie-flips aside).
+
+### Wired into the production continuous batcher
+
+The spec round is now integrated into `ContinuousBatcher`: when `KRILL_NGRAM_SPEC=1`
+(and fp16 KV), each batched round is an n-gram speculative round (per-row propose ->
+one `[R, W]` verify -> ragged per-row accept committed straight into each row's own
+cache, no `scatterBack`). The load-adaptive gate already routes concurrency >= 2 to the
+batcher, so concurrent server requests get it; the non-spec path is byte-for-byte
+unchanged (gated behind `specEnabled`). End-to-end on a live server (`krillm serve
+--ngram-spec`, qwen2.5-3b, echo-heavy concurrent prompts, max_tokens=128):
+
+| N | plain batched | spec batched | speedup |
+|---|--------------:|-------------:|--------:|
+| 4 | 148.5 tok/s   | 281.4 tok/s  | 1.89x   |
+| 8 | 165.6 tok/s   | 333.4 tok/s  | 2.01x   |
+
+~2x on echo concurrent load reaching real API requests (lower than the synthetic
+driver's 2.74x — the server includes prefill/HTTP and real prompts accept less than a
+synthetic echo), and ~3.9x vs Ollama's flat ~85 at N=8. Parity-gated: the spec'd
+batcher matches the plain batched path per row (`BatchedVerifyTests`), and the existing
+non-spec batched live gates still pass.
 
 ## Reproduce
 
