@@ -182,6 +182,31 @@ func buildBatchedDecodeMask(lengths: [Int], sMax: Int, totalLen: Int, dtype: DTy
     return MLXArray(flat).reshaped(R, 1, 1, totalLen).asType(dtype)
 }
 
+/// Build the per-row additive **multi-query verify** mask `[R, 1, L, totalLen]`
+/// (`totalLen = sMax + L`) for a batched speculative-verify forward that feeds
+/// `L` new tokens per row at once. For row `r`, query position `j` (0-based over
+/// the L new tokens, absolute position `lengths[r] + j`):
+///   - cached columns `[0, sMax)`: the left-pad prefix `[0, sMax - lengths[r])`
+///     is masked (same as the single-query decode mask);
+///   - new columns `[sMax, sMax+L)`: block-causal — query `j` may attend to new
+///     keys `0..j` and is masked from `j+1..L-1` (its own future drafts).
+/// This makes the L-wide forward identical to L sequential single-token batched
+/// steps (each new token sees the cache + the accepted prefix, not future drafts).
+func buildBatchedVerifyMask(lengths: [Int], sMax: Int, newLen L: Int, dtype: DType) -> MLXArray {
+    let R = lengths.count
+    let totalLen = sMax + L
+    var flat = [Float](repeating: 0, count: R * L * totalLen)
+    for r in 0 ..< R {
+        let pad = sMax - lengths[r]
+        for j in 0 ..< L {
+            let base = (r * L + j) * totalLen
+            for k in 0 ..< pad { flat[base + k] = maskNegInf }            // left-pad
+            for nk in (j + 1) ..< L { flat[base + sMax + nk] = maskNegInf } // future drafts
+        }
+    }
+    return MLXArray(flat).reshaped(R, 1, L, totalLen).asType(dtype)
+}
+
 extension InferenceEngine {
     /// Whether the loaded model supports the Stage B batched decode path.
     public var supportsBatchedDecode: Bool {
@@ -383,6 +408,75 @@ extension InferenceEngine {
             MLX.eval(bl)
             for r in 0 ..< R {
                 let br = bl[r ..< (r + 1)].reshaped(-1)
+                let d = MLX.max(MLX.abs(br - serialLogits[r][k])).item(Float.self)
+                maxDiff[r] = Swift.max(maxDiff[r], d)
+            }
+        }
+        return maxDiff
+    }
+
+    /// Correctness gate for the batched **multi-token verify** primitive (the
+    /// foundation of batched speculative decode): feed each row its `L`
+    /// teacher-forcing continuation tokens in ONE `[R, L]` batched forward (with
+    /// `buildBatchedVerifyMask`), and return the per-row max abs logit diff vs the
+    /// serial single-token reference at every position. A near-zero diff proves
+    /// the L-wide block-causal forward equals L sequential single-token steps —
+    /// i.e. per-row RoPE (`offset + j`) and the block-causal mask are correct, so
+    /// a speculative verify can commit multiple tokens per row in one step.
+    func batchedVerifyVsSerialMaxDiff(promptTokens: [[Int]], steps L: Int) -> [Float]? {
+        guard let model = loadedModelForBatching,
+              let batchedForward = model.batchedDecodeForward else { return nil }
+        let R = promptTokens.count
+        let prefill = model.prefillForward ?? model.forward
+
+        var cont: [[Int]] = []
+        for tokens in promptTokens {
+            cont.append(serialGreedyDecode(promptTokens: tokens, maxTokens: L + 1) ?? [])
+        }
+        let usable = min(L, (cont.map { $0.count }.min() ?? 1) - 1)
+        guard usable >= 1 else { return nil }
+
+        // Serial teacher-forced logits: [R][usable], each [vocab].
+        var serialLogits: [[MLXArray]] = []
+        for (i, tokens) in promptTokens.enumerated() {
+            let sc = makeKVCaches(numLayers: model.numLayers)
+            let pl = prefill(MLXArray(tokens.map { Int32($0) }).reshaped(1, tokens.count), sc)
+            MLX.eval(pl)
+            var rowLogits: [MLXArray] = []
+            for k in 0 ..< usable {
+                let l = model.forward(MLXArray([Int32(cont[i][k])]).reshaped(1, 1), sc)
+                MLX.eval(l)
+                rowLogits.append(l.reshaped(-1))
+            }
+            serialLogits.append(rowLogits)
+        }
+
+        // Batched: prefill all, stack, ONE [R, usable] verify forward.
+        var lengths: [Int] = []
+        var perRowCaches: [[KVCache]] = []
+        for tokens in promptTokens {
+            let bc = makeKVCaches(numLayers: model.numLayers)
+            let pl = prefill(MLXArray(tokens.map { Int32($0) }).reshaped(1, tokens.count), bc)
+            MLX.eval(pl)
+            perRowCaches.append(bc)
+            lengths.append(tokens.count)
+        }
+        let sMax = lengths.max() ?? 0
+        let caches = stackCachesLeftPadded(perRow: perRowCaches, lengths: lengths)
+        let kDtype = caches.first?.snapshot()?.keys.dtype ?? .float16
+        // Per-row base offset; applyRoPEPerRow rotates new position j to offset+j.
+        let rowOffsets = lengths
+        let mask = buildBatchedVerifyMask(
+            lengths: lengths, sMax: sMax, newLen: usable, dtype: kDtype)
+        let flatTokens = (0 ..< R).flatMap { r in (0 ..< usable).map { Int32(cont[r][$0]) } }
+        let input = MLXArray(flatTokens).reshaped(R, usable)
+        let bl = batchedForward(input, caches, mask, rowOffsets)   // [R, usable, vocab]
+        MLX.eval(bl)
+
+        var maxDiff = [Float](repeating: 0, count: R)
+        for r in 0 ..< R {
+            for k in 0 ..< usable {
+                let br = bl[r ..< (r + 1), k ..< (k + 1)].reshaped(-1)
                 let d = MLX.max(MLX.abs(br - serialLogits[r][k])).item(Float.self)
                 maxDiff[r] = Swift.max(maxDiff[r], d)
             }
