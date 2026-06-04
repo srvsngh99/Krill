@@ -77,15 +77,26 @@ fixed on both the serial and the concurrent batched paths.
 
 ---
 
-## 0b. [finding] 30B-A3B MoE is unstable on 24GB (Metal assertions)
+## 0b. [BOX LIMIT confirmed on retry] 30B-A3B MoE not viable on 24GB
 
-KrillLM runs `Qwen3-Coder-30B-A3B` natively and produces excellent code, but at
-~22GB peak it intermittently throws `failed assertion _status <
-MTLCommandBufferStatusCommitted` (GPU command-buffer / memory pressure). Some runs
-complete, some crash mid-generation. **Practical stable serving ceiling on 24GB is
-~14B; 30B-A3B is KrillLM-solo-only and flaky; 31B/35B will thrash.** Not a code
-bug per se — it's the box. Revisit on a 36GB+ Mac. (If the assertion recurs at
-lower memory, investigate the Metal command-buffer lifecycle under pressure.)
+KrillLM runs `Qwen3-Coder-30B-A3B-Instruct-4bit` natively and produces excellent
+code, but the 16 GB (4-bit) weights leave no headroom on a 24 GB host. **Re-tested
+2026-06-04 on latest `main`, both paths:**
+- **CLI** (`krillm run`): generates correct code, but **segfaults mid-generation
+  ~1 in 5** longer runs under repeated load (exit 139; RAM-free collapses just
+  before the crash). The earlier `failed assertion _status <
+  MTLCommandBufferStatusCommitted` is the same memory-pressure failure surfacing
+  as either a Metal command-buffer assertion or a raw segfault.
+- **Server** (load once, no reload churn): does NOT crash and returns **correct**
+  content, but is **unusably slow - ~118 s for a 40-token request** (the model
+  swaps; first request after load is the worst). `eval_count` reports 0 on this
+  thrashing path (a minor stats artifact; the content is real).
+
+The 256 MB MLX recycling-pool cap (`KRILL_MLX_CACHE_LIMIT_MB`,
+`MLXMemoryConfig`) is already applied; it bounds intermediate buffers, not the
+16 GB of resident weights, so it cannot help here. **Not a code bug - it is the
+box.** Practical stable serving ceiling on 24 GB is ~14 B; 30B-A3B is
+solo-only-and-flaky / thrashes when served. Revisit on a 36 GB+ Mac.
 
 ---
 
