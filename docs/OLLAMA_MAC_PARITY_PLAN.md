@@ -34,6 +34,10 @@ Shipped:
 Default port flipped to `11434` in 0.4.0 (T0-1 done; `mac_parity` gate
 green 18/18 on 2026-05-28). `11435` honored for one release.
 
+> **Update (post-0.4.0): the default port has since changed to 57455
+> (unique, coexists with Ollama); `--port 11434` gives the Ollama
+> drop-in. See CHANGELOG.**
+
 Also shipped (2026-05-17, same branch):
 - WS-G: CORS (`KRILL_ORIGINS`/`OLLAMA_ORIGINS`, OPTIONS preflight +
   `Access-Control-*` on JSON responses, origin allowlist) and the

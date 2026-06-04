@@ -15,7 +15,7 @@ ALLOWED_USERS: list[int] = [
 
 # KrillLM server settings
 KRILLM_HOST: str = os.environ.get("KRILLM_HOST", "127.0.0.1")
-KRILLM_PORT: int = int(os.environ.get("KRILLM_PORT", "11434"))
+KRILLM_PORT: int = int(os.environ.get("KRILLM_PORT", "57455"))
 KRILLM_BASE_URL: str = f"http://{KRILLM_HOST}:{KRILLM_PORT}"
 
 # Path to the krillm CLI binary

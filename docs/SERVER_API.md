@@ -13,10 +13,10 @@ This build is a release-readiness baseline, not a production release. The HTTP s
 ## Starting the Server
 
 ```bash
-krillm serve --model llama-3.2-1b --port 11434
+krillm serve --model llama-3.2-1b --port 57455
 ```
 
-Default: `127.0.0.1:11434`
+Default: `127.0.0.1:57455`
 
 ### Compat mode and the Ollama port
 
@@ -30,20 +30,21 @@ Endpoints disabled by the compat mode return `404` with an explanatory
 `error` body, so client protocol-probing behaves as if the server simply
 does not speak that protocol.
 
-**Drop-in port (T0-1, done in 0.4.0):** the default port is `11434` —
-the same port stock Ollama uses — so Ollama clients need no
-configuration to talk to KrillLM. The previous default, `11435`, still
-works for one release: pass `--port 11435` or set `KRILL_PORT=11435`
-explicitly. The flip was gated on the `mac_parity` gate going green
-(18/18) — see [`OLLAMA_MAC_PARITY_PLAN.md`](OLLAMA_MAC_PARITY_PLAN.md)
-§4 WS-A1. Verify parity with `make parity-gate`.
+**Default port and Ollama drop-in:** the default port is `57455`
+(unique — it spells "KRILL" on a phone keypad — so KrillLM coexists with
+Ollama, which stays on `11434`). For a drop-in Ollama replacement, run
+with `--port 11434` (or set `KRILL_PORT=11434`) and Ollama clients need
+no configuration to talk to KrillLM. The drop-in path is gated on the
+`mac_parity` gate going green (18/18) — see
+[`OLLAMA_MAC_PARITY_PLAN.md`](OLLAMA_MAC_PARITY_PLAN.md) §4 WS-A1. Verify
+parity with `make parity-gate`.
 
 ## OpenAI-Compatible Endpoints
 
 ### POST /v1/chat/completions
 
 ```bash
-curl http://127.0.0.1:11434/v1/chat/completions -d '{
+curl http://127.0.0.1:57455/v1/chat/completions -d '{
   "model": "llama-3.2-1b",
   "messages": [{"role": "user", "content": "Hello"}],
   "stream": true,
@@ -57,7 +58,7 @@ Streaming: SSE format with `data: {...}\n\n` and `data: [DONE]\n\n` terminator.
 ### POST /v1/completions
 
 ```bash
-curl http://127.0.0.1:11434/v1/completions -d '{
+curl http://127.0.0.1:57455/v1/completions -d '{
   "prompt": "The meaning of life is",
   "max_tokens": 32
 }'
@@ -70,7 +71,7 @@ Returns list of installed models.
 ### POST /v1/models/load
 
 ```bash
-curl -X POST http://127.0.0.1:11434/v1/models/load -d '{"model": "llama-3.2-1b"}'
+curl -X POST http://127.0.0.1:57455/v1/models/load -d '{"model": "llama-3.2-1b"}'
 ```
 
 ### POST /v1/models/unload
@@ -96,7 +97,7 @@ Text generation on any model. With Gemma 4 loaded, you may also include `images`
 
 ```bash
 # Text
-curl http://127.0.0.1:11434/api/generate -d '{
+curl http://127.0.0.1:57455/api/generate -d '{
   "model": "llama-3.2-1b",
   "prompt": "Hello",
   "stream": true,
@@ -104,14 +105,14 @@ curl http://127.0.0.1:11434/api/generate -d '{
 }'
 
 # Image (Gemma 4 and Qwen 2.5-VL — native Swift vision path)
-curl http://127.0.0.1:11434/api/generate -d '{
+curl http://127.0.0.1:57455/api/generate -d '{
   "model": "qwen2.5-vl-3b",
   "prompt": "What is in this image?",
   "images": ["'"$(base64 -i photo.png)"'"]
 }'
 
 # Audio (Gemma 4 only — native Swift+MLX USM path)
-curl http://127.0.0.1:11434/api/generate -d '{
+curl http://127.0.0.1:57455/api/generate -d '{
   "model": "gemma-4-e2b",
   "prompt": "Transcribe this clip.",
   "audio": "'"$(base64 -i clip.wav)"'",
@@ -222,7 +223,7 @@ an uninstalled model returns `404` with a `krillm pull` hint.
 ## Anthropic Messages API
 
 `POST /v1/messages` implements the Anthropic Messages shape so Claude
-Code / the Anthropic SDK work via `ANTHROPIC_BASE_URL=http://localhost:11434`.
+Code / the Anthropic SDK work via `ANTHROPIC_BASE_URL=http://localhost:57455`.
 Supports `system` (string or blocks), multi-turn `content` blocks,
 `tools` (`input_schema`), `tool_use`/`tool_result` (mapped onto the
 shared tool-call convention), `thinking` (segmented into a `thinking`
@@ -363,7 +364,7 @@ the same as Ollama). Token-level streaming tool deltas are Phase 4; with
 ### OpenAI image example
 
 ```bash
-curl http://127.0.0.1:11434/v1/chat/completions -d '{
+curl http://127.0.0.1:57455/v1/chat/completions -d '{
   "model": "gemma-4-e2b",
   "messages": [{
     "role": "user",

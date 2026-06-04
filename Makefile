@@ -198,7 +198,7 @@ bench-release-gate:
 # Usage:
 #   make parity-gate                          # mac_parity profile
 #   make parity-gate PARITY_PROFILE=strict_parity
-#   make parity-gate PARITY_ARGS="--base-url http://127.0.0.1:11434"
+#   make parity-gate PARITY_ARGS="--base-url http://127.0.0.1:57455"
 PARITY_PROFILE ?= mac_parity
 PARITY_ARGS ?=
 parity-gate: build

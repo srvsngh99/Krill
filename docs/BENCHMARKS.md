@@ -112,10 +112,10 @@ not yet captured by the harness — issue #3.)
 # 1. Build the release binary (needed for the KrillLM cold/CLI path).
 make release
 
-# 2. Bring up both engines (Ollama on 11434 already; KrillLM on 11435).
+# 2. Bring up both engines (Ollama on 11434 already; KrillLM on its default 57455).
 #    For the concurrency sweep, enable the batcher + n-gram spec.
 KRILL_NUM_PARALLEL=16 KRILL_NGRAM_SPEC=1 \
-  .build/release/krillm serve --model gemma-4-e2b --port 11435 &
+  .build/release/krillm serve --model gemma-4-e2b &
 
 # 3. Text / vision / voice / tools head-to-head (hot + cold):
 python3 tools/bench_suite.py --axis all \
@@ -129,7 +129,7 @@ python3 tools/bench_suite.py --axis tools \
 
 # 4. Concurrency sweep:
 python3 tools/krillm_concurrent_benchmark.py \
-  --krillm-url http://127.0.0.1:11435 --krill-model gemma-4-e2b \
+  --krillm-url http://127.0.0.1:57455 --krill-model gemma-4-e2b \
   --ollama-host http://127.0.0.1:11434 --ollama-model gemma4:e2b \
   --concurrency-sweep "1,2,4,8" --max-tokens 96 --runs 2 --warmup 1 --server-arm batched
 ```

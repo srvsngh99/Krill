@@ -6,6 +6,14 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Default serve port changed from `11434` to `57455`** ("KRILL" on a
+  phone keypad). KrillLM now coexists with Ollama out of the box instead
+  of colliding on Ollama's `11434`. `--port` (and `KRILL_PORT`) still
+  override the default; for a drop-in Ollama replacement, run with
+  `--port 11434`.
+
 ### Added
 
 - **Fused Q4-affine matmul probe (closed lever).** `KLMKernels.fusedQ4Gemv` - a

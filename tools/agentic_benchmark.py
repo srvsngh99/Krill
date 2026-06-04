@@ -19,8 +19,8 @@ Usage:
 """
 import argparse, json, statistics, threading, time, urllib.request
 
-KRILL = "http://127.0.0.1:11435"
-OLLAMA = "http://127.0.0.1:11434"
+KRILL = "http://127.0.0.1:57455"   # KrillLM default ("KRILL" on a keypad)
+OLLAMA = "http://127.0.0.1:11434"  # Ollama default
 
 CONTEXT_UNIT = (
     "KrillLM is a native Swift and MLX inference engine for Apple Silicon. It "

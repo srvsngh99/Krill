@@ -37,7 +37,7 @@ public final class KLMServer: Sendable {
     private let defaultContextLimit: Int?
     private let genQueue: GenerationQueue
 
-    public init(host: String = "127.0.0.1", port: Int = 11434,
+    public init(host: String = "127.0.0.1", port: Int = 57455,
                 compat: CompatMode = .both,
                 engines: EngineRegistry, activeRef: ActiveEngineRef,
                 fallbackEngine: InferenceEngine, registry: Registry,
@@ -114,8 +114,10 @@ public final class KLMServer: Sendable {
         if compat.ollamaEnabled {
             print("Ollama API: http://\(host):\(port)/api/chat")
         }
-        if port == 11435 {
-            print("Note: 11435 was the pre-0.4.0 default and is deprecated; it still works for one release. The default is now 11434 (the Ollama port), so you can drop --port 11435 for a zero-config Ollama drop-in.")
+        if port == 57455 {
+            print("Tip: 57455 is KrillLM's default port (\"KRILL\" on a keypad); it coexists with Ollama on 11434. For a drop-in Ollama replacement, run with --port 11434 (or set OLLAMA_HOST).")
+        } else if port == 11434 {
+            print("Note: 11434 is Ollama's default port; if Ollama is running this will conflict. KrillLM's own default is 57455.")
         }
         print("Press Ctrl+C to stop.")
 
