@@ -129,21 +129,33 @@ Ollama-compat handlers route audio through `BatchScheduler.submit` → serial �
   (it already works on OpenAI `/v1/chat/completions`). Tracked and fixed under
   **#5** below.
 
-## 2. [Comparison caveat / opportunity] Ollama `gemma4:e2b` returns EMPTY multimodal output
+## 2. [RESOLVED] Vision comparison broadened to a model Ollama renders
 
-**Severity: medium** (makes our Gemma-4 multimodal win look one-sided; verify it's
-real and broaden coverage so the benchmark is unimpeachable).
+**Done.** Ollama 0.24 `gemma4:e2b` processes the image AND audio (prefill tokens
+rise to ~289 / ~120) but emits **empty content** for both vision and voice, on
+`/api/generate` and `/api/chat`, at multiple `num_predict`. That makes a
+Gemma-4-only vision comparison look one-sided. This is a Gemma-4n-specific quirk
+in Ollama, not a general Ollama-vision failure: its `qwen2.5vl` / `llava` paths
+answer fine.
 
-- Ollama 0.24 `gemma4:e2b` processes the image AND audio (prefill tokens rise to
-  ~289 / ~120) but emits **empty content** for both vision and voice, on
-  `/api/generate` and `/api/chat`, at multiple `num_predict`. KrillLM answers
-  correctly on the same weights.
-- This is a **Gemma-4n-specific quirk in Ollama**, not a general Ollama-vision
-  failure — Ollama's `qwen2.5vl` / `llava` paths answer fine.
-- **Action:** to make the vision comparison bulletproof, also benchmark a model
-  where Ollama vision WORKS (e.g. `qwen2.5vl:3b` vs KrillLM `Qwen2.5-VL-3B`) and
-  show KrillLM wins on *latency* there, not just "Ollama returns empty." That
-  removes the "you just picked a model Ollama is broken on" rebuttal.
+**Bulletproof comparison on a model Ollama renders** (red-box image, HOT, greedy,
+best-of-3 total latency):
+
+| | total latency | answer |
+|---|---|---|
+| KrillLM `Qwen2.5-VL-3B-Instruct-4bit` | 607 ms | correct (recognizes red) |
+| Ollama `qwen2.5vl:3b` | 660 ms | correct (NOT empty) |
+
+KrillLM is ~1.09x on single-stream total latency here - near parity, the same
+memory-bandwidth-bound story as text decode, with the dramatic multimodal win
+remaining the Gemma-4 correctness case (Ollama empty). The point is that the
+comparison now holds on a model where Ollama actually answers, removing the "you
+just picked a model Ollama is broken on" rebuttal.
+
+`tools/bench_suite.py` `bench_vision` now also flags EMPTY engine output
+explicitly (mirroring `bench_voice`) and prints a NOTE to re-run on a rendering
+model when the baseline returns nothing. Reproduce:
+`tools/bench_suite.py --krill-model Qwen2.5-VL-3B-Instruct-4bit --ollama-model qwen2.5vl:3b --image IMG.png`.
 
 ## 3. [RESOLVED - not reproducible; ambiguity hardened] Concurrency benchmark Ollama p99 TTFT
 

@@ -137,8 +137,22 @@ def bench_vision(a):
     kh, oh = hot(KRILL_URL, "/api/generate", kp), hot(OLLAMA_URL, "/api/generate", op)
     ka, _ = post(KRILL_URL, "/api/generate", kp)
     oa, _ = post(OLLAMA_URL, "/api/generate", op)
-    print(f"  HOT  KrillLM: total {kh['total_ms']} ms | answer {repr((ka.get('response') or '')[:60])}")
-    print(f"       Ollama : total {oh['total_ms']} ms | answer {repr((oa.get('response') or '')[:60])}")
+
+    # Flag empty output explicitly (mirrors bench_voice): Ollama's gemma4:e2b
+    # processes the image but emits no text, which makes a latency comparison on
+    # that model meaningless. Use a model where the OTHER engine actually answers
+    # (e.g. qwen2.5vl:3b vs Qwen2.5-VL-3B-Instruct-4bit) so the comparison is on
+    # latency, not "the baseline returned nothing".
+    def ans(b):
+        t = (b.get("response") or "").strip()
+        return repr(t[:60]) if t else "EMPTY OUTPUT (processed image, produced no text)"
+    print(f"  HOT  KrillLM: total {kh['total_ms']} ms | answer {ans(ka)}")
+    print(f"       Ollama : total {oh['total_ms']} ms | answer {ans(oa)}")
+    if not (oa.get("response") or "").strip():
+        print("       >> NOTE: Ollama returned empty for this model; the latency "
+              "ratio below is not a fair comparison. Re-run with a model Ollama "
+              "renders (e.g. --krill-model Qwen2.5-VL-3B-Instruct-4bit "
+              "--ollama-model qwen2.5vl:3b).")
     if kh['total_ms'] and oh['total_ms']:
         print(f"       >> total {oh['total_ms']/kh['total_ms']:.2f}x faster")
     kc = krill_cli_cold(a.krill_model, prompt, a.image_tokens, image=a.image, cwd=a.repo)
