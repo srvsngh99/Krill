@@ -95,6 +95,66 @@ public final class PrefixCache: @unchecked Sendable {
         }
     }
 
+    /// Look up the in-memory entry sharing the LONGEST common prefix with
+    /// `tokens` (fp16 only). Unlike `lookup`, this does not require the cached
+    /// tokens to equal the request exactly: it returns the entry whose tokens
+    /// share the most leading tokens with the request, so a long shared context
+    /// (system prompt + RAG docs + tool schema) reused across requests with
+    /// different tails is restored once and only the diverging suffix is
+    /// prefilled. The returned `prefixLength` is the shared length; the carried
+    /// KV tensors are the entry's FULL stored state, so the caller restores them
+    /// and then truncates the per-layer caches to `prefixLength`.
+    ///
+    /// Matches are constrained to the same `modelId` AND `mediaHash` as the
+    /// full-match key, so a partial hit can never serve KV conditioned on a
+    /// different model or a different image/audio context. Disk-hydrated entries
+    /// (empty `tokens`) are skipped: the persistent tier serves full hits only.
+    ///
+    /// Returns nil when no in-memory entry shares at least `minPrefixLength`
+    /// leading tokens.
+    public func lookupLongestPrefix(
+        tokens: [Int],
+        modelId: String,
+        mediaHash: String? = nil
+    ) -> PrefixCacheHit? {
+        guard tokens.count >= minPrefixLength else { return nil }
+        memoryLock.lock(); defer { memoryLock.unlock() }
+
+        var bestKey: String? = nil
+        var bestLen = 0
+        var bestKeys: [[MLXArray]] = []
+        var bestValues: [[MLXArray]] = []
+        let wantMedia = mediaHash ?? ""
+        for (key, entry) in memoryCache {
+            guard entry.modelId == modelId,
+                  (entry.mediaHash ?? "") == wantMedia,
+                  case let .fp16(keys, values) = entry.storage,
+                  !entry.tokens.isEmpty
+            else { continue }
+            let lcp = Self.commonPrefixLength(tokens, entry.tokens)
+            // A usable match shares at least `minPrefixLength` leading tokens.
+            // `lcp` is bounded by both token counts, so `lcp <= entry length`
+            // always holds and the caller's truncate(to: lcp) is in range.
+            if lcp >= minPrefixLength, lcp > bestLen {
+                bestLen = lcp
+                bestKey = key
+                bestKeys = keys
+                bestValues = values
+            }
+        }
+        guard let hitKey = bestKey else { return nil }
+        touchEntryLocked(hitKey)
+        return PrefixCacheHit(keys: bestKeys, values: bestValues, prefixLength: bestLen)
+    }
+
+    /// Number of leading tokens `a` and `b` share.
+    static func commonPrefixLength(_ a: [Int], _ b: [Int]) -> Int {
+        let n = min(a.count, b.count)
+        var i = 0
+        while i < n, a[i] == b[i] { i += 1 }
+        return i
+    }
+
     private func scan<T>(
         tokens: [Int],
         modelId: String,
@@ -147,7 +207,12 @@ public final class PrefixCache: @unchecked Sendable {
         guard tokens.count >= minPrefixLength else { return }
 
         let key = cacheKey(tokens: tokens, modelId: modelId, mediaHash: mediaHash, dtype: .fp16)
-        let entry = MemoryCacheEntry(storage: .fp16(keys: keys, values: values))
+        // Retain the tokens + identity so a later request sharing this prefix can
+        // LCP-match it (see `lookupLongestPrefix`). The KV tensors are kept by the
+        // LRU regardless; the token array is a few KB of Ints on top.
+        let entry = MemoryCacheEntry(
+            storage: .fp16(keys: keys, values: values),
+            tokens: tokens, modelId: modelId, mediaHash: mediaHash)
 
         storeInMemory(key: key, entry: entry)
 
@@ -246,6 +311,17 @@ enum CachedStorage {
 
 struct MemoryCacheEntry {
     let storage: CachedStorage
+    /// The exact token prefix this entry's KV was computed under. Retained for
+    /// in-memory longest-common-prefix (LCP) matching so a request that SHARES
+    /// a prefix with this entry (same system prompt / context, different tail)
+    /// can reuse the prefix KV instead of re-prefilling it. Empty for entries
+    /// hydrated from disk (the disk tier serves full-match hits only).
+    var tokens: [Int] = []
+    /// Model + media identity the KV was conditioned under. LCP matches must
+    /// agree on both, exactly as the full-match hash key does, so a partial hit
+    /// can never serve KV from another model or another image/audio context.
+    var modelId: String = ""
+    var mediaHash: String? = nil
 }
 
 enum KVDtype: UInt8 {

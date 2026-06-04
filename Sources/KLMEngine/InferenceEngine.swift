@@ -969,6 +969,14 @@ public final class InferenceEngine: @unchecked Sendable {
             return parts.joined(separator: "|")
         }()
 
+        // Partial-prefix (shared-prefix) reuse forwards a suffix span against a
+        // restored prefix using `createCachedCausalMask`, a plain causal mask.
+        // That is correct for full-attention families but NOT for sliding-window
+        // attention (Gemma 4), whose banded mask over the restored prefix would
+        // differ. Restrict partial reuse to full-attention families; full-MATCH
+        // hits (a single re-forwarded token, no span mask) stay enabled for all.
+        let allowPartialPrefixReuse = (loadedModel.family != "gemma4")
+
         let stream = AsyncStream<TokenEvent> { continuation in
             Task { [statsHolder, captures] in
                 // Re-bind each Captures field to the closure-body
@@ -1008,12 +1016,11 @@ public final class InferenceEngine: @unchecked Sendable {
                 let int8Caches: [QuantizedKVCache]? = useInt8KV ? makeQuantizedKVCaches(numLayers: numLayers) : nil
                 let caches: [KVCacheProtocol] = useInt8KV ? int8Caches! : fp16Caches!
 
-                // -- Prefix Cache Lookup --
-                // Only accept FULL prefix hits (cached tokens == prompt tokens).
-                // Partial hits are unsafe: the causal mask is built for the new
-                // span length only, but attention keys include the restored prefix,
-                // causing shape mismatch or incorrect masking. Until cache-aware
-                // mask construction is implemented, we skip partial hits.
+                // -- Prefix Cache Lookup (full match) --
+                // A FULL hit (cached tokens == prompt tokens) restores the whole
+                // prompt's KV; the prefill below trims the last position and
+                // re-forwards one token for logits. A PARTIAL (shared-prefix) hit
+                // is handled separately just below.
                 if effectiveUsePrefixCache {
                     if let fp16Caches {
                         if let hit = capturedPrefixCache.lookup(
@@ -1045,11 +1052,39 @@ public final class InferenceEngine: @unchecked Sendable {
                     }
                 }
 
+                // -- Partial-prefix (shared-prefix) reuse --
+                // When there is no full hit, restore the longest cached prefix
+                // this request SHARES with a recent prefill (same system prompt /
+                // context, different tail) and prefill only the diverging suffix.
+                // This is the agentic/RAG and multi-turn-chat win: a long shared
+                // scaffold is prefilled once and reused across requests. Scoped to
+                // the fp16 cache and TEXT-only requests: `createCachedCausalMask`
+                // already builds the [suffix, prefix+suffix] mask and RoPE already
+                // applies the cache offset, so this is pure orchestration. Media
+                // requests are excluded so the multimodal encoder/placeholder path
+                // is never reached with a partially warm cache.
+                var partialReuseLen = 0
+                if effectiveUsePrefixCache, allowPartialPrefixReuse, !cacheHit,
+                   let fp16Caches,
+                   capturedImageData == nil, capturedAudioMel == nil,
+                   let hit = capturedPrefixCache.lookupLongestPrefix(
+                       tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash
+                   ), !hit.keys.isEmpty, hit.prefixLength <= promptTokens.count {
+                    for (i, cache) in fp16Caches.enumerated() {
+                        if i < hit.keys.count, let k = hit.keys[i].first,
+                           i < hit.values.count, let v = hit.values[i].first {
+                            cache.restore(keys: k, values: v)
+                        }
+                    }
+                    partialReuseLen = hit.prefixLength
+                }
+
                 // -- Prefill --
                 // On a full cache hit we already have KV for the entire prompt.
                 // We truncate the last position and re-forward that single token
-                // to get logits without duplicating a KV entry.
-                // On a miss we forward the entire prompt normally.
+                // to get logits without duplicating a KV entry. On a partial hit
+                // we keep the shared prefix and forward only the suffix. On a miss
+                // we forward the entire prompt normally.
                 let tokensToProcess: [Int]
                 if cacheHit {
                     let trimmedLength = max(0, promptTokens.count - 1)
@@ -1059,6 +1094,13 @@ public final class InferenceEngine: @unchecked Sendable {
                         for cache in int8Caches { cache.truncate(to: trimmedLength) }
                     }
                     tokensToProcess = [promptTokens.last!]
+                } else if partialReuseLen > 0, let fp16Caches {
+                    // Keep exactly the shared prefix (clamped so at least one
+                    // token is always forwarded for logits), then prefill the
+                    // remaining suffix against it.
+                    let keep = min(partialReuseLen, promptTokens.count - 1)
+                    for cache in fp16Caches { cache.truncate(to: keep) }
+                    tokensToProcess = Array(promptTokens[keep...])
                 } else {
                     tokensToProcess = promptTokens
                 }
