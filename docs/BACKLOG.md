@@ -7,6 +7,33 @@ the in-repo companion to the owner's out-of-repo board
 
 ---
 
+## Gemma 4 partial-prefix (shared-prefix) KV reuse
+
+**Status:** OPEN (surfaced 2026-06-04 by the agentic/RAG prefix-cache work, PRs
+#148 serial / #151 concurrent batched).
+
+Shared-prefix (longest-common-prefix) KV reuse is bit-exact for standard
+per-layer caches (Llama, Qwen, Mistral, Phi, dense MoE) but is **excluded for
+Gemma 4** (`InferenceEngine.swift:984` serial, `:2012` batched:
+`family != "gemma4"`). The exclusion is **verified necessary**: temporarily
+enabling it reuses (prefill 403 ms -> 10 ms) but produces **different greedy
+output than a cold prefill** (non-bit-exact), so the naive gate flip ships WRONG
+answers. Consequence: on a Gemma-4 agentic/RAG workload Ollama's prefix cache
+currently wins (it caches the shared context; KrillLM re-prefills it). Full-MATCH
+reuse still works for Gemma 4.
+
+Prime suspect: Gemma 4's cross-layer KV sharing (`num_kv_shared_layers`) - shared
+layers reuse a donor layer's K/V and derive their RoPE offset from the donor
+cache length AFTER the donor appended the suffix (`Gemma4Model.swift:~445`), so a
+multi-token suffix span is mis-rotated. Full-match (1-token re-forward) survives;
+the S>1 partial span does not.
+
+**Full plan + root-cause analysis + validation gates:**
+`~/.claude/plans/krillm-gemma4-partial-prefix-reuse-handoff.md`. Do not flip the
+gate without a byte-exact Gemma-4 reuse-vs-cold gate green.
+
+---
+
 ## Extract a shared MoE `SwitchGLU` / `QuantizedSwitchedLinear` module
 
 **Status:** DONE — `Sources/KLMCore/MoESwitchGLU.swift` (`MoEQuantizedSwitchedLinear`
