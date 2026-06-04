@@ -442,7 +442,26 @@ class Gemma4Attention: Module {
         // Always compute Q
         var q = qProj(x).reshaped(B, L, numHeads, layerHeadDim).transposed(0, 2, 1, 3)
         q = qNorm(q)
-        let offset = cache?.sequenceLength ?? (sharedCache?.sequenceLength ?? 0)
+        // RoPE position base for Q. A KV-shared layer holds an empty OWN cache
+        // (it reuses the donor's K/V), so `cache.sequenceLength` is 0 — which
+        // rotates this span's first token at position 0. That is only correct
+        // when the span actually STARTS at position 0, i.e. a cold full-prompt
+        // prefill (where base 0 == true positions) or a single-token decode
+        // step (left on the legacy path). For a multi-token PARTIAL-PREFIX
+        // resume the span is the diverging SUFFIX at true positions
+        // [LCP, count): the donor (a non-shared layer that ran earlier this
+        // same forward) already appended this L-token span to its cache, so
+        // its post-update length is LCP + L. Subtracting L recovers the span
+        // base LCP, so the suffix Q rotates at its true positions and aligns
+        // with the donor's restored K (which were rotated at 0..count-1).
+        // Cold prefill: donorLen == L -> base 0 (unchanged). This branch only
+        // changes behavior when a non-empty donor span is resumed (L > 1).
+        let offset: Int
+        if L > 1, let donorLen = sharedCache?.sequenceLength, donorLen > L {
+            offset = donorLen - L
+        } else {
+            offset = cache?.sequenceLength ?? (sharedCache?.sequenceLength ?? 0)
+        }
         if let rowOffsets {
             q = applyRoPEPerRow(q, offsets: rowOffsets)
         } else {

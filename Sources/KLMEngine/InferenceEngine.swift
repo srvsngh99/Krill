@@ -969,20 +969,6 @@ public final class InferenceEngine: @unchecked Sendable {
             return parts.joined(separator: "|")
         }()
 
-        // Partial-prefix (shared-prefix) reuse restores a cached prefix and
-        // forwards only the diverging suffix against it, over the standard
-        // per-layer fp16 cache. Gemma 4 is excluded: it uses a non-standard KV
-        // cache (cross-layer KV sharing, where a trailing run of layers reuses a
-        // donor layer's K/V and holds empty placeholder caches, plus a dual
-        // head_dim). Restore-truncate-then-suffix-forward over that layout is not
-        // yet validated, so partial reuse is withheld there out of caution.
-        // Full-MATCH hits (a single re-forwarded token) already handle that
-        // layout and stay enabled for every family. (Note: Gemma 4 carries a
-        // sliding-window config but its KrillLM forward applies a plain causal
-        // mask like the others, so the mask is not the blocker; the KV-sharing
-        // layout is.)
-        let allowPartialPrefixReuse = (loadedModel.family != "gemma4")
-
         let stream = AsyncStream<TokenEvent> { continuation in
             Task { [statsHolder, captures] in
                 // Re-bind each Captures field to the closure-body
@@ -1070,8 +1056,17 @@ public final class InferenceEngine: @unchecked Sendable {
                 // `mediaHash == nil` gate is exactly "no image AND no audio" (see
                 // its construction above), so the multimodal encoder/placeholder
                 // path is never reached with a partially warm cache.
+                //
+                // Gemma 4 participates here too: its cross-layer KV sharing only
+                // needed the shared layers to rotate the suffix Q at its TRUE
+                // positions [LCP, count) instead of their empty-cache offset 0,
+                // which `Gemma4Attention` now does for a multi-token resume. The
+                // `let fp16Caches` binding scopes this to the default fp16 serial
+                // path; the int8-KV serial path (fp16Caches == nil) and the
+                // concurrent batched path still exclude Gemma 4 partial reuse
+                // (separate follow-ups — see docs/BACKLOG.md).
                 var partialReuseLen = 0
-                if effectiveUsePrefixCache, allowPartialPrefixReuse, !cacheHit,
+                if effectiveUsePrefixCache, !cacheHit,
                    let fp16Caches, mediaHash == nil,
                    let hit = capturedPrefixCache.lookupLongestPrefix(
                        tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash

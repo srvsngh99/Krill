@@ -3,32 +3,38 @@ import Foundation
 @testable import KLMEngine
 
 /// Live, env-gated correctness gate for partial-prefix (shared-prefix) KV reuse
-/// (BENCHMARK_ISSUES #0). A request that shares a long prefix with a recent
-/// prefill but diverges in the tail must:
-///   1. produce output BYTE-IDENTICAL to a cold full prefill (greedy), and
-///   2. prefill materially faster (only the diverging suffix is forwarded).
+/// on **Gemma 4** — the case the dense `PrefixCachePartialReuseLiveTests` does
+/// not cover.
 ///
-/// Set `KLM_TEXT_MODEL_PATH` to a standard per-layer-cache text checkpoint
-/// (e.g. qwen2.5-3b). Gemma 4 has its own variant
-/// (`Gemma4PartialReuseLiveTests`, env `KLM_GEMMA4_MODEL_PATH`) because its
-/// cross-layer KV sharing needs the shared-layer suffix-Q RoPE fix.
-final class PrefixCachePartialReuseLiveTests: XCTestCase {
+/// Gemma 4 uses cross-layer KV sharing: a trailing run of layers reuses a donor
+/// layer's accumulated K/V and keeps an empty own cache, so a naive suffix
+/// forward rotates the shared layers' Q at offset 0 (correct only for a cold
+/// full prefill that starts at position 0). For a partial-prefix RESUME the
+/// suffix must be rotated at its TRUE positions [LCP, count); `Gemma4Attention`
+/// derives that base from the donor's post-update length. This test pins the
+/// invariant: a shared-prefix request must decode BYTE-IDENTICALLY to a cold
+/// full prefill, and prefill far faster.
+///
+/// Set `KLM_GEMMA4_MODEL_PATH` to a Gemma 4 checkpoint (e.g. gemma-4-e2b).
+/// Runs on the default fp16 serial KV path (do not set KRILL_KV_CACHE_DTYPE).
+final class Gemma4PartialReuseLiveTests: XCTestCase {
 
     private func modelDir() throws -> URL {
-        guard let path = ProcessInfo.processInfo.environment["KLM_TEXT_MODEL_PATH"],
+        guard let path = ProcessInfo.processInfo.environment["KLM_GEMMA4_MODEL_PATH"],
               !path.isEmpty else {
-            throw XCTSkip("KLM_TEXT_MODEL_PATH not set")
+            throw XCTSkip("KLM_GEMMA4_MODEL_PATH not set")
         }
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
               isDir.boolValue else {
-            throw XCTSkip("KLM_TEXT_MODEL_PATH is not a directory: \(path)")
+            throw XCTSkip("KLM_GEMMA4_MODEL_PATH is not a directory: \(path)")
         }
         return URL(fileURLWithPath: path, isDirectory: true)
     }
 
     /// A long shared scaffold (system prompt + reused context) followed by a
-    /// short varying question - the agentic/RAG shape.
+    /// short varying question — the agentic/RAG shape that drives a long
+    /// shared-prefix suffix forward through the KV-shared layers.
     private let sharedPrefix =
         "You are an expert assistant. "
         + String(repeating: "Here is reference context reused across many queries. ", count: 40)
@@ -48,7 +54,7 @@ final class PrefixCachePartialReuseLiveTests: XCTestCase {
         return (out, getStats()?.prefillTime ?? 0)
     }
 
-    func testPartialReuseIsBitExactAndFaster() async throws {
+    func testGemma4PartialReuseIsBitExactAndFaster() async throws {
         let dir = try modelDir()
 
         // Cold engine: never sees the shared prefix before this question, so it
@@ -59,7 +65,8 @@ final class PrefixCachePartialReuseLiveTests: XCTestCase {
 
         // Warm engine: prime the shared prefix with a DIFFERENT question, then
         // ask the same question as the cold engine. The second call shares the
-        // whole scaffold and must reuse it (suffix-only prefill).
+        // whole scaffold and must reuse it (suffix-only prefill across the
+        // KV-shared layers).
         let warm = InferenceEngine(modelDirectory: dir)
         try await warm.load()
         _ = await run(warm, "Question: Say hello.")
@@ -68,11 +75,9 @@ final class PrefixCachePartialReuseLiveTests: XCTestCase {
         XCTAssertFalse(baseline.text.isEmpty, "baseline produced no output")
         XCTAssertEqual(
             reused.text, baseline.text,
-            "partial-prefix reuse must be byte-identical to a cold full prefill "
-            + "(greedy); a mismatch means the restored prefix / suffix mask is wrong")
-        // The reused prefill forwards only the short suffix, so it is far cheaper
-        // than the cold full prefill of the ~500-token scaffold. Generous bound
-        // (half) to stay robust across machines while still proving reuse engaged.
+            "Gemma 4 partial-prefix reuse must be byte-identical to a cold full "
+            + "prefill (greedy); a mismatch means the shared-layer suffix-Q RoPE "
+            + "offset is wrong (the divergence the offset-0 path produced)")
         XCTAssertLessThan(
             reused.prefill, baseline.prefill * 0.5,
             "reused prefill (\(reused.prefill)s) should be far below the cold "
