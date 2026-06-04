@@ -41,9 +41,14 @@ attention infra already supported it: `createCachedCausalMask(newLen:cacheLen:)`
 builds the `[suffix, prefix+suffix]` mask and RoPE already applies the cache
 offset, so this is an orchestration change in `InferenceEngine` plus a
 `PrefixCache.lookupLongestPrefix`. Scoped to the fp16 cache and TEXT-only
-requests, and to families with the standard per-layer cache (Gemma 4 is excluded
-because of its cross-layer KV-sharing cache layout, not a mask difference;
-full-match hits stay enabled for it). Multi-turn chat benefits too:
+requests, and to families with the standard per-layer cache. **Gemma 4 was
+initially excluded** (its cross-layer KV-sharing layout, not a mask difference)
+**but is now supported on the serial fp16 path** — the shared layers needed only
+to rotate the suffix Q at its true positions `[LCP, count)` instead of their
+empty-cache offset 0 (`Gemma4Attention`; gated by `Gemma4PartialReuseLiveTests`,
+byte-exact vs cold). gemma-4-e2b shared-prefix prefill drops 1001 ms → 158 ms.
+The int8-KV serial path and the concurrent batched path still exclude Gemma 4
+(see docs/BACKLOG.md). Multi-turn chat benefits too:
 each turn stores its full prompt, so the next turn reuses the whole prior turn.
 
 Measured after the fix (shared prefix + DIFFERENT tail):
