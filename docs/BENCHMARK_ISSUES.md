@@ -152,21 +152,20 @@ claims and we currently can't quote it fresh).
   reported timings. KrillLM agg throughput at N=8 was 1.83x; the TTFT axis is the
   more dramatic one and should be quantified.
 
-## 4. [Model-bound, document] Multi-step agentic tool-call decision is flaky on 3B models
+## 4. [Partly addressed via #6, otherwise model-bound] Multi-step agentic tool-call decision on 3B models
 
 **Severity: low** (not an engine bug; affects the "agentic superiority" narrative).
 
-- On a 2-tool agentic prompt ("weather in Tokyo, in Fahrenheit" → get_weather →
-  convert), BOTH engines were inconsistent on small models: gemma4-e2b (KrillLM
-  made calls + reached correct 77°F but hallucinated the first tool name;
-  Ollama made zero calls); qwen2.5-3b (Ollama called correctly, KrillLM declined
-  on that exact prompt although it calls correctly when prompted directly).
-- Single-shot tool calling is **4/4 valid+exact on BOTH** for qwen2.5-3b, so the
-  parsing/format is fine — it's the small model's *decision* that's prompt-sensitive.
-- **Action:** for a clean agentic demo, use a stronger tool caller (Qwen2.5-7B/14B,
-  Llama-3.1-8B) and/or document the prompt-sensitivity. Consider whether KrillLM's
-  chat-template / tool-system-prompt differs from Ollama's in a way that changes
-  the call decision (see #6).
+- On a 2-tool agentic prompt ("weather in Tokyo, in Fahrenheit" -> get_weather ->
+  convert), small models are decision-sensitive. Part of the qwen2.5-3b
+  divergence was a KrillLM tool-prompt mismatch, now fixed (see #6): with the
+  official Qwen tool format, qwen2.5-3b picks the correct first call
+  (`get_weather`) on these prompts where the old generic prompt jumped straight
+  to the converter.
+- Single-shot tool calling is **4/4 valid+exact on BOTH** for qwen2.5-3b; the
+  residual flakiness is the tiny model's reasoning, not the format.
+- **Remaining guidance:** for a clean agentic demo, prefer a stronger tool caller
+  (Qwen2.5-7B/14B, Llama-3.1-8B). The format-level divergence is closed by #6.
 
 ## 5. [RESOLVED] `/api/chat` now accepts the OpenAI content-block array form
 
@@ -189,17 +188,32 @@ prompt_eval_count 110 + exact transcript; `image_url` block -> prompt_eval_count
 in #1. Gated by `MultimodalEndpointsTests` (content-block accept + the two
 rejection cases).
 
-## 6. [Investigate] Same-weights tool-call *decision* differs KrillLM vs Ollama
+## 6. [RESOLVED] Tool-call *decision* divergence was a tool-prompt mismatch on Qwen
 
-**Severity: low** (subtle; could be chat-template or tool-prompt formatting).
+**Root cause found and fixed.** For Qwen 2.5/3, KrillLM was injecting a generic
+Hermes tool prompt ("You can call tools. The available tools are listed as JSON
+schemas...") instead of the **official Qwen tool block the model was fine-tuned
+on** - the chat template's `# Tools` section with the schemas inside
+`<tools></tools>` XML tags. swift-transformers drops the `tools` Jinja variable,
+so KrillLM has to reproduce that block as message text (the Llama and Mistral
+paths already do this for their families); the Qwen path was still on the
+generic prompt. Ollama renders the official block, so the two engines were
+feeding the model materially different tool instructions, which can flip a
+borderline call decision.
 
-- On one agentic prompt, Ollama qwen2.5:3b chose to call `get_weather` while
-  KrillLM qwen2.5-3b returned plain text (no call), with identical weights, greedy.
-  Different tool/chat-template rendering between the two engines can flip the
-  model's decision.
-- **Action:** diff KrillLM's rendered tool prompt (the actual token stream sent to
-  the model) against Ollama's for the same request, and align if KrillLM's is
-  weaker at eliciting calls.
+**Fix:** a dedicated `injectQwen` reproduces the official `# Tools` / `<tools>`
+block verbatim (the call/result sentinels are unchanged - they already match the
+Hermes convention, so the parser is untouched). Demonstrated effect on
+qwen2.5-3b, 2-tool agentic prompts, greedy:
+
+| prompt | old (generic Hermes) | new (official Qwen) |
+|---|---|---|
+| "weather in Tokyo, in Fahrenheit" | `celsius_to_fahrenheit` (wrong: nothing to convert yet) | `get_weather` (correct first step) |
+| "How hot is it in Dubai right now in Fahrenheit?" | `celsius_to_fahrenheit` | `get_weather` |
+
+Direct single-tool prompts stayed 4/4 (no regression). Gated by
+`ServerTests.testQwenInjectionMirrorsOfficialTemplate` /
+`testQwenInjectionAddsSystemTurnWhenAbsent`.
 
 ---
 
