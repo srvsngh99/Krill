@@ -131,7 +131,7 @@ Mistral, Phi, dense MoE) but NOT for Gemma 4's cross-layer KV-sharing layout
 (verified: it reuses but produces different output), so Gemma 4 keeps full-match
 reuse only. On a Gemma-4 agentic workload Ollama's prefix cache currently wins;
 the other families are at parity. Giving Gemma 4 correct partial reuse is a
-tracked follow-up.
+tracked follow-up (`docs/BACKLOG.md`).
 
 ---
 

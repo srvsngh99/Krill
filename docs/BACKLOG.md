@@ -7,6 +7,43 @@ the in-repo companion to the owner's out-of-repo board
 
 ---
 
+## Gemma 4 partial-prefix (shared-prefix) KV reuse
+
+**Status:** OPEN (surfaced 2026-06-04 by the agentic/RAG prefix-cache work, PRs
+#148 serial / #151 concurrent batched).
+
+Shared-prefix (longest-common-prefix) KV reuse is bit-exact for standard
+per-layer caches (Llama, Qwen, Mistral, Phi, dense MoE) but is **excluded for
+Gemma 4** (`InferenceEngine.swift:984` serial, `:2012` batched:
+`family != "gemma4"`). The exclusion is **verified necessary**: temporarily
+enabling it reuses (prefill 403 ms -> 10 ms) but produces **different greedy
+output than a cold prefill** (non-bit-exact), so the naive gate flip ships WRONG
+answers. Consequence: on a Gemma-4 agentic/RAG workload Ollama's prefix cache
+currently wins (it caches the shared context; KrillLM re-prefills it). Full-MATCH
+reuse still works for Gemma 4.
+
+Prime suspect: Gemma 4's cross-layer KV sharing (`num_kv_shared_layers`). On the
+production path a shared layer is called with its OWN (empty) cache as `cache:`
+plus the donor as `sharedCache:` (`Gemma4Model.swift:1037-1040`), so the
+attention offset `cache?.sequenceLength ?? (sharedCache?.sequenceLength ?? 0)`
+(`:445`) resolves to the shared layer's OWN length = 0 (the `sharedCache`
+fallback is dead code on this path). A shared layer therefore rotates its Q from
+offset 0. That is consistent in a COLD prefill (the shared layer processes the
+whole `[0..N)` span from 0, matching the donor's true K positions), but in
+PARTIAL reuse the shared layer forwards only the SUFFIX span yet still starts at
+offset 0, so the suffix Q positions do not line up with the restored donor K at
+true positions -> RoPE mismatch -> divergent output. Open puzzle to resolve with
+instrumentation: full-MATCH (1-token re-forward) survives this same offset-0
+shared-layer path, so the next session should log per-layer (offset, span) for
+shared vs donor layers, partial vs cold, and fix the shared-layer suffix offset
+to match the donor (base = restored prefix length).
+
+**Full plan + root-cause analysis + validation gates:**
+`~/.claude/plans/krillm-gemma4-partial-prefix-reuse-handoff.md`. Do not flip the
+gate without a byte-exact Gemma-4 reuse-vs-cold gate green.
+
+---
+
 ## Extract a shared MoE `SwitchGLU` / `QuantizedSwitchedLinear` module
 
 **Status:** DONE — `Sources/KLMCore/MoESwitchGLU.swift` (`MoEQuantizedSwitchedLinear`
