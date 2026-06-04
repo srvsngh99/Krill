@@ -17,8 +17,8 @@ Examples:
     # KrillLM server with n-gram + batching enabled vs Ollama daemon
     KRILL_NUM_PARALLEL=16 KRILL_NGRAM_SPEC=1 krillm serve &   # (started separately)
     python3 tools/krillm_concurrent_benchmark.py \
-        --krillm-url http://127.0.0.1:11434 --krill-model llama-3.2-3b \
-        --ollama-host http://127.0.0.1:11435 --ollama-model llama3.2:3b \
+        --krillm-url http://127.0.0.1:57455 --krill-model llama-3.2-3b \
+        --ollama-host http://127.0.0.1:11434 --ollama-model llama3.2:3b \
         --concurrency-sweep 1,2,4,8,16 --max-tokens 128
 
     # Baseline arm labeling (run twice against servers launched with
@@ -77,9 +77,9 @@ DEFAULT_PROMPTS = [
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--krillm-url", help="KrillLM server base URL (e.g. http://127.0.0.1:11434).")
+    p.add_argument("--krillm-url", help="KrillLM server base URL (e.g. http://127.0.0.1:57455).")
     p.add_argument("--krill-model", default="llama-3.2-3b", help="KrillLM model name.")
-    p.add_argument("--ollama-host", help="Ollama API base URL (e.g. http://127.0.0.1:11435).")
+    p.add_argument("--ollama-host", help="Ollama API base URL (e.g. http://127.0.0.1:11434).")
     p.add_argument("--ollama-model", default="llama3.2:3b", help="Ollama model name.")
     p.add_argument("--concurrency-sweep", default="1,2,4,8,16",
                    help="Comma-separated concurrency levels to sweep.")

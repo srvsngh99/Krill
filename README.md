@@ -68,10 +68,10 @@ For fair warm-server-vs-warm-server comparison (no CLI process startup overhead)
 
 ```bash
 # Start KrillLM server
-krillm serve --model llama-3.2-1b --port 11434
+krillm serve --model llama-3.2-1b --port 57455
 
 # In another terminal
-make bench-compare KRILLM_URL=http://127.0.0.1:11434
+make bench-compare KRILLM_URL=http://127.0.0.1:57455
 ```
 
 ### Release benchmark gate
@@ -158,10 +158,9 @@ krillm run llama-3.2-3b
 
 # Start API server (OpenAI + Ollama compatible)
 krillm serve --model llama-3.2-3b
-# Then: curl http://localhost:11434/v1/chat/completions ...
-# Default port is 11434 -- the same port stock Ollama uses -- so
-# existing Ollama clients work with no config change. The old default
-# 11435 still works for one release: pass --port 11435 or KRILL_PORT=11435.
+# Then: curl http://localhost:57455/v1/chat/completions ...
+# Default port is 57455 (unique; coexists with Ollama on 11434). For a
+# drop-in Ollama replacement, run with --port 11434.
 
 # Native synthetic-token benchmark
 krillm bench llama-3.2-3b
@@ -200,11 +199,11 @@ krillm pull mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 
 ### Speed up CLI with a background daemon
 
-`krillm run "<prompt>"` reloads the model on every invocation. Run `krillm serve` in the background once and subsequent `krillm run` calls detect it (probes `/v1/status` on `$KRILL_PORT` or 11434), route through `/v1/chat/completions`, and skip the per-call model load entirely. TTFT drops from seconds to tens of milliseconds.
+`krillm run "<prompt>"` reloads the model on every invocation. Run `krillm serve` in the background once and subsequent `krillm run` calls detect it (probes `/v1/status` on `$KRILL_PORT` or 57455), route through `/v1/chat/completions`, and skip the per-call model load entirely. TTFT drops from seconds to tens of milliseconds.
 
 ```bash
 KRILL_KEEP_ALIVE=24h krillm serve --model qwen2.5-3b &
-krillm run qwen2.5-3b "hi"   # auto-routed; prints "(via daemon @ :11434)"
+krillm run qwen2.5-3b "hi"   # auto-routed; prints "(via daemon @ :57455)"
 ```
 
 Text-only single-shot requests are routed; `--image`, `--audio`, `--draft-model`, models with Modelfile overrides, and the interactive REPL still run in-process. Set `KRILL_NO_AUTO_DAEMON=1` to force in-process behavior.
@@ -229,7 +228,7 @@ krillm run gemma-4-e2b "Transcribe this audio." --audio ./clip.wav --max-tokens 
 
 ## API Compatibility
 
-KrillLM serves on port 11434 (configurable) with all of:
+KrillLM serves on port 57455 (configurable) with all of:
 
 - **OpenAI API**: `POST /v1/chat/completions` (SSE streaming), `POST /v1/completions`, `GET /v1/models`
 - **Ollama API**: `POST /api/chat`, `POST /api/generate`, `GET /api/tags`
@@ -239,14 +238,14 @@ Drop-in replacement -- just change the port in your client config.
 
 ### Use with existing SDKs
 
-Start `krillm serve --model <name>` once. Then point your SDK at the right base URL: OpenAI-family clients (openai, langchain-openai, llama-index) use `http://localhost:11434/v1`, since their SDKs append paths like `/chat/completions` directly. The Anthropic SDK is the exception -- it appends its own `/v1/messages`, so it takes `http://localhost:11434` without the trailing `/v1`. All four snippets below are verified end-to-end against the running daemon.
+Start `krillm serve --model <name>` once. Then point your SDK at the right base URL: OpenAI-family clients (openai, langchain-openai, llama-index) use `http://localhost:57455/v1`, since their SDKs append paths like `/chat/completions` directly. The Anthropic SDK is the exception -- it appends its own `/v1/messages`, so it takes `http://localhost:57455` without the trailing `/v1`. All four snippets below are verified end-to-end against the running daemon.
 
 **OpenAI Python SDK:**
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://localhost:11434/v1", api_key="not-used")
+client = OpenAI(base_url="http://localhost:57455/v1", api_key="not-used")
 resp = client.chat.completions.create(
     model="llama-3.2-1b",
     messages=[{"role": "user", "content": "hi"}],
@@ -260,7 +259,7 @@ print(resp.choices[0].message.content)
 from langchain_openai import ChatOpenAI
 
 llm = ChatOpenAI(
-    base_url="http://localhost:11434/v1",
+    base_url="http://localhost:57455/v1",
     api_key="not-used",
     model="llama-3.2-1b",
 )
@@ -274,7 +273,7 @@ from llama_index.llms.openai_like import OpenAILike
 
 llm = OpenAILike(
     model="llama-3.2-1b",
-    api_base="http://localhost:11434/v1",
+    api_base="http://localhost:57455/v1",
     api_key="not-used",
     is_chat_model=True,
 )
@@ -286,7 +285,7 @@ print(llm.complete("hi").text)
 ```python
 from anthropic import Anthropic
 
-client = Anthropic(base_url="http://localhost:11434", api_key="not-used")
+client = Anthropic(base_url="http://localhost:57455", api_key="not-used")
 resp = client.messages.create(
     model="llama-3.2-1b",
     max_tokens=64,
@@ -319,7 +318,7 @@ KLMTokenizer     swift-transformers tokenizer wrapper
 
 # Environment variables
 KRILL_DEFAULT_MODEL=llama-3.2-3b
-KRILL_PORT=11434
+KRILL_PORT=57455
 KRILL_KV_CACHE_DTYPE=fp16
 ```
 
