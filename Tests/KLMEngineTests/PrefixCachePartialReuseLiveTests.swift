@@ -27,7 +27,7 @@ final class PrefixCachePartialReuseLiveTests: XCTestCase {
     }
 
     /// A long shared scaffold (system prompt + reused context) followed by a
-    /// short varying question — the agentic/RAG shape.
+    /// short varying question - the agentic/RAG shape.
     private let sharedPrefix =
         "You are an expert assistant. "
         + String(repeating: "Here is reference context reused across many queries. ", count: 40)

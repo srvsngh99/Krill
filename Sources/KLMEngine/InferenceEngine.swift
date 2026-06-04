@@ -969,12 +969,18 @@ public final class InferenceEngine: @unchecked Sendable {
             return parts.joined(separator: "|")
         }()
 
-        // Partial-prefix (shared-prefix) reuse forwards a suffix span against a
-        // restored prefix using `createCachedCausalMask`, a plain causal mask.
-        // That is correct for full-attention families but NOT for sliding-window
-        // attention (Gemma 4), whose banded mask over the restored prefix would
-        // differ. Restrict partial reuse to full-attention families; full-MATCH
-        // hits (a single re-forwarded token, no span mask) stay enabled for all.
+        // Partial-prefix (shared-prefix) reuse restores a cached prefix and
+        // forwards only the diverging suffix against it, over the standard
+        // per-layer fp16 cache. Gemma 4 is excluded: it uses a non-standard KV
+        // cache (cross-layer KV sharing, where a trailing run of layers reuses a
+        // donor layer's K/V and holds empty placeholder caches, plus a dual
+        // head_dim). Restore-truncate-then-suffix-forward over that layout is not
+        // yet validated, so partial reuse is withheld there out of caution.
+        // Full-MATCH hits (a single re-forwarded token) already handle that
+        // layout and stay enabled for every family. (Note: Gemma 4 carries a
+        // sliding-window config but its KrillLM forward applies a plain causal
+        // mask like the others, so the mask is not the blocker; the KV-sharing
+        // layout is.)
         let allowPartialPrefixReuse = (loadedModel.family != "gemma4")
 
         let stream = AsyncStream<TokenEvent> { continuation in
@@ -1060,13 +1066,13 @@ public final class InferenceEngine: @unchecked Sendable {
                 // scaffold is prefilled once and reused across requests. Scoped to
                 // the fp16 cache and TEXT-only requests: `createCachedCausalMask`
                 // already builds the [suffix, prefix+suffix] mask and RoPE already
-                // applies the cache offset, so this is pure orchestration. Media
-                // requests are excluded so the multimodal encoder/placeholder path
-                // is never reached with a partially warm cache.
+                // applies the cache offset, so this is pure orchestration. The
+                // `mediaHash == nil` gate is exactly "no image AND no audio" (see
+                // its construction above), so the multimodal encoder/placeholder
+                // path is never reached with a partially warm cache.
                 var partialReuseLen = 0
                 if effectiveUsePrefixCache, allowPartialPrefixReuse, !cacheHit,
-                   let fp16Caches,
-                   capturedImageData == nil, capturedAudioMel == nil,
+                   let fp16Caches, mediaHash == nil,
                    let hit = capturedPrefixCache.lookupLongestPrefix(
                        tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash
                    ), !hit.keys.isEmpty, hit.prefixLength <= promptTokens.count {

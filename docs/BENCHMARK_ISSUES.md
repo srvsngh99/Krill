@@ -41,8 +41,9 @@ attention infra already supported it: `createCachedCausalMask(newLen:cacheLen:)`
 builds the `[suffix, prefix+suffix]` mask and RoPE already applies the cache
 offset, so this is an orchestration change in `InferenceEngine` plus a
 `PrefixCache.lookupLongestPrefix`. Scoped to the fp16 cache and TEXT-only
-requests, and to full-attention families (Gemma 4's sliding-window mask is
-excluded; full-match hits stay enabled for it). Multi-turn chat benefits too:
+requests, and to families with the standard per-layer cache (Gemma 4 is excluded
+because of its cross-layer KV-sharing cache layout, not a mask difference;
+full-match hits stay enabled for it). Multi-turn chat benefits too:
 each turn stores its full prompt, so the next turn reuses the whole prior turn.
 
 Measured after the fix (shared prefix + DIFFERENT tail):
