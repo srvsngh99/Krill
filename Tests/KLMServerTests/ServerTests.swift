@@ -1216,6 +1216,44 @@ final class ServerTests: XCTestCase {
         })
     }
 
+    func testQwenInjectionMirrorsOfficialTemplate() {
+        let spec = ServerToolSpec(name: "get_weather", description: "Get weather",
+                                  parametersJSON: "{\"type\":\"object\"}")
+        // With an existing system message: the official `# Tools` block is
+        // appended to it (not a foreign Hermes instruction).
+        let out = ToolCalling.injectToolSystem(
+            into: [["role": "system", "content": "Be nice."],
+                   ["role": "user", "content": "weather in Tokyo?"]],
+            tools: [spec], format: .qwen)
+        XCTAssertEqual(out.first?["role"], "system")
+        let sys = out.first?["content"] ?? ""
+        XCTAssertTrue(sys.hasPrefix("Be nice."), "original system is preserved")
+        XCTAssertTrue(sys.contains("# Tools"), "official tool block header present")
+        XCTAssertTrue(sys.contains("<tools>") && sys.contains("</tools>"),
+                      "schemas wrapped in <tools> XML tags")
+        XCTAssertTrue(sys.contains("\"type\":\"function\"") && sys.contains("get_weather"),
+                      "tool schema present as the OpenAI function spec")
+        XCTAssertTrue(sys.contains("<tool_call>") && sys.contains("</tool_call>"),
+                      "official call format described")
+        // The generic Hermes phrasing must NOT be used for Qwen.
+        XCTAssertFalse(sys.contains("You can call tools. The available tools are listed"),
+                       "must use the official Qwen block, not the generic Hermes prompt")
+        // The user turn is untouched.
+        XCTAssertEqual(out.last?["content"], "weather in Tokyo?")
+    }
+
+    func testQwenInjectionAddsSystemTurnWhenAbsent() {
+        let spec = ServerToolSpec(name: "f", description: "d", parametersJSON: "{}")
+        let out = ToolCalling.injectToolSystem(
+            into: [["role": "user", "content": "hi"]], tools: [spec], format: .qwen)
+        XCTAssertEqual(out.first?["role"], "system",
+                       "a system turn carrying the tool block is prepended")
+        XCTAssertTrue(out.first?["content"]?.hasPrefix("# Tools") ?? false,
+                      "the block is the system content (no model-specific preamble, "
+                      + "since .qwen also serves non-Qwen MoE checkpoints)")
+        XCTAssertEqual(out.last?["content"], "hi", "user turn untouched")
+    }
+
     func testLlamaInjectionMirrorsOllamaTemplate() {
         let spec = ServerToolSpec(name: "add", description: "sum",
                                   parametersJSON: "{\"type\":\"object\"}")

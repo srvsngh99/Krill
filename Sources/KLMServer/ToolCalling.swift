@@ -126,10 +126,7 @@ internal enum ToolCalling {
         case .llama:
             return injectLlama(into: messages, tools: tools)
         case .qwen:
-            // Qwen 2.5/3's native tool format IS the Hermes
-            // `<tool_call>{"name","arguments"}</tool_call>` convention, so
-            // the generic injection is already Qwen-native.
-            return injectHermes(into: messages, tools: tools)
+            return injectQwen(into: messages, tools: tools)
         case .mistral:
             return injectMistral(into: messages, tools: tools)
         case .phi:
@@ -227,6 +224,63 @@ internal enum ToolCalling {
         }
         if lastUser == nil {
             out.append(["role": "user", "content": toolBlock])
+        }
+        return out
+    }
+
+    /// Qwen 2.5 / 3 native path. The call/result sentinels ARE the Hermes
+    /// `<tool_call>{"name","arguments"}</tool_call>` convention (so the parser
+    /// and history un-transform are shared), but the model was fine-tuned on a
+    /// SPECIFIC tool-definition block - the chat template's `# Tools` section
+    /// with the schemas inside `<tools></tools>` XML tags - not on the generic
+    /// Hermes instruction. swift-transformers drops the `tools` Jinja variable,
+    /// so (like the Llama/Mistral paths) we reproduce that block verbatim into
+    /// the system message, byte-for-byte what the official template renders and
+    /// what Ollama sends. The earlier generic Hermes prompt elicited tool calls
+    /// less reliably on the same weights (BENCHMARK_ISSUES #6); the canonical
+    /// format aligns the call decision with Ollama.
+    private static func injectQwen(
+        into messages: [[String: String]],
+        tools: [ServerToolSpec]
+    ) -> [[String: String]] {
+        // Each tool is the OpenAI `{"type":"function","function":{…}}` spec, one
+        // per line inside <tools>, exactly as `tool | tojson` renders it.
+        var schemas: [String] = []
+        for t in tools {
+            let params = (try? JSONSerialization.jsonObject(
+                with: Data(t.parametersJSON.utf8))) ?? [String: Any]()
+            let fn: [String: Any] = [
+                "type": "function",
+                "function": ["name": t.name, "description": t.description,
+                             "parameters": params],
+            ]
+            if let d = try? JSONSerialization.data(withJSONObject: fn),
+               let s = String(data: d, encoding: .utf8) {
+                schemas.append(s)
+            }
+        }
+        // The official template's tool block. The closing `<|im_end|>` is added
+        // by the chat-template turn wrapper, so it is intentionally omitted here.
+        let block =
+            "# Tools\n\nYou may call one or more functions to assist with the user query."
+            + "\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>"
+            + schemas.map { "\n" + $0 }.joined()
+            + "\n</tools>\n\nFor each function call, return a json object with function name and"
+            + " arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n"
+            + "{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>"
+
+        var out = messages
+        if let first = out.first, first["role"] == "system" {
+            // Append the block to the existing system content, matching the
+            // template's `{system}\n\n# Tools...` layout.
+            out[0]["content"] = (first["content"] ?? "") + "\n\n" + block
+        } else {
+            // No system turn: carry the block as the system message. We do NOT
+            // splice in the official template's "You are Qwen..." default, since
+            // the `.qwen` tool format also serves non-Qwen MoE checkpoints
+            // (OLMoE / DeepSeek-V2 / Mixtral); the `# Tools` block is the part
+            // the model keys on for the call decision.
+            out.insert(["role": "system", "content": block], at: 0)
         }
         return out
     }
