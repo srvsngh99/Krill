@@ -505,74 +505,87 @@ internal enum ServerParsing {
                     expected: "a string or an array of content blocks"
                 )
             }
-
-            var textParts: [String] = []
-            for (blockIdx, block) in blocks.enumerated() {
-                let type = block["type"] as? String ?? ""
-                switch type {
-                case "text":
-                    guard let t = block["text"] as? String else {
-                        throw ServerRequestError.invalidType(
-                            field: "messages[\(index)].content[\(blockIdx)].text",
-                            expected: "a string"
-                        )
-                    }
-                    textParts.append(t)
-                case "image_url":
-                    guard let imageURL = block["image_url"] as? [String: Any] else {
-                        throw ServerRequestError.invalidType(
-                            field: "messages[\(index)].content[\(blockIdx)].image_url",
-                            expected: "an object with a 'url' field"
-                        )
-                    }
-                    guard let url = imageURL["url"] as? String else {
-                        throw ServerRequestError.invalidType(
-                            field: "messages[\(index)].content[\(blockIdx)].image_url.url",
-                            expected: "a string"
-                        )
-                    }
-                    guard url.hasPrefix("data:") else {
-                        throw ServerRequestError.invalidValue(
-                            field: "messages[\(index)].content[\(blockIdx)].image_url.url",
-                            reason: "only data: URLs are supported (base64-encoded images)"
-                        )
-                    }
-                    media.images.append(url)
-                case "input_audio":
-                    guard let audio = block["input_audio"] as? [String: Any] else {
-                        throw ServerRequestError.invalidType(
-                            field: "messages[\(index)].content[\(blockIdx)].input_audio",
-                            expected: "an object with 'data' and 'format' fields"
-                        )
-                    }
-                    guard let data = audio["data"] as? String else {
-                        throw ServerRequestError.invalidType(
-                            field: "messages[\(index)].content[\(blockIdx)].input_audio.data",
-                            expected: "a base64 string"
-                        )
-                    }
-                    if media.audio != nil {
-                        throw ServerRequestError.invalidValue(
-                            field: "messages[\(index)].content[\(blockIdx)].input_audio",
-                            reason: "only one audio clip per request is supported"
-                        )
-                    }
-                    media.audio = data
-                    media.audioFormat = audio["format"] as? String
-                default:
-                    throw ServerRequestError.invalidValue(
-                        field: "messages[\(index)].content[\(blockIdx)].type",
-                        reason: "unsupported content block type '\(type)'"
-                    )
-                }
-            }
-            structured.append(["role": role, "content": textParts.joined(separator: "\n")])
+            let text = try parseContentBlocks(blocks, messageIndex: index, into: &media)
+            structured.append(["role": role, "content": text])
         }
 
         guard !structured.isEmpty else {
             throw ServerRequestError.invalidValue(field: "messages", reason: "must contain at least one message")
         }
         return ExtractedMessages(messages: structured, media: media)
+    }
+
+    /// Parse an OpenAI-style content-block array
+    /// (`[{type: text|image_url|input_audio}]`) into the message's joined text,
+    /// appending any image (`data:` URL) or audio (base64 + format) blocks to
+    /// `media`. Shared by the OpenAI (`/v1/chat/completions`) and Ollama
+    /// (`/api/chat`) chat parsers so both accept the content-block form.
+    static func parseContentBlocks(
+        _ blocks: [[String: Any]],
+        messageIndex index: Int,
+        into media: inout ServerMediaPayload
+    ) throws -> String {
+        var textParts: [String] = []
+        for (blockIdx, block) in blocks.enumerated() {
+            let type = block["type"] as? String ?? ""
+            switch type {
+            case "text":
+                guard let t = block["text"] as? String else {
+                    throw ServerRequestError.invalidType(
+                        field: "messages[\(index)].content[\(blockIdx)].text",
+                        expected: "a string"
+                    )
+                }
+                textParts.append(t)
+            case "image_url":
+                guard let imageURL = block["image_url"] as? [String: Any] else {
+                    throw ServerRequestError.invalidType(
+                        field: "messages[\(index)].content[\(blockIdx)].image_url",
+                        expected: "an object with a 'url' field"
+                    )
+                }
+                guard let url = imageURL["url"] as? String else {
+                    throw ServerRequestError.invalidType(
+                        field: "messages[\(index)].content[\(blockIdx)].image_url.url",
+                        expected: "a string"
+                    )
+                }
+                guard url.hasPrefix("data:") else {
+                    throw ServerRequestError.invalidValue(
+                        field: "messages[\(index)].content[\(blockIdx)].image_url.url",
+                        reason: "only data: URLs are supported (base64-encoded images)"
+                    )
+                }
+                media.images.append(url)
+            case "input_audio":
+                guard let audio = block["input_audio"] as? [String: Any] else {
+                    throw ServerRequestError.invalidType(
+                        field: "messages[\(index)].content[\(blockIdx)].input_audio",
+                        expected: "an object with 'data' and 'format' fields"
+                    )
+                }
+                guard let data = audio["data"] as? String else {
+                    throw ServerRequestError.invalidType(
+                        field: "messages[\(index)].content[\(blockIdx)].input_audio.data",
+                        expected: "a base64 string"
+                    )
+                }
+                if media.audio != nil {
+                    throw ServerRequestError.invalidValue(
+                        field: "messages[\(index)].content[\(blockIdx)].input_audio",
+                        reason: "only one audio clip per request is supported"
+                    )
+                }
+                media.audio = data
+                media.audioFormat = audio["format"] as? String
+            default:
+                throw ServerRequestError.invalidValue(
+                    field: "messages[\(index)].content[\(blockIdx)].type",
+                    reason: "unsupported content block type '\(type)'"
+                )
+            }
+        }
+        return textParts.joined(separator: "\n")
     }
 
     /// Parse Ollama-style chat messages. Each message may carry `images` and `audio`
@@ -591,8 +604,20 @@ internal enum ServerParsing {
             guard let role = message["role"] as? String else {
                 throw ServerRequestError.invalidType(field: "messages[\(index)].role", expected: "a string")
             }
-            guard let content = message["content"] as? String else {
-                throw ServerRequestError.invalidType(field: "messages[\(index)].content", expected: "a string")
+            // Accept either a plain string or the OpenAI content-block array
+            // form (`[{type: text|image_url|input_audio}]`); the latter routes
+            // its image/audio blocks into the request-level media payload,
+            // alongside Ollama's own message-level `images`/`audio` fields below.
+            let rawContent = message["content"]
+            let content: String
+            if let str = rawContent as? String {
+                content = str
+            } else if let blocks = rawContent as? [[String: Any]] {
+                content = try parseContentBlocks(blocks, messageIndex: index, into: &media)
+            } else {
+                throw ServerRequestError.invalidType(
+                    field: "messages[\(index)].content",
+                    expected: "a string or an array of content blocks")
             }
             structured.append(["role": role, "content": content])
 
