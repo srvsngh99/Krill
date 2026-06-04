@@ -316,6 +316,57 @@ final class BatchedDecodeLiveTests: XCTestCase {
             "prefix-cache replay must decode identically to the cold (no-cache) run")
     }
 
+    /// Issue #0 follow-up: shared-prefix (partial) reuse on the batched
+    /// (continuous-batcher) path must be an EXACT replay. Two prompts share a
+    /// long prefix but diverge in the tail; after the first is prefilled+stored,
+    /// the second must restore the shared prefix and forward only its suffix,
+    /// decoding byte-for-byte the same as a cold (never-cached) run. Drives
+    /// `submitBatched`: (1) the second prompt cold (usePrefixCache=false, the
+    /// reference), (2) the FIRST prompt with the cache on (miss -> store), (3)
+    /// the second prompt with the cache on (partial hit on the shared prefix ->
+    /// forward suffix only). The partial-hit run's full greedy sequence must
+    /// equal the cold run's, bit-for-bit. memoryCount transitions guard against
+    /// a silent miss masquerading as a match.
+    func testBatchedPartialPrefixReuseMatchesColdDecode() async throws {
+        let dir = try requireModelDirectory()
+        let engine = InferenceEngine(modelDirectory: dir)
+        try await engine.load()
+        guard engine.supportsBatchedDecode else {
+            throw XCTSkip("loaded model is not batched-eligible")
+        }
+        // A long shared scaffold (comfortably > minPrefixLength once tokenized)
+        // followed by a SHORT varying question - the agentic/RAG shape.
+        let shared = "You are a helpful assistant. "
+            + String(repeating: "Here is reference context reused across many queries. ", count: 12)
+        let p1 = shared + "Question: what is the capital of France?"
+        let p2 = shared + "Question: name a primary color."
+
+        func runBatched(_ text: String, usePrefixCache: Bool) async -> [Int] {
+            guard let r = engine.submitBatched(
+                BatchGenRequest(messages: [["role": "user", "content": text]],
+                                params: .greedy, maxTokens: 24,
+                                usePrefixCache: usePrefixCache),
+                maxRows: 4, windowMs: 0)
+            else { return [] }
+            var toks: [Int] = []
+            for await ev in r.stream { if ev.isEnd { break }; toks.append(ev.tokenId) }
+            return toks
+        }
+
+        XCTAssertEqual(engine.prefixCache.memoryCount, 0, "cache should start empty")
+        let cold = await runBatched(p2, usePrefixCache: false)   // reference, never stores
+        XCTAssertEqual(engine.prefixCache.memoryCount, 0,
+                       "usePrefixCache=false must not populate the cache")
+        _ = await runBatched(p1, usePrefixCache: true)           // miss -> stores p1 (prefix + tail A)
+        XCTAssertGreaterThanOrEqual(engine.prefixCache.memoryCount, 1,
+                       "the first run must have stored its prompt, anchoring the shared prefix")
+        let reuse = await runBatched(p2, usePrefixCache: true)   // partial hit -> restore prefix, forward suffix
+
+        XCTAssertGreaterThan(cold.count, 0, "cold batched run produced no tokens")
+        XCTAssertEqual(reuse, cold,
+            "batched shared-prefix reuse must decode identically to the cold (no-cache) run")
+    }
+
     /// Stage C4 (2b): the shared prefix cache on the STATIC-cohort
     /// `generateBatched` path (the BatchScheduler's non-continuous entry) must
     /// be an exact replay too. A full prefix hit restores each row's KV and

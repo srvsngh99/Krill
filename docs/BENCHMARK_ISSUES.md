@@ -7,7 +7,7 @@ engine on macOS." Ordered by impact on that goal.
 
 ---
 
-## 0. [RESOLVED - serial path] Shared-prefix (partial-prefix) KV reuse for the agentic/RAG workload
+## 0. [RESOLVED - serial + concurrent batched] Shared-prefix (partial-prefix) KV reuse for the agentic/RAG workload
 
 **Severity: critical.** The agentic/RAG moat (reuse a long shared context -
 system prompt, tool schemas, retrieved docs - across calls) was not working: a
@@ -57,16 +57,23 @@ Measured after the fix (shared prefix + DIFFERENT tail):
 ~194 ms (was ~2500 ms). Output is byte-identical to a cold full prefill under
 greedy decoding (gated by `PrefixCachePartialReuseLiveTests`).
 
-**Still open (follow-up): share one prefix across CONCURRENT streams.** The
-serial fix covers sequential requests and multi-turn chat. The batched
-`ContinuousBatcher` path (8 concurrent agents on one scaffold) does not yet do
-LCP reuse across rows; that is the next increment for the concurrent agentic
-bench. Tracked as a follow-up, not in this PR.
+**Follow-up DONE: shared-prefix reuse across CONCURRENT streams.** The batched
+`ContinuousBatcher` per-row prefill now does the same LCP reuse as the serial
+path (`makeBatchedPrefillRow`): each row, on a full-match miss, restores the
+longest cached prefix it shares with a recent prefill and forwards only its
+suffix. The batched decode already tolerates a row whose cache is shorter than
+its prompt (`epochBaseLen` drives the ragged left-pad mask + per-row offsets),
+so this is a per-row prefill change only. Measured (qwen2.5-3b,
+`KRILL_NUM_PARALLEL=4`, ~440-token shared scaffold): the cold prefill is ~441 ms;
+4 concurrent requests sharing that scaffold then prefill in 13 / 43 / 44 / 111 ms
+instead of each re-prefilling. Bit-exact vs a cold decode, gated by
+`BatchedDecodeLiveTests.testBatchedPartialPrefixReuseMatchesColdDecode`. fp16 /
+text-only / non-Gemma-4, same as the serial path.
 
 **Isolation (unchanged, still accurate):** JSON/grammar-constrained decode
 overhead is only ~20%, NOT the cause. 14B single-stream decode is healthy
 (~1.08x Ollama). The collapse was purely the un-cached repeated prefill, now
-fixed for the serial path.
+fixed on both the serial and the concurrent batched paths.
 
 ---
 
