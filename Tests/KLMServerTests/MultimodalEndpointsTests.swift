@@ -138,6 +138,74 @@ final class MultimodalEndpointsTests: XCTestCase {
         ]))
     }
 
+    // MARK: - Ollama /api/chat content-block array form (BENCHMARK_ISSUES #5)
+
+    /// Regression for BENCHMARK_ISSUES #5: the Ollama-compat `/api/chat` endpoint
+    /// rejected the OpenAI content-block array form ("content must be a string"),
+    /// which also blocked the `input_audio` path. It must now accept the same
+    /// blocks the OpenAI endpoint does, routing media into the request payload.
+    func testOllamaChatRequestAcceptsContentBlockInputAudio() throws {
+        let request = try ServerParsing.ollamaChatRequest(from: [
+            "model": "gemma-4-e2b",
+            "messages": [[
+                "role": "user",
+                "content": [
+                    ["type": "text", "text": "transcribe"],
+                    ["type": "input_audio", "input_audio": ["data": "UklGRg==", "format": "wav"]],
+                ]
+            ]]
+        ])
+        XCTAssertEqual(request.media.audio, "UklGRg==")
+        XCTAssertEqual(request.media.audioFormat, "wav")
+        XCTAssertEqual(request.messages.first?["content"], "transcribe",
+                       "text blocks become the message content")
+    }
+
+    func testOllamaChatRequestAcceptsContentBlockImageURL() throws {
+        let request = try ServerParsing.ollamaChatRequest(from: [
+            "model": "gemma-4-e2b",
+            "messages": [[
+                "role": "user",
+                "content": [
+                    ["type": "text", "text": "what is this?"],
+                    ["type": "image_url", "image_url": ["url": "data:image/png;base64,iVBORw0KGgo="]],
+                ]
+            ]]
+        ])
+        XCTAssertEqual(request.media.images.count, 1)
+        XCTAssertTrue(request.media.images.first?.hasPrefix("data:") ?? false)
+        XCTAssertEqual(request.messages.first?["content"], "what is this?")
+    }
+
+    /// A non-`data:` image URL must be rejected on the Ollama path too (parity
+    /// with the OpenAI parser; we only accept base64 data URLs).
+    func testOllamaChatRequestRejectsNonDataImageURLInContentBlock() {
+        XCTAssertThrowsError(try ServerParsing.ollamaChatRequest(from: [
+            "model": "gemma-4-e2b",
+            "messages": [[
+                "role": "user",
+                "content": [
+                    ["type": "image_url", "image_url": ["url": "https://example.com/x.png"]],
+                ]
+            ]]
+        ]))
+    }
+
+    /// A content-block audio clip plus a message-level `audio` field is still a
+    /// two-clip request and must be rejected, not silently overwrite one.
+    func testOllamaChatRequestRejectsContentBlockPlusMessageLevelAudio() {
+        XCTAssertThrowsError(try ServerParsing.ollamaChatRequest(from: [
+            "model": "gemma-4-e2b",
+            "messages": [[
+                "role": "user",
+                "content": [
+                    ["type": "input_audio", "input_audio": ["data": "UklGRg==", "format": "wav"]],
+                ],
+                "audio": "UklGRh==",
+            ]]
+        ]))
+    }
+
     // MARK: - Handler tests (gated by capability checks)
 
     func testOllamaGenerateRejectsMoreThanOneImage() throws {

@@ -168,20 +168,26 @@ claims and we currently can't quote it fresh).
   chat-template / tool-system-prompt differs from Ollama's in a way that changes
   the call decision (see #6).
 
-## 5. [API parity] `/api/chat` rejects OpenAI content-block array form
+## 5. [RESOLVED] `/api/chat` now accepts the OpenAI content-block array form
 
-**Severity: low-medium** (limits multimodal-over-chat ergonomics; blocks the
-`input_audio` path for #1).
+**Fixed.** `/api/chat` with `messages[].content` as an array of
+`{type:text|image_url|input_audio}` blocks used to return "Field
+'messages[0].content' must be a string"; it now accepts the same content blocks
+the OpenAI `/v1/chat/completions` endpoint does.
 
-- `/api/chat` with `messages[].content` as an array of `{type:text|image_url|
-  input_audio}` blocks returns "Field 'messages[0].content' must be a string".
-  Vision works via the top-level/message `images` array, but the OpenAI-style
-  content-block form (and thus `input_audio`) isn't accepted on the Ollama-compat
-  chat endpoint.
-- **Where to look:** `Sources/KLMServer/ServerParsing.swift` already has
-  content-block parsing (`case "input_audio"`, `case "image_url"` around
-  L520-560) — confirm which endpoint/path enforces "content must be a string" and
-  whether the content-block branch is reachable from `/api/chat`.
+The OpenAI and Ollama chat parsers in `Sources/KLMServer/ServerParsing.swift`
+now share one `parseContentBlocks` helper (previously the block-parsing logic
+lived only in `openAIMessages`; `ollamaMessages` required a string). A
+content-block clip routes its image (`data:` URL) / audio (base64 + format) into
+the request media payload, alongside Ollama's own message-level `images`/`audio`
+fields; a `data:`-less image URL and a second audio clip (across blocks or vs a
+message-level `audio`) are rejected just as on the OpenAI path.
+
+Verified end-to-end on `/api/chat` (gemma-4-e2b): `input_audio` block ->
+prompt_eval_count 110 + exact transcript; `image_url` block -> prompt_eval_count
+274 + correct answer. This also delivers the `input_audio`-over-chat path noted
+in #1. Gated by `MultimodalEndpointsTests` (content-block accept + the two
+rejection cases).
 
 ## 6. [Investigate] Same-weights tool-call *decision* differs KrillLM vs Ollama
 
