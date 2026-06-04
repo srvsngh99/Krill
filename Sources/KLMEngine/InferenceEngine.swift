@@ -1064,7 +1064,7 @@ public final class InferenceEngine: @unchecked Sendable {
                 // `let fp16Caches` binding scopes this to the default fp16 serial
                 // path; the int8-KV serial path (fp16Caches == nil) and the
                 // concurrent batched path still exclude Gemma 4 partial reuse
-                // (separate follow-ups — see docs/BACKLOG.md).
+                // (separate follow-ups - see docs/BACKLOG.md).
                 var partialReuseLen = 0
                 if effectiveUsePrefixCache, !cacheHit,
                    let fp16Caches, mediaHash == nil,

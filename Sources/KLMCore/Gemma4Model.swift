@@ -443,7 +443,7 @@ class Gemma4Attention: Module {
         var q = qProj(x).reshaped(B, L, numHeads, layerHeadDim).transposed(0, 2, 1, 3)
         q = qNorm(q)
         // RoPE position base for Q. A KV-shared layer holds an empty OWN cache
-        // (it reuses the donor's K/V), so `cache.sequenceLength` is 0 — which
+        // (it reuses the donor's K/V), so `cache.sequenceLength` is 0 - which
         // rotates this span's first token at position 0. That is only correct
         // when the span actually STARTS at position 0, i.e. a cold full-prompt
         // prefill (where base 0 == true positions) or a single-token decode

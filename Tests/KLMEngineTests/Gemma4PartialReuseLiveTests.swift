@@ -3,7 +3,7 @@ import Foundation
 @testable import KLMEngine
 
 /// Live, env-gated correctness gate for partial-prefix (shared-prefix) KV reuse
-/// on **Gemma 4** — the case the dense `PrefixCachePartialReuseLiveTests` does
+/// on **Gemma 4** - the case the dense `PrefixCachePartialReuseLiveTests` does
 /// not cover.
 ///
 /// Gemma 4 uses cross-layer KV sharing: a trailing run of layers reuses a donor
@@ -33,7 +33,7 @@ final class Gemma4PartialReuseLiveTests: XCTestCase {
     }
 
     /// A long shared scaffold (system prompt + reused context) followed by a
-    /// short varying question — the agentic/RAG shape that drives a long
+    /// short varying question - the agentic/RAG shape that drives a long
     /// shared-prefix suffix forward through the KV-shared layers.
     private let sharedPrefix =
         "You are an expert assistant. "
