@@ -334,6 +334,15 @@ final class BatchedDecodeLiveTests: XCTestCase {
         guard engine.supportsBatchedDecode else {
             throw XCTSkip("loaded model is not batched-eligible")
         }
+        // The concurrent batched path deliberately excludes Gemma 4 from
+        // partial-prefix reuse (its cross-layer KV sharing is wired only on the
+        // serial fp16 path - see Gemma4PartialReuseLiveTests and
+        // InferenceEngine `makeBatchedPrefillRow`). With reuse off, a Gemma 4
+        // batched "reuse" run full-prefills and legitimately diverges from this
+        // test's serial-shaped cold reference, so this gate does not apply to it.
+        guard engine.family != "gemma4" else {
+            throw XCTSkip("Gemma 4 batched partial-prefix reuse is excluded (serial-only)")
+        }
         // A long shared scaffold (comfortably > minPrefixLength once tokenized)
         // followed by a SHORT varying question - the agentic/RAG shape.
         let shared = "You are a helpful assistant. "
