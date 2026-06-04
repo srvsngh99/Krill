@@ -9,38 +9,46 @@ the in-repo companion to the owner's out-of-repo board
 
 ## Gemma 4 partial-prefix (shared-prefix) KV reuse
 
-**Status:** OPEN (surfaced 2026-06-04 by the agentic/RAG prefix-cache work, PRs
-#148 serial / #151 concurrent batched).
+**Status:** SERIAL fp16 path DONE (2026-06-04, this PR). int8-KV serial path
+and concurrent batched path remain OPEN follow-ups (see below).
 
 Shared-prefix (longest-common-prefix) KV reuse is bit-exact for standard
-per-layer caches (Llama, Qwen, Mistral, Phi, dense MoE) but is **excluded for
-Gemma 4** (`InferenceEngine.swift:984` serial, `:2012` batched:
-`family != "gemma4"`). The exclusion is **verified necessary**: temporarily
-enabling it reuses (prefill 403 ms -> 10 ms) but produces **different greedy
-output than a cold prefill** (non-bit-exact), so the naive gate flip ships WRONG
-answers. Consequence: on a Gemma-4 agentic/RAG workload Ollama's prefix cache
-currently wins (it caches the shared context; KrillLM re-prefills it). Full-MATCH
-reuse still works for Gemma 4.
+per-layer caches (Llama, Qwen, Mistral, Phi, dense MoE). It is **now also
+bit-exact for Gemma 4 on the default fp16 serial path.** The blocker was Gemma
+4's cross-layer KV sharing: a shared layer holds an empty OWN cache and reuses
+the donor's K/V, so the attention offset `cache?.sequenceLength` resolved to 0.
+That is correct in a COLD prefill (the span starts at position 0, so offset 0 ==
+true positions) but wrong for a PARTIAL-PREFIX resume, where the span is the
+diverging SUFFIX at true positions `[LCP, count)` — offset 0 rotated the suffix
+Q at `0..suffixLen-1`, misaligning it with the restored donor K (rotated at
+their true positions) → RoPE mismatch → divergent greedy output.
 
-Prime suspect: Gemma 4's cross-layer KV sharing (`num_kv_shared_layers`). On the
-production path a shared layer is called with its OWN (empty) cache as `cache:`
-plus the donor as `sharedCache:` (`Gemma4Model.swift:1037-1040`), so the
-attention offset `cache?.sequenceLength ?? (sharedCache?.sequenceLength ?? 0)`
-(`:445`) resolves to the shared layer's OWN length = 0 (the `sharedCache`
-fallback is dead code on this path). A shared layer therefore rotates its Q from
-offset 0. That is consistent in a COLD prefill (the shared layer processes the
-whole `[0..N)` span from 0, matching the donor's true K positions), but in
-PARTIAL reuse the shared layer forwards only the SUFFIX span yet still starts at
-offset 0, so the suffix Q positions do not line up with the restored donor K at
-true positions -> RoPE mismatch -> divergent output. Open puzzle to resolve with
-instrumentation: full-MATCH (1-token re-forward) survives this same offset-0
-shared-layer path, so the next session should log per-layer (offset, span) for
-shared vs donor layers, partial vs cold, and fix the shared-layer suffix offset
-to match the donor (base = restored prefix length).
+**Fix (`Gemma4Model.swift`, `Gemma4Attention.callAsFunction`):** for a
+multi-token forward (`L > 1`) whose donor cache already holds more than this
+span (`donorLen > L`), the shared layer rotates Q at base `donorLen - L`. The
+donor (a non-shared layer that ran earlier in the same forward) appended this
+L-token span to its cache, so `donorLen - L` recovers the span's true base
+position: 0 for a cold full prefill (unchanged), `LCP` for a partial resume.
+The L==1 decode step and the single-token full-MATCH re-forward keep the legacy
+offset-0 path untouched, so this changes behavior ONLY for a multi-token
+partial-prefix resume.
 
-**Full plan + root-cause analysis + validation gates:**
-`~/.claude/plans/krillm-gemma4-partial-prefix-reuse-handoff.md`. Do not flip the
-gate without a byte-exact Gemma-4 reuse-vs-cold gate green.
+**Gate:** `Gemma4PartialReuseLiveTests` (env `KLM_GEMMA4_MODEL_PATH`) asserts
+shared-prefix reuse is BYTE-IDENTICAL to a cold full prefill and far faster.
+Verified end-to-end on gemma-4-e2b: a 562-token shared-prefix request drops from
+1001 ms (cold) to 158 ms (partial reuse) — Ollama-parity territory. The
+existing Gemma 4 smoke + 11 batched-decode gates (incl. full-match replay) stay
+green (cold/decode paths are provably unchanged).
+
+**Remaining (separate follow-ups):**
+- **int8-KV serial path** — the partial branch is fp16-only (`let fp16Caches`),
+  so Gemma 4 with `KRILL_KV_CACHE_DTYPE=int8` still re-prefills. Extend the
+  quantized restore/truncate path with the same shared-layer offset.
+- **Concurrent batched path** — `InferenceEngine.swift:2012`
+  (`makeBatchedPrefillRow`) still gates `family != "gemma4"`. Gemma 4 batches on
+  the int8 quantized closure (`makeBatchedPrefillRowQuantized`), and the batched
+  ragged-decode passes all-zero `rowOffsets` to shared layers; a batched partial
+  resume needs the per-row shared-layer base wired through there too.
 
 ---
 

@@ -86,6 +86,23 @@ Donors:
 - Sliding shared layer -> last non-shared sliding layer (layer 14 for sliding)
 - Full shared layer -> last non-shared full layer (layer 14 for full)
 
+**Shared-layer query RoPE offset.** A shared layer keeps an EMPTY own cache (it
+never writes K/V), so a naive `offset = cache.sequenceLength` is 0. That rotates
+this forward's first query token at position 0 — correct only when the span
+actually starts at position 0:
+- **Cold full prefill** (span `[0, N)`): offset 0 == true positions. ✓
+- **Single-token decode / full-MATCH 1-token re-forward** (`L == 1`): legacy
+  offset-0 path, left as-is. ✓ (gated by the int8 full-match replay test)
+- **Partial-prefix RESUME** (`L > 1`, donor already holds the prefix): the span
+  is the diverging SUFFIX at true positions `[LCP, count)`. Offset 0 would
+  rotate it at `0..L-1`, misaligned with the donor's restored K (rotated at
+  their true positions) → RoPE mismatch → divergent output. The shared layer
+  instead derives base `donorLen - L` from the donor's POST-update length (the
+  donor ran earlier this forward and appended the same L-token span), giving
+  `LCP`. So the suffix Q lands at its true positions and the resume is bit-exact
+  to a cold prefill. See `Gemma4Attention.callAsFunction` and
+  `Gemma4PartialReuseLiveTests`.
+
 **BUG HISTORY**: Previously, shared layers computed their own K/V and wrote to separate caches. This produced wrong attention context for 20 of 35 layers, causing gibberish output. Fixed by reusing donor's K/V snapshot directly.
 
 ## Per-Layer Embedding (PLE)
