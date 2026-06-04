@@ -7,6 +7,64 @@ engine on macOS." Ordered by impact on that goal.
 
 ---
 
+## 0. [CRITICAL — the #1 blocker to "miles ahead on agents"] Prefix cache silently FAILS on larger models
+
+**Severity: critical.** The single most important finding from the benchmark
+session. The agentic/RAG moat (reuse a long shared context — system prompt, tool
+schemas, retrieved docs — across calls) currently does NOT work on larger models,
+so KrillLM is *behind* Ollama on the exact workload agents hammer.
+
+**Measured (qwen2.5-14b, same server, three sequential requests sharing a
+674-token context prefix, different short suffix each):**
+
+| | req1 (cold) | req2 (same prefix) | req3 (same prefix) |
+|---|---|---|---|
+| **KrillLM** prefill | 3462 ms | **3466 ms (re-prefills all 674 tok)** | 3440 ms |
+| **Ollama** prefill | 3871 ms | **194 ms (cached)** | 197 ms |
+
+Ollama is **~18x faster on the repeated-context prefill.** KrillLM re-computes the
+entire context every request.
+
+**It is model-size-dependent.** On `qwen2.5-3b` the SAME test showed KrillLM's
+prefix cache WORKING (req2 prefilled 0 tokens). On `qwen2.5-14b` it re-prefills.
+Strong signal of a **KV-memory-budget eviction / size cap**: the 14B's per-token
+KV is much larger, so the 674-token entry is likely rejected or evicted instantly
+under the ~17-18GB memory pressure of a resident 14B.
+
+**Why it matters for the goal:** agentic concurrency collapses because of this.
+The agentic workload bench (8 concurrent streams, shared ~1100-token context,
+JSON output) gave KrillLM **agg 1-3.4 tok/s, p99 TTFT 27 s** at N=8 — every stream
+re-prefills the shared context, serializing on prefill. With a working shared
+prefix cache that prefill happens ONCE and is reused. **Fix this and the agentic
+moat becomes real; until then it's a liability.**
+
+**Where to look:** the `PrefixCache` store + lookup + eviction policy (#99/#101).
+Check (a) its memory/size budget and whether a 14B-sized KV entry is rejected or
+instantly evicted; (b) whether storage is gated on a max prompt/KV size;
+(c) whether the batcher path (`KRILL_NUM_PARALLEL`) stores/looks-up the same cache
+the serial path does. Then the BIG win on top: **share one prefix entry across
+CONCURRENT streams** (many agents, one scaffold) — the architectural moat
+Ollama's per-slot model can't match.
+
+**Isolation done (don't re-chase the wrong thing):** JSON/grammar-constrained
+decode overhead is only ~20% (28.5 → 22.5 tok/s), NOT the cause. 14B single-stream
+decode is healthy (~27.7 tok/s, ~1.08x Ollama). The collapse is purely the
+un-cached repeated prefill.
+
+---
+
+## 0b. [finding] 30B-A3B MoE is unstable on 24GB (Metal assertions)
+
+KrillLM runs `Qwen3-Coder-30B-A3B` natively and produces excellent code, but at
+~22GB peak it intermittently throws `failed assertion _status <
+MTLCommandBufferStatusCommitted` (GPU command-buffer / memory pressure). Some runs
+complete, some crash mid-generation. **Practical stable serving ceiling on 24GB is
+~14B; 30B-A3B is KrillLM-solo-only and flaky; 31B/35B will thrash.** Not a code
+bug per se — it's the box. Revisit on a 36GB+ Mac. (If the assertion recurs at
+lower memory, investigate the Metal command-buffer lifecycle under pressure.)
+
+---
+
 ## 1. [RESOLVED - not reproducible] Server HTTP API audio ingestion
 
 **Status: NOT A BUG on current `main`.** Re-checked 2026-06-04 against a freshly
