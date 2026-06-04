@@ -145,19 +145,23 @@ real and broaden coverage so the benchmark is unimpeachable).
   show KrillLM wins on *latency* there, not just "Ollama returns empty." That
   removes the "you just picked a model Ollama is broken on" rebuttal.
 
-## 3. [Harness gap] Concurrency benchmark doesn't capture Ollama p99 TTFT
+## 3. [RESOLVED - not reproducible; ambiguity hardened] Concurrency benchmark Ollama p99 TTFT
 
-**Severity: medium** (the tail-latency win is one of the strongest "by miles"
-claims and we currently can't quote it fresh).
+**The harness already captures Ollama p99 TTFT.** `one_request` streams both arms
+(`stream:true`) and records the first chunk carrying a `response` field; both
+KrillLM and Ollama `/api/generate` emit NDJSON with per-chunk `response`, so the
+same parser populates both. Re-run against Ollama qwen2.5:14b: p99 TTFT 189 ms at
+N=1, 621 ms at N=2: populated, not blank. The original blank cell was the Ollama
+arm not being run (or its streams failing), not a parser gap.
 
-- `tools/krillm_concurrent_benchmark.py` reported Ollama p99 TTFT as `—` while
-  KrillLM's populated (11 → 89 ms across N=1→8). Prior data claimed ~14x p99 TTFT
-  advantage; we can't reproduce it until the harness parses Ollama's streaming
-  TTFT (first-token timestamp) the same way it does KrillLM's.
-- **Where to look:** the harness's per-request timing for the Ollama arm — ensure
-  it streams (`"stream":true`) and records the first-chunk time, or reads Ollama's
-  reported timings. KrillLM agg throughput at N=8 was 1.83x; the TTFT axis is the
-  more dramatic one and should be quantified.
+**Hardened so the ambiguity can't recur silently:** each per-N result now records
+`ttft_samples` (how many successful streams yielded a first-token time), and the
+summary prints an explicit `note:` when an arm produced streams but captured zero
+TTFT samples, so a blank TTFT cell is now always either a populated number, an arm
+that was not run, or an explained parse gap, never a silent blank.
+
+To quote the tail-latency comparison fresh, run with BOTH arms, e.g.:
+`tools/krillm_concurrent_benchmark.py --krillm-url URL --ollama-host URL --concurrency-sweep 1,2,4,8`.
 
 ## 4. [Partly addressed via #6, otherwise model-bound] Multi-step agentic tool-call decision on 3B models
 

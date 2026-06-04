@@ -188,6 +188,11 @@ def run_concurrency(base_url: str, model: str, n: int, ps: list[str],
         "per_request_decode_tps_p99": pct(per_req_tps, 0.99),
         "ttft_ms_p50": pct(ttfts, 0.5),
         "ttft_ms_p99": pct(ttfts, 0.99),
+        # How many successful streams yielded a first-token time. A blank cell in
+        # the TTFT column with ok streams but 0 samples here means the stream
+        # shape was not recognized (no per-chunk `response`), NOT that the arm was
+        # skipped; the summary calls this out so the gap is never silent.
+        "ttft_samples": len(ttfts),
     }
 
 
@@ -206,7 +211,8 @@ def averaged_concurrency(base_url: str, model: str, n: int, ps: list[str],
         run_concurrency(base_url, model, n, ps, args)
     rows = [run_concurrency(base_url, model, n, ps, args) for _ in range(max(1, args.runs))]
     out: dict[str, Any] = {"concurrency": n, "runs": len(rows),
-                           "failed": sum(r.get("failed", 0) for r in rows)}
+                           "failed": sum(r.get("failed", 0) for r in rows),
+                           "ttft_samples": sum(r.get("ttft_samples", 0) for r in rows)}
     for k in _AVG_KEYS:
         vals = [r[k] for r in rows if isinstance(r.get(k), (int, float))]
         out[k] = statistics.mean(vals) if vals else None
@@ -284,6 +290,24 @@ def main() -> int:
               "sums only the surviving streams over the full wall, so it is an "
               "optimistic (lower-effective-N) reading — not a clean N-stream "
               "measurement. See per-level `failed` in the JSON.")
+
+    # Disambiguate a blank TTFT cell: distinguish "engine arm not run" from "arm
+    # ran but first-token timing was not captured". Both KrillLM and Ollama
+    # `/api/generate` stream NDJSON with a per-chunk `response`, so a streamed arm
+    # should always populate TTFT; a 0-sample arm signals a parse gap (e.g. a
+    # non-streaming or differently-shaped response), the silent failure that made
+    # earlier runs show a blank cell with no explanation.
+    for name, rows in report["engines"].items():
+        starved = [
+            r["concurrency"] for r in rows
+            if r.get("aggregate_decode_tps") and not r.get("ttft_samples")
+        ]
+        if starved:
+            print(f"\nnote: {name} produced streams but captured no first-token "
+                  f"timing at N={','.join(str(s) for s in starved)} (its TTFT "
+                  f"cells are blank for this reason, not because the arm was "
+                  f"skipped). Check that the arm streams NDJSON `/api/generate` "
+                  f"with a per-chunk `response` field.")
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as fh:
