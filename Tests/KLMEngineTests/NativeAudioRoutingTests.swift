@@ -68,6 +68,65 @@ final class NativeAudioRoutingTests: XCTestCase {
             + "identical output means the native audio path did not run")
     }
 
+    /// Regression for BENCHMARK_ISSUES #1: audio frames must reach prefill.
+    /// The benchmark diagnosed "audio not ingested" purely from the prompt
+    /// (prefill) token count - a text-only fallback shows a low count, an
+    /// ingested clip shows the count inflated by the encoder frame run. Assert
+    /// that the SAME prompt prefilled WITH audio reports materially more prompt
+    /// tokens than the text-only baseline (the `<|audio|>` frame placeholders),
+    /// which the engine's `GenerationStats.promptTokens` exposes - the exact
+    /// signal the benchmark measured. Skips unless KLM_GEMMA4_MODEL_PATH points
+    /// at a real checkpoint.
+    func testLiveNativeAudioInflatesPromptTokens() async throws {
+        guard let path = ProcessInfo.processInfo.environment["KLM_GEMMA4_MODEL_PATH"],
+              !path.isEmpty else {
+            throw XCTSkip("KLM_GEMMA4_MODEL_PATH not set")
+        }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
+              isDir.boolValue else {
+            throw XCTSkip("KLM_GEMMA4_MODEL_PATH is not a directory")
+        }
+        let assets = ProcessInfo.processInfo.environment["KLM_BENCH_ASSETS_DIR"]
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent(".build/benchmarks/assets", isDirectory: true)
+        let wav = assets.appendingPathComponent("gemma4-sine-1khz-5s.wav")
+        guard FileManager.default.fileExists(atPath: wav.path) else {
+            throw XCTSkip("audio fixture missing: \(wav.path)")
+        }
+
+        let engine = InferenceEngine(modelDirectory: URL(fileURLWithPath: path))
+        try await engine.load()
+        XCTAssertTrue(engine.canUseNativeAudio)
+
+        let audioData = try Data(contentsOf: wav)
+        let feats = try AudioPreprocessor.features(fromAudio: audioData)
+        XCTAssertGreaterThan(feats.numTokens, 0)
+
+        let prompt = "What do you hear in this audio?"
+        func promptTokens(_ audio: Data?) async -> Int {
+            let (stream, getStats) = engine.generate(
+                prompt: prompt, maxTokens: 1,
+                imageData: nil, audioData: audio)
+            for await ev in stream { if ev.isEnd { break } }
+            return getStats()?.promptTokens ?? 0
+        }
+
+        let withAudioTokens = await promptTokens(audioData)
+        let textOnlyTokens = await promptTokens(nil)
+
+        XCTAssertGreaterThan(textOnlyTokens, 0, "text-only prefill must be counted")
+        // The encoder scatters `feats.numTokens` `<|audio|>` frame placeholders
+        // into the prompt; ingestion must inflate the prefill count by at least
+        // that run. A text-only fallback would leave the counts ~equal.
+        XCTAssertGreaterThanOrEqual(
+            withAudioTokens, textOnlyTokens + feats.numTokens,
+            "audio prefill (\(withAudioTokens)) must exceed text-only "
+            + "(\(textOnlyTokens)) by the \(feats.numTokens)-frame audio run; "
+            + "near-equal counts mean the audio was dropped to a text-only prefill")
+    }
+
     /// PR #21 rereview P1b: with the native path selected, undecodable
     /// audio must surface a loud decode error in the engine-visible
     /// response — never a silent/empty "successful" text-only answer.
