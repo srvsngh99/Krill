@@ -104,6 +104,40 @@ final class MultimodalEndpointsTests: XCTestCase {
         XCTAssertEqual(request.media.audioFormat, "wav")
     }
 
+    /// Regression for BENCHMARK_ISSUES #1: the message-level `audio` field on
+    /// `/api/chat` must flow into the request-level media payload so the
+    /// handler can decode it and thread `audioData` to the engine. (The
+    /// benchmark's HTTP probe wrongly reported this path as "accepted but not
+    /// ingested"; reproduction on current `main` shows the audio frames reach
+    /// prefill. This locks the parse → media wiring so it can't silently
+    /// regress.)
+    func testOllamaChatRequestAcceptsAudioPerMessage() throws {
+        let request = try ServerParsing.ollamaChatRequest(from: [
+            "model": "gemma-4-e2b",
+            "messages": [[
+                "role": "user",
+                "content": "transcribe this",
+                "audio": "UklGRg=="
+            ]]
+        ])
+        XCTAssertEqual(request.media.audio, "UklGRg==",
+                       "message-level audio must populate request.media.audio")
+        XCTAssertEqual(request.messages.count, 1)
+        XCTAssertEqual(request.messages.first?["content"], "transcribe this")
+    }
+
+    /// A single request must not carry two audio clips: a second `audio` field
+    /// across messages is rejected rather than silently overwriting the first.
+    func testOllamaChatRequestRejectsTwoAudioClips() {
+        XCTAssertThrowsError(try ServerParsing.ollamaChatRequest(from: [
+            "model": "gemma-4-e2b",
+            "messages": [
+                ["role": "user", "content": "a", "audio": "UklGRg=="],
+                ["role": "user", "content": "b", "audio": "UklGRh=="],
+            ]
+        ]))
+    }
+
     // MARK: - Handler tests (gated by capability checks)
 
     func testOllamaGenerateRejectsMoreThanOneImage() throws {
