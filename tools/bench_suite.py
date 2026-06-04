@@ -16,7 +16,7 @@ Unlike those, this one is the quick "show me the head-to-head numbers" driver
 used to refresh docs/BENCHMARKS.md.
 
 Prereqs:
-  - KrillLM server up:  krillm serve --model <m> --port 11435   (hot numbers)
+  - KrillLM server up:  krillm serve --model <m>   (default port 57455; hot numbers)
   - Ollama up on 11434 with the matching GGUF model pulled
   - .build/release/krillm built (make release)            (KrillLM cold)
   - Pillow in the active venv ONLY if you let it auto-generate the image asset
@@ -28,8 +28,8 @@ Usage:
 """
 import argparse, base64, json, re, statistics, subprocess, sys, time, urllib.request
 
-KRILL_URL = "http://127.0.0.1:11435"
-OLLAMA_URL = "http://127.0.0.1:11434"
+KRILL_URL = "http://127.0.0.1:57455"   # KrillLM default ("KRILL" on a keypad)
+OLLAMA_URL = "http://127.0.0.1:11434"  # Ollama default
 KRILL_BIN = ".build/release/krillm"
 
 

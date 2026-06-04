@@ -254,6 +254,10 @@ landing details.
 > production-tag blocker is the fresh multimodal benchmark artifact
 > (Section 3.1). The `11435→11434` default-port flip shipped in 0.4.0 once
 > the `mac_parity` gate went green (18/18, 2026-05-28).
+>
+> **Update (post-0.4.0): the default port has since changed to 57455
+> (unique, coexists with Ollama); `--port 11434` gives the Ollama
+> drop-in. See CHANGELOG.**
 
 ### 3.1 Release benchmark gate
 

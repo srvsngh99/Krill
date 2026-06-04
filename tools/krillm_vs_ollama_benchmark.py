@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0, help="Sampling seed passed to both engines.")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature passed to both engines.")
     parser.add_argument("--top-p", type=float, default=1.0, help="Top-p passed to both engines.")
-    parser.add_argument("--krillm-url", help="KrillLM server URL (e.g. http://127.0.0.1:11434). When set, benchmarks against a running KrillLM server instead of CLI subprocess.")
+    parser.add_argument("--krillm-url", help="KrillLM server URL (e.g. http://127.0.0.1:57455). When set, benchmarks against a running KrillLM server instead of CLI subprocess.")
     parser.add_argument("--ollama-host", default="http://127.0.0.1:11434", help="Ollama API host.")
     parser.add_argument("--timeout", type=float, default=600.0, help="Per-run timeout in seconds.")
     parser.add_argument("--krillm-draft-model", default=None, help="Enable speculative decoding by loading this draft model (alias, path, or 'auto'). KrillLM only.")
