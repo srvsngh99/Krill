@@ -168,6 +168,109 @@ final class PrefixCacheTests: XCTestCase {
         #endif
     }
 
+    // MARK: - Longest-common-prefix (shared-prefix) lookup
+
+    func testCommonPrefixLength() {
+        XCTAssertEqual(PrefixCache.commonPrefixLength([1, 2, 3, 4], [1, 2, 3, 4]), 4)
+        XCTAssertEqual(PrefixCache.commonPrefixLength([1, 2, 3, 9], [1, 2, 3, 4]), 3)
+        XCTAssertEqual(PrefixCache.commonPrefixLength([1, 2], [1, 2, 3, 4]), 2, "bounded by shorter")
+        XCTAssertEqual(PrefixCache.commonPrefixLength([9, 1], [1, 2]), 0)
+        XCTAssertEqual(PrefixCache.commonPrefixLength([], [1]), 0)
+    }
+
+    /// Core of issue #0: a request that SHARES a long prefix with a recent
+    /// prefill but diverges in the tail must find that prefix and report the
+    /// shared length, carrying the stored entry's full KV for the caller to
+    /// restore-then-truncate. This is the path that turns an agentic/RAG
+    /// re-prefill into a suffix-only prefill.
+    func testLookupLongestPrefixSharedPrefixHits() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = makeTempCache()  // minPrefixLength = 4
+            let shared = Array(0 ..< 10)
+            let stored = shared + [100, 101]                 // prefix + tail A
+            let storedKeys = makeKV(seqLen: stored.count, start: 10)
+            let storedValues = makeKV(seqLen: stored.count, start: 100)
+            cache.store(tokens: stored, modelId: "m",
+                        keys: [[storedKeys]], values: [[storedValues]])
+
+            // A different tail over the same shared prefix.
+            let query = shared + [200, 201, 202]
+            let hit = try XCTUnwrap(
+                cache.lookupLongestPrefix(tokens: query, modelId: "m"),
+                "shared-prefix request must find the recent prefill")
+            XCTAssertEqual(hit.prefixLength, shared.count,
+                           "reported length is the shared prefix, not the stored length")
+            // Carries the entry's FULL stored KV (caller truncates to prefixLength).
+            XCTAssertEqual(hit.keys[0][0].shape, [1, 2, stored.count, 2])
+            XCTAssertEqual(hit.keys[0][0].asArray(Int32.self), storedKeys.asArray(Int32.self))
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    func testLookupLongestPrefixBelowMinMisses() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = makeTempCache()  // minPrefixLength = 4
+            let stored = Array(0 ..< 8)
+            cache.store(tokens: stored, modelId: "m",
+                        keys: [[makeKV(seqLen: stored.count, start: 1)]],
+                        values: [[makeKV(seqLen: stored.count, start: 9)]])
+            // Shares only 3 leading tokens -> below minPrefixLength -> miss.
+            let query = [0, 1, 2, 77, 78, 79, 80, 81]
+            XCTAssertNil(cache.lookupLongestPrefix(tokens: query, modelId: "m"))
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    func testLookupLongestPrefixModelIsolation() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = makeTempCache()
+            let stored = Array(0 ..< 10) + [5, 6]
+            cache.store(tokens: stored, modelId: "model-a",
+                        keys: [[makeKV(seqLen: stored.count, start: 1)]],
+                        values: [[makeKV(seqLen: stored.count, start: 9)]])
+            // Same shared prefix, different model -> must not match.
+            XCTAssertNil(cache.lookupLongestPrefix(
+                tokens: Array(0 ..< 10) + [9, 9], modelId: "model-b"))
+            // And a different mediaHash must not match a text (nil) entry.
+            XCTAssertNil(cache.lookupLongestPrefix(
+                tokens: Array(0 ..< 10) + [9, 9], modelId: "model-a", mediaHash: "img:X"))
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    func testLookupLongestPrefixPrefersLongestMatch() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = makeTempCache()  // maxMemoryEntries = 4
+            let short = Array(0 ..< 6) + [50]            // shares 6 with query
+            let long = Array(0 ..< 9) + [60]             // shares 9 with query
+            cache.store(tokens: short, modelId: "m",
+                        keys: [[makeKV(seqLen: short.count, start: 1)]],
+                        values: [[makeKV(seqLen: short.count, start: 5)]])
+            let longKeys = makeKV(seqLen: long.count, start: 200)
+            cache.store(tokens: long, modelId: "m",
+                        keys: [[longKeys]],
+                        values: [[makeKV(seqLen: long.count, start: 400)]])
+
+            let query = Array(0 ..< 9) + [99, 99]
+            let hit = try XCTUnwrap(cache.lookupLongestPrefix(tokens: query, modelId: "m"))
+            XCTAssertEqual(hit.prefixLength, 9, "must pick the entry with the longer shared prefix")
+            XCTAssertEqual(hit.keys[0][0].asArray(Int32.self), longKeys.asArray(Int32.self))
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
     // MARK: - Concurrency
 
     /// Hammer `store` / `lookup` / `clear` from many threads at once. The

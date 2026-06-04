@@ -7,49 +7,66 @@ engine on macOS." Ordered by impact on that goal.
 
 ---
 
-## 0. [CRITICAL — the #1 blocker to "miles ahead on agents"] Prefix cache silently FAILS on larger models
+## 0. [RESOLVED - serial path] Shared-prefix (partial-prefix) KV reuse for the agentic/RAG workload
 
-**Severity: critical.** The single most important finding from the benchmark
-session. The agentic/RAG moat (reuse a long shared context — system prompt, tool
-schemas, retrieved docs — across calls) currently does NOT work on larger models,
-so KrillLM is *behind* Ollama on the exact workload agents hammer.
+**Severity: critical.** The agentic/RAG moat (reuse a long shared context -
+system prompt, tool schemas, retrieved docs - across calls) was not working: a
+request that shared a long prefix with a recent one re-prefilled the ENTIRE
+context every time, so KrillLM was at a large prefill disadvantage on the exact
+workload agents hammer.
 
-**Measured (qwen2.5-14b, same server, three sequential requests sharing a
-674-token context prefix, different short suffix each):**
+**Corrected diagnosis (it is NOT model-size-dependent).** Controlled
+reproduction with a cleared cache shows the prefix cache only ever reused KV for
+a BYTE-IDENTICAL full prompt; it had no shared-prefix (partial) reuse. That
+limitation is independent of model size - it fails the same way on 3B and 14B.
+The earlier "works on 3B, fails on 14B / KV-budget eviction" read compared two
+different workloads (identical prompts on 3B vs varying-tail prompts on 14B).
 
-| | req1 (cold) | req2 (same prefix) | req3 (same prefix) |
+Measured before the fix (cleared cache, same shared ~480-token scaffold):
+
+| scenario | req1 cold | req2 | req3 |
 |---|---|---|---|
-| **KrillLM** prefill | 3462 ms | **3466 ms (re-prefills all 674 tok)** | 3440 ms |
-| **Ollama** prefill | 3871 ms | **194 ms (cached)** | 197 ms |
+| 3B, IDENTICAL prompt (full match) | 566 ms | 10 ms | 10 ms |
+| 3B, shared prefix + DIFFERENT tail | 546 ms | 533 ms | 534 ms |
+| 14B, IDENTICAL prompt (full match) | 2553 ms | 39 ms | 38 ms |
+| 14B, shared prefix + DIFFERENT tail | 2552 ms | 2496 ms | 2497 ms |
 
-Ollama is **~18x faster on the repeated-context prefill.** KrillLM re-computes the
-entire context every request.
+Full-match caching worked on both sizes; the varying-tail (real agentic) case
+re-prefilled on both.
 
-**It is model-size-dependent.** On `qwen2.5-3b` the SAME test showed KrillLM's
-prefix cache WORKING (req2 prefilled 0 tokens). On `qwen2.5-14b` it re-prefills.
-Strong signal of a **KV-memory-budget eviction / size cap**: the 14B's per-token
-KV is much larger, so the 674-token entry is likely rejected or evicted instantly
-under the ~17-18GB memory pressure of a resident 14B.
+**Fix (this PR): longest-common-prefix (LCP) reuse on the serial path.** When a
+request shares a prefix with a recent in-memory prefill, the cached prefix KV is
+restored and only the diverging suffix is prefilled (llama.cpp's behaviour). The
+attention infra already supported it: `createCachedCausalMask(newLen:cacheLen:)`
+builds the `[suffix, prefix+suffix]` mask and RoPE already applies the cache
+offset, so this is an orchestration change in `InferenceEngine` plus a
+`PrefixCache.lookupLongestPrefix`. Scoped to the fp16 cache and TEXT-only
+requests, and to families with the standard per-layer cache (Gemma 4 is excluded
+because of its cross-layer KV-sharing cache layout, not a mask difference;
+full-match hits stay enabled for it). Multi-turn chat benefits too:
+each turn stores its full prompt, so the next turn reuses the whole prior turn.
 
-**Why it matters for the goal:** agentic concurrency collapses because of this.
-The agentic workload bench (8 concurrent streams, shared ~1100-token context,
-JSON output) gave KrillLM **agg 1-3.4 tok/s, p99 TTFT 27 s** at N=8 — every stream
-re-prefills the shared context, serializing on prefill. With a working shared
-prefix cache that prefill happens ONCE and is reused. **Fix this and the agentic
-moat becomes real; until then it's a liability.**
+Measured after the fix (shared prefix + DIFFERENT tail):
 
-**Where to look:** the `PrefixCache` store + lookup + eviction policy (#99/#101).
-Check (a) its memory/size budget and whether a 14B-sized KV entry is rejected or
-instantly evicted; (b) whether storage is gated on a max prompt/KV size;
-(c) whether the batcher path (`KRILL_NUM_PARALLEL`) stores/looks-up the same cache
-the serial path does. Then the BIG win on top: **share one prefix entry across
-CONCURRENT streams** (many agents, one scaffold) — the architectural moat
-Ollama's per-slot model can't match.
+| | req1 cold | req2 reuse | req3 reuse |
+|---|---|---|---|
+| 3B | 576 ms | **44 ms** | 45 ms |
+| 14B | 2555 ms | **175 ms** | 175 ms |
 
-**Isolation done (don't re-chase the wrong thing):** JSON/grammar-constrained
-decode overhead is only ~20% (28.5 → 22.5 tok/s), NOT the cause. 14B single-stream
-decode is healthy (~27.7 tok/s, ~1.08x Ollama). The collapse is purely the
-un-cached repeated prefill.
+14B repeated-context prefill is now ~175 ms, at parity with Ollama's cached
+~194 ms (was ~2500 ms). Output is byte-identical to a cold full prefill under
+greedy decoding (gated by `PrefixCachePartialReuseLiveTests`).
+
+**Still open (follow-up): share one prefix across CONCURRENT streams.** The
+serial fix covers sequential requests and multi-turn chat. The batched
+`ContinuousBatcher` path (8 concurrent agents on one scaffold) does not yet do
+LCP reuse across rows; that is the next increment for the concurrent agentic
+bench. Tracked as a follow-up, not in this PR.
+
+**Isolation (unchanged, still accurate):** JSON/grammar-constrained decode
+overhead is only ~20%, NOT the cause. 14B single-stream decode is healthy
+(~1.08x Ollama). The collapse was purely the un-cached repeated prefill, now
+fixed for the serial path.
 
 ---
 
