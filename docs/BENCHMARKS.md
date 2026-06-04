@@ -101,8 +101,37 @@ KrillLM emits correct `tool_calls` when prompted directly). See issues #4/#6.
 
 **This is the architectural win:** KrillLM aggregate throughput *climbs* with load
 (108 → 153 tok/s) because the continuous batcher serves many decode rows from one
-weight read; Ollama is flat (~73–84) because it serializes. (Ollama p99 TTFT is
-not yet captured by the harness — issue #3.)
+weight read; Ollama is flat (~73-84) because it serializes. (The harness now also
+captures Ollama p99 TTFT, resolved in issue #3.)
+
+### Agentic / RAG (shared-prefix KV reuse) - the closed-gap axis
+
+A realistic agent/RAG request reuses a long shared scaffold (system prompt + tool
+schemas + retrieved docs) across many calls with a short varying tail. KrillLM now
+reuses that shared prefix (PRs #148 serial + #151 concurrent batched) instead of
+re-prefilling it. Measured on **qwen2.5-14b** vs Ollama `qwen2.5:14b` (shared
+~1300-token RAG context, varied question, greedy; run sequentially so only one
+14B is resident):
+
+| | cold prefill (first req) | repeated-context prefill (reuse) |
+|--:|--:|--:|
+| **KrillLM** | 4556 ms | **180 ms** |
+| **Ollama**  | 4781 ms | 193 ms |
+
+KrillLM's repeated-context prefill is **180 ms, at parity with Ollama's 193 ms** -
+where before #148 it re-prefilled the whole context every request (~4556 ms, i.e.
+~24x slower than Ollama's cached path). The critical agentic/RAG gap is closed.
+Concurrent rows share the scaffold too: on qwen2.5-3b at `KRILL_NUM_PARALLEL=4`, a
+~440-token scaffold prefills cold once (~441 ms) and the 4 concurrent shared-prefix
+requests then prefill in 13 / 43 / 44 / 111 ms each.
+
+**Caveat - Gemma 4 is excluded.** Shared-prefix reuse forwards a suffix span over a
+restored prefix; that is bit-exact for standard per-layer caches (Llama, Qwen,
+Mistral, Phi, dense MoE) but NOT for Gemma 4's cross-layer KV-sharing layout
+(verified: it reuses but produces different output), so Gemma 4 keeps full-match
+reuse only. On a Gemma-4 agentic workload Ollama's prefix cache currently wins;
+the other families are at parity. Giving Gemma 4 correct partial reuse is a
+tracked follow-up.
 
 ---
 
@@ -132,6 +161,11 @@ python3 tools/krillm_concurrent_benchmark.py \
   --krillm-url http://127.0.0.1:57455 --krill-model gemma-4-e2b \
   --ollama-host http://127.0.0.1:11434 --ollama-model gemma4:e2b \
   --concurrency-sweep "1,2,4,8" --max-tokens 96 --runs 2 --warmup 1 --server-arm batched
+
+# 5. Agentic / RAG shared-prefix reuse (use a NON-Gemma-4 family; run the engines
+#    sequentially on a 24GB box so only one 14B is resident at a time):
+python3 tools/agentic_benchmark.py \
+  --krill-model qwen2.5-14b --ollama-model qwen2.5:14b --concurrency 1,4 --max-tokens 48
 ```
 
 `tools/bench_suite.py` auto-uses `/tmp/klmbench/red.png` and
