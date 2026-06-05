@@ -793,4 +793,56 @@ extension InferenceEngine {
         }
         return gen
     }
+
+    /// Robust, prompt-independent correctness probe for shared-prefix (partial)
+    /// KV reuse. Builds the KV two ways over the fp16 cache and returns the max
+    /// per-element |diff| of the resulting per-layer caches plus the max |cold|
+    /// value (for relative scale):
+    ///   - COLD: prefill `prefix + suffix` in one forward.
+    ///   - PARTIAL: prefill `prefix`, snapshot, restore into fresh caches,
+    ///     truncate to `prefix.count`, then forward only `suffix` - exactly the
+    ///     restore/truncate/suffix-forward the engine's partial-reuse path runs.
+    /// A mathematically exact path yields identical caches. The residual is the
+    /// model's own GEMM rounding: fp16 families (Llama/Qwen) round at ~1e-3
+    /// relative, so their greedy output stays byte-identical; Gemma 4 computes in
+    /// bf16, so a length-dependent suffix GEMM rounds at a few percent relative,
+    /// which is numerically correct but can flip a downstream greedy tie. This
+    /// probe is the correctness gate ("the reuse builds the right cache"); strict
+    /// greedy-token equality is the STRONGER gate that only the fp16 families can
+    /// meet. Returns nil if no model is loaded.
+    func partialPrefillCacheMaxDiff(
+        prefix: [Int], suffix: [Int]
+    ) -> (maxDiff: Float, maxCold: Float)? {
+        guard let model = loadedModelForBatching else { return nil }
+        let prefill = model.prefillForward ?? model.forward
+        let full = prefix + suffix
+
+        let coldCaches = makeKVCaches(numLayers: model.numLayers)
+        _ = prefill(MLXArray(full.map { Int32($0) }).reshaped(1, full.count), coldCaches)
+
+        let primeCaches = makeKVCaches(numLayers: model.numLayers)
+        _ = prefill(MLXArray(prefix.map { Int32($0) }).reshaped(1, prefix.count), primeCaches)
+        let partialCaches = makeKVCaches(numLayers: model.numLayers)
+        for (i, c) in primeCaches.enumerated() {
+            if let snap = c.snapshot() {
+                partialCaches[i].restore(keys: snap.keys, values: snap.values)
+            }
+        }
+        for c in partialCaches { c.truncate(to: prefix.count) }
+        _ = prefill(MLXArray(suffix.map { Int32($0) }).reshaped(1, suffix.count), partialCaches)
+
+        var maxDiff: Float = 0
+        var maxCold: Float = 0
+        for i in 0 ..< coldCaches.count {
+            guard let cs = coldCaches[i].snapshot(), let ps = partialCaches[i].snapshot(),
+                  cs.keys.dim(2) == ps.keys.dim(2) else { continue }
+            maxDiff = Swift.max(maxDiff,
+                MLX.max(MLX.abs(cs.keys - ps.keys)).item(Float.self),
+                MLX.max(MLX.abs(cs.values - ps.values)).item(Float.self))
+            maxCold = Swift.max(maxCold,
+                MLX.max(MLX.abs(cs.keys)).item(Float.self),
+                MLX.max(MLX.abs(cs.values)).item(Float.self))
+        }
+        return (maxDiff, maxCold)
+    }
 }
