@@ -162,6 +162,10 @@ krillm serve --model llama-3.2-3b
 # Default port is 57455 (unique; coexists with Ollama on 11434). For a
 # drop-in Ollama replacement, run with --port 11434.
 
+# Boot a coding agent wired to your local KrillLM server (no manual config)
+krillm launch              # list agents
+krillm launch claude       # also: codex, opencode, hermes, pi, copilot, droid
+
 # Native synthetic-token benchmark
 krillm bench llama-3.2-3b
 ```
@@ -191,6 +195,7 @@ krillm pull mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 | `krillm run <model> [prompt]` | Chat (interactive or single-shot) |
 | `krillm pull <model>` | Download model from HuggingFace |
 | `krillm serve` | Start OpenAI/Ollama-compatible HTTP server |
+| `krillm launch <agent>` | Boot a coding agent (Claude Code, Codex, OpenCode, ...) wired to KrillLM |
 | `krillm bench <model>` | Run performance benchmarks |
 | `krillm list` | Show installed models |
 | `krillm rm <model>` | Remove a model |
@@ -230,11 +235,15 @@ krillm run gemma-4-e2b "Transcribe this audio." --audio ./clip.wav --max-tokens 
 
 KrillLM serves on port 57455 (configurable) with all of:
 
-- **OpenAI API**: `POST /v1/chat/completions` (SSE streaming), `POST /v1/completions`, `GET /v1/models`
+- **OpenAI API**: `POST /v1/chat/completions` (SSE streaming), `POST /v1/completions`, `POST /v1/responses` (Responses API, for Codex), `GET /v1/models`
 - **Ollama API**: `POST /api/chat`, `POST /api/generate`, `GET /api/tags`
 - **Anthropic API**: `POST /v1/messages` (Claude SDK drop-in)
 
 Drop-in replacement -- just change the port in your client config.
+
+**Coding agents:** `krillm launch <agent>` boots Claude Code, Codex, OpenCode,
+Hermes, Pi, Copilot CLI, or Droid pre-wired to your local server. See
+[`docs/CONNECT_CODING_AGENTS.md`](docs/CONNECT_CODING_AGENTS.md).
 
 ### Use with existing SDKs
 
