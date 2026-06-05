@@ -89,6 +89,56 @@ final class QuantizedPrefixCacheTests: XCTestCase {
         #endif
     }
 
+    func testLookupLongestPrefixQuantizedFindsSharedPrefix() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = makeTempCache()
+            let stored = [10, 11, 12, 13, 14, 15, 16, 17]
+            cache.storeQuantized(
+                tokens: stored, modelId: "m-int8",
+                snapshots: [makeSnapshot(seqLen: stored.count, headSeed: 3),
+                            makeSnapshot(seqLen: stored.count, headSeed: 4)]
+            )
+
+            // Shares 5 leading tokens, diverges at the 6th (>= minPrefixLength 4).
+            let query = [10, 11, 12, 13, 14, 99, 99]
+            let hit = try XCTUnwrap(
+                cache.lookupLongestPrefixQuantized(tokens: query, modelId: "m-int8"))
+            XCTAssertEqual(hit.prefixLength, 5, "should match the 5 shared leading tokens")
+            XCTAssertEqual(hit.layers.count, 2, "carries the full stored snapshot set")
+
+            // Sharing fewer than minPrefixLength leading tokens must miss.
+            XCTAssertNil(
+                cache.lookupLongestPrefixQuantized(tokens: [10, 11, 0, 0, 0, 0], modelId: "m-int8"),
+                "a 2-token shared prefix is below minPrefixLength and must not hit")
+
+            // Cross-dtype isolation: the fp16 LCP path cannot see this entry.
+            XCTAssertNil(cache.lookupLongestPrefix(tokens: query, modelId: "m-int8"))
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    func testQuantizedLongestPrefixCannotHitFp16Entry() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = makeTempCache()
+            let stored = [10, 11, 12, 13, 14, 15]
+            cache.store(
+                tokens: stored, modelId: "m",
+                keys: [[makeFp16(seqLen: stored.count, start: 10)]],
+                values: [[makeFp16(seqLen: stored.count, start: 100)]]
+            )
+            // An fp16 entry must be invisible to the quantized LCP lookup.
+            XCTAssertNil(
+                cache.lookupLongestPrefixQuantized(tokens: [10, 11, 12, 13, 99], modelId: "m"))
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
     func testRestoreTruncateAndReforwardKeepsOriginalLength() throws {
         #if canImport(MLX) && os(macOS) && arch(arm64)
         try withMLXCPU {
