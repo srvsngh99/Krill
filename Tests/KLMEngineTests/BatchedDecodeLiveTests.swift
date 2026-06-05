@@ -1,5 +1,7 @@
 import XCTest
+import Foundation
 @testable import KLMEngine
+import KLMCache
 import KLMSampler
 
 /// Stage B correctness gate: a batched (B>1) decode of several DIFFERENT,
@@ -317,31 +319,32 @@ final class BatchedDecodeLiveTests: XCTestCase {
     }
 
     /// Issue #0 follow-up: shared-prefix (partial) reuse on the batched
-    /// (continuous-batcher) path must be an EXACT replay. Two prompts share a
-    /// long prefix but diverge in the tail; after the first is prefilled+stored,
-    /// the second must restore the shared prefix and forward only its suffix,
-    /// decoding byte-for-byte the same as a cold (never-cached) run. Drives
-    /// `submitBatched`: (1) the second prompt cold (usePrefixCache=false, the
-    /// reference), (2) the FIRST prompt with the cache on (miss -> store), (3)
-    /// the second prompt with the cache on (partial hit on the shared prefix ->
-    /// forward suffix only). The partial-hit run's full greedy sequence must
-    /// equal the cold run's, bit-for-bit. memoryCount transitions guard against
-    /// a silent miss masquerading as a match.
+    /// (continuous-batcher) path. Two prompts share a long prefix but diverge in
+    /// the tail; after the first is prefilled+stored, the second must restore the
+    /// shared prefix and forward only its suffix. Drives `submitBatched`: (1) the
+    /// second prompt cold (usePrefixCache=false, the reference), (2) the FIRST
+    /// prompt with the cache on (miss -> store), (3) the second prompt with the
+    /// cache on (partial hit on the shared prefix -> forward suffix only).
+    /// For fp16 families the partial-hit run's full greedy sequence must equal
+    /// the cold run's bit-for-bit; Gemma 4 computes in bf16, so its reused suffix
+    /// forward can flip a downstream greedy tie - there only the first token (a
+    /// gross-divergence guard, per `Gemma4PartialReuseLiveTests`) is required.
+    /// memoryCount transitions guard against a silent miss masquerading as a hit.
     func testBatchedPartialPrefixReuseMatchesColdDecode() async throws {
         let dir = try requireModelDirectory()
-        let engine = InferenceEngine(modelDirectory: dir)
+        // Isolated, per-test prefix cache. The default on-disk cache
+        // (~/.krillm/cache) persists across runs and a full-match lookup hydrates
+        // from disk, so a stale entry from a prior run could serve this prompt and
+        // mask a real partial-reuse miss. A fresh temp cache makes the
+        // prime->reuse flow deterministic.
+        let cacheDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("klm-batched-partial-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: cacheDir) }
+        let engine = InferenceEngine(
+            modelDirectory: dir, prefixCache: PrefixCache(cacheDir: cacheDir))
         try await engine.load()
         guard engine.supportsBatchedDecode else {
             throw XCTSkip("loaded model is not batched-eligible")
-        }
-        // The concurrent batched path deliberately excludes Gemma 4 from
-        // partial-prefix reuse (its cross-layer KV sharing is wired only on the
-        // serial fp16 path - see Gemma4PartialReuseLiveTests and
-        // InferenceEngine `makeBatchedPrefillRow`). With reuse off, a Gemma 4
-        // batched "reuse" run full-prefills and legitimately diverges from this
-        // test's serial-shaped cold reference, so this gate does not apply to it.
-        guard engine.family != "gemma4" else {
-            throw XCTSkip("Gemma 4 batched partial-prefix reuse is excluded (serial-only)")
         }
         // A long shared scaffold (comfortably > minPrefixLength once tokenized)
         // followed by a SHORT varying question - the agentic/RAG shape.
@@ -372,8 +375,72 @@ final class BatchedDecodeLiveTests: XCTestCase {
         let reuse = await runBatched(p2, usePrefixCache: true)   // partial hit -> restore prefix, forward suffix
 
         XCTAssertGreaterThan(cold.count, 0, "cold batched run produced no tokens")
-        XCTAssertEqual(reuse, cold,
-            "batched shared-prefix reuse must decode identically to the cold (no-cache) run")
+        XCTAssertGreaterThan(reuse.count, 0, "reused batched run produced no tokens")
+        if engine.family == "gemma4" {
+            // Gemma 4 computes in bf16: the reused suffix forward rounds a few
+            // percent differently than the cold full forward, which can flip a
+            // downstream greedy tie into an equally-valid continuation. Gate on
+            // the first decoded token (computed from the full prompt context; a
+            // broken shared-layer offset corrupts it grossly, not via a tie-flip),
+            // matching the standard in Gemma4PartialReuseLiveTests. The reused
+            // cache's numerical correctness is gated there; dense families below
+            // keep the strict full-sequence match.
+            XCTAssertEqual(reuse.first, cold.first,
+                "Gemma 4 batched partial-reuse first token \(String(describing: reuse.first)) "
+                + "!= cold \(String(describing: cold.first)) (a gross divergence, not bf16)")
+        } else {
+            XCTAssertEqual(reuse, cold,
+                "batched shared-prefix reuse must decode identically to the cold (no-cache) run")
+        }
+    }
+
+    /// int8 batched path: shared-prefix (partial) reuse on the QUANTIZED per-row
+    /// prefill closure (`makeBatchedPrefillRowQuantized`). Gemma 4 is the only
+    /// int8-batched family and computes in bf16, so - like the fp16 batched and
+    /// serial paths - the reused first token must match cold (a broken
+    /// shared-layer offset corrupts it grossly); a downstream bf16 tie-flip is
+    /// accepted. Uses an isolated cache so the prime->reuse flow is deterministic.
+    func testInt8BatchedPartialPrefixReuseEngages() async throws {
+        let dir = try requireModelDirectory()
+        let cacheDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("klm-int8-batched-partial-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: cacheDir) }
+        let engine = InferenceEngine(
+            modelDirectory: dir, prefixCache: PrefixCache(cacheDir: cacheDir),
+            kvCacheDtype: "int8")
+        try await engine.load()
+        guard engine.supportsQuantizedBatchedDecode,
+              engine.useQuantizedBatched(engine.loadedModelForBatching!) else {
+            throw XCTSkip("loaded model does not support int8 batched decode (use a Gemma 4 checkpoint)")
+        }
+
+        let shared = "You are a helpful assistant. "
+            + String(repeating: "Here is reference context reused across many queries. ", count: 12)
+        let p1 = shared + "Question: what is the capital of France?"
+        let p2 = shared + "Question: name a primary color."
+
+        func runBatched(_ text: String, usePrefixCache: Bool) async -> [Int] {
+            guard let r = engine.submitBatched(
+                BatchGenRequest(messages: [["role": "user", "content": text]],
+                                params: .greedy, maxTokens: 24, usePrefixCache: usePrefixCache),
+                maxRows: 4, windowMs: 0)
+            else { return [] }
+            var toks: [Int] = []
+            for await ev in r.stream { if ev.isEnd { break }; toks.append(ev.tokenId) }
+            return toks
+        }
+
+        let cold = await runBatched(p2, usePrefixCache: false)
+        _ = await runBatched(p1, usePrefixCache: true)            // miss -> stores p1
+        XCTAssertGreaterThanOrEqual(engine.prefixCache.memoryCount, 1,
+                       "the first run must have stored its prompt, anchoring the shared prefix")
+        let reuse = await runBatched(p2, usePrefixCache: true)    // partial hit -> suffix only
+
+        XCTAssertGreaterThan(cold.count, 0, "cold int8 batched run produced no tokens")
+        XCTAssertGreaterThan(reuse.count, 0, "reused int8 batched run produced no tokens")
+        XCTAssertEqual(reuse.first, cold.first,
+            "Gemma 4 int8 batched partial-reuse first token \(String(describing: reuse.first)) "
+            + "!= cold \(String(describing: cold.first)) (a gross divergence, not bf16)")
     }
 
     /// Stage C4 (2b): the shared prefix cache on the STATIC-cohort
