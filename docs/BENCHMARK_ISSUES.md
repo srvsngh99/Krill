@@ -47,8 +47,9 @@ initially excluded** (its cross-layer KV-sharing layout, not a mask difference)
 to rotate the suffix Q at its true positions `[LCP, count)` instead of their
 empty-cache offset 0 (`Gemma4Attention`; gated by `Gemma4PartialReuseLiveTests`,
 byte-exact vs cold). gemma-4-e2b shared-prefix prefill drops 1001 ms → 158 ms.
-The int8-KV serial path and the concurrent batched path still exclude Gemma 4
-(see docs/BACKLOG.md). Multi-turn chat benefits too:
+The int8-KV serial path now reuses for Gemma 4 too (quantized LCP lookup +
+per-token quantized restore/truncate); only the concurrent batched path still
+excludes Gemma 4 (see docs/BACKLOG.md). Multi-turn chat benefits too:
 each turn stores its full prompt, so the next turn reuses the whole prior turn.
 
 Measured after the fix (shared prefix + DIFFERENT tail):

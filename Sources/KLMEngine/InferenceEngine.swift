@@ -1060,24 +1060,35 @@ public final class InferenceEngine: @unchecked Sendable {
                 // Gemma 4 participates here too: its cross-layer KV sharing only
                 // needed the shared layers to rotate the suffix Q at its TRUE
                 // positions [LCP, count) instead of their empty-cache offset 0,
-                // which `Gemma4Attention` now does for a multi-token resume. The
-                // `let fp16Caches` binding scopes this to the default fp16 serial
-                // path; the int8-KV serial path (fp16Caches == nil) and the
-                // concurrent batched path still exclude Gemma 4 partial reuse
-                // (separate follow-ups - see docs/BACKLOG.md).
+                // which `Gemma4Attention` now does for a multi-token resume. Both
+                // the fp16 and the int8 serial caches reuse here; only the
+                // concurrent batched path still excludes Gemma 4 partial reuse
+                // (separate follow-up - see docs/BACKLOG.md).
                 var partialReuseLen = 0
-                if effectiveUsePrefixCache, !cacheHit,
-                   let fp16Caches, mediaHash == nil,
-                   let hit = capturedPrefixCache.lookupLongestPrefix(
-                       tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash
-                   ), !hit.keys.isEmpty, hit.prefixLength <= promptTokens.count {
-                    for (i, cache) in fp16Caches.enumerated() {
-                        if i < hit.keys.count, let k = hit.keys[i].first,
-                           i < hit.values.count, let v = hit.values[i].first {
-                            cache.restore(keys: k, values: v)
+                if effectiveUsePrefixCache, !cacheHit, mediaHash == nil {
+                    if let fp16Caches,
+                       let hit = capturedPrefixCache.lookupLongestPrefix(
+                           tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash
+                       ), !hit.keys.isEmpty, hit.prefixLength <= promptTokens.count {
+                        for (i, cache) in fp16Caches.enumerated() {
+                            if i < hit.keys.count, let k = hit.keys[i].first,
+                               i < hit.values.count, let v = hit.values[i].first {
+                                cache.restore(keys: k, values: v)
+                            }
                         }
+                        partialReuseLen = hit.prefixLength
+                    } else if let int8Caches,
+                       let hit = capturedPrefixCache.lookupLongestPrefixQuantized(
+                           tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash
+                       ), !hit.layers.isEmpty, hit.prefixLength <= promptTokens.count {
+                        // KV sharing (Gemma 4) leaves a suffix of caches empty,
+                        // so the hit covers caches[0..<layers.count]; the rest
+                        // stay empty and reuse the donor via sharedCache.
+                        for i in 0 ..< hit.layers.count {
+                            int8Caches[i].restoreQuantized(hit.layers[i])
+                        }
+                        partialReuseLen = hit.prefixLength
                     }
-                    partialReuseLen = hit.prefixLength
                 }
 
                 // -- Prefill --
@@ -1095,12 +1106,13 @@ public final class InferenceEngine: @unchecked Sendable {
                         for cache in int8Caches { cache.truncate(to: trimmedLength) }
                     }
                     tokensToProcess = [promptTokens.last!]
-                } else if partialReuseLen > 0, let fp16Caches {
+                } else if partialReuseLen > 0 {
                     // Keep exactly the shared prefix (clamped so at least one
                     // token is always forwarded for logits), then prefill the
-                    // remaining suffix against it.
+                    // remaining suffix against it. Same for fp16 and int8 caches.
                     let keep = min(partialReuseLen, promptTokens.count - 1)
-                    for cache in fp16Caches { cache.truncate(to: keep) }
+                    if let fp16Caches { for cache in fp16Caches { cache.truncate(to: keep) } }
+                    if let int8Caches { for cache in int8Caches { cache.truncate(to: keep) } }
                     tokensToProcess = Array(promptTokens[keep...])
                 } else {
                     tokensToProcess = promptTokens

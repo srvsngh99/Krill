@@ -9,8 +9,9 @@ the in-repo companion to the owner's out-of-repo board
 
 ## Gemma 4 partial-prefix (shared-prefix) KV reuse
 
-**Status:** SERIAL fp16 path DONE (2026-06-04, this PR). int8-KV serial path
-and concurrent batched path remain OPEN follow-ups (see below).
+**Status:** SERIAL fp16 path DONE (2026-06-04, PR #156). int8-KV SERIAL path
+DONE (2026-06-05, this PR). Only the concurrent batched path remains OPEN
+(see below).
 
 Shared-prefix (longest-common-prefix) KV reuse is bit-exact for standard
 per-layer caches (Llama, Qwen, Mistral, Phi, dense MoE). It is **now also
@@ -40,15 +41,26 @@ Verified end-to-end on gemma-4-e2b: a 562-token shared-prefix request drops from
 existing Gemma 4 smoke + 11 batched-decode gates (incl. full-match replay) stay
 green (cold/decode paths are provably unchanged).
 
-**Remaining (separate follow-ups):**
-- **int8-KV serial path** — the partial branch is fp16-only (`let fp16Caches`),
-  so Gemma 4 with `KRILL_KV_CACHE_DTYPE=int8` still re-prefills. Extend the
-  quantized restore/truncate path with the same shared-layer offset.
-- **Concurrent batched path** — `InferenceEngine.swift:2012`
-  (`makeBatchedPrefillRow`) still gates `family != "gemma4"`. Gemma 4 batches on
-  the int8 quantized closure (`makeBatchedPrefillRowQuantized`), and the batched
-  ragged-decode passes all-zero `rowOffsets` to shared layers; a batched partial
-  resume needs the per-row shared-layer base wired through there too.
+**int8-KV serial path — DONE (2026-06-05, this PR).** The shared-layer offset
+fix is dtype-agnostic, so the only missing pieces were on the cache side:
+`PrefixCache.storeQuantized` now retains the entry's tokens (it previously
+discarded them, so a quantized entry could only serve a byte-identical full hit,
+never a shared-prefix match), and a new `lookupLongestPrefixQuantized` mirrors
+the fp16 LCP lookup over int8 storage. The engine gained a parallel int8 partial
+branch (restore the quantized donor snapshots, truncate to the shared length,
+forward the suffix). Quantization is per-token (each token carries its own
+scale/zero), so a restored-then-truncated prefix is bit-identical to a cold int8
+prefill of those tokens. Gate: `Gemma4PartialReuseLiveTests`
+`testGemma4PartialReuseIsBitExactAndFasterInt8` (byte-exact vs cold int8) plus
+`QuantizedPrefixCacheTests` LCP units. The int8 batched full-match gates stay
+green.
+
+**Remaining (separate follow-up):**
+- **Concurrent batched path** — `InferenceEngine.swift` `makeBatchedPrefillRow`
+  still gates `family != "gemma4"`. Gemma 4 batches on the int8 quantized closure
+  (`makeBatchedPrefillRowQuantized`), and the batched ragged-decode passes
+  all-zero `rowOffsets` to shared layers; a batched partial resume needs the
+  per-row shared-layer base wired through there too.
 
 ---
 
