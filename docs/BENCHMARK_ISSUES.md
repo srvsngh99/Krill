@@ -46,11 +46,13 @@ initially excluded** (its cross-layer KV-sharing layout, not a mask difference)
 **but is now supported on the serial fp16 path** — the shared layers needed only
 to rotate the suffix Q at its true positions `[LCP, count)` instead of their
 empty-cache offset 0 (`Gemma4Attention`; gated by `Gemma4PartialReuseLiveTests`,
-byte-exact vs cold). gemma-4-e2b shared-prefix prefill drops 1001 ms → 158 ms.
-The int8-KV serial path now reuses for Gemma 4 too (quantized LCP lookup +
-per-token quantized restore/truncate); only the concurrent batched path still
-excludes Gemma 4 (see docs/BACKLOG.md). Multi-turn chat benefits too:
-each turn stores its full prompt, so the next turn reuses the whole prior turn.
+the robust bf16 standard - the reused cache matches cold within bf16 GEMM noise,
+which is numerically correct but can flip a downstream greedy tie, so dense
+families stay byte-exact and Gemma 4 is gated on cache-match + first-token; see
+docs/BACKLOG.md). gemma-4-e2b shared-prefix prefill drops 1001 ms to 158 ms.
+ALL paths now reuse for Gemma 4: serial fp16, int8-KV serial, AND the concurrent
+batched path (fp16 + int8-quantized). Multi-turn chat benefits too: each turn
+stores its full prompt, so the next turn reuses the whole prior turn.
 
 Measured after the fix (shared prefix + DIFFERENT tail):
 
@@ -72,9 +74,11 @@ its prompt (`epochBaseLen` drives the ragged left-pad mask + per-row offsets),
 so this is a per-row prefill change only. Measured (qwen2.5-3b,
 `KRILL_NUM_PARALLEL=4`, ~440-token shared scaffold): the cold prefill is ~441 ms;
 4 concurrent requests sharing that scaffold then prefill in 13 / 43 / 44 / 111 ms
-instead of each re-prefilling. Bit-exact vs a cold decode, gated by
-`BatchedDecodeLiveTests.testBatchedPartialPrefixReuseMatchesColdDecode`. fp16 /
-text-only / non-Gemma-4, same as the serial path.
+instead of each re-prefilling. Bit-exact vs a cold decode for fp16 families,
+gated by `BatchedDecodeLiveTests.testBatchedPartialPrefixReuseMatchesColdDecode`.
+Text-only. Gemma 4 now participates too (fp16 + int8-quantized closures), on the
+bf16 standard (first-token gate; see `testInt8BatchedPartialPrefixReuseEngages`
+and docs/BACKLOG.md).
 
 **Isolation (unchanged, still accurate):** JSON/grammar-constrained decode
 overhead is only ~20%, NOT the cause. 14B single-stream decode is healthy

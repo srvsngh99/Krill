@@ -2006,20 +2006,19 @@ extension InferenceEngine {
     /// Otherwise it prefills cold and stores write-behind (>= 8 tokens). Gemma 4
     /// KV-shared layers leave a suffix of caches empty, so the store skips nil
     /// snapshots and the restore only fills the layers the hit carries - matching
-    /// the dense path; partial reuse is gated off for Gemma 4 like the serial
-    /// path. `mediaHash` is nil: the batched path is text-only (image/audio
-    /// requests are routed serially upstream).
+    /// the dense path. Gemma 4 participates in partial reuse here too: the per-row
+    /// prefill runs through the SERIAL forward (`prefillForward`), so the
+    /// shared-layer suffix-Q RoPE fix applies exactly as on the serial path. (Its
+    /// reused cache is numerically correct but bf16-rounding can flip a downstream
+    /// greedy tie; dense families stay byte-identical - see
+    /// `Gemma4PartialReuseLiveTests` for the standard.) `mediaHash` is nil: the
+    /// batched path is text-only (image/audio requests are routed serially).
     private func makeBatchedPrefillRow(
         _ model: LoadedModel
     ) -> ([Int], [KVCache], Bool) -> MLXArray {
         let rawPrefill = model.prefillForward ?? model.forward
         let pc = self.prefixCache
         let pcModelId = self.modelId
-        // Shared-prefix (partial) reuse needs the plain causal span mask, which
-        // is wrong for Gemma 4's KV-sharing layout (see the serial path); full
-        // hits stay enabled for it. Gemma 4 batches via the int8 closure anyway,
-        // so this is belt-and-suspenders.
-        let allowPartial = (model.family != "gemma4")
         return { tokens, caches, usePrefixCache in
             var cacheHit = false
             if usePrefixCache,
@@ -2042,7 +2041,7 @@ extension InferenceEngine {
             // decode already handles a row whose cache is shorter than its
             // prompt (`epochBaseLen` drives the ragged mask + offsets).
             var partialReuseLen = 0
-            if usePrefixCache, allowPartial, !cacheHit,
+            if usePrefixCache, !cacheHit,
                let hit = pc.lookupLongestPrefix(tokens: tokens, modelId: pcModelId, mediaHash: nil),
                !hit.keys.isEmpty, hit.prefixLength <= tokens.count {
                 for (i, cache) in caches.enumerated() {
@@ -2095,10 +2094,18 @@ extension InferenceEngine {
     /// `storeQuantized`): a full hit restores each layer's uint8 KV (avoiding a
     /// dequant->requant round trip), trims the last position, and forwards just
     /// that token - so the resulting per-row quantized caches are identical to a
-    /// cold int8 prefill and the stacked decode is byte-for-byte the same; a
-    /// miss prefills cold and stores write-behind (>= 8 tokens). Gemma 4
-    /// KV-shared layers leave a suffix of caches empty, so the store skips nil
-    /// snapshots and the restore fills only the layers the hit carries.
+    /// cold int8 prefill and the stacked decode is byte-for-byte the same. On a
+    /// full-match miss it tries a shared-prefix (partial) hit
+    /// (`lookupLongestPrefixQuantized`): restore the longest shared quantized
+    /// prefix and forward only the diverging suffix (the concurrent agentic/RAG
+    /// win), otherwise it prefills cold and stores write-behind (>= 8 tokens).
+    /// Gemma 4 (the only int8-batched family) participates: the per-row prefill
+    /// runs the serial forward, so the shared-layer suffix-Q offset fix applies,
+    /// and per-token quantization makes the restored prefix bit-identical (the
+    /// bf16 standard in `Gemma4PartialReuseLiveTests` applies to the underlying
+    /// compute). Gemma 4 KV-shared layers leave a suffix of caches empty, so the
+    /// store skips nil snapshots and the restore fills only the layers the hit
+    /// carries.
     private func makeBatchedPrefillRowQuantized(
         _ model: LoadedModel
     ) -> ([Int], [QuantizedKVCache], Bool) -> MLXArray {
@@ -2117,11 +2124,29 @@ extension InferenceEngine {
                 cacheHit = true
             }
 
+            // Shared-prefix (partial) reuse on a full-match miss, mirroring the
+            // int8 serial path: restore the longest shared quantized prefix and
+            // forward only the diverging suffix.
+            var partialReuseLen = 0
+            if usePrefixCache, !cacheHit,
+               let hit = pc.lookupLongestPrefixQuantized(tokens: tokens, modelId: pcModelId, mediaHash: nil),
+               !hit.layers.isEmpty, hit.layers.count <= caches.count,
+               hit.prefixLength <= tokens.count {
+                for i in 0 ..< hit.layers.count {
+                    caches[i].restoreQuantized(hit.layers[i])
+                }
+                partialReuseLen = hit.prefixLength
+            }
+
             let toProcess: [Int]
             if cacheHit {
                 let trimmed = max(0, tokens.count - 1)
                 for cache in caches { cache.truncate(to: trimmed) }
                 toProcess = [tokens.last!]
+            } else if partialReuseLen > 0 {
+                let keep = min(partialReuseLen, tokens.count - 1)
+                for cache in caches { cache.truncate(to: keep) }
+                toProcess = Array(tokens[keep...])
             } else {
                 toProcess = tokens
             }

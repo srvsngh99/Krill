@@ -9,9 +9,9 @@ the in-repo companion to the owner's out-of-repo board
 
 ## Gemma 4 partial-prefix (shared-prefix) KV reuse
 
-**Status:** SERIAL fp16 path DONE (2026-06-04, PR #156). int8-KV SERIAL path
-DONE (2026-06-05, this PR). Only the concurrent batched path remains OPEN
-(see below).
+**Status:** DONE - all paths. SERIAL fp16 (PR #156), int8-KV SERIAL (PR #157),
+honest bf16 gate (PR #158), and the CONCURRENT BATCHED path (fp16 +
+int8-quantized, this PR) all reuse shared prefixes for Gemma 4.
 
 Shared-prefix (longest-common-prefix) KV reuse is bit-exact for standard
 per-layer caches (Llama, Qwen, Mistral, Phi, dense MoE). It is **now also
@@ -79,12 +79,18 @@ bf16 standard above still applies to the underlying compute). Gate:
 `QuantizedPrefixCacheTests` LCP units. The int8 batched full-match gates stay
 green.
 
-**Remaining (separate follow-up):**
-- **Concurrent batched path** - `InferenceEngine.swift` `makeBatchedPrefillRow`
-  still gates `family != "gemma4"`. Gemma 4 batches on the int8 quantized closure
-  (`makeBatchedPrefillRowQuantized`), and the batched ragged-decode passes
-  all-zero `rowOffsets` to shared layers; a batched partial resume needs the
-  per-row shared-layer base wired through there too.
+**Concurrent batched path - DONE (this PR).** It turned out NOT to need any
+batched-decode change: the batched per-row prefill runs through the SERIAL
+forward (`prefillForward`), so the shared-layer suffix-Q offset fix already
+applies. So the only changes were to drop the `family != "gemma4"` gate in
+`makeBatchedPrefillRow` (fp16) and add the same partial branch to
+`makeBatchedPrefillRowQuantized` (int8, the closure Gemma 4 actually uses). The
+stacked decode reads the resulting per-row caches unchanged. Gates:
+`BatchedDecodeLiveTests.testBatchedPartialPrefixReuseMatchesColdDecode` (now runs
+Gemma 4 too, first-token gate; dense stays bit-for-bit) and
+`testInt8BatchedPartialPrefixReuseEngages`. Both use an isolated per-test prefix
+cache - the default on-disk cache hydrates full-match lookups from disk, so a
+stale entry from a prior run could mask a real partial-reuse miss.
 
 ---
 
