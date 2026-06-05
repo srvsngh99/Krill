@@ -37,7 +37,7 @@ KLMCLI (executable)
 
 ```
 Sources/
-  KLMCLI/             CLI commands (run, serve, pull, bench, etc.)
+  KLMCLI/             CLI commands (run, serve, launch, pull, bench, etc.)
   KLMEngine/          Inference engine, speculative decoder, Python fallback
   KLMCore/            Model architectures (Llama, Gemma4, Qwen, etc.) + model loader
   KLMCache/           KV cache (batched concat) + prefix cache (LRU + disk)
@@ -99,6 +99,8 @@ Default port: 57455
 |----------|--------|---------|
 | `/v1/chat/completions` | POST | OpenAI chat (SSE streaming) |
 | `/v1/completions` | POST | OpenAI text completion |
+| `/v1/responses` | POST | OpenAI Responses API (Codex `wire_api="responses"`) |
+| `/v1/messages` | POST | Anthropic Messages API (Claude Code / Anthropic SDK) |
 | `/v1/models` | GET | List models |
 | `/v1/models/load` | POST | Load model by name |
 | `/v1/models/unload` | POST | Unload model |
@@ -108,6 +110,58 @@ Default port: 57455
 | `/api/tags` | GET | Ollama model list |
 | `/healthz` | GET | Health check |
 | `/metrics` | GET | Prometheus metrics |
+
+The three generation wire protocols share one internal generate path. The
+Anthropic (`/v1/messages`) and Responses (`/v1/responses`) surfaces are thin,
+pure translation layers (`AnthropicCompat.swift`, `ResponsesCompat.swift`) that
+map a foreign request shape onto the internal messages/tools/sampling params and
+format the result back; tool calls on every surface flow through one
+model-agnostic `<tool_call>`/`<tool_response>` sentinel extractor
+(`ToolCalling.swift`). This is what lets a single server back agents that speak
+three different protocols.
+
+## Coding Agent Backend (`krillm launch`)
+
+`krillm launch <agent>` boots a terminal coding agent (Claude Code, Codex,
+OpenCode, Hermes, Pi, Copilot CLI, Droid) pre-wired to the local server, the way
+`ollama launch` does. The design principle: **the adapter is an endpoint inside
+the server, not a per-agent external proxy.** Each agent speaks one of the three
+generation wire protocols above, and `launch` only points it at the matching
+endpoint.
+
+| Agent's protocol | Endpoint | Agents |
+|---|---|---|
+| Anthropic Messages | `/v1/messages` | Claude Code |
+| OpenAI Chat Completions | `/v1/chat/completions` | OpenCode, Hermes, Pi, Copilot, Droid |
+| OpenAI Responses | `/v1/responses` | Codex (it dropped `wire_api="chat"`) |
+
+**Layout.** Agent knowledge is a declarative table in
+`Sources/KLMCLI/AgentProfiles.swift` (one `AgentProfile` literal per agent:
+wire protocol, env to export, config files to `write`/`mergeJSON`, setup
+`preExec` commands, binary, install hint). `Sources/KLMCLI/LaunchCommand.swift`
+stays generic over the table.
+
+**Flow.** Resolve the profile and model (`--model` or first installed) -> ensure
+a server is up with that model loaded (auto-start a detached `krillm serve` and
+poll `/healthz`, or fail loud; `--no-serve` opts out) -> apply the agent's
+config files + env + setup commands -> `execvp` the agent so it inherits the
+real TTY/stdin/signals. The auto-started server survives the exec (it is a
+separate process) and keeps running after the agent exits; the keep-alive
+controller unloads its idle *model* to free memory (and `krillm stop` unloads
+it on demand), but the server *process* itself stays resident until killed.
+
+**Config safety.** `write` targets are krillm-owned paths only (e.g. Codex gets
+an isolated `config.toml` under a krillm-owned `CODEX_HOME`, so the user's real
+`~/.codex` is never touched). `mergeJSON` deep-merges only our keys into the
+user's config, keeps a `.bak`, and concatenates+dedups arrays (so e.g. Droid's
+`custom_models` never clobbers the user's existing entries).
+
+Adding an agent is a one-literal edit. Two roster members are documented for
+manual setup rather than auto-wired: `codex-app` (the desktop app reads the real
+`~/.codex` and would change the user's default provider) and `openclaw`
+(config surface unverified). See
+[`CONNECT_CODING_AGENTS.md`](CONNECT_CODING_AGENTS.md) for usage and
+[`SERVER_API.md`](SERVER_API.md) for the raw endpoint shapes.
 
 ## Dependencies
 
