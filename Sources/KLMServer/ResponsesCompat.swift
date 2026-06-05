@@ -79,11 +79,16 @@ internal enum ResponsesCompat {
 
     /// Render a `function_call_output.output` value as text for the shared
     /// `<tool_response>` sentinel. Responses usually sends a string, but a
-    /// JSON object/array or a scalar must not be dropped — the model needs
+    /// JSON object/array or a scalar must not be dropped: the model needs
     /// the tool result.
     private static func stringifyOutput(_ value: Any?) -> String {
         if let s = value as? String { return s }
-        if let parts = value as? [[String: Any]] { return flattenContent(parts) }
+        // Content-part array -> flatten its text; if that yields nothing it is
+        // an arbitrary JSON array, so fall through to serialization below.
+        if let parts = value as? [[String: Any]] {
+            let flat = flattenContent(parts)
+            if !flat.isEmpty { return flat }
+        }
         if let obj = value, JSONSerialization.isValidJSONObject(obj),
            let d = try? JSONSerialization.data(withJSONObject: obj),
            let s = String(data: d, encoding: .utf8) {

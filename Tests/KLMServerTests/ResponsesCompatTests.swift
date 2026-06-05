@@ -83,6 +83,14 @@ final class ResponsesCompatTests: XCTestCase {
         XCTAssertNotNil(resp)
         XCTAssertTrue(resp?["content"]?.contains("\"temp\"") ?? false)
         XCTAssertFalse(resp?["content"]?.contains("<tool_response></tool_response>") ?? true)
+
+        // An arbitrary JSON array (not content parts) is serialized, not dropped.
+        let arr = ResponsesCompat.parse([
+            "input": [["type": "function_call_output", "call_id": "c1",
+                       "output": [["id": 1], ["id": 2]]]],
+        ])
+        let aresp = arr.messages.first { $0["content"]?.contains("<tool_response>") ?? false }
+        XCTAssertTrue(aresp?["content"]?.contains("\"id\"") ?? false)
     }
 
     func testParseSkipsNonFunctionTools() {

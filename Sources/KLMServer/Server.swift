@@ -958,7 +958,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     // MARK: - OpenAI Responses: POST /v1/responses
 
     /// OpenAI Responses API. Codex (`wire_api = "responses"`) requires this
-    /// surface — it dropped Chat Completions. Mirrors ``handleAnthropicMessages``:
+    /// surface (it dropped Chat Completions). Mirrors ``handleAnthropicMessages``:
     /// buffered generate, then format as the Responses shape (non-streaming
     /// body or the Responses SSE event sequence). Tool calls become
     /// `function_call` output items; text becomes a `message`/`output_text`
