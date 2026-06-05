@@ -108,7 +108,9 @@ captures Ollama p99 TTFT, resolved in issue #3.)
 
 A realistic agent/RAG request reuses a long shared scaffold (system prompt + tool
 schemas + retrieved docs) across many calls with a short varying tail. KrillLM now
-reuses that shared prefix (PRs #148 serial + #151 concurrent batched) instead of
+reuses that shared prefix - serial (PRs #148) and concurrent batched (#151) for
+the standard per-layer families, plus **Gemma 4 on every path** (#156 serial fp16,
+#157 int8 serial, #158 honest gate, #159 concurrent batched) - instead of
 re-prefilling it. Measured on **qwen2.5-14b** vs Ollama `qwen2.5:14b` (shared
 ~1300-token RAG context, varied question, greedy; run sequentially so only one
 14B is resident):
@@ -125,13 +127,22 @@ Concurrent rows share the scaffold too: on qwen2.5-3b at `KRILL_NUM_PARALLEL=4`,
 ~440-token scaffold prefills cold once (~441 ms) and the 4 concurrent shared-prefix
 requests then prefill in 13 / 43 / 44 / 111 ms each.
 
-**Caveat - Gemma 4 is excluded.** Shared-prefix reuse forwards a suffix span over a
-restored prefix; that is bit-exact for standard per-layer caches (Llama, Qwen,
-Mistral, Phi, dense MoE) but NOT for Gemma 4's cross-layer KV-sharing layout
-(verified: it reuses but produces different output), so Gemma 4 keeps full-match
-reuse only. On a Gemma-4 agentic workload Ollama's prefix cache currently wins;
-the other families are at parity. Giving Gemma 4 correct partial reuse is a
-tracked follow-up (`docs/BACKLOG.md`).
+**Gemma 4 now reuses too (closed 2026-06-06).** Shared-prefix reuse forwards a
+suffix span over a restored prefix. This is byte-exact for standard per-layer
+caches (Llama, Qwen, Mistral, Phi, dense MoE). Gemma 4 needed one fix - its
+cross-layer KV-shared layers must rotate the suffix query at its true positions
+`[LCP, count)` rather than offset 0 - and now reuses on all paths. Gemma 4
+computes in bf16, so the reused result is numerically correct but NOT strictly
+byte-identical: the shorter suffix GEMM rounds a few percent differently and can
+flip a downstream greedy near-tie into an equally-valid different continuation
+(dense families stay byte-exact; Gemma 4 is gated on the reused cache matching
+cold within bf16 noise + first-token match - see `docs/BACKLOG.md`). KrillLM
+self-measured on gemma-4-e2b over HTTP (562-token shared prefix): cold prefill
+**1001 ms -> partial reuse 158 ms** (full-match 17 ms).
+
+> **Refresh pending:** a clean Gemma-4 head-to-head vs Ollama `gemma4:e2b`
+> agentic table is not yet captured here; re-run `tools/agentic_benchmark.py`
+> with `--krill-model gemma-4-e2b --ollama-model gemma4:e2b` and replace this note.
 
 ---
 
@@ -162,10 +173,13 @@ python3 tools/krillm_concurrent_benchmark.py \
   --ollama-host http://127.0.0.1:11434 --ollama-model gemma4:e2b \
   --concurrency-sweep "1,2,4,8" --max-tokens 96 --runs 2 --warmup 1 --server-arm batched
 
-# 5. Agentic / RAG shared-prefix reuse (use a NON-Gemma-4 family; run the engines
-#    sequentially on a 24GB box so only one 14B is resident at a time):
+# 5. Agentic / RAG shared-prefix reuse (any family now, incl. Gemma 4; run the
+#    engines sequentially on a 24GB box so only one large model is resident):
 python3 tools/agentic_benchmark.py \
   --krill-model qwen2.5-14b --ollama-model qwen2.5:14b --concurrency 1,4 --max-tokens 48
+#   (Gemma 4 agentic head-to-head - the path closed in #156-#159:)
+python3 tools/agentic_benchmark.py \
+  --krill-model gemma-4-e2b --ollama-model gemma4:e2b --concurrency 1,4 --max-tokens 48
 ```
 
 `tools/bench_suite.py` auto-uses `/tmp/klmbench/red.png` and
