@@ -241,11 +241,35 @@ struct LaunchCommand: AsyncParsableCommand {
         for (k, v) in overlay {
             if let bv = result[k] as? [String: Any], let ov = v as? [String: Any] {
                 result[k] = deepMerge(bv, ov)
+            } else if let bv = result[k] as? [Any], let ov = v as? [Any] {
+                // Arrays (e.g. Droid's custom_models) concatenate, then dedup by
+                // value so re-running launch never duplicates our entry or drops
+                // the user's existing entries.
+                result[k] = dedup(bv + ov)
             } else {
                 result[k] = v
             }
         }
         return result
+    }
+
+    private func dedup(_ items: [Any]) -> [Any] {
+        var seen = Set<String>()
+        var out: [Any] = []
+        for item in items {
+            let key: String
+            if JSONSerialization.isValidJSONObject(item),
+               let d = try? JSONSerialization.data(withJSONObject: item, options: [.sortedKeys]),
+               let s = String(data: d, encoding: .utf8) {
+                key = "json:" + s
+            } else {
+                // Type-prefix scalars so e.g. Int 1 and String "1" don't
+                // false-dedup.
+                key = "\(type(of: item)):\(item)"
+            }
+            if seen.insert(key).inserted { out.append(item) }
+        }
+        return out
     }
 
     private func runPreExec(_ commands: [[String]]) {

@@ -228,7 +228,24 @@ Supports `system` (string or blocks), multi-turn `content` blocks,
 `tools` (`input_schema`), `tool_use`/`tool_result` (mapped onto the
 shared tool-call convention), `thinking` (segmented into a `thinking`
 content block), non-streaming and a valid streaming event sequence
-(`message_start` → `content_block_*` → `message_delta` → `message_stop`).
+(`message_start` → `ping` → `content_block_start` → `content_block_delta`
+(`text_delta` / `input_json_delta`) → `content_block_stop` →
+`message_delta` → `message_stop`).
+
+## OpenAI Responses API
+
+`POST /v1/responses` implements the OpenAI Responses shape so OpenAI Codex
+(`wire_api = "responses"`, which dropped Chat Completions) and other
+Responses clients work against KrillLM. Accepts `instructions` (system
+prompt), `input` (a string or an array of `message` / `function_call` /
+`function_call_output` items), `tools` (flat `{type:"function", name,
+parameters}`, mapped onto the shared tool-call convention), and
+`max_output_tokens`. Non-streaming returns `{object:"response",
+output:[{type:"message"|"function_call"}], usage}`; streaming emits the
+Responses event sequence (`response.created` → `response.output_item.added`
+→ `response.output_text.delta` / `response.function_call_arguments.delta` →
+… → `response.completed`). The easiest way to use it is
+`krillm launch codex` (see [CONNECT_CODING_AGENTS.md](CONNECT_CODING_AGENTS.md)).
 
 ## CORS & Environment Aliases
 
