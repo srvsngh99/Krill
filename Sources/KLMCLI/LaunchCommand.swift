@@ -74,6 +74,7 @@ struct LaunchCommand: AsyncParsableCommand {
         try applyConfigFiles(profile.configFiles, baseURL: baseURL, model: modelName)
         let env = profile.env(baseURL, modelName)
         runPreExec(profile.preExec(baseURL, modelName))
+        let agentArgv = [profile.binary] + profile.args(modelName) + agentArgs
 
         print("""
 
@@ -86,7 +87,7 @@ struct LaunchCommand: AsyncParsableCommand {
 
         // Export env, then replace this process with the agent so it owns the TTY.
         for (k, v) in env { setenv(k, expandTilde(v), 1) }
-        try execAgent(profile)
+        try execAgent(profile, argv: agentArgv)
     }
 
     // MARK: - Roster
@@ -116,7 +117,13 @@ struct LaunchCommand: AsyncParsableCommand {
             let active = health["model"] as? String
             if !loaded || active != model {
                 print("Loading '\(model)' into the running server...")
-                await loadModel(baseURL: baseURL, model: model)
+                // Fail loud (like the auto-start branch) so we never exec the
+                // agent against the wrong model on a failed load.
+                guard await loadModel(baseURL: baseURL, model: model) else {
+                    print("Error: server could not load '\(model)'. "
+                          + "Check `krillm list` and the server log.")
+                    throw ExitCode.failure
+                }
             }
             return
         }
@@ -179,13 +186,15 @@ struct LaunchCommand: AsyncParsableCommand {
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
-    private func loadModel(baseURL: String, model: String) async {
-        guard let url = URL(string: "\(baseURL)/v1/models/load") else { return }
+    /// Ask the running server to load `model`. Returns true on HTTP 200.
+    private func loadModel(baseURL: String, model: String) async -> Bool {
+        guard let url = URL(string: "\(baseURL)/v1/models/load") else { return false }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model])
-        _ = try? await URLSession.shared.data(for: req)
+        guard let (_, resp) = try? await URLSession.shared.data(for: req) else { return false }
+        return (resp as? HTTPURLResponse)?.statusCode == 200
     }
 
     // MARK: - Config + setup
@@ -211,8 +220,10 @@ struct LaunchCommand: AsyncParsableCommand {
     /// Deep-merge a rendered JSON fragment into an existing JSON file (new keys
     /// win, sibling keys preserved). A .bak of any existing file is kept.
     private func mergeJSON(_ fragment: String, into path: String) throws {
-        guard let overlay = try? JSONSerialization.jsonObject(
-            with: Data(fragment.utf8)) as? [String: Any] else { return }
+        guard let overlay = try JSONSerialization.jsonObject(
+            with: Data(fragment.utf8)) as? [String: Any] else {
+            throw LaunchError.invalidConfigFragment(path)
+        }
         var base: [String: Any] = [:]
         if FileManager.default.fileExists(atPath: path),
            let data = FileManager.default.contents(atPath: path) {
@@ -258,9 +269,9 @@ struct LaunchCommand: AsyncParsableCommand {
     // MARK: - Exec
 
     /// Replace this process with the agent binary so it inherits the real TTY,
-    /// stdin/stdout, and signals. On success this never returns.
-    private func execAgent(_ profile: AgentProfile) throws {
-        let argv = [profile.binary] + profile.args(model ?? "") + agentArgs
+    /// stdin/stdout, and signals. On success this never returns. `argv` already
+    /// includes the binary as argv[0], the resolved model args, and passthrough.
+    private func execAgent(_ profile: AgentProfile, argv: [String]) throws {
         var cArgs: [UnsafeMutablePointer<CChar>?] = argv.map { strdup($0) }
         cArgs.append(nil)
         execvp(profile.binary, &cArgs)
@@ -282,5 +293,15 @@ struct LaunchCommand: AsyncParsableCommand {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         if path == "~" { return home }
         return home + String(path.dropFirst(1))
+    }
+}
+
+enum LaunchError: Error, CustomStringConvertible {
+    case invalidConfigFragment(String)
+    var description: String {
+        switch self {
+        case .invalidConfigFragment(let path):
+            return "Internal error: could not build a valid JSON config for \(path)."
+        }
     }
 }

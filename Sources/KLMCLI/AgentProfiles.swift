@@ -1,5 +1,14 @@
 import Foundation
 
+/// Serialize a JSON object to a string with proper escaping, so model ids and
+/// URLs are never raw-interpolated into config files. Returns "{}" only if the
+/// object is somehow non-serializable (it never is here).
+func jsonString(_ obj: [String: Any]) -> String {
+    guard let d = try? JSONSerialization.data(withJSONObject: obj),
+          let s = String(data: d, encoding: .utf8) else { return "{}" }
+    return s
+}
+
 /// Per-agent launch profiles for `krillm launch <agent>`. Each profile says
 /// how to wire one coding agent to the local KrillLM server: which wire
 /// protocol it speaks, what env to export, what config file(s) to write or
@@ -121,19 +130,15 @@ enum AgentProfiles {
         wire: .openAIChat,
         configFiles: [AgentConfigFile(
             path: "~/.config/opencode/opencode.json", mode: .mergeJSON,
-            render: { base, model in """
-                {
-                  "provider": {
-                    "krillm": {
-                      "npm": "@ai-sdk/openai-compatible",
-                      "name": "KrillLM",
-                      "options": { "baseURL": "\(base)/v1" },
-                      "models": { "\(model)": { "name": "\(model)" } }
-                    }
-                  },
-                  "model": "krillm/\(model)"
-                }
-                """ })],
+            render: { base, model in jsonString([
+                "provider": ["krillm": [
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "KrillLM",
+                    "options": ["baseURL": "\(base)/v1"],
+                    "models": [model: ["name": model]],
+                ]],
+                "model": "krillm/\(model)",
+            ]) })],
         binary: "opencode",
         notInstalledHint: "Install opencode:  npm i -g opencode-ai")
 
@@ -161,26 +166,20 @@ enum AgentProfiles {
         wire: .openAIChat,
         configFiles: [AgentConfigFile(
             path: "~/.pi/agent/models.json", mode: .mergeJSON,
-            render: { base, model in """
-                {
-                  "providers": {
-                    "krillm": {
-                      "baseUrl": "\(base)/v1",
-                      "api": "openai-completions",
-                      "apiKey": "krillm-local"
-                    }
-                  },
-                  "models": {
-                    "krillm/\(model)": {
-                      "provider": "krillm",
-                      "id": "\(model)",
-                      "name": "\(model)",
-                      "contextWindow": 65536,
-                      "maxTokens": 8192
-                    }
-                  }
-                }
-                """ })],
+            render: { base, model in jsonString([
+                "providers": ["krillm": [
+                    "baseUrl": "\(base)/v1",
+                    "api": "openai-completions",
+                    "apiKey": "krillm-local",
+                ]],
+                "models": ["krillm/\(model)": [
+                    "provider": "krillm",
+                    "id": model,
+                    "name": model,
+                    "contextWindow": 65536,
+                    "maxTokens": 8192,
+                ]],
+            ]) })],
         binary: "pi",
         notInstalledHint: "Install Pi:  npm i -g @mariozechner/pi-coding-agent")
 
