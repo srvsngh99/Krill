@@ -49,8 +49,13 @@ final class Gemma4PartialReuseLiveTests: XCTestCase {
         let (stream, getStats) = engine.generate(
             messages: userMessage(q), params: .greedy, maxTokens: maxTokens,
             useSpeculative: false, usePrefixCache: true)
+        // Drain the stream to completion rather than breaking on the end event:
+        // the engine writes `getStats()` just before it finishes the stream, so
+        // breaking early can read stats before they are populated and see
+        // prefillTime == 0 (a flaky < 0.0 comparison below). Letting the loop
+        // exit naturally guarantees the stats are set.
         var out = ""
-        for await ev in stream { if ev.isEnd { break }; out += ev.text }
+        for await ev in stream where !ev.isEnd { out += ev.text }
         return (out, getStats()?.prefillTime ?? 0)
     }
 
@@ -81,6 +86,35 @@ final class Gemma4PartialReuseLiveTests: XCTestCase {
         XCTAssertLessThan(
             reused.prefill, baseline.prefill * 0.5,
             "reused prefill (\(reused.prefill)s) should be far below the cold "
+            + "full prefill (\(baseline.prefill)s); near-equal means reuse did not engage")
+    }
+
+    /// Same invariant on the int8-KV serial path (`KRILL_KV_CACHE_DTYPE=int8`).
+    /// Gemma 4 is the only family that uses int8 KV; the partial reuse there
+    /// restores quantized per-layer snapshots, truncates them to the shared
+    /// prefix length, and forwards the suffix. The shared-layer suffix-Q RoPE
+    /// fix is dtype-agnostic (it reads the donor cache's sequence length), so
+    /// the int8 resume must be byte-identical to a cold int8 prefill too.
+    func testGemma4PartialReuseIsBitExactAndFasterInt8() async throws {
+        let dir = try modelDir()
+
+        let cold = InferenceEngine(modelDirectory: dir, kvCacheDtype: "int8")
+        try await cold.load()
+        let baseline = await run(cold, "Question: Explain in one sentence why the sky is blue.")
+
+        let warm = InferenceEngine(modelDirectory: dir, kvCacheDtype: "int8")
+        try await warm.load()
+        _ = await run(warm, "Question: Say hello.")
+        let reused = await run(warm, "Question: Explain in one sentence why the sky is blue.")
+
+        XCTAssertFalse(baseline.text.isEmpty, "int8 baseline produced no output")
+        XCTAssertEqual(
+            reused.text, baseline.text,
+            "Gemma 4 int8 partial-prefix reuse must be byte-identical to a cold "
+            + "int8 full prefill (greedy)")
+        XCTAssertLessThan(
+            reused.prefill, baseline.prefill * 0.5,
+            "int8 reused prefill (\(reused.prefill)s) should be far below the cold "
             + "full prefill (\(baseline.prefill)s); near-equal means reuse did not engage")
     }
 }

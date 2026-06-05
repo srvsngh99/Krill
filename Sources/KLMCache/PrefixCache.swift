@@ -147,6 +147,44 @@ public final class PrefixCache: @unchecked Sendable {
         return PrefixCacheHit(keys: bestKeys, values: bestValues, prefixLength: bestLen)
     }
 
+    /// int8 analogue of `lookupLongestPrefix`: returns the per-layer quantized
+    /// snapshots of the in-memory entry that shares the longest leading-token
+    /// run with `tokens`, plus that shared length. The snapshots are the
+    /// entry's FULL stored state, so the caller restores them and then
+    /// truncates the per-layer caches to `prefixLength` (mirrors the fp16
+    /// partial path). Same `modelId` + `mediaHash` constraint as the full
+    /// match. Disk-hydrated entries (empty `tokens`) are skipped. Returns nil
+    /// when no in-memory entry shares at least `minPrefixLength` leading tokens.
+    public func lookupLongestPrefixQuantized(
+        tokens: [Int],
+        modelId: String,
+        mediaHash: String? = nil
+    ) -> QuantizedPrefixCacheHit? {
+        guard tokens.count >= minPrefixLength else { return nil }
+        memoryLock.lock(); defer { memoryLock.unlock() }
+
+        var bestKey: String? = nil
+        var bestLen = 0
+        var bestSnaps: [QuantizedKVSnapshot] = []
+        let wantMedia = mediaHash ?? ""
+        for (key, entry) in memoryCache {
+            guard entry.modelId == modelId,
+                  (entry.mediaHash ?? "") == wantMedia,
+                  case let .int8(snapshots) = entry.storage,
+                  !entry.tokens.isEmpty
+            else { continue }
+            let lcp = Self.commonPrefixLength(tokens, entry.tokens)
+            if lcp >= minPrefixLength, lcp > bestLen {
+                bestLen = lcp
+                bestKey = key
+                bestSnaps = snapshots
+            }
+        }
+        guard let hitKey = bestKey else { return nil }
+        touchEntryLocked(hitKey)
+        return QuantizedPrefixCacheHit(layers: bestSnaps, prefixLength: bestLen)
+    }
+
     /// Number of leading tokens `a` and `b` share.
     static func commonPrefixLength(_ a: [Int], _ b: [Int]) -> Int {
         let n = min(a.count, b.count)
@@ -244,7 +282,13 @@ public final class PrefixCache: @unchecked Sendable {
         guard tokens.count >= minPrefixLength, !snapshots.isEmpty else { return }
 
         let key = cacheKey(tokens: tokens, modelId: modelId, mediaHash: mediaHash, dtype: .int8)
-        let entry = MemoryCacheEntry(storage: .int8(snapshots: snapshots))
+        // Retain tokens + identity so a later request sharing this prefix can
+        // LCP-match it (see `lookupLongestPrefixQuantized`), exactly as the
+        // fp16 `store` does. Without this, quantized entries could only ever
+        // serve byte-identical full hits, never a shared-prefix partial reuse.
+        let entry = MemoryCacheEntry(
+            storage: .int8(snapshots: snapshots),
+            tokens: tokens, modelId: modelId, mediaHash: mediaHash)
 
         storeInMemory(key: key, entry: entry)
 
