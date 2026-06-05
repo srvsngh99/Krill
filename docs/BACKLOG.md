@@ -7,6 +7,31 @@ the in-repo companion to the owner's out-of-repo board
 
 ---
 
+## `krillm launch` roster: remaining agents + live verification
+
+**Status:** core DONE (PRs #161-#164). `krillm launch <agent>` ships with
+claude, codex, opencode, hermes, pi, copilot, droid. Follow-ups consciously
+deferred:
+
+- **Live-verify hermes / pi / copilot / droid.** Only claude/codex/opencode
+  were installed to test end-to-end (codex did a real `/v1/responses`
+  round-trip). The other four follow each tool's documented OpenAI-compatible
+  config but were not run against a real binary; verify their exact env/config
+  schema once installed and tweak the `AgentProfile` literal if a version
+  drifted. Profiles live in `Sources/KLMCLI/AgentProfiles.swift`.
+- **`codex-app` (Codex desktop).** The GUI reads the real `~/.codex/config.toml`
+  (it does not inherit a shell `CODEX_HOME`), so wiring it means merging a
+  provider + profile into the user's file AND setting their default provider -
+  invasive to do silently. Needs a careful TOML block-merge mode (append-if-
+  absent + `.bak`) and `open -a Codex` launch semantics. Documented as manual
+  in `docs/CONNECT_CODING_AGENTS.md` for now.
+- **`openclaw`.** Config surface not verified (reportedly Pi-stack based);
+  shipping guessed wiring would be worse than the documented manual path.
+- **Streaming granularity (optional).** `/v1/responses` and `/v1/messages` are
+  buffered (one delta) like the chat tool path; token-incremental Responses
+  deltas would mirror `handleStreamingCompletion`. Codex tolerates the current
+  granularity, so this is polish, not a blocker.
+
 ## Gemma 4 partial-prefix (shared-prefix) KV reuse
 
 **Status:** DONE - all paths. SERIAL fp16 (PR #156), int8-KV SERIAL (PR #157),
