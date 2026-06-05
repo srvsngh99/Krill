@@ -261,9 +261,11 @@ struct LaunchCommand: AsyncParsableCommand {
             if JSONSerialization.isValidJSONObject(item),
                let d = try? JSONSerialization.data(withJSONObject: item, options: [.sortedKeys]),
                let s = String(data: d, encoding: .utf8) {
-                key = s
+                key = "json:" + s
             } else {
-                key = String(describing: item)
+                // Type-prefix scalars so e.g. Int 1 and String "1" don't
+                // false-dedup.
+                key = "\(type(of: item)):\(item)"
             }
             if seen.insert(key).inserted { out.append(item) }
         }
