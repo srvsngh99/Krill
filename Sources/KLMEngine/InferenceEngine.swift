@@ -1061,9 +1061,9 @@ public final class InferenceEngine: @unchecked Sendable {
                 // needed the shared layers to rotate the suffix Q at its TRUE
                 // positions [LCP, count) instead of their empty-cache offset 0,
                 // which `Gemma4Attention` now does for a multi-token resume. Both
-                // the fp16 and the int8 serial caches reuse here; only the
-                // concurrent batched path still excludes Gemma 4 partial reuse
-                // (separate follow-up - see docs/BACKLOG.md).
+                // the fp16 and the int8 serial caches reuse here; the concurrent
+                // batched path reuses for Gemma 4 too (same per-row serial
+                // prefill - see `makeBatchedPrefillRow`).
                 var partialReuseLen = 0
                 if effectiveUsePrefixCache, !cacheHit, mediaHash == nil {
                     if let fp16Caches,
