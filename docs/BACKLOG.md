@@ -34,12 +34,35 @@ The L==1 decode step and the single-token full-MATCH re-forward keep the legacy
 offset-0 path untouched, so this changes behavior ONLY for a multi-token
 partial-prefix resume.
 
-**Gate:** `Gemma4PartialReuseLiveTests` (env `KLM_GEMMA4_MODEL_PATH`) asserts
-shared-prefix reuse is BYTE-IDENTICAL to a cold full prefill and far faster.
 Verified end-to-end on gemma-4-e2b: a 562-token shared-prefix request drops from
-1001 ms (cold) to 158 ms (partial reuse) — Ollama-parity territory. The
-existing Gemma 4 smoke + 11 batched-decode gates (incl. full-match replay) stay
-green (cold/decode paths are provably unchanged).
+1001 ms (cold) to 158 ms (partial reuse) - Ollama-parity territory. The existing
+Gemma 4 smoke + 11 batched-decode gates (incl. full-match replay) stay green
+(cold/decode paths are provably unchanged).
+
+**CORRECTNESS STANDARD (bf16). Gemma 4 partial reuse is numerically correct but
+NOT strictly byte-exact, and this is fundamental, not a bug.** Gemma 4 computes
+in bf16; a partial reuse forwards only the suffix, whose shorter GEMM rounds a
+few percent differently than the cold full forward (measured ~0.05 max relative
+on e2b vs ~0.0005 for fp16 Qwen). The reused KV cache is correct to within that
+rounding, but it can flip a downstream greedy near-tie into an equally-valid
+different continuation - the same bf16 behavior `BatchedDecodeLiveTests`'
+teacher-forced gate already accepts (tolerance bound, not token equality). So the
+DENSE families keep the strict byte-exact gate, and Gemma 4 is gated on the
+robust, prompt-independent invariants instead (`Gemma4PartialReuseLiveTests`,
+2026-06-06):
+- `testCacheMatchesColdWithinBf16` - the restored+truncated+suffix-forwarded
+  cache (what the DONOR, non-shared layers write) matches a cold prefill within a
+  bf16 relative bound. A bad restore or wrong truncate length corrupts it at O(1)
+  relative. It does NOT cover the shared-layer Q offset (Q is never cached; the
+  empty KV-shared layers are skipped). New helper `partialPrefillCacheMaxDiff`.
+- `testPartialReuseEngagesAndIsFaster` / `...Int8` - gates the shared-layer Q
+  offset + engine wiring: the first decoded token (flows through the KV-shared
+  layers; the pre-fix offset-0 path corrupted it grossly, not via a bf16
+  tie-flip) matches cold and prefill is far faster.
+
+(An earlier framing of these tests asserted full greedy-token equality and
+passed only because the chosen prompt had no near-tie in-window; the robust
+invariants above are stronger and prompt-independent.)
 
 **int8-KV serial path - DONE (2026-06-05, this PR).** The shared-layer offset
 fix is dtype-agnostic, so the only missing pieces were on the cache side:
@@ -50,8 +73,9 @@ the fp16 LCP lookup over int8 storage. The engine gained a parallel int8 partial
 branch (restore the quantized donor snapshots, truncate to the shared length,
 forward the suffix). Quantization is per-token (each token carries its own
 scale/zero), so a restored-then-truncated prefix is bit-identical to a cold int8
-prefill of those tokens. Gate: `Gemma4PartialReuseLiveTests`
-`testGemma4PartialReuseIsBitExactAndFasterInt8` (byte-exact vs cold int8) plus
+prefill of those tokens (the int8 quantization itself is exact-per-token; the
+bf16 standard above still applies to the underlying compute). Gate:
+`Gemma4PartialReuseLiveTests.testPartialReuseEngagesAndIsFasterInt8` plus
 `QuantizedPrefixCacheTests` LCP units. The int8 batched full-match gates stay
 green.
 

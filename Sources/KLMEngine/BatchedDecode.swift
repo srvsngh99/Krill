@@ -793,4 +793,68 @@ extension InferenceEngine {
         }
         return gen
     }
+
+    /// Robust, prompt-independent correctness probe for shared-prefix (partial)
+    /// KV reuse. Builds the KV two ways over the fp16 cache and returns the max
+    /// per-element |diff| of the resulting per-layer caches plus the max |cold|
+    /// value (for relative scale):
+    ///   - COLD: prefill `prefix + suffix` in one forward.
+    ///   - PARTIAL: prefill the FULL `prefix + suffix` (the engine stores the
+    ///     whole prompt), snapshot, restore into fresh caches, truncate back to
+    ///     `prefix.count` (so the truncate really trims the stored suffix), then
+    ///     re-forward only `suffix` - exactly the restore/truncate/suffix-forward
+    ///     the engine's partial-reuse path runs when a later request shares this
+    ///     prefix.
+    /// SCOPE: this measures the cache the DONOR (non-shared) layers write. It
+    /// gates the restore + truncate + suffix-forward orchestration: a bad restore
+    /// or a wrong truncate length corrupts the donor K/V at O(1) relative. It
+    /// does NOT exercise Gemma 4's shared-layer suffix-Q RoPE offset - that fix
+    /// only rotates the KV-shared layers' QUERY, which is never written to any
+    /// cache (and those layers' own caches are empty, so they are skipped here).
+    /// The offset fix is gated separately by the first-decoded-token check in
+    /// `Gemma4PartialReuseLiveTests`.
+    /// A mathematically exact path yields identical caches. The residual is the
+    /// model's own GEMM rounding: fp16 families (Llama/Qwen) round at ~1e-3
+    /// relative, so their greedy output stays byte-identical; Gemma 4 computes in
+    /// bf16, so a length-dependent suffix GEMM rounds at a few percent relative,
+    /// which is numerically correct but can flip a downstream greedy tie. Returns
+    /// nil if no model is loaded.
+    func partialPrefillCacheMaxDiff(
+        prefix: [Int], suffix: [Int]
+    ) -> (maxDiff: Float, maxCold: Float)? {
+        guard let model = loadedModelForBatching, !suffix.isEmpty else { return nil }
+        let prefill = model.prefillForward ?? model.forward
+        let full = prefix + suffix
+
+        let coldCaches = makeKVCaches(numLayers: model.numLayers)
+        _ = prefill(MLXArray(full.map { Int32($0) }).reshaped(1, full.count), coldCaches)
+
+        // Prime on the FULL prompt so the restore carries a stored suffix that
+        // `truncate(to: prefix.count)` actually trims (mirrors a stored entry
+        // longer than the shared prefix).
+        let primeCaches = makeKVCaches(numLayers: model.numLayers)
+        _ = prefill(MLXArray(full.map { Int32($0) }).reshaped(1, full.count), primeCaches)
+        let partialCaches = makeKVCaches(numLayers: model.numLayers)
+        for (i, c) in primeCaches.enumerated() {
+            if let snap = c.snapshot() {
+                partialCaches[i].restore(keys: snap.keys, values: snap.values)
+            }
+        }
+        for c in partialCaches { c.truncate(to: prefix.count) }
+        _ = prefill(MLXArray(suffix.map { Int32($0) }).reshaped(1, suffix.count), partialCaches)
+
+        var maxDiff: Float = 0
+        var maxCold: Float = 0
+        for i in 0 ..< coldCaches.count {
+            guard let cs = coldCaches[i].snapshot(), let ps = partialCaches[i].snapshot(),
+                  cs.keys.dim(2) == ps.keys.dim(2) else { continue }
+            maxDiff = Swift.max(maxDiff,
+                MLX.max(MLX.abs(cs.keys - ps.keys)).item(Float.self),
+                MLX.max(MLX.abs(cs.values - ps.values)).item(Float.self))
+            maxCold = Swift.max(maxCold,
+                MLX.max(MLX.abs(cs.keys)).item(Float.self),
+                MLX.max(MLX.abs(cs.values)).item(Float.self))
+        }
+        return (maxDiff, maxCold)
+    }
 }
