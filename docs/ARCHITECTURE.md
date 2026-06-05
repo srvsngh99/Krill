@@ -146,7 +146,9 @@ a server is up with that model loaded (auto-start a detached `krillm serve` and
 poll `/healthz`, or fail loud; `--no-serve` opts out) -> apply the agent's
 config files + env + setup commands -> `execvp` the agent so it inherits the
 real TTY/stdin/signals. The auto-started server survives the exec (it is a
-separate process) and is reaped by the normal keep-alive evictor.
+separate process) and keeps running after the agent exits; the keep-alive
+controller unloads its idle *model* to free memory (and `krillm stop` unloads
+it on demand), but the server *process* itself stays resident until killed.
 
 **Config safety.** `write` targets are krillm-owned paths only (e.g. Codex gets
 an isolated `config.toml` under a krillm-owned `CODEX_HOME`, so the user's real
