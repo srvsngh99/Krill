@@ -930,6 +930,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                             "stop_reason": NSNull(),
                             "usage": ["input_tokens": inTok, "output_tokens": 0]],
             ])
+            sse("ping", ["type": "ping"])
             if calls.isEmpty {
                 sse("content_block_start", ["type": "content_block_start", "index": 0,
                     "content_block": ["type": "text", "text": ""]])
@@ -937,13 +938,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "delta": ["type": "text_delta", "text": cleaned]])
                 sse("content_block_stop", ["type": "content_block_stop", "index": 0])
             } else {
+                // Anthropic streaming tool_use: the block opens with an EMPTY
+                // input, the JSON arguments arrive as input_json_delta(s), then
+                // the block closes. Claude Code accumulates partial_json and
+                // parses on content_block_stop - shipping the whole input inside
+                // content_block_start (as we used to) leaves its tool input empty.
                 for (i, c) in calls.enumerated() {
-                    let input = (try? JSONSerialization.jsonObject(
-                        with: Data(c.argumentsJSON.utf8))) ?? [String: Any]()
                     sse("content_block_start", ["type": "content_block_start", "index": i,
                         "content_block": ["type": "tool_use",
                                           "id": "toolu_\(UUID().uuidString.prefix(8))",
-                                          "name": c.name, "input": input]])
+                                          "name": c.name, "input": [String: Any]()]])
+                    sse("content_block_delta", ["type": "content_block_delta", "index": i,
+                        "delta": ["type": "input_json_delta",
+                                  "partial_json": c.argumentsJSON]])
                     sse("content_block_stop", ["type": "content_block_stop", "index": i])
                 }
             }
