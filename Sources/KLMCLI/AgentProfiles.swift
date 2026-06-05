@@ -183,10 +183,50 @@ enum AgentProfiles {
         binary: "pi",
         notInstalledHint: "Install Pi:  npm i -g @mariozechner/pi-coding-agent")
 
+    // Copilot CLI (GitHub): OpenAI-compatible BYOK via env. Copilot's system
+    // prompt + tools are large, so it wants a >= 32k context model.
+    static let copilot = AgentProfile(
+        id: "copilot",
+        displayName: "Copilot CLI",
+        summary: "GitHub's AI coding agent for the terminal",
+        wire: .openAIChat,
+        env: { base, model in [
+            "COPILOT_PROVIDER_BASE_URL": "\(base)/v1",
+            "COPILOT_MODEL": model,
+        ] },
+        binary: "copilot",
+        notInstalledHint: "Install Copilot CLI:  npm i -g @github/copilot")
+
+    // Droid (Factory): OpenAI-compatible BYOK. A custom_models entry is merged
+    // into ~/.factory/config.json (the array concatenates, so existing custom
+    // models are preserved). Select it in Droid via /model or
+    // `droid --model custom:<display name>`.
+    static let droid = AgentProfile(
+        id: "droid",
+        displayName: "Droid",
+        summary: "Factory's coding agent across terminal and IDEs",
+        wire: .openAIChat,
+        configFiles: [AgentConfigFile(
+            path: "~/.factory/config.json", mode: .mergeJSON,
+            render: { base, model in jsonString([
+                "custom_models": [[
+                    "model_display_name": "KrillLM \(model)",
+                    "model": model,
+                    "base_url": "\(base)/v1",
+                    "api_key": "not-needed",
+                    "provider": "generic-chat-completion-api",
+                    "max_tokens": 8192,
+                ]],
+            ]) })],
+        binary: "droid",
+        notInstalledHint: "Install Droid:  curl -fsSL https://app.factory.ai/cli | sh")
+
     /// The launchable roster. claude/codex/opencode are verified against each
-    /// agent's documented local-endpoint setup; hermes/pi follow their
-    /// documented OpenAI-compatible config and may need per-version tweaks.
-    static let all: [AgentProfile] = [claude, codex, opencode, hermes, pi]
+    /// agent's documented local-endpoint setup; hermes/pi/copilot/droid follow
+    /// their documented OpenAI-compatible config and may need per-version tweaks.
+    /// (codex-app and openclaw need manual setup for now - see the connect-an-
+    /// agent docs.)
+    static let all: [AgentProfile] = [claude, codex, opencode, hermes, pi, copilot, droid]
 
     static func find(_ id: String) -> AgentProfile? {
         all.first { $0.id.lowercased() == id.lowercased() }
