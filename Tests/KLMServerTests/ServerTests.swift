@@ -116,6 +116,18 @@ final class ServerTests: XCTestCase {
         try readResponseEnd(from: channel)
     }
 
+    func testResponsesWithoutModelReturns503() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        try writeJSONRequest(to: channel, method: .POST, uri: "/v1/responses", body: [
+            "model": "gpt-x", "max_output_tokens": 64,
+            "input": "hi",
+        ])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .serviceUnavailable)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
     func testGenerationQueueSerializesAndCapsAtMaxQueue() async throws {
         // numParallel=1, maxQueue=1: one active + one queued allowed; a
         // third concurrent enter() must throw QueueFull (-> 503).

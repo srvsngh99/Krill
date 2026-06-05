@@ -328,6 +328,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         case (.POST, "/v1/messages"):
             guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
             routeGenerate(context: context, body: body) { self.handleAnthropicMessages(context: $0, body: $1) }
+        case (.POST, "/v1/responses"):
+            guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
+            routeGenerate(context: context, body: body) { self.handleResponses(context: $0, body: $1) }
 
         // Model management (KrillLM-native, available in any compat mode)
         case (.POST, "/v1/models/load"):
@@ -948,6 +951,137 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 "delta": ["stop_reason": calls.isEmpty ? "end_turn" : "tool_use"],
                 "usage": ["output_tokens": outTok]])
             sse("message_stop", ["type": "message_stop"])
+            self.writeOnLoop(ctx, .end(nil), flush: true)
+        }
+    }
+
+    // MARK: - OpenAI Responses: POST /v1/responses
+
+    /// OpenAI Responses API. Codex (`wire_api = "responses"`) requires this
+    /// surface (it dropped Chat Completions). Mirrors ``handleAnthropicMessages``:
+    /// buffered generate, then format as the Responses shape (non-streaming
+    /// body or the Responses SSE event sequence). Tool calls become
+    /// `function_call` output items; text becomes a `message`/`output_text`
+    /// item.
+    private func handleResponses(context: ChannelHandlerContext, body: ByteBuffer) {
+        guard let json = parseJSON(body) else {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid JSON"])
+            return
+        }
+        let p = ResponsesCompat.parse(json)
+        guard requireModel(context: context) else { return }
+        touchKeepAlive(nil)
+
+        let toolFormat = ToolCalling.ToolFormat.forFamily(engine.family)
+        let msgs = ToolCalling.injectToolSystem(
+            into: p.messages, tools: p.tools, format: toolFormat)
+        let modelName = engine.modelName ?? p.model ?? "unknown"
+        let eventLoop = context.eventLoop
+        nonisolated(unsafe) let ctx = context
+        let eng = engine
+        let wantStream = p.stream
+        let createdAt = Int(Date().timeIntervalSince1970)
+        let respId = "resp_\(UUID().uuidString.prefix(24))"
+        let (params, maxTokens, ctxLimit) = applyModelParams(
+            sampling: p.sampling.samplingParams, maxTokens: p.maxTokens,
+            contextLimit: defaultContextLimit)
+
+        Task {
+            guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
+            defer { self.leaveQueue(releasing: eng) }
+            let (tokenStream, getStats) = await self.runGenerate(eng,
+                messages: msgs, params: params, maxTokens: maxTokens,
+                contextLimit: ctxLimit,
+                promptTemplateOverride: modelTemplateOverride())
+            var full = ""
+            for await ev in tokenStream { if ev.isEnd { break }; full += ev.text }
+
+            let (visible, _) = ReasoningParser.strip(full)
+            let (calls, cleaned) = ToolCalling.extractIfToolsOffered(
+                from: visible, hasTools: !p.tools.isEmpty, format: toolFormat)
+            let stats = getStats()
+            let inTok = stats?.promptTokens ?? 0
+            let outTok = stats?.generatedTokens ?? 0
+
+            if !wantStream {
+                let resp = ResponsesCompat.response(
+                    id: respId, model: modelName, text: cleaned, toolCalls: calls,
+                    createdAt: createdAt, inputTokens: inTok, outputTokens: outTok)
+                self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
+                                    status: .ok, body: resp)
+                return
+            }
+
+            // Streaming Responses event sequence. First cut emits the assembled
+            // text / tool-args as single deltas (buffered, like the Anthropic
+            // path); Codex tolerates chunk granularity. Token-incremental
+            // deltas are a later enhancement.
+            self.writeOnLoop(ctx, .head(ServerResponseHeads.openAIStreaming(cors: self.corsHeaders())))
+            var seq = 0
+            func sse(_ event: String, _ obj: [String: Any]) {
+                var o = obj
+                o["sequence_number"] = seq
+                seq += 1
+                if let d = try? JSONSerialization.data(withJSONObject: o),
+                   let s = String(data: d, encoding: .utf8) {
+                    self.writeRaw(ctx, "event: \(event)\ndata: \(s)\n\n")
+                }
+            }
+
+            let output = ResponsesCompat.outputItems(
+                messageId: "msg_\(UUID().uuidString.prefix(24))",
+                text: cleaned, toolCalls: calls)
+
+            let inProgress = ResponsesCompat.responseObject(
+                id: respId, model: modelName, status: "in_progress",
+                output: [], createdAt: createdAt, inputTokens: inTok, outputTokens: 0)
+            sse("response.created", ["type": "response.created", "response": inProgress])
+            sse("response.in_progress", ["type": "response.in_progress", "response": inProgress])
+
+            for (idx, item) in output.enumerated() {
+                let itemId = (item["id"] as? String) ?? "item_\(idx)"
+                if (item["type"] as? String) == "function_call" {
+                    let args = (item["arguments"] as? String) ?? "{}"
+                    var added = item
+                    added["arguments"] = ""
+                    added["status"] = "in_progress"
+                    sse("response.output_item.added", ["type": "response.output_item.added",
+                        "output_index": idx, "item": added])
+                    sse("response.function_call_arguments.delta",
+                        ["type": "response.function_call_arguments.delta",
+                         "item_id": itemId, "output_index": idx, "delta": args])
+                    sse("response.function_call_arguments.done",
+                        ["type": "response.function_call_arguments.done",
+                         "item_id": itemId, "output_index": idx, "arguments": args])
+                    sse("response.output_item.done", ["type": "response.output_item.done",
+                        "output_index": idx, "item": item])
+                } else {
+                    let text = ((item["content"] as? [[String: Any]])?.first?["text"] as? String) ?? cleaned
+                    var added = item
+                    added["content"] = [Any]()
+                    added["status"] = "in_progress"
+                    sse("response.output_item.added", ["type": "response.output_item.added",
+                        "output_index": idx, "item": added])
+                    sse("response.content_part.added", ["type": "response.content_part.added",
+                        "item_id": itemId, "output_index": idx, "content_index": 0,
+                        "part": ["type": "output_text", "text": "", "annotations": [Any]()]])
+                    sse("response.output_text.delta", ["type": "response.output_text.delta",
+                        "item_id": itemId, "output_index": idx, "content_index": 0, "delta": text])
+                    sse("response.output_text.done", ["type": "response.output_text.done",
+                        "item_id": itemId, "output_index": idx, "content_index": 0, "text": text])
+                    sse("response.content_part.done", ["type": "response.content_part.done",
+                        "item_id": itemId, "output_index": idx, "content_index": 0,
+                        "part": ["type": "output_text", "text": text, "annotations": [Any]()]])
+                    sse("response.output_item.done", ["type": "response.output_item.done",
+                        "output_index": idx, "item": item])
+                }
+            }
+
+            sse("response.completed", ["type": "response.completed",
+                "response": ResponsesCompat.responseObject(
+                    id: respId, model: modelName, status: "completed",
+                    output: output, createdAt: createdAt,
+                    inputTokens: inTok, outputTokens: outTok)])
             self.writeOnLoop(ctx, .end(nil), flush: true)
         }
     }
