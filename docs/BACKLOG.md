@@ -51,13 +51,14 @@ DENSE families keep the strict byte-exact gate, and Gemma 4 is gated on the
 robust, prompt-independent invariants instead (`Gemma4PartialReuseLiveTests`,
 2026-06-06):
 - `testCacheMatchesColdWithinBf16` - the restored+truncated+suffix-forwarded
-  cache matches a cold prefill within a bf16 relative bound (a wrong restore or
-  shared-layer offset corrupts it at O(1) relative). New helper
-  `partialPrefillCacheMaxDiff`.
-- `testPartialReuseEngagesAndIsFaster` / `...Int8` - the engine path engages
-  reuse: the first decoded token (most anchored; a broken shared-layer offset
-  corrupts it grossly, not via a bf16 tie-flip) matches cold and prefill is far
-  faster.
+  cache (what the DONOR, non-shared layers write) matches a cold prefill within a
+  bf16 relative bound. A bad restore or wrong truncate length corrupts it at O(1)
+  relative. It does NOT cover the shared-layer Q offset (Q is never cached; the
+  empty KV-shared layers are skipped). New helper `partialPrefillCacheMaxDiff`.
+- `testPartialReuseEngagesAndIsFaster` / `...Int8` - gates the shared-layer Q
+  offset + engine wiring: the first decoded token (flows through the KV-shared
+  layers; the pre-fix offset-0 path corrupted it grossly, not via a bf16
+  tie-flip) matches cold and prefill is far faster.
 
 (An earlier framing of these tests asserted full greedy-token equality and
 passed only because the chosen prompt had no near-tie in-window; the robust

@@ -21,20 +21,27 @@ import Foundation
 /// `testCacheMatchesColdWithinBf16`), but that rounding can flip a downstream
 /// greedy near-tie into an equally-valid different continuation - the same bf16
 /// behavior the batched-decode gate already documents. So Gemma 4 is gated on
-/// the robust, prompt-independent invariants instead:
-///   1. the reused KV cache matches a cold prefill within bf16 GEMM noise, AND
-///   2. the engine path engages reuse: the first decoded token (computed from
-///      the full prompt context, the most anchored and the one a broken
-///      shared-layer offset would corrupt) matches cold, and prefill is far
-///      faster.
+/// the robust, prompt-independent invariants instead, which split cleanly by
+/// what they protect:
+///   1. RESTORE/TRUNCATE/SUFFIX-FORWARD: the reused KV cache (what the DONOR,
+///      non-shared layers write) matches a cold prefill within bf16 GEMM noise.
+///      A bad restore or wrong truncate length corrupts it at O(1) relative.
+///      This does NOT cover the shared-layer Q offset (Q is never cached).
+///   2. SHARED-LAYER Q OFFSET + engine wiring: the first decoded token - which
+///      flows through the KV-shared layers and which the pre-fix offset-0 path
+///      grossly corrupted - matches cold, and prefill is far faster (reuse
+///      actually engaged). A bf16 tie-flip only diverges LATER in the sequence,
+///      so a first-token match is a sound proxy for the offset being right.
 ///
 /// Set `KLM_GEMMA4_MODEL_PATH` to a Gemma 4 checkpoint (e.g. gemma-4-e2b).
 final class Gemma4PartialReuseLiveTests: XCTestCase {
 
     /// Relative bound on the reused-vs-cold cache diff. Gemma 4's bf16 suffix
-    /// GEMM rounds at a few percent (measured ~0.05 on e2b); a real restore /
-    /// shared-layer-offset bug corrupts the cache at O(1) relative, so this
-    /// generously separates "correct within rounding" from "wrong".
+    /// GEMM rounds at a few percent (measured ~0.05 on e2b); a bad restore or a
+    /// wrong truncate length corrupts the donor cache at O(1) relative, so this
+    /// generously separates "correct within rounding" from "wrong". (The
+    /// shared-layer Q offset is gated by the first-token check, not this bound -
+    /// Q is never cached.)
     private let bf16CacheRelBound: Float = 0.2
 
     private func modelDir() throws -> URL {
@@ -77,8 +84,9 @@ final class Gemma4PartialReuseLiveTests: XCTestCase {
 
     /// Invariant 1 (rigorous, prompt-independent): the reused cache matches a
     /// cold prefill within bf16 GEMM rounding. Restore-truncate-suffix-forward
-    /// must reproduce the cold full-prefill KV; a wrong shared-layer offset or a
-    /// bad restore corrupts it at O(1) relative.
+    /// must reproduce the cold full-prefill donor K/V; a bad restore or a wrong
+    /// truncate length corrupts it at O(1) relative. (Scope: donor caches only -
+    /// the shared-layer Q offset is not cached and is gated by Invariant 2.)
     func testCacheMatchesColdWithinBf16() async throws {
         let dir = try modelDir()
         let engine = InferenceEngine(modelDirectory: dir)
@@ -90,11 +98,15 @@ final class Gemma4PartialReuseLiveTests: XCTestCase {
         let split = toks.count - 12
         let r = try XCTUnwrap(engine.partialPrefillCacheMaxDiff(
             prefix: Array(toks[0..<split]), suffix: Array(toks[split...])))
-        let rel = r.maxCold > 0 ? r.maxDiff / r.maxCold : r.maxDiff
+        // Guard against a vacuous pass: at least one populated layer must have
+        // been compared (maxCold stays 0 only if every layer was skipped).
+        XCTAssertGreaterThan(r.maxCold, 0,
+            "no populated layers were compared - the probe measured nothing")
+        let rel = r.maxDiff / r.maxCold
         XCTAssertLessThan(rel, bf16CacheRelBound,
-            "Gemma 4 reused cache diverged from cold by \(rel) relative "
+            "Gemma 4 reused donor cache diverged from cold by \(rel) relative "
             + "(maxDiff \(r.maxDiff), maxCold \(r.maxCold)); above bf16 GEMM noise "
-            + "this means the restore / shared-layer suffix-Q offset is wrong")
+            + "this means the restore or truncate length is wrong")
     }
 
     /// Invariant 2 (fp16 engine end-to-end): partial reuse engages - the first
