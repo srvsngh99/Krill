@@ -48,6 +48,43 @@ final class ResponsesCompatTests: XCTestCase {
         XCTAssertTrue(p.messages.contains { $0["content"]?.contains("<tool_response>") ?? false })
     }
 
+    func testParseToolCallNormalizesBlankOrInvalidArguments() {
+        // Blank arguments -> valid {} so the sentinel stays parseable.
+        let blank = ResponsesCompat.parse([
+            "input": [["type": "function_call", "name": "f", "arguments": ""]],
+        ])
+        XCTAssertTrue(blank.messages.contains {
+            $0["content"]?.contains("\"arguments\": {}") ?? false
+        })
+        // Non-JSON arguments -> {} (never splice malformed JSON).
+        let bad = ResponsesCompat.parse([
+            "input": [["type": "function_call", "name": "f", "arguments": "not json"]],
+        ])
+        XCTAssertTrue(bad.messages.contains {
+            $0["content"]?.contains("\"arguments\": {}") ?? false
+        })
+        // Object-shaped arguments (tolerated) -> serialized JSON, not dropped.
+        let obj = ResponsesCompat.parse([
+            "input": [["type": "function_call", "name": "f", "arguments": ["a": 1]]],
+        ])
+        XCTAssertTrue(obj.messages.contains {
+            ($0["content"]?.contains("<tool_call>") ?? false)
+                && ($0["content"]?.contains("\"a\"") ?? false)
+        })
+    }
+
+    func testParseToolOutputStringifiesStructuredResults() {
+        // A JSON-object tool result must reach the model, not be dropped.
+        let p = ResponsesCompat.parse([
+            "input": [["type": "function_call_output", "call_id": "c1",
+                       "output": ["temp": 70]]],
+        ])
+        let resp = p.messages.first { $0["content"]?.contains("<tool_response>") ?? false }
+        XCTAssertNotNil(resp)
+        XCTAssertTrue(resp?["content"]?.contains("\"temp\"") ?? false)
+        XCTAssertFalse(resp?["content"]?.contains("<tool_response></tool_response>") ?? true)
+    }
+
     func testParseSkipsNonFunctionTools() {
         let p = ResponsesCompat.parse([
             "input": "hi",

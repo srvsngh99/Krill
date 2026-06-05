@@ -53,6 +53,46 @@ internal enum ResponsesCompat {
         }
     }
 
+    /// Normalize a `function_call.arguments` value into a valid JSON object
+    /// string for the shared `<tool_call>` sentinel. Responses sends it as a
+    /// JSON *string*, but a blank or non-JSON value would otherwise splice
+    /// malformed JSON that the extractor silently drops; a client that sends
+    /// an object instead of a string is also tolerated.
+    private static func normalizeArguments(_ value: Any?) -> String {
+        if let s = value as? String {
+            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { return "{}" }
+            if let d = trimmed.data(using: .utf8),
+               (try? JSONSerialization.jsonObject(with: d)) != nil {
+                return trimmed
+            }
+            return "{}"
+        }
+        if let obj = value,
+           JSONSerialization.isValidJSONObject(obj),
+           let d = try? JSONSerialization.data(withJSONObject: obj),
+           let s = String(data: d, encoding: .utf8) {
+            return s
+        }
+        return "{}"
+    }
+
+    /// Render a `function_call_output.output` value as text for the shared
+    /// `<tool_response>` sentinel. Responses usually sends a string, but a
+    /// JSON object/array or a scalar must not be dropped — the model needs
+    /// the tool result.
+    private static func stringifyOutput(_ value: Any?) -> String {
+        if let s = value as? String { return s }
+        if let parts = value as? [[String: Any]] { return flattenContent(parts) }
+        if let obj = value, JSONSerialization.isValidJSONObject(obj),
+           let d = try? JSONSerialization.data(withJSONObject: obj),
+           let s = String(data: d, encoding: .utf8) {
+            return s
+        }
+        if let n = value as? NSNumber { return n.stringValue }
+        return ""
+    }
+
     static func parse(_ json: [String: Any]) -> Parsed {
         var messages: [[String: String]] = []
 
@@ -74,12 +114,12 @@ internal enum ResponsesCompat {
                 case "function_call":
                     // Assistant-issued tool call → shared sentinel.
                     let name = (item["name"] as? String) ?? ""
-                    let args = (item["arguments"] as? String) ?? "{}"
+                    let args = normalizeArguments(item["arguments"])
                     messages.append(["role": "assistant",
                         "content": "<tool_call>{\"name\": \"\(name)\", \"arguments\": \(args)}</tool_call>"])
                 case "function_call_output":
                     // Tool result returned to the model → shared sentinel.
-                    let out = (item["output"] as? String) ?? flattenContent(item["output"])
+                    let out = stringifyOutput(item["output"])
                     messages.append(["role": "user",
                         "content": "<tool_response>\(out)</tool_response>"])
                 default:
@@ -158,11 +198,15 @@ internal enum ResponsesCompat {
             "object": "response",
             "created_at": createdAt,
             "status": status,
+            "error": NSNull(),
+            "incomplete_details": NSNull(),
             "model": model,
             "output": output,
             "usage": [
                 "input_tokens": inputTokens,
+                "input_tokens_details": ["cached_tokens": 0],
                 "output_tokens": outputTokens,
+                "output_tokens_details": ["reasoning_tokens": 0],
                 "total_tokens": inputTokens + outputTokens,
             ],
         ]
