@@ -49,8 +49,13 @@ final class Gemma4PartialReuseLiveTests: XCTestCase {
         let (stream, getStats) = engine.generate(
             messages: userMessage(q), params: .greedy, maxTokens: maxTokens,
             useSpeculative: false, usePrefixCache: true)
+        // Drain the stream to completion rather than breaking on the end event:
+        // the engine writes `getStats()` just before it finishes the stream, so
+        // breaking early can read stats before they are populated and see
+        // prefillTime == 0 (a flaky < 0.0 comparison below). Letting the loop
+        // exit naturally guarantees the stats are set.
         var out = ""
-        for await ev in stream { if ev.isEnd { break }; out += ev.text }
+        for await ev in stream where !ev.isEnd { out += ev.text }
         return (out, getStats()?.prefillTime ?? 0)
     }
 

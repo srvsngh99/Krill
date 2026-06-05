@@ -41,7 +41,7 @@ Verified end-to-end on gemma-4-e2b: a 562-token shared-prefix request drops from
 existing Gemma 4 smoke + 11 batched-decode gates (incl. full-match replay) stay
 green (cold/decode paths are provably unchanged).
 
-**int8-KV serial path — DONE (2026-06-05, this PR).** The shared-layer offset
+**int8-KV serial path - DONE (2026-06-05, this PR).** The shared-layer offset
 fix is dtype-agnostic, so the only missing pieces were on the cache side:
 `PrefixCache.storeQuantized` now retains the entry's tokens (it previously
 discarded them, so a quantized entry could only serve a byte-identical full hit,
@@ -56,7 +56,7 @@ prefill of those tokens. Gate: `Gemma4PartialReuseLiveTests`
 green.
 
 **Remaining (separate follow-up):**
-- **Concurrent batched path** — `InferenceEngine.swift` `makeBatchedPrefillRow`
+- **Concurrent batched path** - `InferenceEngine.swift` `makeBatchedPrefillRow`
   still gates `family != "gemma4"`. Gemma 4 batches on the int8 quantized closure
   (`makeBatchedPrefillRowQuantized`), and the batched ragged-decode passes
   all-zero `rowOffsets` to shared layers; a batched partial resume needs the

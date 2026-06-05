@@ -1080,10 +1080,13 @@ public final class InferenceEngine: @unchecked Sendable {
                     } else if let int8Caches,
                        let hit = capturedPrefixCache.lookupLongestPrefixQuantized(
                            tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash
-                       ), !hit.layers.isEmpty, hit.prefixLength <= promptTokens.count {
+                       ), !hit.layers.isEmpty, hit.layers.count <= int8Caches.count,
+                       hit.prefixLength <= promptTokens.count {
                         // KV sharing (Gemma 4) leaves a suffix of caches empty,
                         // so the hit covers caches[0..<layers.count]; the rest
-                        // stay empty and reuse the donor via sharedCache.
+                        // stay empty and reuse the donor via sharedCache. The
+                        // `layers.count <= int8Caches.count` bound matches the
+                        // int8 full-match path so the indexed restore is in range.
                         for i in 0 ..< hit.layers.count {
                             int8Caches[i].restoreQuantized(hit.layers[i])
                         }
