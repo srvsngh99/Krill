@@ -51,6 +51,17 @@ Layers alternate between sliding window and full attention:
 - Sliding: layers 0-3, 5-8, 10-13, 15-18, 20-23, 25-28, 30-33
 - Full: layers 4, 9, 14, 19, 24, 29, 34
 
+**Sliding-window masking (IMPLEMENTED on the solo path).** A `sliding_attention`
+layer attends only the last `slidingWindow` (512) keys; a `full_attention` layer
+attends the whole causal context. The solo forward (`callAsFunction`) builds both
+a plain causal mask and a `createSlidingWindowCausalMask` and selects per layer
+via `isFullAttention(layerIdx:)`. This is REQUIRED for correctness: the sliding
+layers are trained on a 512-token window, so feeding them the full context at long
+prompts is out-of-distribution and collapses generation to an immediate stop
+(empty output past ~2x the window). For prompts shorter than the window the two
+masks are identical, so short requests are byte-identical to the non-windowed
+path. The concurrent batched-decode path does NOT yet apply the window (follow-up).
+
 ```swift
 config.isFullAttention(layerIdx: 4)  // true
 config.isFullAttention(layerIdx: 3)  // false

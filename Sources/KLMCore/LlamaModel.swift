@@ -200,3 +200,31 @@ public func createCachedCausalMask(
     let additive = mask.asType(dtype) * Float(-10000.0)
     return expandedDimensions(expandedDimensions(additive, axis: 0), axis: 0)
 }
+
+/// Additive `[1, 1, newLen, cacheLen+newLen]` mask for a CAUSAL SLIDING-WINDOW
+/// layer (Gemma family): a query at absolute position `q = cacheLen + i` may
+/// attend a key at absolute position `k` iff it is causal (`k <= q`) AND inside
+/// the window (`q - k < window`) - mlx-lm's convention (each token sees itself
+/// plus the previous `window - 1`).
+///
+/// When the farthest causal lookback in this forward (`cacheLen + newLen - 1`)
+/// already fits inside the window, the window never bites, so this is exactly
+/// the plain causal mask - we delegate to `createCachedCausalMask` so SHORT
+/// prompts (and a single decode token before the cache reaches `window`) are
+/// byte-identical to the non-windowed path. Returns nil only in that delegated
+/// `newLen <= 1` case.
+public func createSlidingWindowCausalMask(
+    newLen: Int, cacheLen: Int, window: Int, dtype: DType = .float16
+) -> MLXArray? {
+    if cacheLen + newLen <= window {
+        return createCachedCausalMask(newLen: newLen, cacheLen: cacheLen, dtype: dtype)
+    }
+    let total = cacheLen + newLen
+    let q = MLXArray(Int32(cacheLen) ..< Int32(total)).reshaped(newLen, 1)  // [L, 1]
+    let k = MLXArray(Int32(0) ..< Int32(total)).reshaped(1, total)          // [1, total]
+    let causal = k .<= q                                  // k <= q
+    let within = (q - k) .< MLXArray(Int32(window))       // q - k < window
+    let allowed = causal .&& within
+    return MLX.where(allowed, MLXArray(Float(0)), MLXArray(Float(-10000.0)))
+        .reshaped(1, 1, newLen, total).asType(dtype)
+}
