@@ -20,18 +20,30 @@ layer. Past ~2x the window those layers attend out-of-distribution context and
 the model emits its stop token immediately. The cliff was sharp at ~1024 tokens
 (2x512). Invisible until now because every test/benchmark used short prompts.
 
-**Fix (solo path).** `createSlidingWindowCausalMask` (mlx-lm convention,
+**Fix (solo path, #166).** `createSlidingWindowCausalMask` (mlx-lm convention,
 `q - k < window`) + per-layer mask selection in `Gemma4Model.callAsFunction`
 (`isFullAttention` picks plain-causal vs windowed). Short prompts are
 byte-identical (the window does not bite). Gates: `SlidingWindowMaskTests`
-(unit) + `Gemma4LongContextLiveTests` (long prompt now non-empty + on-topic);
-existing Gemma 4 smoke / partial-reuse / batched gates stay green.
+(unit) + `Gemma4LongContextLiveTests` (long prompt now non-empty + on-topic).
 
-**Remaining follow-up:** the CONCURRENT batched-decode path
-(`Gemma4Model.batchedDecode`) does not yet apply the window, so concurrent
-long-context generation is still affected. (Also: the solo fix is mask-only, so
-sliding-layer KV caches still grow unbounded - a rolling-buffer trim is a memory
-optimization follow-up, not a correctness issue.)
+**Fix (batched-decode path, this PR).** `Gemma4Model.batchedDecode` windows
+sliding layers too: in the stacked single-query layout `query_abs - key_abs ==
+totalLen - 1 - col` for every row, so a key is "too old" iff
+`col < totalLen - slidingWindow` (row-independent), added to the left-pad mask
+for sliding layers. L==1 decode only (the multi-query spec-verify mask is left
+unwindowed - a niche follow-up). Gate: `Gemma4BatchedLongContextLiveTests`
+(`submitBatched` long context now non-empty). Existing batched gates stay green.
+
+**Remaining follow-ups:**
+- **Server streaming + batched + `format:json` long-context returns EMPTY.** The
+  ENGINE path is fixed (the batched test above passes), but the HTTP
+  `/api/generate` streaming path through the queue at `KRILL_NUM_PARALLEL >= 2`
+  still yields empty output for a long context (serial streaming and batched
+  non-streaming both work). This is a SERVER/queue streaming-layer bug, separate
+  from the sliding window; it blocks the Gemma-4 agentic benchmark refresh.
+- Mask-only fix, so sliding-layer KV caches still grow unbounded - a
+  rolling-buffer trim is a memory optimization, not a correctness issue.
+- Spec-verify (multi-query) batched mask is not windowed (niche).
 
 ---
 
