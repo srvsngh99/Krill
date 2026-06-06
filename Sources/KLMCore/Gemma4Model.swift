@@ -1101,13 +1101,13 @@ class Gemma4TextModel: Module {
     /// placeholders the attention never reads or updates.
     ///
     /// Decode-only: no multimodal injection, no prefill graph-flushing (the
-    /// step is a single token, the driver evals the logits). The causal
-    /// structure is plain left-pad for every layer. NOTE: the solo path now
-    /// applies a per-layer sliding-window mask (`createSlidingWindowCausalMask`)
-    /// so sliding layers see only the last `slidingWindow` keys; this batched
-    /// path does NOT yet, so concurrent generation past the window is still
-    /// out-of-distribution. Wiring the window into the ragged left-pad mask here
-    /// is the follow-up (see docs/BENCHMARK_ISSUES.md).
+    /// step is a single token, the driver evals the logits). Sliding layers are
+    /// windowed here too: in the stacked single-query layout a key column is
+    /// "too old" iff `col < totalLen - slidingWindow` (row-independent), added to
+    /// the left-pad mask for `sliding_attention` layers. Only the L==1 decode
+    /// step is windowed; the multi-query spec-verify mask is left unwindowed
+    /// (documented follow-up). Matches the solo path's
+    /// `createSlidingWindowCausalMask`.
     func batchedDecode(
         _ tokens: MLXArray, caches: [KVCacheProtocol], mask: MLXArray, rowOffsets: [Int]
     ) -> MLXArray {
@@ -1133,21 +1133,41 @@ class Gemma4TextModel: Module {
             combinedPLE = (projNormed + pleEmbed) * combineScale
         }
 
-        let maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .array(mask)
+        let fullMode: MLXFast.ScaledDotProductAttentionMaskMode = .array(mask)
+        // Sliding layers attend only the last `slidingWindow` keys (see the solo
+        // path). In the stacked SINGLE-query decode layout, for EVERY row
+        // `query_abs - key_abs == totalLen - 1 - col`, so a key column is
+        // "too old" iff `col < totalLen - window` - row-independent. Add that to
+        // the left-pad mask for sliding layers. Only the L==1 decode step is
+        // windowed here; the multi-query verify mask (spec) is left unwindowed
+        // (a documented follow-up). For prompts within the window this is a no-op.
+        let totalLen = mask.dim(3)
+        let window = config.slidingWindow
+        let slidingMode: MLXFast.ScaledDotProductAttentionMaskMode
+        if L == 1, totalLen > window {
+            let cols = MLXArray(Int32(0) ..< Int32(totalLen))
+            let tooOld = cols .< MLXArray(Int32(totalLen - window))
+            let colAdd = MLX.where(tooOld, MLXArray(Float(-10000)), MLXArray(Float(0)))
+                .reshaped(1, 1, 1, totalLen).asType(mask.dtype)
+            slidingMode = .array(mask + colAdd)
+        } else {
+            slidingMode = .array(mask)
+        }
         let firstShared = config.firstKVSharedLayer
 
         for (i, layer) in layers.enumerated() {
             let pleSlice: MLXArray? = combinedPLE.map { ple in
                 ple[0..., 0..., (i * pleDim) ..< ((i + 1) * pleDim)]
             }
+            let layerMode = config.isFullAttention(layerIdx: i) ? fullMode : slidingMode
 
             if kvSharingEnabled, i >= firstShared {
                 let donorIdx = config.isFullAttention(layerIdx: i) ? lastFullDonor : lastSlidingDonor
-                h = layer(h, maskMode: maskMode, cache: caches[i],
+                h = layer(h, maskMode: layerMode, cache: caches[i],
                           sharedCache: caches[donorIdx], perLayerInput: pleSlice,
                           rowOffsets: zeroOffsets)
             } else {
-                h = layer(h, maskMode: maskMode, cache: caches[i],
+                h = layer(h, maskMode: layerMode, cache: caches[i],
                           perLayerInput: pleSlice, rowOffsets: rowOffsets)
             }
         }
