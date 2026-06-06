@@ -7,6 +7,34 @@ engine on macOS." Ordered by impact on that goal.
 
 ---
 
+## 7. [SOLO PATH RESOLVED 2026-06-06; batched follow-up] Gemma 4 produced empty output past ~1k tokens (missing sliding-window attention)
+
+**Severity: critical** (silent correctness hole on the flagship's long-context /
+RAG / agentic path). Surfaced while refreshing the Gemma-4 agentic head-to-head:
+gemma-4-e2b returned EMPTY output (`eval_count=0`) for any prompt above ~1024
+tokens, while Ollama answered fine.
+
+**Root cause.** gemma-4-e2b uses a 512-token sliding window on 28 of 35 layers
+(`sliding_attention`), but KrillLM applied a plain FULL-causal mask to every
+layer. Past ~2x the window those layers attend out-of-distribution context and
+the model emits its stop token immediately. The cliff was sharp at ~1024 tokens
+(2x512). Invisible until now because every test/benchmark used short prompts.
+
+**Fix (solo path).** `createSlidingWindowCausalMask` (mlx-lm convention,
+`q - k < window`) + per-layer mask selection in `Gemma4Model.callAsFunction`
+(`isFullAttention` picks plain-causal vs windowed). Short prompts are
+byte-identical (the window does not bite). Gates: `SlidingWindowMaskTests`
+(unit) + `Gemma4LongContextLiveTests` (long prompt now non-empty + on-topic);
+existing Gemma 4 smoke / partial-reuse / batched gates stay green.
+
+**Remaining follow-up:** the CONCURRENT batched-decode path
+(`Gemma4Model.batchedDecode`) does not yet apply the window, so concurrent
+long-context generation is still affected. (Also: the solo fix is mask-only, so
+sliding-layer KV caches still grow unbounded - a rolling-buffer trim is a memory
+optimization follow-up, not a correctness issue.)
+
+---
+
 ## 0. [RESOLVED - serial + concurrent batched] Shared-prefix (partial-prefix) KV reuse for the agentic/RAG workload
 
 **Severity: critical.** The agentic/RAG moat (reuse a long shared context -

@@ -1037,9 +1037,20 @@ class Gemma4TextModel: Module {
         // when int8 KV is active - its `sequenceLength` semantics match
         // the fp16 path.
         let cacheLen = caches?.first?.sequenceLength ?? 0
-        let mask = createCachedCausalMask(
+        // Gemma 4 mixes full-attention and sliding-window layers (`layer_types`).
+        // Full layers attend the whole causal context; sliding layers attend only
+        // the last `slidingWindow` (512) keys - the model is TRAINED that way, so
+        // feeding a sliding layer the full context at long prompts is
+        // out-of-distribution and collapses generation to an immediate stop. Build
+        // both masks once and pick per layer. For prompts shorter than the window
+        // the two are identical (the window never bites), so short requests are
+        // byte-identical to the pre-windowing path.
+        let fullMask = createCachedCausalMask(
             newLen: L, cacheLen: cacheLen, dtype: .bfloat16)
-        let maskMode: MLXFast.ScaledDotProductAttentionMaskMode = mask != nil ? .array(mask!) : .none
+        let slidingMask = createSlidingWindowCausalMask(
+            newLen: L, cacheLen: cacheLen, window: config.slidingWindow, dtype: .bfloat16)
+        let fullMode: MLXFast.ScaledDotProductAttentionMaskMode = fullMask != nil ? .array(fullMask!) : .none
+        let slidingMode: MLXFast.ScaledDotProductAttentionMaskMode = slidingMask != nil ? .array(slidingMask!) : .none
 
         // KV sharing donor indices (pre-computed at init)
         let firstShared = config.firstKVSharedLayer
@@ -1052,6 +1063,7 @@ class Gemma4TextModel: Module {
             let pleSlice: MLXArray? = combinedPLE.map { ple in
                 ple[0..., 0..., (i * pleDim) ..< ((i + 1) * pleDim)]
             }
+            let maskMode = config.isFullAttention(layerIdx: i) ? fullMode : slidingMode
 
             if kvSharingEnabled, i >= firstShared, let caches {
                 let donorIdx = config.isFullAttention(layerIdx: i) ? lastFullDonor : lastSlidingDonor
@@ -1090,10 +1102,12 @@ class Gemma4TextModel: Module {
     ///
     /// Decode-only: no multimodal injection, no prefill graph-flushing (the
     /// step is a single token, the driver evals the logits). The causal
-    /// structure is plain left-pad for every layer - matching the solo path,
-    /// which applies no sliding-window restriction (see `callAsFunction`'s
-    /// `createCachedCausalMask`, which is plain causal). A future sliding-
-    /// window-aware solo path would need the matching restriction here.
+    /// structure is plain left-pad for every layer. NOTE: the solo path now
+    /// applies a per-layer sliding-window mask (`createSlidingWindowCausalMask`)
+    /// so sliding layers see only the last `slidingWindow` keys; this batched
+    /// path does NOT yet, so concurrent generation past the window is still
+    /// out-of-distribution. Wiring the window into the ragged left-pad mask here
+    /// is the follow-up (see docs/BENCHMARK_ISSUES.md).
     func batchedDecode(
         _ tokens: MLXArray, caches: [KVCacheProtocol], mask: MLXArray, rowOffsets: [Int]
     ) -> MLXArray {
