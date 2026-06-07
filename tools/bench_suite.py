@@ -26,7 +26,7 @@ Usage:
       --krill-model gemma-4-e2b --ollama-model gemma4:e2b
   python3 tools/bench_suite.py --axis text --krill-model llama-3.2-3b --ollama-model llama3.2:3b
 """
-import argparse, base64, json, re, statistics, subprocess, sys, time, urllib.request
+import argparse, base64, json, os, re, statistics, subprocess, sys, time, urllib.request
 
 KRILL_URL = "http://127.0.0.1:57455"   # KrillLM default ("KRILL" on a keypad)
 OLLAMA_URL = "http://127.0.0.1:11434"  # Ollama default
@@ -72,14 +72,26 @@ def hot(url, path, payload, runs=3, warmup=1):
 
 
 def krill_cli_cold(model, prompt, np_, image=None, audio=None, cwd="."):
-    """One-shot CLI = cold load + first inference; parse its printed metrics."""
+    """One-shot CLI = cold load + first inference; parse its printed metrics.
+
+    `KRILL_NO_AUTO_DAEMON=1` is REQUIRED: with a server running for the hot
+    numbers, `krillm run` otherwise auto-routes the prompt through that warm
+    daemon (printing `--- (via daemon @ :PORT) N chunks ...`) instead of doing a
+    real cold in-process load, so the cold metrics never appear and every field
+    parses to None. The flag forces the in-process load + the
+    `Ready (Xs load time)` / `decode: N tokens at X tok/s` / `total: Xs` lines.
+    """
     cmd = [KRILL_BIN, "run", model, prompt, "--max-tokens", str(np_), "--temp", "0"]
     if image:
         cmd += ["--image", image]
     if audio:
         cmd += ["--audio", audio]
-    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=300)
+    env = {**os.environ, "KRILL_NO_AUTO_DAEMON": "1"}
+    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=300, env=env)
     out = p.stdout + p.stderr
+    if "(via daemon @" in out:
+        print("  [cold] WARNING: krillm run routed through the daemon despite "
+              "KRILL_NO_AUTO_DAEMON=1 - cold metrics will be missing.")
     g = lambda rx: (re.search(rx, out) or [None, None])
     load = re.search(r"Ready \(([\d.]+)s load time\)", out)
     pre = re.search(r"prefill: ([\d.]+) tok/s", out)
@@ -88,6 +100,11 @@ def krill_cli_cold(model, prompt, np_, image=None, audio=None, cwd="."):
     tot = re.search(r"total: ([\d.]+)s", out)
     answer = " ".join(l for l in p.stdout.splitlines()
                       if l.strip() and not l.startswith(("Loading", "Ready", "prompt:", "---")))
+    if not (load and dec and tot):
+        # Surface WHY instead of silently emitting None cells: a non-zero exit,
+        # a timeout, or an output format the regexes no longer match.
+        print(f"  [cold] WARNING: could not parse cold metrics (exit={p.returncode}); "
+              f"tail: {out[-160:]!r}")
     return {
         "load_ms": round(float(load.group(1)) * 1000, 1) if load else None,
         "prefill_tps": float(pre.group(1)) if pre else None,
