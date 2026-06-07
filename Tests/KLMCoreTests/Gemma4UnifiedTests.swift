@@ -247,7 +247,20 @@ final class Gemma4UnifiedTests: XCTestCase {
         XCTAssertEqual(p2!.shape, [1, 2, 12])
     }
 
-    // MARK: - Audio projector shape
+    // MARK: - Audio framing + projector shape
+
+    func testAudioFramingShapeAndTokenCount() {
+        // 1601 samples at 640/token -> 3 frames (ceil), zero-padded.
+        let wave = [Float](repeating: 0.1, count: 1601)
+        let frames = preprocessGemma4UnifiedAudio(wave, samplesPerToken: 640)
+        XCTAssertEqual(frames.shape, [1, 3, 640])
+        XCTAssertEqual(gemma4UnifiedAudioTokenCount(sampleCount: 1601, samplesPerToken: 640), 3)
+        // Exact multiple -> no extra frame.
+        XCTAssertEqual(gemma4UnifiedAudioTokenCount(sampleCount: 1280, samplesPerToken: 640), 2)
+        // Empty waveform must not trap: yields a single zero frame.
+        let empty = preprocessGemma4UnifiedAudio([], samplesPerToken: 640)
+        XCTAssertEqual(empty.shape, [1, 1, 640])
+    }
 
     func testAudioProjectorProjectsRawFramesToHidden() {
         // embed_audio is a MultimodalEmbedder: RMSNormNoScale -> Linear.

@@ -279,12 +279,16 @@ public func preprocessGemma4UnifiedAudio(
     _ waveform: [Float], samplesPerToken: Int = 640
 ) -> MLXArray {
     var samples = waveform
-    let remainder = samples.count % samplesPerToken
-    if remainder != 0 {
-        samples.append(contentsOf: [Float](repeating: 0, count: samplesPerToken - remainder))
+    // Pad up to at least one full frame. This also covers an empty waveform,
+    // which would otherwise reshape 0 elements into a non-empty frame and trap.
+    let pad = samples.isEmpty
+        ? samplesPerToken
+        : (samplesPerToken - samples.count % samplesPerToken) % samplesPerToken
+    if pad != 0 {
+        samples.append(contentsOf: [Float](repeating: 0, count: pad))
     }
     let n = samples.count / samplesPerToken
-    return MLXArray(samples).reshaped(1, max(n, 1), samplesPerToken)
+    return MLXArray(samples).reshaped(1, n, samplesPerToken)
 }
 
 /// Number of audio soft tokens for a waveform of `sampleCount` mono samples:

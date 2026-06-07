@@ -720,16 +720,24 @@ public final class InferenceEngine: @unchecked Sendable {
         // frames, not USM log-mel. So for that family we decode the waveform
         // and reshape into frames instead of running the mel pipeline; the
         // frames ride the same `audioMel` seam slot the mel path uses.
-        let isUnifiedModel = loadedModel.module is Gemma4UnifiedModel
+        let unifiedModel = loadedModel.module as? Gemma4UnifiedModel
+        let isUnifiedModel = unifiedModel != nil
         var nativeAudio: AudioPreprocessor.Features?
         var unifiedAudioFrames: MLXArray?
         var unifiedAudioTokens: Int?
         if nativeAudioChosen, let aud = audioData {
             do {
-                if isUnifiedModel {
+                if let unifiedModel {
+                    // Frame width comes from the checkpoint's audio_config, not
+                    // a hardcoded 640, so a future SKU with a different
+                    // `audio_samples_per_token` stays consistent between the
+                    // frame reshape and the placeholder count (mirrors how the
+                    // vision path threads `visionConfig.modelPatchSize`).
+                    let spt = unifiedModel.audioConfig.audioSamplesPerToken
                     let wave = try AudioPreprocessor.monoWaveform(fromAudio: aud)
-                    unifiedAudioFrames = preprocessGemma4UnifiedAudio(wave)
-                    unifiedAudioTokens = gemma4UnifiedAudioTokenCount(sampleCount: wave.count)
+                    unifiedAudioFrames = preprocessGemma4UnifiedAudio(wave, samplesPerToken: spt)
+                    unifiedAudioTokens = gemma4UnifiedAudioTokenCount(
+                        sampleCount: wave.count, samplesPerToken: spt)
                 } else {
                     nativeAudio = try AudioPreprocessor.features(fromAudio: aud)
                 }
