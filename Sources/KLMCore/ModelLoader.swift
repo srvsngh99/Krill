@@ -231,6 +231,21 @@ let architectureRules: [ArchitectureRule] = [
         },
         action: .load { try loadLlamaVision(configData: $0, directory: $1) }),
 
+    // Gemma 4 12B "unified": ENCODER-FREE multimodal (model_type
+    // "gemma4_unified", arch Gemma4UnifiedForConditionalGeneration). No
+    // SigLIP/USM towers - raw image patches and raw audio frames project
+    // straight into the text embedding space. Its text decoder is the same
+    // dense Gemma 4 backbone, so the arch string also contains "gemma4";
+    // this rule MUST precede the generic gemma4 rule (first match wins) so
+    // a unified checkpoint does not fall into the SigLIP-tower path.
+    ArchitectureRule(
+        id: "gemma4_unified",
+        matches: { arch, mt in
+            arch.contains("gemma4unified") || mt == "gemma4_unified"
+                || mt == "gemma4_unified_text"
+        },
+        action: .load { try loadGemma4Unified(configData: $0, directory: $1) }),
+
     ArchitectureRule(
         id: "gemma4",
         matches: { arch, mt in
@@ -867,6 +882,99 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
             model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
         },
         // int8 batched decode (Stage C4): see the multimodal branch.
+        batchedDecodeForwardQuantized: { tokens, caches, mask, rowOffsets in
+            model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
+        vocabSize: config.vocabSize
+    )
+}
+
+/// Gemma 4 12B "unified" (encoder-free multimodal). The text decoder is the
+/// same dense Gemma 4 backbone (`Gemma4Config` parses it from the nested
+/// `text_config`); the media front-ends are the two thin encoder-free
+/// projectors built by `Gemma4UnifiedModel`. Weight keys map directly onto
+/// the module hierarchy (`language_model.model.*`, `vision_embedder.*`,
+/// `embed_vision.*`, `embed_audio.*`).
+private func loadGemma4Unified(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(Gemma4Config.self, from: configData)
+
+    let rawConfig = try JSONSerialization.jsonObject(with: configData) as? [String: Any]
+    let imageTokenId = rawConfig?["image_token_id"] as? Int ?? 258880
+    let audioTokenId = rawConfig?["audio_token_id"] as? Int ?? 258881
+    let visionConfig = Gemma4UnifiedVisionConfig(
+        from: rawConfig?["vision_config"] as? [String: Any])
+    let audioConfig = Gemma4UnifiedAudioConfig(
+        from: rawConfig?["audio_config"] as? [String: Any])
+
+    let model = Gemma4UnifiedModel(
+        config, visionConfig: visionConfig, audioConfig: audioConfig,
+        imageTokenId: imageTokenId, audioTokenId: audioTokenId)
+
+    // The LM, the vision `patch_dense`, and both media
+    // `embedding_projection`s ship quantized; the LayerNorms and the
+    // `pos_embedding` table do not (and `quantize` only touches
+    // Linear/Embedding leaves, so those are skipped regardless).
+    if let q = config.quantization {
+        quantize(model: model) { path, _ in
+            let isLangModel = path.contains("language_model.")
+            let isPatchDense = path.contains("vision_embedder.patch_dense")
+            let isEmbedProj = path.contains("embed_vision.embedding_projection")
+                || path.contains("embed_audio.embedding_projection")
+            guard isLangModel || isPatchDense || isEmbedProj else { return nil }
+            let eff = q.effective(for: path)
+            return (eff.groupSize, eff.bits, .affine)
+        }
+    }
+
+    var flatWeights = try loadWeightArrays(from: directory)
+    var cleaned: [String: MLXArray] = [:]
+    for (key, value) in flatWeights {
+        // Tied embeddings: the LM head reuses `embed_tokens`, so a separate
+        // `lm_head.weight` (if shipped) is dropped. Rotary inv_freq buffers
+        // are derived at runtime.
+        if key.hasPrefix("lm_head.") { continue }
+        if key.contains("rotary_emb.inv_freq") { continue }
+        cleaned[key] = value
+    }
+    flatWeights = cleaned
+
+    let tuples = flatWeights.map { ($0.key, $0.value) }
+    let nested = ModuleParameters.unflattened(tuples)
+    try model.update(parameters: nested, verify: [])
+
+    let patchDim = visionConfig.patchDim
+
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "gemma4_unified",
+        forward: { tokens, caches in model(tokens, caches: caches) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches, lastTokenOnly: true)
+        },
+        // multimodalForward seam packing (gemma4-unified only): the image
+        // slot carries `[1, N, patchDim+2]` (raw patches ++ (x, y) grid
+        // positions); the audio slot carries raw `[1, N, audioSamplesPerToken]`
+        // frames; the mask slot is unused. The unified vision front-end needs
+        // per-patch positions, which the single-MLXArray seam cannot pass
+        // separately, so they ride along and are split back out here.
+        multimodalForward: { tokens, caches, packedImage, audioFeats, _, hash in
+            let (pixels, posIds) = Gemma4UnifiedModel.unpackImage(
+                packedImage, patchDim: patchDim)
+            return model(tokens, caches: caches,
+                         pixelValues: pixels, imagePositionIds: posIds,
+                         audioFeatures: audioFeats, mediaHash: hash)
+        },
+        multimodalPrefillForward: { tokens, caches, packedImage, audioFeats, _, hash in
+            let (pixels, posIds) = Gemma4UnifiedModel.unpackImage(
+                packedImage, patchDim: patchDim)
+            return model(tokens, caches: caches,
+                         pixelValues: pixels, imagePositionIds: posIds,
+                         audioFeatures: audioFeats, mediaHash: hash, lastTokenOnly: true)
+        },
+        batchedDecodeForward: { tokens, caches, mask, rowOffsets in
+            model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
         batchedDecodeForwardQuantized: { tokens, caches, mask, rowOffsets in
             model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
         },

@@ -117,6 +117,13 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case mistral
     case gemma
     case gemma4
+    /// Gemma 4 12B "unified": the encoder-free multimodal Gemma 4 SKU
+    /// (`model_type: "gemma4_unified"`). Unlike e2b/e4b/26B-A4B it has no
+    /// SigLIP vision tower or USM audio encoder - raw image patches and raw
+    /// audio sample-frames project straight into the text embedding space
+    /// through thin linear pipelines (`vision_embedder` / `embed_vision` /
+    /// `embed_audio`). The text decoder is the same dense Gemma 4 backbone.
+    case gemma4Unified = "gemma4_unified"
     case phi
     case glm
     case deepseek
@@ -209,6 +216,10 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         // encoder, loaded via the engine's GTE path. Still a `.bert`-family
         // embedder at the registry level so the embeddings gate admits it.
         if archLower.contains("newmodel") { return .bert }
+        // Encoder-free unified Gemma 4 (12B) before the generic gemma4 arm:
+        // its arch is `Gemma4UnifiedForConditionalGeneration`, which also
+        // contains "gemma4", so the specific check must come first.
+        if archLower.contains("gemma4unified") { return .gemma4Unified }
         if archLower.contains("gemma4") { return .gemma4 }
         if archLower.contains("gemma") { return .gemma }
         if archLower.contains("chatglm") || archLower.contains("glm") { return .glm }

@@ -411,19 +411,14 @@ public final class InferenceEngine: @unchecked Sendable {
         into messages: [[String: String]],
         imageData: Data?,
         audioData: Data?,
-        audioTokenCount: Int = 1
+        audioTokenCount: Int = 1,
+        wrapGemma4Markers: Bool = false
     ) -> [[String: String]] {
         guard imageData != nil || audioData != nil else { return messages }
-        var prefix = ""
-        if let img = imageData {
-            prefix += String(repeating: "<|image|>", count: computeImageTokenCount(imageData: img))
-        }
-        if audioData != nil {
-            // Native audio scatters `audioTokenCount` encoder frames into
-            // exactly that many `<|audio|>` positions (mirrors the image
-            // path). Bridge fallback uses a single placeholder.
-            prefix += String(repeating: "<|audio|>", count: max(1, audioTokenCount))
-        }
+        let prefix = Self.mediaPlaceholderPrefix(
+            imageTokenCount: imageData.map { computeImageTokenCount(imageData: $0) },
+            audioTokenCount: audioData != nil ? max(1, audioTokenCount) : nil,
+            wrapGemma4Markers: wrapGemma4Markers)
         var result = messages
         if let firstUserIndex = result.firstIndex(where: { $0["role"] == "user" }) {
             let existing = result[firstUserIndex]["content"] ?? ""
@@ -432,6 +427,47 @@ public final class InferenceEngine: @unchecked Sendable {
             result.append(["role": "user", "content": prefix])
         }
         return result
+    }
+
+    // Gemma media placeholder/marker token strings. These are the literal
+    // `content` forms of the checkpoint's added_tokens, NOT the prose names:
+    // they round-trip through the Gemma tokenizer to the ids below (verified
+    // live, and gated by Gemma4UnifiedLiveDiag.testMediaMarkerTokenIds when a
+    // model is present).
+    static let gemma4ImageSoftToken = "<|image|>"   // 258880
+    static let gemma4AudioSoftToken = "<|audio|>"   // 258881
+    static let gemma4BeginImage = "<|image>"        // 255999 (<start_of_image>)
+    static let gemma4EndImage = "<image|>"          // 258882 (<end_of_image>)
+    static let gemma4BeginAudio = "<|audio>"        // 256000 (<start_of_audio>)
+    static let gemma4EndAudio = "<audio|>"          // 258883 (<end_of_audio>)
+
+    /// Build the media-placeholder prefix string spliced ahead of the first
+    /// user turn. Pure (no I/O) so it is unit-testable without a tokenizer.
+    ///
+    /// `wrapGemma4Markers` wraps each soft-token run in the begin/end markers
+    /// the model was trained with (`<start_of_image>` ... `<end_of_image>`,
+    /// likewise audio). The encoder-free Gemma 4 12B "unified" SKU REQUIRES
+    /// them - without the markers the soft tokens are not demarcated and the
+    /// model misreads the media (verified: a red image is reported as "white"
+    /// with a bare run, correct with the markers). It is scoped to that family
+    /// only (false here) so the e2b/e4b bare-run behavior is unchanged.
+    static func mediaPlaceholderPrefix(
+        imageTokenCount: Int?,
+        audioTokenCount: Int?,
+        wrapGemma4Markers: Bool
+    ) -> String {
+        let boi = wrapGemma4Markers ? gemma4BeginImage : ""
+        let eoi = wrapGemma4Markers ? gemma4EndImage : ""
+        let boa = wrapGemma4Markers ? gemma4BeginAudio : ""
+        let eoa = wrapGemma4Markers ? gemma4EndAudio : ""
+        var prefix = ""
+        if let n = imageTokenCount, n > 0 {
+            prefix += boi + String(repeating: gemma4ImageSoftToken, count: n) + eoi
+        }
+        if let n = audioTokenCount, n > 0 {
+            prefix += boa + String(repeating: gemma4AudioSoftToken, count: max(1, n)) + eoa
+        }
+        return prefix
     }
 
     /// Compute the number of soft tokens the vision encoder will produce for an image.
@@ -680,10 +716,31 @@ public final class InferenceEngine: @unchecked Sendable {
         // Gemma 4 family declares today; `canUseNativeAudio` already encodes
         // that, so no family-string check is needed here.
         let nativeAudioChosen = audioData != nil && canUseNativeAudio
-        let nativeAudio: AudioPreprocessor.Features?
+        // Gemma 4 12B "unified" is encoder-free: it projects RAW 640-sample
+        // frames, not USM log-mel. So for that family we decode the waveform
+        // and reshape into frames instead of running the mel pipeline; the
+        // frames ride the same `audioMel` seam slot the mel path uses.
+        let unifiedModel = loadedModel.module as? Gemma4UnifiedModel
+        let isUnifiedModel = unifiedModel != nil
+        var nativeAudio: AudioPreprocessor.Features?
+        var unifiedAudioFrames: MLXArray?
+        var unifiedAudioTokens: Int?
         if nativeAudioChosen, let aud = audioData {
             do {
-                nativeAudio = try AudioPreprocessor.features(fromAudio: aud)
+                if let unifiedModel {
+                    // Frame width comes from the checkpoint's audio_config, not
+                    // a hardcoded 640, so a future SKU with a different
+                    // `audio_samples_per_token` stays consistent between the
+                    // frame reshape and the placeholder count (mirrors how the
+                    // vision path threads `visionConfig.modelPatchSize`).
+                    let spt = unifiedModel.audioConfig.audioSamplesPerToken
+                    let wave = try AudioPreprocessor.monoWaveform(fromAudio: aud)
+                    unifiedAudioFrames = preprocessGemma4UnifiedAudio(wave, samplesPerToken: spt)
+                    unifiedAudioTokens = gemma4UnifiedAudioTokenCount(
+                        sampleCount: wave.count, samplesPerToken: spt)
+                } else {
+                    nativeAudio = try AudioPreprocessor.features(fromAudio: aud)
+                }
             } catch {
                 // The native path was selected for this audio request but
                 // decoding failed. Fail loudly: never silently drop the audio
@@ -702,7 +759,8 @@ public final class InferenceEngine: @unchecked Sendable {
             ? messages
             : injectMediaPlaceholders(
                 into: messages, imageData: imageData, audioData: audioData,
-                audioTokenCount: nativeAudio?.numTokens ?? 1)
+                audioTokenCount: unifiedAudioTokens ?? nativeAudio?.numTokens ?? 1,
+                wrapGemma4Markers: isUnifiedModel)
 
         // Use direct token ID path for Gemma4 to avoid decode→re-encode
         // round-trip that loses special tokens (105, 106, 107).
@@ -939,14 +997,24 @@ public final class InferenceEngine: @unchecked Sendable {
             ngramProposer: ngramProposer,
             modelId: self.modelId,
             imageData: imageData,
-            audioMel: nativeAudio?.mel,
-            audioMask: nativeAudio?.validMask,
+            // For the unified family this slot carries raw audio frames
+            // `[1, N, 640]`, not log-mel; the mask slot is unused (all frames
+            // are real - padding is zero frames the model tolerates).
+            audioMel: unifiedAudioFrames ?? nativeAudio?.mel,
+            audioMask: unifiedAudioFrames != nil ? nil : nativeAudio?.validMask,
             moeModel: loadedModel.module as? Qwen3MoEForCausalLM,
             grammarMask: grammarMask,
             preprocessImageFn: {
                 if let llava = llavaModel {
                     let size = llava.config.visionConfig.imageSize
                     return { try LlavaImagePreprocessor.preprocess($0, imageSize: size) }
+                }
+                // Gemma 4 12B "unified" (encoder-free): patchify into 48x48
+                // model-patches and pack the per-patch grid positions onto the
+                // tensor (the loader's multimodalForward splits them back out).
+                if let unified = loadedModel.module as? Gemma4UnifiedModel {
+                    let mps = unified.visionConfig.modelPatchSize
+                    return { try preprocessGemma4UnifiedImage($0, modelPatchSize: mps) }
                 }
                 return { try preprocessImage($0) }
             }()

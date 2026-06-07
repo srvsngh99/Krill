@@ -67,6 +67,16 @@ public enum AudioPreprocessor {
         return try features(waveform: mono)
     }
 
+    /// Decode common audio containers/codecs to a mono 16 kHz Float
+    /// waveform (the shared front of `features(fromAudio:)`), WITHOUT the
+    /// USM log-mel pipeline. Used by the Gemma 4 "unified" (encoder-free)
+    /// audio path, which projects raw sample-frames directly and so wants
+    /// the waveform, not mel features.
+    public static func monoWaveform(fromAudio data: Data) throws -> [Float] {
+        let (raw, fileSR) = try loadAudio(from: data)
+        return resampleAudio(raw, from: fileSR, to: sampleRate)
+    }
+
     /// Decode WAV bytes and produce native audio features.
     public static func features(fromWAV wavData: Data) throws -> Features {
         let (raw, fileSR) = try loadWAV(from: wavData)
