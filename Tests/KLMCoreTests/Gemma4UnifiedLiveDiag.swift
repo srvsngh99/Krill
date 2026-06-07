@@ -21,6 +21,29 @@ final class Gemma4UnifiedLiveDiag: XCTestCase {
         XCTAssertEqual(count258880, 3, "the 3 <|image|> placeholders must encode to id 258880")
     }
 
+    /// Gate the LOAD-BEARING claim that the begin/end marker strings emitted by
+    /// the serving path round-trip through the Gemma tokenizer to the exact ids
+    /// the model was trained with. Env-gated (needs the real tokenizer); the
+    /// pure prefix STRUCTURE is gated in CI by Gemma4UnifiedMarkersTests.
+    func testMediaMarkerTokenIds() async throws {
+        guard let path = ProcessInfo.processInfo.environment["KRILL_G4U_MODEL"] else {
+            throw XCTSkip("set KRILL_G4U_MODEL to the snapshot dir")
+        }
+        let tk = try await KLMTokenizer(from: URL(fileURLWithPath: path))
+        // (marker text, expected single id)
+        let cases: [(String, Int)] = [
+            ("<|image|>", 258880), ("<|audio|>", 258881),
+            ("<|image>", 255999),  ("<image|>", 258882),
+            ("<|audio>", 256000),  ("<audio|>", 258883),
+        ]
+        for (text, id) in cases {
+            let ids = tk.encode(text)
+            print("encode(\(text)) = \(ids)")
+            XCTAssertEqual(ids.filter { $0 == id }.count, 1,
+                "\(text) must encode to a single id \(id)")
+        }
+    }
+
     func testVisionFeaturesDifferByColor() throws {
         guard let path = ProcessInfo.processInfo.environment["KRILL_G4U_MODEL"] else {
             throw XCTSkip("set KRILL_G4U_MODEL to the snapshot dir")

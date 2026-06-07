@@ -299,10 +299,10 @@ public func gemma4UnifiedAudioTokenCount(
 // MARK: - Gemma4UnifiedModel (top-level)
 
 /// Encoder-free Gemma 4 unified multimodal model. Weight key hierarchy:
-///   `language_model.*`      — dense text decoder (`Gemma4ForCausalLM`)
-///   `vision_embedder.*`     — encoder-free patch projector
-///   `embed_vision.*`        — vision → text-hidden projection
-///   `embed_audio.*`         — audio → text-hidden projection
+///   `language_model.*` - dense text decoder (`Gemma4ForCausalLM`)
+///   `vision_embedder.*` - encoder-free patch projector
+///   `embed_vision.*` - vision -> text-hidden projection
+///   `embed_audio.*` - audio -> text-hidden projection
 public class Gemma4UnifiedModel: Module {
     @ModuleInfo(key: "language_model") var languageModel: Gemma4ForCausalLM
     @ModuleInfo(key: "vision_embedder") var visionEmbedder: Gemma4UnifiedVisionEmbedder

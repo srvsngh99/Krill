@@ -412,33 +412,13 @@ public final class InferenceEngine: @unchecked Sendable {
         imageData: Data?,
         audioData: Data?,
         audioTokenCount: Int = 1,
-        imageTokenCountOverride: Int? = nil,
         wrapGemma4Markers: Bool = false
     ) -> [[String: String]] {
         guard imageData != nil || audioData != nil else { return messages }
-        // Gemma 4 wraps each media soft-token run in begin/end markers the
-        // model was trained with: `<start_of_image>`(255999) ... soft tokens
-        // ... `<end_of_image>`(258882), likewise `<start_of_audio>`(256000) /
-        // `<end_of_audio>`(258883). The encoder-free 12B "unified" SKU needs
-        // these markers - WITHOUT them the soft tokens are not demarcated and
-        // the model misreads the media (verified: a red image is called
-        // "white" with a bare run, correct with the markers). The text forms
-        // round-trip to those ids through the Gemma tokenizer.
-        let boi = wrapGemma4Markers ? "<|image>" : ""
-        let eoi = wrapGemma4Markers ? "<image|>" : ""
-        let boa = wrapGemma4Markers ? "<|audio>" : ""
-        let eoa = wrapGemma4Markers ? "<audio|>" : ""
-        var prefix = ""
-        if let img = imageData {
-            let count = imageTokenCountOverride ?? computeImageTokenCount(imageData: img)
-            prefix += boi + String(repeating: "<|image|>", count: count) + eoi
-        }
-        if audioData != nil {
-            // Native audio scatters `audioTokenCount` encoder frames into
-            // exactly that many `<|audio|>` positions (mirrors the image
-            // path). Bridge fallback uses a single placeholder.
-            prefix += boa + String(repeating: "<|audio|>", count: max(1, audioTokenCount)) + eoa
-        }
+        let prefix = Self.mediaPlaceholderPrefix(
+            imageTokenCount: imageData.map { computeImageTokenCount(imageData: $0) },
+            audioTokenCount: audioData != nil ? max(1, audioTokenCount) : nil,
+            wrapGemma4Markers: wrapGemma4Markers)
         var result = messages
         if let firstUserIndex = result.firstIndex(where: { $0["role"] == "user" }) {
             let existing = result[firstUserIndex]["content"] ?? ""
@@ -447,6 +427,47 @@ public final class InferenceEngine: @unchecked Sendable {
             result.append(["role": "user", "content": prefix])
         }
         return result
+    }
+
+    // Gemma media placeholder/marker token strings. These are the literal
+    // `content` forms of the checkpoint's added_tokens, NOT the prose names:
+    // they round-trip through the Gemma tokenizer to the ids below (verified
+    // live, and gated by Gemma4UnifiedLiveDiag.testMediaMarkerTokenIds when a
+    // model is present).
+    static let gemma4ImageSoftToken = "<|image|>"   // 258880
+    static let gemma4AudioSoftToken = "<|audio|>"   // 258881
+    static let gemma4BeginImage = "<|image>"        // 255999 (<start_of_image>)
+    static let gemma4EndImage = "<image|>"          // 258882 (<end_of_image>)
+    static let gemma4BeginAudio = "<|audio>"        // 256000 (<start_of_audio>)
+    static let gemma4EndAudio = "<audio|>"          // 258883 (<end_of_audio>)
+
+    /// Build the media-placeholder prefix string spliced ahead of the first
+    /// user turn. Pure (no I/O) so it is unit-testable without a tokenizer.
+    ///
+    /// `wrapGemma4Markers` wraps each soft-token run in the begin/end markers
+    /// the model was trained with (`<start_of_image>` ... `<end_of_image>`,
+    /// likewise audio). The encoder-free Gemma 4 12B "unified" SKU REQUIRES
+    /// them - without the markers the soft tokens are not demarcated and the
+    /// model misreads the media (verified: a red image is reported as "white"
+    /// with a bare run, correct with the markers). It is scoped to that family
+    /// only (false here) so the e2b/e4b bare-run behavior is unchanged.
+    static func mediaPlaceholderPrefix(
+        imageTokenCount: Int?,
+        audioTokenCount: Int?,
+        wrapGemma4Markers: Bool
+    ) -> String {
+        let boi = wrapGemma4Markers ? gemma4BeginImage : ""
+        let eoi = wrapGemma4Markers ? gemma4EndImage : ""
+        let boa = wrapGemma4Markers ? gemma4BeginAudio : ""
+        let eoa = wrapGemma4Markers ? gemma4EndAudio : ""
+        var prefix = ""
+        if let n = imageTokenCount, n > 0 {
+            prefix += boi + String(repeating: gemma4ImageSoftToken, count: n) + eoi
+        }
+        if let n = audioTokenCount, n > 0 {
+            prefix += boa + String(repeating: gemma4AudioSoftToken, count: max(1, n)) + eoa
+        }
+        return prefix
     }
 
     /// Compute the number of soft tokens the vision encoder will produce for an image.
