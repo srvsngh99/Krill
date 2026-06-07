@@ -548,7 +548,8 @@ public final class InferenceEngine: @unchecked Sendable {
                     + "plain JSON-validity mask.\n").utf8))
                 return jsonValidityMaskLocked(pieces: pieces, stopIds: stopIds)
             }
-            let mask = GrammarTokenMask(automaton: grammar, pieces: pieces, stopIds: stopIds)
+            let mask = GrammarTokenMask(automaton: grammar, pieces: pieces, stopIds: stopIds,
+                                        outputWidth: loadedModel?.vocabSize)
             cachedSchemaMask = (schema, mask)
             return mask
 
@@ -563,7 +564,8 @@ public final class InferenceEngine: @unchecked Sendable {
                     + "for this request.\n").utf8))
                 return nil
             }
-            let mask = GrammarTokenMask(automaton: grammar, pieces: pieces, stopIds: stopIds)
+            let mask = GrammarTokenMask(automaton: grammar, pieces: pieces, stopIds: stopIds,
+                                        outputWidth: loadedModel?.vocabSize)
             cachedRegexMask = (pattern, mask)
             return mask
 
@@ -578,7 +580,8 @@ public final class InferenceEngine: @unchecked Sendable {
                     + "for this request.\n").utf8))
                 return nil
             }
-            let mask = GrammarTokenMask(automaton: grammar, pieces: pieces, stopIds: stopIds)
+            let mask = GrammarTokenMask(automaton: grammar, pieces: pieces, stopIds: stopIds,
+                                        outputWidth: loadedModel?.vocabSize)
             cachedCFGMask = (grammarText, mask)
             return mask
         }
@@ -590,7 +593,8 @@ public final class InferenceEngine: @unchecked Sendable {
     /// on exactly that set).
     private func jsonValidityMaskLocked(pieces: [String], stopIds: Set<Int>) -> JSONTokenMask {
         if let cached = cachedJSONMask, cached.stopIdSet == stopIds { return cached }
-        let mask = JSONTokenMask(pieces: pieces, stopIds: stopIds)
+        let mask = JSONTokenMask(pieces: pieces, stopIds: stopIds,
+                                 outputWidth: loadedModel?.vocabSize)
         cachedJSONMask = mask
         return mask
     }
@@ -1292,10 +1296,13 @@ public final class InferenceEngine: @unchecked Sendable {
                 var grammarSession: (any GrammarLogitSession)?
                 if let m = capturedGrammarMask {
                     let logitsVocab = prefillLogits.dim(prefillLogits.ndim - 1)
-                    if m.vocabSize != logitsVocab {
+                    // The mask is emitted at `maskWidth` (= the model's padded
+                    // logits width, e.g. Gemma 4's 262144 vs 261707 pieces).
+                    // Only a genuine width mismatch disables it.
+                    if m.maskWidth != logitsVocab {
                         FileHandle.standardError.write(Data((
-                            "[KrillLM] grammar mask disabled: mask vocab "
-                            + "\(m.vocabSize) != logits vocab \(logitsVocab).\n").utf8))
+                            "[KrillLM] grammar mask disabled: mask width "
+                            + "\(m.maskWidth) != logits vocab \(logitsVocab).\n").utf8))
                     } else {
                         grammarSession = m.makeSession()
                     }
