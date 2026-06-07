@@ -182,10 +182,18 @@ private let aliases: [String: ResolvedModel] = [
     "gemma-4-e4b": ResolvedModel(
         repo: "mlx-community/gemma-4-e4b-it-4bit",
         name: "gemma-4-e4b", family: .gemma4, params: "4B", quant: "4bit", context: 131072),
-    // Google's Gemma 4 lineup is E2B / E4B / 26B-A4B / 31B; no 12B or
-    // 27B SKU exists. 26B-A4B and 31B are not aliased here yet because
-    // the loader (`Gemma4Model`) is currently e2b-shape-specific - see
-    // docs/FOLLOWUPS_AGENT_DOGFOOD.md §1.
+    // Gemma 4 12B "unified" (released 2026-06-03): the encoder-free
+    // multimodal SKU. `family: .gemma4Unified` routes it to the
+    // `Gemma4UnifiedModel` loader (raw-patch / raw-audio linear front-ends
+    // over the shared dense Gemma 4 backbone), NOT the SigLIP/USM path the
+    // e2b/e4b/.gemma4 entries use. 256K context.
+    "gemma-4-12b": ResolvedModel(
+        repo: "mlx-community/gemma-4-12B-it-4bit",
+        name: "gemma-4-12b", family: .gemma4Unified, params: "12B", quant: "4bit",
+        context: 262144),
+    // Google's Gemma 4 lineup is E2B / E4B / 12B (unified) / 26B-A4B / 31B.
+    // 26B-A4B and 31B are not aliased here yet (the `Gemma4Model` loader is
+    // currently e2b-shape-specific) - see docs/FOLLOWUPS_AGENT_DOGFOOD.md §1.
 
     // GLM-4
     "glm-4-9b": ResolvedModel(

@@ -90,6 +90,10 @@ public enum ModelCapabilities {
             return [.textGeneration, .tools]
         case .gemma4:
             return [.textGeneration, .visionInput, .audioInput, .tools]
+        case .gemma4Unified:
+            // Encoder-free multimodal Gemma 4 (12B): text + image + native
+            // audio, same tool surface as the rest of the Gemma 4 family.
+            return [.textGeneration, .visionInput, .audioInput, .tools]
         case .bert:
             return [.embeddings]
         case .qwen25vl:
@@ -174,6 +178,14 @@ public enum ModelCapabilities {
             // are pending. Tier promotes once the scoring runtime
             // lands and the parity smoke matches a reference model
             // within tolerance.
+            return .experimental
+        case .gemma4Unified:
+            // Encoder-free Gemma 4 12B: native Swift+MLX load+run path
+            // reusing the dense Gemma 4 text backbone, with encoder-free
+            // vision/audio embedders gated on numeric parity. `.experimental`
+            // until the real-checkpoint serving run + benchmark gate land
+            // (mirrors how llava / llamaVision are promoted only after
+            // their serving gate is green).
             return .experimental
         }
     }
