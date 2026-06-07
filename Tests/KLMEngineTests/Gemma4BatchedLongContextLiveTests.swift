@@ -19,8 +19,10 @@ import Foundation
 /// This uses VARIED content (a repeated context masks both bugs by saturating
 /// the residual stream) with a per-row NEEDLE placed mid-context (outside the
 /// final 512-token window, so only correct long-range attention + the right
-/// shared-layer offset can retrieve it), and fires the rows CONCURRENTLY so the
-/// stacked batchedDecode runs with genuinely different per-row positions.
+/// shared-layer offset can retrieve it). Each request goes through
+/// `batchedDecode`; the shared-layer offset bug bites at B == 1 too (a single
+/// shared row got `zeroOffsets = [0]` instead of its true position), so the rows
+/// run sequentially and distinct needles also guard against row/KV bleed.
 ///
 /// Set `KLM_BATCH_MODEL_PATH` to a Gemma 4 checkpoint (e.g. gemma-4-e2b).
 final class Gemma4BatchedLongContextLiveTests: XCTestCase {
