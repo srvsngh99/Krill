@@ -159,4 +159,35 @@ final class JSONTokenMaskTests: XCTestCase {
         XCTAssertEqual(host[0], 0)          // "{"
         XCTAssertLessThan(host[1], -1e8)    // "}"
     }
+
+    // MARK: - Padded logits width (Gemma 4: 262144 logits vs 261707 pieces)
+
+    func testPaddedOutputWidthBlocksUnusedTail() {
+        let pad = 5
+        let width = pieces.count + pad
+        let mask = JSONTokenMask(pieces: pieces, stopIds: [eosId], outputWidth: width)
+        // The grammar still reasons over the real tokenizer pieces…
+        XCTAssertEqual(mask.vocabSize, pieces.count)
+        // …but emits a mask at the model's padded logits width.
+        XCTAssertEqual(mask.maskWidth, width)
+
+        let host = mask.mask(for: JSONGrammar.initialState).asArray(Float.self)
+        XCTAssertEqual(host.count, width)
+        // Real-token decisions are unchanged by padding.
+        XCTAssertEqual(host[0], 0)          // "{" still allowed
+        XCTAssertLessThan(host[1], -1e8)    // "}" still forbidden
+        // Every padding slot is blocked so it can never be sampled.
+        for id in pieces.count ..< width {
+            XCTAssertLessThan(host[id], -1e8, "padding id \(id) must be blocked")
+        }
+        // advance() stays bounded by the real vocab.
+        XCTAssertNil(mask.advance(JSONGrammar.initialState, token: pieces.count))
+    }
+
+    func testPaddedFailOpenStillBlocksTail() {
+        // outputWidth below pieces.count is clamped up (mask must cover all
+        // real tokens); equal width behaves like the default.
+        let mask = JSONTokenMask(pieces: pieces, stopIds: [eosId], outputWidth: 2)
+        XCTAssertEqual(mask.maskWidth, pieces.count)
+    }
 }

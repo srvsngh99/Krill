@@ -34,7 +34,14 @@ public extension GrammarAutomaton {
 /// `GrammarLogitSession`, so the shared (per-model, thread-safe) mask object
 /// can serve many concurrent generations.
 public protocol GrammarLogitMask: AnyObject, Sendable {
+    /// Number of real token pieces the grammar reasons over (the tokenizer
+    /// vocab). Used for piece indexing / advance bounds.
     var vocabSize: Int { get }
+    /// Width of the emitted additive mask vector. Equals the model's logits
+    /// width (`lm_head` output), which can be PADDED beyond `vocabSize` (e.g.
+    /// Gemma 4: 262144 logits vs 261707 tokenizer pieces). The engine validates
+    /// this against the runtime logits width; padding slots are blocked.
+    var maskWidth: Int { get }
     var stopIdSet: Set<Int> { get }
     func makeSession() -> any GrammarLogitSession
 }
@@ -72,6 +79,10 @@ public final class GrammarTokenMask<A: GrammarAutomaton>: GrammarLogitMask, @unc
     /// Stop tokens (EOS / end-of-turn) - allowed only at a complete value.
     private let stopIds: [Int]
     public let vocabSize: Int
+    /// Emitted mask width = the model's (possibly padded) logits width. When it
+    /// exceeds `vocabSize`, the tail `[vocabSize, maskWidth)` are unused token
+    /// slots and are always blocked.
+    public let maskWidth: Int
     public let stopIdSet: Set<Int>
 
     private var cache: [A.State: MLXArray] = [:]
@@ -79,10 +90,15 @@ public final class GrammarTokenMask<A: GrammarAutomaton>: GrammarLogitMask, @unc
     /// One-shot guard for the all-blocked fail-open notice.
     private var didWarnAllBlocked = false
 
-    public init(automaton: A, pieces: [String], stopIds: Set<Int>) {
+    /// - Parameter outputWidth: the model's logits width. Pass the loaded
+    ///   model's `vocabSize` when it is padded beyond the tokenizer (Gemma 4).
+    ///   Defaults to `pieces.count` (no padding). Values below `pieces.count`
+    ///   are clamped up (the mask must cover every real token).
+    public init(automaton: A, pieces: [String], stopIds: Set<Int>, outputWidth: Int? = nil) {
         self.automaton = automaton
         self.pieces = pieces
         self.vocabSize = pieces.count
+        self.maskWidth = max(outputWidth ?? pieces.count, pieces.count)
         self.stopIds = Array(stopIds)
         self.stopIdSet = stopIds
     }
@@ -104,7 +120,9 @@ public final class GrammarTokenMask<A: GrammarAutomaton>: GrammarLogitMask, @unc
         if let cached = cache[state] { return cached }
 
         let complete = automaton.isComplete(state)
-        var bias = [Float](repeating: grammarBlockedBias, count: vocabSize)
+        // Width = logits width; entries in [vocabSize, maskWidth) are padding
+        // token slots and stay blocked (their initial value).
+        var bias = [Float](repeating: grammarBlockedBias, count: maskWidth)
         var allowedCount = 0
         for id in 0 ..< vocabSize {
             let piece = pieces[id]
@@ -141,7 +159,10 @@ public final class GrammarTokenMask<A: GrammarAutomaton>: GrammarLogitMask, @unc
                     + "failing open for this step (output validity then relies on "
                     + "post-extraction).\n").utf8))
             }
-            let open = MLXArray([Float](repeating: 0, count: vocabSize))
+            // Fail open over the REAL tokens only; padding slots stay blocked.
+            var openBias = [Float](repeating: 0, count: maskWidth)
+            for id in vocabSize ..< maskWidth { openBias[id] = grammarBlockedBias }
+            let open = MLXArray(openBias)
             cache[state] = open
             return open
         }

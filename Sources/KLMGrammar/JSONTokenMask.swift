@@ -20,7 +20,9 @@ public typealias JSONTokenMask = GrammarTokenMask<JSONValueAutomaton>
 
 public extension GrammarTokenMask where A == JSONValueAutomaton {
     /// Build the any-JSON-value mask from a token-piece table and stop set.
-    convenience init(pieces: [String], stopIds: Set<Int>) {
-        self.init(automaton: JSONValueAutomaton(), pieces: pieces, stopIds: stopIds)
+    /// `outputWidth` is the model's (possibly padded) logits width.
+    convenience init(pieces: [String], stopIds: Set<Int>, outputWidth: Int? = nil) {
+        self.init(automaton: JSONValueAutomaton(), pieces: pieces, stopIds: stopIds,
+                  outputWidth: outputWidth)
     }
 }
