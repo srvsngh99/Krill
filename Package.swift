@@ -8,7 +8,10 @@ let package = Package(
         .executable(name: "krillm", targets: ["KLMCLI"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.21.0"),
+        // 0.31.4+ required: earlier revisions' QuantizedLinear.init drops the
+        // quantization `mode` when allocating params, which breaks loading
+        // nvfp4 (4-bit-float) checkpoints. See finding_gemma4_12b_unified.
+        .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.31.4"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "0.1.12"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),

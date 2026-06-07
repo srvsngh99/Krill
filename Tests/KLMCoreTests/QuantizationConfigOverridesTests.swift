@@ -176,6 +176,66 @@ final class QuantizationConfigOverridesTests: XCTestCase {
         XCTAssertEqual(round.moduleOverrides, original.moduleOverrides)
     }
 
+    // MARK: - Quantization mode (affine / nvfp4 / mxfp4)
+
+    func testModeDefaultsToAffineWhenAbsent() throws {
+        // Every historical mlx-community 4-bit checkpoint omits `mode`;
+        // it must default to "affine" so behavior is unchanged.
+        let q = try decode("""
+        { "group_size": 64, "bits": 4 }
+        """)
+        XCTAssertEqual(q.mode, "affine")
+        XCTAssertEqual(q.effective(for: "any.module").mode, "affine")
+    }
+
+    func testNvfp4ModeParsesAndPropagatesThroughEffective() throws {
+        // nvfp4 (4-bit float) checkpoints carry `"mode": "nvfp4"` and use
+        // group_size 16. The mode must reach `effective(for:)` so the
+        // loader can select the right MLX QuantizationMode.
+        let q = try decode("""
+        { "group_size": 16, "bits": 4, "mode": "nvfp4" }
+        """)
+        XCTAssertEqual(q.mode, "nvfp4")
+        let eff = q.effective(for: "model.layers.0.self_attn.q_proj")
+        XCTAssertEqual(eff.groupSize, 16)
+        XCTAssertEqual(eff.bits, 4)
+        XCTAssertEqual(eff.mode, "nvfp4")
+    }
+
+    func testPerModuleModeOverridesTopLevel() throws {
+        // A per-module override may carry its own mode; one without a
+        // mode inherits the top-level mode.
+        let q = try decode("""
+        {
+          "group_size": 16, "bits": 4, "mode": "nvfp4",
+          "model.layers.0.mlp.down_proj": { "group_size": 32, "bits": 4, "mode": "mxfp4" },
+          "model.layers.0.self_attn.q_proj": { "group_size": 16, "bits": 4 }
+        }
+        """)
+        XCTAssertEqual(q.effective(for: "model.layers.0.mlp.down_proj").mode, "mxfp4")
+        // override without `mode` inherits the top-level nvfp4
+        XCTAssertEqual(q.effective(for: "model.layers.0.self_attn.q_proj").mode, "nvfp4")
+        // unlisted module also inherits top-level
+        XCTAssertEqual(q.effective(for: "model.layers.5.mlp.up_proj").mode, "nvfp4")
+    }
+
+    func testNonAffineModeRoundTrips() throws {
+        let original = QuantizationConfig(groupSize: 16, bits: 4, mode: "nvfp4")
+        let data = try JSONEncoder().encode(original)
+        let round = try JSONDecoder().decode(QuantizationConfig.self, from: data)
+        XCTAssertEqual(round.mode, "nvfp4")
+        XCTAssertEqual(round.groupSize, 16)
+        XCTAssertEqual(round.bits, 4)
+    }
+
+    func testAffineModeOmittedFromEncoding() throws {
+        // Affine configs must encode byte-identically to the historical
+        // (mode-less) form, so `mode` is only emitted for non-affine.
+        let q = QuantizationConfig(groupSize: 64, bits: 4)
+        let json = String(data: try JSONEncoder().encode(q), encoding: .utf8)!
+        XCTAssertFalse(json.contains("mode"))
+    }
+
     // MARK: - Helpers
 
     private func decode(_ json: String) throws -> QuantizationConfig {

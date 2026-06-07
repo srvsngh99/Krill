@@ -46,6 +46,11 @@ public protocol ModelConfig: Sendable {
 public struct QuantizationConfig: Sendable {
     public let groupSize: Int
     public let bits: Int
+    /// Quantization mode label from the config (e.g. `"affine"`, `"nvfp4"`,
+    /// `"mxfp4"`, `"mxfp8"`). Drives the MLX `QuantizationMode` at load time;
+    /// callers in KLMCore map this string via `mlxQuantizationMode(_:)`.
+    /// Defaults to `"affine"` so every existing affine checkpoint is unchanged.
+    public let mode: String
     /// Per-module overrides keyed by the module's full dotted name.
     /// Empty for uniform-precision checkpoints.
     public let moduleOverrides: [String: ModuleQuant]
@@ -53,36 +58,42 @@ public struct QuantizationConfig: Sendable {
     public struct ModuleQuant: Codable, Sendable, Equatable {
         public let groupSize: Int
         public let bits: Int
+        /// Per-module mode override; `nil` inherits the top-level `mode`.
+        public let mode: String?
 
         enum CodingKeys: String, CodingKey {
             case groupSize = "group_size"
             case bits
+            case mode
         }
 
-        public init(groupSize: Int, bits: Int) {
+        public init(groupSize: Int, bits: Int, mode: String? = nil) {
             self.groupSize = groupSize
             self.bits = bits
+            self.mode = mode
         }
     }
 
     public init(
-        groupSize: Int, bits: Int,
+        groupSize: Int, bits: Int, mode: String = "affine",
         moduleOverrides: [String: ModuleQuant] = [:]
     ) {
         self.groupSize = groupSize
         self.bits = bits
+        self.mode = mode
         self.moduleOverrides = moduleOverrides
     }
 
-    /// Effective `(groupSize, bits)` for a module at the given dotted path.
-    /// Falls back to the top-level defaults when no override is registered.
+    /// Effective `(groupSize, bits, mode)` for a module at the given dotted
+    /// path. Falls back to the top-level defaults when no override is
+    /// registered; a per-module override with no `mode` inherits top-level.
     public func effective(
         for modulePath: String
-    ) -> (groupSize: Int, bits: Int) {
+    ) -> (groupSize: Int, bits: Int, mode: String) {
         if let o = moduleOverrides[modulePath] {
-            return (o.groupSize, o.bits)
+            return (o.groupSize, o.bits, o.mode ?? mode)
         }
-        return (groupSize, bits)
+        return (groupSize, bits, mode)
     }
 }
 
@@ -100,6 +111,7 @@ extension QuantizationConfig: Codable {
         let c = try decoder.container(keyedBy: DynamicKey.self)
         var groupSize: Int?
         var bits: Int?
+        var mode = "affine"
         var overrides: [String: ModuleQuant] = [:]
         for key in c.allKeys {
             switch key.stringValue {
@@ -107,10 +119,13 @@ extension QuantizationConfig: Codable {
                 groupSize = try c.decode(Int.self, forKey: key)
             case "bits":
                 bits = try c.decode(Int.self, forKey: key)
-            case "mode", "method":
-                // Top-level mode / method labels (e.g. `"mode": "affine"`)
-                // are informational; the MLX quantize call uses .affine
-                // and the per-module overrides do not carry these.
+            case "mode":
+                // The quantization format (e.g. `"affine"`, `"nvfp4"`,
+                // `"mxfp4"`). Threaded to the MLX quantize call at load
+                // time so 4-bit-float checkpoints run with the right kernel.
+                mode = (try? c.decode(String.self, forKey: key)) ?? "affine"
+            case "method":
+                // `method` is an informational label; ignore it.
                 continue
             default:
                 // Nested object => module override. If the entry is not
@@ -141,6 +156,7 @@ extension QuantizationConfig: Codable {
         }
         self.groupSize = resolvedGroupSize
         self.bits = resolvedBits
+        self.mode = mode
         self.moduleOverrides = overrides
     }
 
@@ -148,6 +164,11 @@ extension QuantizationConfig: Codable {
         var c = encoder.container(keyedBy: DynamicKey.self)
         try c.encode(groupSize, forKey: DynamicKey(stringValue: "group_size")!)
         try c.encode(bits, forKey: DynamicKey(stringValue: "bits")!)
+        // Only emit `mode` for non-affine formats so affine configs round-trip
+        // byte-identically to the historical (mode-less) encoding.
+        if mode != "affine" {
+            try c.encode(mode, forKey: DynamicKey(stringValue: "mode")!)
+        }
         for (path, mq) in moduleOverrides {
             try c.encode(mq, forKey: DynamicKey(stringValue: path)!)
         }

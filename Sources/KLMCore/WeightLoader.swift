@@ -2,6 +2,22 @@ import Foundation
 import MLX
 import MLXNN
 
+/// Map a config quantization `mode` string to MLX's `QuantizationMode`.
+///
+/// `"affine"` (the historical default) and any unrecognized value fall back
+/// to `.affine`, so existing checkpoints are unaffected. `"nvfp4"` /
+/// `"mxfp4"` / `"mxfp8"` select the 4-bit-float (and 8-bit-float) formats —
+/// nvfp4 in particular preserves outlier weights that affine int4 clips, at
+/// the same 4-bit speed (verified end-to-end on Gemma 4 12B MMLU).
+func mlxQuantizationMode(_ mode: String) -> QuantizationMode {
+    switch mode.lowercased() {
+    case "nvfp4": return .nvfp4
+    case "mxfp4": return .mxfp4
+    case "mxfp8": return .mxfp8
+    default: return .affine
+    }
+}
+
 // MARK: - Weight Loading
 
 /// Load model weights from a directory containing safetensors files.
@@ -96,11 +112,12 @@ public func loadWeights(
     // scales-shape mismatch.
     if let q = quantization {
         if q.moduleOverrides.isEmpty {
-            quantize(model: model, groupSize: q.groupSize, bits: q.bits)
+            quantize(model: model, groupSize: q.groupSize, bits: q.bits,
+                     mode: mlxQuantizationMode(q.mode))
         } else {
             quantize(model: model) { path, _ in
                 let eff = q.effective(for: path)
-                return (eff.groupSize, eff.bits, .affine)
+                return (eff.groupSize, eff.bits, mlxQuantizationMode(eff.mode))
             }
         }
     }

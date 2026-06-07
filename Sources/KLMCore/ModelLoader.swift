@@ -728,7 +728,7 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
                 let shouldQuant = (isLangModel && !isPLE && !isMoEExpert) || isEmbedProj
                 guard shouldQuant else { return nil }
                 let eff = q.effective(for: path)
-                return (eff.groupSize, eff.bits, .affine)
+                return (eff.groupSize, eff.bits, mlxQuantizationMode(eff.mode))
             }
         }
 
@@ -838,15 +838,15 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
             // the same checkpoint is loaded text-only.
             if path.contains("per_layer_model_projection")
                 || path.contains("per_layer_projection_norm") { return nil }
-            let eff: (groupSize: Int, bits: Int)
+            let eff: (groupSize: Int, bits: Int, mode: String)
             if q.moduleOverrides[path] != nil {
                 eff = q.effective(for: path)
             } else if q.moduleOverrides["language_model." + path] != nil {
                 eff = q.effective(for: "language_model." + path)
             } else {
-                eff = (q.groupSize, q.bits)
+                eff = (q.groupSize, q.bits, q.mode)
             }
-            return (eff.groupSize, eff.bits, .affine)
+            return (eff.groupSize, eff.bits, mlxQuantizationMode(eff.mode))
         }
     }
 
@@ -922,7 +922,7 @@ private func loadGemma4Unified(configData: Data, directory: URL) throws -> Loade
                 || path.contains("embed_audio.embedding_projection")
             guard isLangModel || isPatchDense || isEmbedProj else { return nil }
             let eff = q.effective(for: path)
-            return (eff.groupSize, eff.bits, .affine)
+            return (eff.groupSize, eff.bits, mlxQuantizationMode(eff.mode))
         }
     }
 
