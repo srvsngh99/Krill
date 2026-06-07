@@ -6,6 +6,17 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Grammar / structured-output decoding now works on models with a padded
+  vocab (Gemma 4).** The grammar logit mask was built at the tokenizer piece
+  count (e.g. 261707) while the model's logits are the padded config vocab
+  (262144), so the width-mismatch guard silently disabled all
+  JSON/schema/regex/CFG constrained decoding on Gemma 4. The mask now emits at
+  the model's logits width (`GrammarTokenMask.maskWidth`, fed the loaded
+  model's `vocabSize`), with the unused padding token slots blocked. Constrained
+  decoding is enabled whenever the emitted width matches the logits width.
+
 ### Changed
 
 - **Default serve port changed from `11434` to `57455`** ("KRILL" on a
