@@ -22,18 +22,36 @@ import argparse, json, statistics, threading, time, urllib.request
 KRILL = "http://127.0.0.1:57455"   # KrillLM default ("KRILL" on a keypad)
 OLLAMA = "http://127.0.0.1:11434"  # Ollama default
 
-CONTEXT_UNIT = (
-    "KrillLM is a native Swift and MLX inference engine for Apple Silicon. It "
-    "serves text, vision, audio, embeddings, rerankers, tool calling, and "
-    "grammar-constrained structured output. Its continuous batcher serves many "
-    "concurrent decode rows from a single weight read, and it shares prefix KV "
-    "across requests. ")
+# A pool of DISTINCT sentences (realistic RAG context), not one sentence repeated:
+# a degenerate repeated context is out-of-distribution and can push a greedy
+# decode straight to EOS (especially on a model with a sliding-window attention
+# pattern). The context is built by cycling this pool to the requested length,
+# so it stays varied while remaining answerable by QUESTIONS.
+CONTEXT_SENTENCES = [
+    "KrillLM is a native Swift and MLX inference engine for Apple Silicon.",
+    "It serves text, vision, audio, embeddings, rerankers, and tool calling.",
+    "One structured-output feature it provides is grammar-constrained JSON decoding.",
+    "Its continuous batcher serves many concurrent decode rows from a single weight read.",
+    "KrillLM shares prefix KV cache across requests to avoid re-prefilling shared context.",
+    "The project aims to be a drop-in Ollama replacement on macOS.",
+    "It runs entirely on Apple Silicon using the MLX array framework and Metal.",
+    "Cold model load and total request latency are among its measured wins over Ollama.",
+    "Vision and voice are handled by native Swift pipelines, not a Python bridge.",
+    "Gemma 4, Llama 3.x, Qwen 2.5/3, Mistral, and Phi families run natively.",
+    "Tool calling uses per-family adapters that emit the model's native call format.",
+    "Speculative decoding includes an opt-in n-gram prompt-lookup path for repetitive output.",
+]
 QUESTIONS = [
     "What hardware does KrillLM target?", "List two modalities it supports.",
     "What does the continuous batcher do?", "Does it support tool calling?",
     "Name one structured-output feature.", "What language is it written in?",
     "Does it run on Apple Silicon?", "What is one thing it shares across requests?",
 ]
+
+
+def build_context(units):
+    """Cycle the distinct-sentence pool to ~`units` sentences (each ~20 words)."""
+    return " ".join(CONTEXT_SENTENCES[i % len(CONTEXT_SENTENCES)] for i in range(units)) + " "
 
 
 def stream_request(url, model, prompt, max_tokens, want_json):
@@ -109,10 +127,10 @@ def main():
     p.add_argument("--concurrency", default="1,4,8")
     p.add_argument("--max-tokens", type=int, default=64)
     p.add_argument("--context-repeat", type=int, default=60,
-                   help="Repeat the context unit N times (~25 tok each).")
+                   help="Number of context sentences (cycled from a distinct pool; ~20 tok each).")
     p.add_argument("--no-json", action="store_true", help="Disable structured-output mode.")
     a = p.parse_args()
-    context = CONTEXT_UNIT * a.context_repeat
+    context = build_context(a.context_repeat)
     sweep = [int(x) for x in a.concurrency.split(",")]
     want_json = not a.no_json
     ctx_tok = len(context.split())
