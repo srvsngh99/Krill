@@ -43,7 +43,7 @@ public struct ModelAdapter: Sendable, Equatable {
     public var chatRouting: ChatRouting {
         switch family {
         case .llama, .qwen, .qwen25vl, .llava, .llamaVision, .mistral, .gemma, .gemma4,
-             .phi, .glm, .deepseek, .bert, .reranker, .moe:
+             .gemma4Unified, .phi, .glm, .deepseek, .bert, .reranker, .moe:
             // Native Swift+MLX path. WS5 made Qwen 2.5-VL native, so
             // a VL manifest routes here too - the standard chat path
             // decodes the image and calls the native engine, exactly
@@ -68,7 +68,7 @@ public struct ModelAdapter: Sendable, Equatable {
     public var requiresImageInput: Bool {
         switch family {
         case .llama, .qwen, .qwen25vl, .llava, .llamaVision, .mistral, .gemma, .gemma4,
-             .phi, .glm, .deepseek, .bert, .reranker, .moe:
+             .gemma4Unified, .phi, .glm, .deepseek, .bert, .reranker, .moe:
             return false
         }
     }
@@ -76,7 +76,7 @@ public struct ModelAdapter: Sendable, Equatable {
     /// The tool / function-call chat template this family expects.
     public var chatTemplate: ChatTemplatePolicy {
         switch family {
-        case .gemma4:
+        case .gemma4, .gemma4Unified:
             return .gemma4
         case .llama:
             return .llama
@@ -122,9 +122,12 @@ public struct ModelAdapter: Sendable, Equatable {
     /// swift-transformers direct template with a render+encode fallback.
     public var tokenizerPrompt: TokenizerPromptPolicy {
         switch family {
-        case .gemma4:
+        case .gemma4, .gemma4Unified:
             // Direct token-id construction keeps the 105/106/107 turn
             // specials that a decode -> re-encode round-trip would drop.
+            // The unified (encoder-free) SKU shares the same turn structure;
+            // its media placeholder runs are spliced in the engine's
+            // multimodal path, not here.
             return .gemma4DirectIds
         case .phi:
             // o200k (GPT-4o / tiktoken) BPE: the swift-transformers DIRECT
@@ -153,6 +156,12 @@ public struct ModelAdapter: Sendable, Equatable {
         switch family {
         case .gemma4:
             return .supportsInt8
+        case .gemma4Unified:
+            // The unified text decoder is the same Gemma4Attention that
+            // accepts `KVCacheProtocol`, so int8 KV is structurally
+            // supported, but it is not yet end-to-end verified for this
+            // family. Stay fp16-only until that gate lands (follow-up).
+            return .fp16Only
         case .llama, .qwen, .qwen25vl, .llava, .llamaVision, .mistral, .gemma, .phi,
              .glm, .deepseek, .bert, .reranker, .moe:
             return .fp16Only
