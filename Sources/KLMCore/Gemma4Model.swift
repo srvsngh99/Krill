@@ -428,9 +428,10 @@ class Gemma4Attention: Module {
     ///   positions. When non-nil, Q (and, on non-shared layers, the freshly
     ///   computed K) are rotated per row at `rowOffsets[r]` instead of the
     ///   single scalar `cache.sequenceLength` offset. The caller passes the
-    ///   row's true position (prefill length + step) for non-shared layers and
-    ///   all-zeros for KV-shared layers, mirroring the solo path where a
-    ///   shared layer's empty own cache yields offset 0.
+    ///   row's true position (prefill length + step) for BOTH non-shared and
+    ///   KV-shared layers: a shared layer reuses the donor's K (rotated at the
+    ///   true position), so its Q must rotate at that same true position to keep
+    ///   the Q/K relative positions correct at decode.
     func callAsFunction(
         _ x: MLXArray, maskMode: MLXFast.ScaledDotProductAttentionMaskMode = .none,
         cache: KVCacheProtocol? = nil, sharedCache: KVCacheProtocol? = nil,
@@ -454,10 +455,13 @@ class Gemma4Attention: Module {
         // its post-update length is LCP + L. Subtracting L recovers the span
         // base LCP, so the suffix Q rotates at its true positions and aligns
         // with the donor's restored K (which were rotated at 0..count-1).
-        // Cold prefill: donorLen == L -> base 0 (unchanged). This branch only
-        // changes behavior when a non-empty donor span is resumed (L > 1).
+        // Cold prefill: donorLen == L -> falls through to base 0 (unchanged).
+        // The branch fires whenever a non-empty donor span is reused:
+        //   - L == 1 decode: donor updated this step -> donorLen = P+1 > 1, so
+        //     offset = P (the new token's true position; matches the donor's K).
+        //   - L > 1 partial-prefix resume / spec-verify: offset = donorLen - L.
         let offset: Int
-        if L > 1, let donorLen = sharedCache?.sequenceLength, donorLen > L {
+        if let donorLen = sharedCache?.sequenceLength, donorLen > L {
             offset = donorLen - L
         } else {
             offset = cache?.sequenceLength ?? (sharedCache?.sequenceLength ?? 0)
@@ -1094,9 +1098,9 @@ class Gemma4TextModel: Module {
     /// tolerance) to running that prompt alone.
     ///
     /// KV sharing (e2b/e4b): shared layers (`i >= firstKVSharedLayer`) reuse
-    /// the donor layer's stacked K/V and rotate Q at offset 0 - exactly the
-    /// solo path, where a shared layer's own (empty) cache yields
-    /// `sequenceLength == 0`. The stacked `caches` therefore hold real K/V only
+    /// the donor layer's stacked K/V and rotate Q at each row's TRUE position
+    /// (`rowOffsets`) to match the donor's K - exactly the solo path's
+    /// `donorLen - L` offset. The stacked `caches` therefore hold real K/V only
     /// at the non-shared (donor-eligible) slots; shared slots are empty
     /// placeholders the attention never reads or updates.
     ///
@@ -1115,9 +1119,6 @@ class Gemma4TextModel: Module {
         let L = tokens.dim(1)
         let numLayers = config.numHiddenLayers
         let pleDim = config.hiddenSizePerLayerInput
-        // Shared layers rotate Q at offset 0 (their own cache is empty in the
-        // solo path), so a fresh zero-offset vector mirrors that exactly.
-        let zeroOffsets = [Int](repeating: 0, count: B)
 
         var h = embedTokens(tokens) * embedScale
 
@@ -1163,9 +1164,14 @@ class Gemma4TextModel: Module {
 
             if kvSharingEnabled, i >= firstShared {
                 let donorIdx = config.isFullAttention(layerIdx: i) ? lastFullDonor : lastSlidingDonor
+                // Shared layers reuse the donor's K (rotated at each row's TRUE
+                // position), so the shared-layer Q must rotate at that SAME true
+                // position (`rowOffsets`), not 0 - otherwise the Q/K relative
+                // positions are wrong at decode and long-context generation
+                // degenerates (mirror of the solo-path `donorLen - L` fix).
                 h = layer(h, maskMode: layerMode, cache: caches[i],
                           sharedCache: caches[donorIdx], perLayerInput: pleSlice,
-                          rowOffsets: zeroOffsets)
+                          rowOffsets: rowOffsets)
             } else {
                 h = layer(h, maskMode: layerMode, cache: caches[i],
                           perLayerInput: pleSlice, rowOffsets: rowOffsets)

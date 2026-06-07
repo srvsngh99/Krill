@@ -35,18 +35,45 @@ final class Gemma4LongContextLiveTests: XCTestCase {
         let engine = InferenceEngine(modelDirectory: try modelDir())
         try await engine.load()
 
-        // ~40 words per unit; 60 units is well over 2000 tokens, comfortably past
-        // the 512 window (and the ~1024-token cliff where the bug appeared).
-        let unit = "KrillLM is a native Swift and MLX inference engine for Apple "
-            + "Silicon. It serves text, vision, audio, embeddings, and tool calling. "
-        let longContext = String(repeating: unit, count: 60)
-            + "\n\nQuestion: In one sentence, what is KrillLM written in?\nAnswer:"
+        // VARIED content (NOT one sentence repeated). A repeated context masks
+        // long-context attention bugs: the answer saturates the residual stream
+        // so even broken attention echoes it (this is exactly how the earlier
+        // KV-shared decode RoPE-offset bug slipped past the original repeated
+        // version of this test). Distinct sentences + a single NEEDLE fact force
+        // real long-range retrieval. ~12 words/sentence * 180 = well past 2048
+        // tokens, comfortably beyond the ~1024 (2x sliding-window) cliff.
+        let filler = [
+            "The continuous batcher serves many concurrent decode rows per weight read.",
+            "Prefix KV cache is shared across requests to avoid re-prefilling context.",
+            "Native Swift pipelines handle vision and voice without a Python bridge.",
+            "Tool calling uses per-family adapters that emit the native call format.",
+            "Grammar-constrained decoding can force schema-valid JSON output.",
+            "Cold model load and total request latency are measured wins over Ollama.",
+        ]
+        var sentences: [String] = []
+        for i in 0 ..< 180 { sentences.append(filler[i % filler.count]) }
+        // Drop the needle in the MIDDLE so it sits outside the final 512 window
+        // and can only be retrieved by the full-attention layers.
+        sentences.insert("The internal project codename for this release is Marlin-Seven.", at: 90)
+        let longContext = sentences.joined(separator: " ")
+            + "\n\nQuestion: What is the internal project codename for this release?\nAnswer:"
 
         let long = await generate(engine, longContext)
-        XCTAssertFalse(long.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        let trimmed = long.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertFalse(trimmed.isEmpty,
             "long-context generation must not be empty (the sliding-window bug); got \(long.count) chars")
-        XCTAssertTrue(long.lowercased().contains("swift"),
-            "long-context answer should mention Swift; got: \(long)")
+        // Degeneration guard: the KV-shared decode bug produced loops like
+        // `{"{"{"...` / ` ```json ` repeated. Assert output is not dominated by a
+        // single repeated short fragment.
+        let words = trimmed.split(separator: " ")
+        if words.count >= 6 {
+            let unique = Set(words.map(String.init)).count
+            XCTAssertGreaterThan(unique, 2,
+                "long-context output degenerated into a repetition loop: \(long)")
+        }
+        // Needle retrieval: only correct long-range attention recovers this.
+        XCTAssertTrue(long.lowercased().contains("marlin"),
+            "long-context answer must retrieve the mid-context needle; got: \(long)")
 
         // Sanity: a short prompt (within the window) still works.
         let short = await generate(engine, "In one word, what language is Swift?")
