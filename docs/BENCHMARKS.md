@@ -15,8 +15,9 @@ drifts with thermal state and OS load; the *ratios* are the durable signal.
 |---|---|
 | Machine | Apple M4 Pro, 24 GB, macOS 26.5.1 (Darwin 25.5.0, arm64) |
 | KrillLM | commit `c0b4a63` (release build, `swift build -c release`) |
-| Ollama | 0.30.6 |
-| Common model | Gemma 4 E2B — KrillLM `gemma-4-e2b` / Ollama `gemma4:e2b` (the one model that does text+vision+voice+tools) |
+| Ollama | 0.30.6 (GGUF default; MLX engine available for Gemma 4) |
+| Common model | Gemma 4 E2B — KrillLM `gemma-4-e2b` / Ollama `gemma4:e2b` (GGUF) (the one model that does text+vision+voice+tools) |
+| Gemma 4 MLX | Ollama `gemma4:e2b-mlx` (nvfp4, text-only) — the MLX-vs-MLX comparison target |
 | Popular text | Llama 3.2 3B — `llama-3.2-3b` / `llama3.2:3b` |
 | Tool model | Qwen 2.5 3B — `qwen2.5-3b` / `qwen2.5:3b` (strong tool caller) |
 | Vision (fair) | Qwen 2.5 VL 3B — `Qwen2.5-VL-3B-Instruct-4bit` / `qwen2.5vl:3b` (both engines render it) |
@@ -33,7 +34,13 @@ self-reported by each engine, not wall-clock-inferred.
 
 ## Results
 
-### Text (single stream)
+### Text (single stream, vs Ollama's default GGUF engine)
+
+These rows compare KrillLM (MLX) against Ollama's **GGUF / llama.cpp** path (the
+default for these models). For Gemma 4 — where Ollama also has an MLX engine — see
+the MLX-vs-MLX section right below, which is the apples-to-apples decode number.
+Llama 3.2 and Qwen 2.5 have **no MLX tag in Ollama** (its MLX backend only covers
+newer architectures), so GGUF is the only available Ollama comparison there.
 
 | Model | State | Metric | KrillLM | Ollama | KrillLM |
 |---|---|---|--:|--:|:--|
@@ -62,6 +69,39 @@ engines holding a 14B). This is the documented ~14B stability ceiling for 24 GB
 (`docs/BENCHMARK_ISSUES.md` #0b), not a code regression — on a box with headroom
 the 14B tracks the small/mid models. KrillLM leads on every model that fits
 comfortably.
+
+### Text — vs Ollama's MLX engine (Gemma 4 E2B) — the apples-to-apples decode number
+
+Ollama added an MLX backend (v0.21.0, Apr 2026) with a text-only Gemma 4 runtime,
+tagged `gemma4:e2b-mlx` (nvfp4 4-bit). This is the fair MLX-vs-MLX comparison:
+both engines run the same model family on MLX, so the GGUF quant-class confound is
+gone. KrillLM uses `mlx-community/gemma-4-e2b-it-4bit` (affine 4-bit) — not a
+bit-identical quant to nvfp4, but both are MLX 4-bit.
+
+| Metric | KrillLM (MLX affine-4bit) | Ollama `gemma4:e2b-mlx` (MLX nvfp4) | KrillLM |
+|---|--:|--:|:--|
+| hot decode tok/s (N=1) | 109.1 | **114.9** | 0.95x |
+| hot total ms (64 tok) | 621 | 624 | ~parity |
+| **cold total ms** | **1080** | 3124 | **2.9x faster** |
+| **concurrent agg tok/s, N=4** | **206** | 110 | **1.88x** |
+| **concurrent agg tok/s, N=8** | **219** | 110 | **1.99x** |
+| vision / voice | ✅ native | ❌ MLX tag is text-only | KrillLM only |
+
+> This is a SEPARATE, later measurement run from the GGUF tables above (different
+> session, thermal state, and build), so KrillLM's absolute self-numbers here
+> (decode 109 vs 96, N=8 219 vs 155) do not line up with that section - only the
+> within-section RATIO vs the engine measured alongside it is meaningful, per the
+> "ratios are the durable signal" note at the top.
+
+**Read (honest):** on **single-stream** text decode, KrillLM is at **parity with
+Ollama's MLX engine — marginally behind (~5%)**; Ollama's nvfp4 + fused top-P/top-K
+sampling edge out the shared bandwidth roof. The 1.5x text-total figure in the
+GGUF table above is partly a GGUF-vs-MLX artifact and should NOT be read as a
+single-stream MLX win. KrillLM's durable wins over Ollama's MLX engine are
+**concurrency (~2x, the continuous batcher vs Ollama's per-slot serialization,
+which holds even on MLX), cold start (2.9x), and multimodal** (Ollama's MLX Gemma
+tag is text-only; KrillLM serves vision + voice natively). Numbers drift ~±5% with
+thermal state, so treat single-stream as parity-within-noise.
 
 ### Vision
 
@@ -208,6 +248,10 @@ python3 tools/bench_suite.py --axis text \
 #   (tools on a strong caller:)
 python3 tools/bench_suite.py --axis tools \
   --krill-model qwen2.5-3b --ollama-model qwen2.5:3b --repo .
+#   (apples-to-apples MLX-vs-MLX: Ollama's MLX Gemma 4 tag - pull it first:)
+ollama pull gemma4:e2b-mlx
+python3 tools/bench_suite.py --axis text \
+  --krill-model gemma-4-e2b --ollama-model gemma4:e2b-mlx --repo .
 
 # 4. Concurrency sweep:
 python3 tools/krillm_concurrent_benchmark.py \
