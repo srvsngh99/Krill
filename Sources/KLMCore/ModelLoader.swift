@@ -411,7 +411,8 @@ private func loadLlava(configData: Data, directory: URL) throws -> LoadedModel {
     // Linear/Embedding). The tiny synthetic parity fixture is unquantized.
     // `verify: []` tolerates tied-embedding checkpoints that omit lm_head.
     if let q = config.quantization {
-        quantize(model: model, groupSize: q.groupSize, bits: q.bits) { name, module in
+        quantize(model: model, groupSize: q.groupSize, bits: q.bits,
+                 mode: mlxQuantizationMode(q.mode)) { name, module in
             (module is Linear || module is Embedding) && !name.contains("patch_embedding")
         }
     }
@@ -481,7 +482,8 @@ private func loadLlamaVision(configData: Data, directory: URL) throws -> LoadedM
     // quantization layout is validated when the image-serving follow-up runs a
     // real checkpoint on a larger box (the 11B run is RAM-blocked here).
     if let q = config.quantization {
-        quantize(model: model, groupSize: q.groupSize, bits: q.bits) { name, module in
+        quantize(model: model, groupSize: q.groupSize, bits: q.bits,
+                 mode: mlxQuantizationMode(q.mode)) { name, module in
             guard module is Linear || module is Embedding else { return false }
             if name.contains("patch_embedding") { return false }
             // Skip the vision tower's Embedding tables (tile / aspect-ratio /
@@ -579,7 +581,8 @@ private func loadQwen25VL(configData: Data, directory: URL) throws -> LoadedMode
     // quantization predicate to `language_model.*`, mirroring how
     // `loadGemma4` excludes its vision / PLE towers.
     if let q = config.quantization {
-        quantize(model: model, groupSize: q.groupSize, bits: q.bits) { name, _ in
+        quantize(model: model, groupSize: q.groupSize, bits: q.bits,
+                 mode: mlxQuantizationMode(q.mode)) { name, _ in
             name.contains("language_model")
         }
     }
@@ -728,7 +731,7 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
                 let shouldQuant = (isLangModel && !isPLE && !isMoEExpert) || isEmbedProj
                 guard shouldQuant else { return nil }
                 let eff = q.effective(for: path)
-                return (eff.groupSize, eff.bits, .affine)
+                return (eff.groupSize, eff.bits, mlxQuantizationMode(eff.mode))
             }
         }
 
@@ -838,15 +841,15 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
             // the same checkpoint is loaded text-only.
             if path.contains("per_layer_model_projection")
                 || path.contains("per_layer_projection_norm") { return nil }
-            let eff: (groupSize: Int, bits: Int)
+            let eff: (groupSize: Int, bits: Int, mode: String)
             if q.moduleOverrides[path] != nil {
                 eff = q.effective(for: path)
             } else if q.moduleOverrides["language_model." + path] != nil {
                 eff = q.effective(for: "language_model." + path)
             } else {
-                eff = (q.groupSize, q.bits)
+                eff = (q.groupSize, q.bits, q.mode)
             }
-            return (eff.groupSize, eff.bits, .affine)
+            return (eff.groupSize, eff.bits, mlxQuantizationMode(eff.mode))
         }
     }
 
@@ -922,7 +925,7 @@ private func loadGemma4Unified(configData: Data, directory: URL) throws -> Loade
                 || path.contains("embed_audio.embedding_projection")
             guard isLangModel || isPatchDense || isEmbedProj else { return nil }
             let eff = q.effective(for: path)
-            return (eff.groupSize, eff.bits, .affine)
+            return (eff.groupSize, eff.bits, mlxQuantizationMode(eff.mode))
         }
     }
 
