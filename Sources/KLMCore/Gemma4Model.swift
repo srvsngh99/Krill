@@ -455,8 +455,11 @@ class Gemma4Attention: Module {
         // its post-update length is LCP + L. Subtracting L recovers the span
         // base LCP, so the suffix Q rotates at its true positions and aligns
         // with the donor's restored K (which were rotated at 0..count-1).
-        // Cold prefill: donorLen == L -> base 0 (unchanged). This branch only
-        // changes behavior when a non-empty donor span is resumed (L > 1).
+        // Cold prefill: donorLen == L -> falls through to base 0 (unchanged).
+        // The branch fires whenever a non-empty donor span is reused:
+        //   - L == 1 decode: donor updated this step -> donorLen = P+1 > 1, so
+        //     offset = P (the new token's true position; matches the donor's K).
+        //   - L > 1 partial-prefix resume / spec-verify: offset = donorLen - L.
         let offset: Int
         if let donorLen = sharedCache?.sequenceLength, donorLen > L {
             offset = donorLen - L
@@ -1163,7 +1166,7 @@ class Gemma4TextModel: Module {
                 let donorIdx = config.isFullAttention(layerIdx: i) ? lastFullDonor : lastSlidingDonor
                 // Shared layers reuse the donor's K (rotated at each row's TRUE
                 // position), so the shared-layer Q must rotate at that SAME true
-                // position (`rowOffsets`), not 0 — otherwise the Q/K relative
+                // position (`rowOffsets`), not 0 - otherwise the Q/K relative
                 // positions are wrong at decode and long-context generation
                 // degenerates (mirror of the solo-path `donorLen - L` fix).
                 h = layer(h, maskMode: layerMode, cache: caches[i],
