@@ -6,7 +6,7 @@ import MLXNN
 ///
 /// `"affine"` (the historical default) and any unrecognized value fall back
 /// to `.affine`, so existing checkpoints are unaffected. `"nvfp4"` /
-/// `"mxfp4"` / `"mxfp8"` select the 4-bit-float (and 8-bit-float) formats —
+/// `"mxfp4"` / `"mxfp8"` select the 4-bit-float (and 8-bit-float) formats.
 /// nvfp4 in particular preserves outlier weights that affine int4 clips, at
 /// the same 4-bit speed (verified end-to-end on Gemma 4 12B MMLU).
 func mlxQuantizationMode(_ mode: String) -> QuantizationMode {
