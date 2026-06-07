@@ -87,6 +87,12 @@ bit-identical quant to nvfp4, but both are MLX 4-bit.
 | **concurrent agg tok/s, N=8** | **219** | 110 | **1.99x** |
 | vision / voice | ✅ native | ❌ MLX tag is text-only | KrillLM only |
 
+> This is a SEPARATE, later measurement run from the GGUF tables above (different
+> session, thermal state, and build), so KrillLM's absolute self-numbers here
+> (decode 109 vs 96, N=8 219 vs 155) do not line up with that section - only the
+> within-section RATIO vs the engine measured alongside it is meaningful, per the
+> "ratios are the durable signal" note at the top.
+
 **Read (honest):** on **single-stream** text decode, KrillLM is at **parity with
 Ollama's MLX engine — marginally behind (~5%)**; Ollama's nvfp4 + fused top-P/top-K
 sampling edge out the shared bandwidth roof. The 1.5x text-total figure in the
