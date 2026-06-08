@@ -1110,11 +1110,30 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         style: ToolChatStyle
     ) {
         let toolFormat = ToolCalling.ToolFormat.forFamily(engine.family)
-        let messages = ToolCalling.injectToolSystem(
-            into: request.messages, tools: request.tools, format: toolFormat)
+        // tool_choice routing: forced calls (.required / .function) are
+        // grammar-CONSTRAINED to a valid {name,arguments} JSON (best-effort,
+        // name-correct calls); .none suppresses tools; .auto uses the family
+        // adapter unconstrained so the model can also answer in prose.
+        let forcedSchema: String? = request.toolChoice.forcesCall
+            ? ToolCalling.forcedToolCallSchema(tools: request.tools, choice: request.toolChoice)
+            : nil
+        let messages: [[String: String]]
+        let constrainFormat: OutputFormat?
+        if let schema = forcedSchema {
+            messages = ToolCalling.injectForcedToolSystem(
+                into: request.messages, tools: request.tools, choice: request.toolChoice)
+            constrainFormat = .jsonSchemaCompact(schema)
+        } else if request.toolChoice == .none {
+            messages = request.messages           // tools available but suppressed
+            constrainFormat = nil
+        } else {
+            messages = ToolCalling.injectToolSystem(
+                into: request.messages, tools: request.tools, format: toolFormat)
+            constrainFormat = nil
+        }
         if ProcessInfo.processInfo.environment["KRILL_TOOL_DEBUG"] != nil {
             FileHandle.standardError.write(Data(
-                "[KRILL_TOOL_DEBUG] family=\(engine.family ?? "nil") fmt=\(toolFormat)\n".utf8))
+                "[KRILL_TOOL_DEBUG] family=\(engine.family ?? "nil") fmt=\(toolFormat) choice=\(request.toolChoice) constrained=\(forcedSchema != nil)\n".utf8))
         }
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
@@ -1140,6 +1159,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 audioData: audioData,
                 contextLimit: toolCtx,
                 promptTemplateOverride: modelTemplateOverride(),
+                format: constrainFormat,
                 imagesData: imagesData)
 
             var full = ""
@@ -1155,8 +1175,30 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             // tool-call extraction so a model that wraps its tool
             // call in a reasoning preamble still yields the call.
             let (postReasoning, _) = ReasoningParser.strip(full)
-            let (calls, cleaned) = ToolCalling.extractToolCalls(
-                from: postReasoning, format: toolFormat)
+            let calls: [ToolCalling.ParsedToolCall]
+            let cleaned: String
+            if forcedSchema != nil {
+                // Constrained output is a bare {name,arguments} JSON object.
+                if let c = ToolCalling.parseForcedToolCall(postReasoning) {
+                    calls = [c]; cleaned = ""
+                } else {
+                    // tool_choice forced a call but the (schema-constrained)
+                    // output did not parse as one - e.g. the compact mask fell
+                    // open on a tokenizer lacking a bare value-start piece. Log
+                    // it unconditionally so the failed forcing is never silent;
+                    // the client gets the prose with no tool_calls.
+                    calls = []; cleaned = postReasoning
+                    FileHandle.standardError.write(Data((
+                        "[KrillLM] tool_choice forced a call but the constrained "
+                        + "output did not parse as {name,arguments}; returning "
+                        + "content with no tool_calls.\n").utf8))
+                }
+            } else if request.toolChoice == .none {
+                calls = []; cleaned = postReasoning   // tools suppressed
+            } else {
+                (calls, cleaned) = ToolCalling.extractToolCalls(
+                    from: postReasoning, format: toolFormat)
+            }
             let stats = getStats()
             let totalNs = Int64((CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
 

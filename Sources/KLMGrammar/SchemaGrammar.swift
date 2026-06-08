@@ -48,6 +48,14 @@ public struct SchemaGrammar: GrammarAutomaton {
     let anyId: Int
     let anyObjectId: Int
     let anyArrayId: Int
+    /// Compact mode: reject whitespace at every STRUCTURAL position (leading,
+    /// between tokens, trailing) so constrained output is forced to emit the
+    /// value immediately - no `{`-delaying whitespace loop. Whitespace inside
+    /// string values is unaffected (it is consumed by the string body, not by
+    /// these structural `isWS` checks). Used for forced tool calls, where a
+    /// greedy thinking-prone model would otherwise loop on grammar-permitted
+    /// whitespace forever. Default false keeps `response_format` ws-tolerant.
+    var compact: Bool = false
 
     // MARK: State
 
@@ -166,7 +174,7 @@ public struct SchemaGrammar: GrammarAutomaton {
     }
 
     public func step(_ s: State, _ c: Character) -> State? {
-        if s.done { return Self.isWS(c) ? s : nil }
+        if s.done { return (!compact && Self.isWS(c)) ? s : nil }
         var st = s
         // Bounded by stack depth: each completeReprocess pops a frame, and
         // pushReprocess is followed by a child .start that always consumes or
@@ -175,7 +183,7 @@ public struct SchemaGrammar: GrammarAutomaton {
             guard let top = st.stack.last else {
                 // Stack emptied (root value closed). Only trailing WS allowed.
                 st.done = true
-                return Self.isWS(c) ? st : nil
+                return (!compact && Self.isWS(c)) ? st : nil
             }
             switch advance(top, c) {
             case .reject:
@@ -195,7 +203,7 @@ public struct SchemaGrammar: GrammarAutomaton {
                 st.stack.removeLast()
                 if st.stack.isEmpty {
                     st.done = true
-                    return Self.isWS(c) ? st : nil
+                    return (!compact && Self.isWS(c)) ? st : nil
                 }
                 continue  // reprocess c in the parent (now in *AfterValue)
             }
@@ -209,7 +217,7 @@ public struct SchemaGrammar: GrammarAutomaton {
         switch top.step {
 
         case .start:
-            if Self.isWS(c) { return .replace(top) }
+            if !compact && Self.isWS(c) { return .replace(top) }
             return beginValue(top, c)
 
         // MARK: strings
@@ -272,7 +280,7 @@ public struct SchemaGrammar: GrammarAutomaton {
 
         // MARK: objects
         case .objOpen, .objKeyStart:
-            if Self.isWS(c) { return .replace(top) }
+            if !compact && Self.isWS(c) { return .replace(top) }
             if c == "}" && top.step == .objOpen {
                 return objClose(top) ? .completeConsumed : .reject
             }
@@ -301,30 +309,30 @@ public struct SchemaGrammar: GrammarAutomaton {
             if n == 3 { return .replace(with(top, .objInKey(partial))) }
             return .replace(with(top, .objKeyU(partial, n + 1)))
         case .objAfterKey(let childId):
-            if Self.isWS(c) { return .replace(top) }
+            if !compact && Self.isWS(c) { return .replace(top) }
             if c == ":" { return .replace(with(top, .objAfterColon(childId))) }
             return .reject
         case .objAfterColon(let childId):
-            if Self.isWS(c) { return .replace(top) }
+            if !compact && Self.isWS(c) { return .replace(top) }
             let parent = with(top, .objAfterValue)
             let child = Frame(node: childId, step: .start, seen: [])
             return .pushReprocess(parent: parent, child: child)
         case .objAfterValue:
-            if Self.isWS(c) { return .replace(top) }
+            if !compact && Self.isWS(c) { return .replace(top) }
             if c == "," { return .replace(with(top, .objKeyStart)) }
             if c == "}" { return objClose(top) ? .completeConsumed : .reject }
             return .reject
 
         // MARK: arrays
         case .arrOpen:
-            if Self.isWS(c) { return .replace(top) }
+            if !compact && Self.isWS(c) { return .replace(top) }
             if c == "]" { return .completeConsumed }
             return beginItem(top, node: node, c: c)
         case .arrItemStart:
-            if Self.isWS(c) { return .replace(top) }
+            if !compact && Self.isWS(c) { return .replace(top) }
             return beginItem(top, node: node, c: c)
         case .arrAfterValue:
-            if Self.isWS(c) { return .replace(top) }
+            if !compact && Self.isWS(c) { return .replace(top) }
             if c == "," { return .replace(with(top, .arrItemStart)) }
             if c == "]" { return .completeConsumed }
             return .reject

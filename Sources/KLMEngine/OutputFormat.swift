@@ -28,6 +28,11 @@
 public enum OutputFormat: Sendable {
     case json
     case jsonSchema(String)
+    /// Like `.jsonSchema` but compiled in COMPACT mode (no structural
+    /// whitespace), so a greedy model is forced to emit the value immediately
+    /// instead of looping on grammar-permitted whitespace. Used for forced
+    /// tool calls (`tool_choice` = required / specific function).
+    case jsonSchemaCompact(String)
     case regex(String)
     case cfg(String)
 }
