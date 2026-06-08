@@ -13,6 +13,13 @@ higher-precision override (default: 8-bit affine, group_size 64), which is what
 lets a mixed checkpoint EXCEED Ollama's uniform nvfp4 on quality while the bulk
 stays nvfp4 for speed.
 
+The vision/audio projectors (`vision_embedder.patch_dense`,
+`embed_vision.embedding_projection`, `embed_audio.embedding_projection`) are
+auto-protected by default: nvfp4 on the patch-embedding attenuates the red
+input channel enough to misread red-heavy colors (red->brown, yellow->olive,
+magenta->purple) while text MMLU is unaffected. They are tiny, so 8-bit costs
+almost nothing. Pass --no-protect-vision for a pure-uniform research baseline.
+
 config.json gets a top-level nvfp4 block plus per-module override entries (keyed
 by full module path, e.g. "language_model.model.layers.0.mlp.down_proj") for the
 protected set - the exact format KrillLM's loader resolves via q.effective(path).
@@ -48,6 +55,10 @@ def main():
     ap.add_argument("--oracle-4bit", default="models--mlx-community--gemma-4-12B-it-4bit")
     ap.add_argument("--protect", action="append", default=[],
                     help="substring of module path to protect (repeatable), e.g. down_proj")
+    ap.add_argument("--no-protect-vision", dest="protect_vision", action="store_false",
+                    help="do NOT auto-protect the vision/audio projectors "
+                         "(pure-uniform research baseline)")
+    ap.set_defaults(protect_vision=True)
     ap.add_argument("--protect-layers", default="",
                     help="comma list like first4,last4 or explicit layer indices 0,1,47")
     ap.add_argument("--protect-bits", type=int, default=8)
@@ -55,6 +66,19 @@ def main():
     ap.add_argument("--protect-mode", default="affine", choices=["affine", "mxfp8"])
     ap.add_argument("--n-layers", type=int, default=48, help="transformer layer count (for first/last)")
     args = ap.parse_args()
+
+    # Auto-protect the vision/audio projectors unless explicitly disabled. nvfp4
+    # on the patch-embedding attenuates the red channel (red->brown etc.); these
+    # are tiny tensors so 8-bit is effectively free. Mirrors attn o_proj.
+    VISION_PROTECT = ["vision_embedder.patch_dense",
+                      "embed_vision.embedding_projection",
+                      "embed_audio.embedding_projection"]
+    if args.protect_vision:
+        for s in VISION_PROTECT:
+            if s not in args.protect:
+                args.protect.append(s)
+        print(f"[requant] auto-protecting vision/audio projectors @ "
+              f"{args.protect_bits}b {args.protect_mode} (--no-protect-vision to disable)")
 
     SRC = snap(args.src_bf16)
     ORC = snap(args.oracle_4bit)
