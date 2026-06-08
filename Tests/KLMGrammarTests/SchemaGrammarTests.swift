@@ -40,6 +40,48 @@ final class SchemaGrammarTests: XCTestCase {
         }
     }
 
+    // MARK: - Compact mode (forced tool calls)
+
+    func testCompactRejectsStructuralWhitespaceButAllowsInsideStrings() {
+        let schema = #"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}"#
+        guard let g = SchemaGrammar.compile(schema, compact: true) else {
+            return XCTFail("compact schema did not compile")
+        }
+        // Structural whitespace is rejected -> the object must start immediately
+        // (this is what stops a greedy model looping on newlines).
+        XCTAssertNil(g.advance(g.initialState, piece: " "), "leading space must reject")
+        XCTAssertNil(g.advance(g.initialState, piece: "\n"), "leading newline must reject")
+        XCTAssertNil(g.advance(g.initialState, piece: "{ "), "ws after { must reject")
+        XCTAssertNotNil(g.advance(g.initialState, piece: "{"), "{ must be accepted")
+        XCTAssertNotNil(g.advance(g.initialState, piece: "{\""), "key must start immediately")
+        // Whitespace INSIDE a string value is content, not structural -> allowed.
+        XCTAssertNotNil(g.advance(g.initialState, piece: #"{"city":"New York"#),
+                        "space inside a string value must be allowed in compact mode")
+        // A full compact object still completes.
+        if let done = g.advance(g.initialState, piece: #"{"city":"NYC"}"#) {
+            XCTAssertTrue(g.isComplete(done))
+        } else { XCTFail("compact object should complete") }
+
+        // SentencePiece/Gemma decode space-prefixed pieces (e.g. the "▁{" token)
+        // to a leading space + char. Compact rejects that whole piece, so the
+        // mask depends on a BARE value-start piece ("{") being available; if it
+        // is not, the grammar mask fails open (best-effort, not absolute). This
+        // pins that behavior so the trade-off is visible.
+        XCTAssertNil(g.advance(g.initialState, piece: " {"),
+                     "space-prefixed '{' piece must reject in compact mode")
+        XCTAssertNotNil(g.advance(g.initialState, piece: "{"),
+                        "bare '{' piece must be accepted (mask relies on it existing)")
+    }
+
+    func testNonCompactStillToleratesWhitespace() {
+        // Regression: default (non-compact) schema must keep accepting
+        // structural whitespace, so response_format behavior is unchanged.
+        let schema = #"{"type":"object","properties":{"a":{"type":"integer"}},"required":["a"]}"#
+        let g = SchemaGrammar.compile(schema)!
+        XCTAssertNotNil(g.advance(g.initialState, piece: "  {\n  \"a\": 1 }"),
+                        "non-compact must tolerate whitespace")
+    }
+
     // MARK: - Scalar types
 
     func testStringType() {
