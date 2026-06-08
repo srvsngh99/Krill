@@ -6,6 +6,21 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+### Added
+
+- **`tool_choice` with grammar-constrained tool calls.** The OpenAI/Ollama chat
+  paths now honor `tool_choice`: `"none"` suppresses tools, `"required"` and
+  `{type:"function",function:{name}}` FORCE a call. A forced call is decoded
+  under a JSON schema built from the tool (`name` pinned, `arguments` = the
+  tool's own parameter schema), so the output is a guaranteed-valid,
+  schema-matched `{"name","arguments"}` object - no malformed JSON, no wrong
+  tool. `.auto` (default) is unchanged (unconstrained, family adapter). To make
+  this work on a greedy thinking-prone model (Gemma), the schema grammar gained
+  a COMPACT mode (`OutputFormat.jsonSchemaCompact`) that rejects structural
+  whitespace - without it the model loops on grammar-permitted newlines instead
+  of emitting the object. Whitespace inside string values is unaffected, and
+  the default `response_format` path stays whitespace-tolerant.
+
 ### Fixed
 
 - **Grammar / structured-output decoding now works on models with a padded

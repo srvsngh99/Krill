@@ -41,6 +41,9 @@ public final class InferenceEngine: @unchecked Sendable {
     private var cachedPieces: [String]?
     private var cachedJSONMask: JSONTokenMask?
     private var cachedSchemaMask: (schema: String, mask: any GrammarLogitMask)?
+    /// Memoized most-recent COMPACT (no-whitespace) schema mask for forced tool
+    /// calls, keyed by (schema, stop set).
+    private var cachedCompactSchemaMask: (schema: String, mask: any GrammarLogitMask)?
     /// Memoized most-recent Stage C regex mask, keyed by (pattern, stop set).
     private var cachedRegexMask: (pattern: String, mask: any GrammarLogitMask)?
     /// Memoized most-recent Stage D CFG mask, keyed by (grammar, stop set).
@@ -551,6 +554,25 @@ public final class InferenceEngine: @unchecked Sendable {
             let mask = GrammarTokenMask(automaton: grammar, pieces: pieces, stopIds: stopIds,
                                         outputWidth: loadedModel?.vocabSize)
             cachedSchemaMask = (schema, mask)
+            return mask
+
+        case .jsonSchemaCompact(let schema):
+            // Same as .jsonSchema but no structural whitespace (forced tool
+            // calls): the model must emit the value immediately, so a greedy
+            // thinking-prone model cannot loop on grammar-permitted whitespace.
+            if let cached = cachedCompactSchemaMask, cached.schema == schema,
+               cached.mask.stopIdSet == stopIds {
+                return cached.mask
+            }
+            guard let grammar = SchemaGrammar.compile(schema, compact: true) else {
+                FileHandle.standardError.write(Data((
+                    "[KrillLM] compact JSON schema did not compile; falling back to "
+                    + "the plain JSON-validity mask.\n").utf8))
+                return jsonValidityMaskLocked(pieces: pieces, stopIds: stopIds)
+            }
+            let mask = GrammarTokenMask(automaton: grammar, pieces: pieces, stopIds: stopIds,
+                                        outputWidth: loadedModel?.vocabSize)
+            cachedCompactSchemaMask = (schema, mask)
             return mask
 
         case .regex(let pattern):

@@ -134,6 +134,136 @@ internal enum ToolCalling {
         }
     }
 
+    // MARK: - Forced (grammar-constrained) tool calls
+
+    /// Build a JSON-schema string that a forced tool call must match, for
+    /// `tool_choice = required | {function:name}`. Decoding is constrained to
+    /// this schema so the emitted call is guaranteed valid + name-correct, and
+    /// (for a single resolved tool) argument-schema-correct.
+    ///
+    /// Shape: `{"type":"object","properties":{"name":{...},"arguments":{...}},
+    ///          "required":["name","arguments"],"additionalProperties":false}`
+    /// - single resolved tool  -> name is `const`, arguments = the tool's own
+    ///   parameter schema (full constraint).
+    /// - multiple tools (`required`) -> name is `enum` of tool names, arguments
+    ///   = any object (the schema grammar has no `oneOf`, so per-name argument
+    ///   schemas cannot be expressed; name is still pinned to a valid tool).
+    /// Returns nil when no tool resolves (caller falls back to unconstrained).
+    static func forcedToolCallSchema(
+        tools: [ServerToolSpec], choice: ServerToolChoice
+    ) -> String? {
+        let candidates: [ServerToolSpec]
+        switch choice {
+        case .function(let name):
+            guard let t = tools.first(where: { $0.name == name }) else { return nil }
+            candidates = [t]
+        case .required:
+            guard !tools.isEmpty else { return nil }
+            candidates = tools
+        case .auto, .none:
+            return nil
+        }
+
+        let nameSchema: [String: Any]
+        let argsSchema: Any
+        if candidates.count == 1 {
+            nameSchema = ["const": candidates[0].name]
+            // Embed the tool's own parameter schema (parsed) as the arguments
+            // constraint; fall back to a bare object if it does not parse.
+            if let data = candidates[0].parametersJSON.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                argsSchema = obj
+            } else {
+                argsSchema = ["type": "object"]
+            }
+        } else {
+            nameSchema = ["enum": candidates.map { $0.name }]
+            argsSchema = ["type": "object"]
+        }
+
+        let schema: [String: Any] = [
+            "type": "object",
+            "properties": ["name": nameSchema, "arguments": argsSchema],
+            "required": ["name", "arguments"],
+            "additionalProperties": false,
+        ]
+        guard let out = try? JSONSerialization.data(withJSONObject: schema),
+              let str = String(data: out, encoding: .utf8) else { return nil }
+        return str
+    }
+
+    /// System turn for a forced tool call: list the tool schemas and instruct a
+    /// bare-JSON `{"name","arguments"}` object (no family sentinel - decoding is
+    /// schema-constrained, so the bare object is the whole output and parses
+    /// directly). Used only when `tool_choice` forces a call.
+    static func forcedToolSystemPrompt(
+        tools: [ServerToolSpec], choice: ServerToolChoice
+    ) -> String {
+        var lines = ["You must call a tool. Available tools (JSON schemas):", ""]
+        for t in tools {
+            lines.append(
+                "{\"name\": \"\(t.name)\", \"description\": \"\(escapeForPrompt(t.description))\", \"parameters\": \(t.parametersJSON)}")
+        }
+        lines.append("")
+        if case .function(let name) = choice {
+            lines.append("Call the tool named \"\(name)\".")
+        }
+        lines.append("Respond with ONLY a single JSON object of the form:")
+        lines.append("{\"name\": \"<tool-name>\", \"arguments\": {<concrete argument values>}}")
+        lines.append("No prose, no code fences, no sentinels - just the JSON object.")
+        return lines.joined(separator: "\n")
+    }
+
+    /// Inject the forced-tool system turn (replaces the family-specific
+    /// injection when `tool_choice` forces a call).
+    static func injectForcedToolSystem(
+        into messages: [[String: String]],
+        tools: [ServerToolSpec],
+        choice: ServerToolChoice
+    ) -> [[String: String]] {
+        guard !tools.isEmpty else { return messages }
+        let sys = forcedToolSystemPrompt(tools: tools, choice: choice)
+        // Prepend as a system turn (merge with an existing leading system msg).
+        var out = messages
+        if let first = out.first, first["role"] == "system" {
+            out[0] = ["role": "system", "content": (first["content"] ?? "") + "\n\n" + sys]
+        } else {
+            out.insert(["role": "system", "content": sys], at: 0)
+        }
+        return out
+    }
+
+    /// Parse the bare, schema-constrained JSON object emitted for a forced
+    /// tool call into a `ParsedToolCall`. Tolerant of surrounding whitespace
+    /// and a stray code fence. Returns nil if it is not a `{name,arguments}`
+    /// object.
+    static func parseForcedToolCall(_ text: String) -> ParsedToolCall? {
+        var s = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("```") {
+            s = s.replacingOccurrences(of: "```json", with: "")
+                 .replacingOccurrences(of: "```", with: "")
+                 .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // Take from the first '{' to the last '}' (constrained output is a bare
+        // object, but be defensive).
+        guard let lo = s.firstIndex(of: "{"), let hi = s.lastIndex(of: "}"), lo < hi else {
+            return nil
+        }
+        let objStr = String(s[lo...hi])
+        guard let data = objStr.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let name = obj["name"] as? String else { return nil }
+        let argsValue = obj["arguments"] ?? [String: Any]()
+        let argsJSON: String
+        if let argsData = try? JSONSerialization.data(withJSONObject: argsValue),
+           let str = String(data: argsData, encoding: .utf8) {
+            argsJSON = str
+        } else {
+            argsJSON = "{}"
+        }
+        return ParsedToolCall(name: name, argumentsJSON: argsJSON)
+    }
+
     /// Llama 3.x native path. The Llama checkpoint ships a full chat
     /// template whose `tools_in_user_message` branch (default) prepends an
     /// exact instruction + the tool JSON schemas to the first user message;

@@ -11,7 +11,7 @@ public extension SchemaGrammar {
     /// Compile `schemaJSON`. Returns `nil` only when the input is not a JSON
     /// object/bool at the root (in which case the caller falls back to the
     /// plain JSON-validity mask).
-    static func compile(_ schemaJSON: String) -> SchemaGrammar? {
+    static func compile(_ schemaJSON: String, compact: Bool = false) -> SchemaGrammar? {
         guard let data = schemaJSON.data(using: .utf8),
               let root = try? JSONSerialization.jsonObject(
                   with: data, options: [.fragmentsAllowed])
@@ -33,7 +33,8 @@ public extension SchemaGrammar {
             rootId: rootId,
             anyId: anyId,
             anyObjectId: anyObjectId,
-            anyArrayId: anyArrayId)
+            anyArrayId: anyArrayId,
+            compact: compact)
     }
 
     /// Mutable compile-time scratch.

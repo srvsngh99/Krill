@@ -74,6 +74,23 @@ internal enum ResponseFormat: Equatable, Sendable {
     case cfg(String)
 }
 
+/// OpenAI `tool_choice`: how the model may use the offered tools.
+/// `.auto` (default) = model decides; `.none` = never call a tool;
+/// `.required` = must call some tool; `.function(name)` = must call exactly
+/// that tool. The forced variants let the server grammar-CONSTRAIN the output
+/// to a valid tool-call JSON (guaranteed-valid calls), where `.auto` leaves
+/// decoding unconstrained so the model can also answer in prose.
+internal enum ServerToolChoice: Equatable, Sendable {
+    case auto
+    case none
+    case required
+    case function(String)
+    /// True when the model MUST emit a tool call (safe to constrain decoding).
+    var forcesCall: Bool {
+        switch self { case .required, .function: return true; case .auto, .none: return false }
+    }
+}
+
 internal struct ServerChatRequest: Equatable, Sendable {
     let messages: [[String: String]]
     let stream: Bool
@@ -87,6 +104,8 @@ internal struct ServerChatRequest: Equatable, Sendable {
     var keepAlive: Int? = nil
     /// `num_ctx` prompt-token cap (WS-D D4). nil=model max.
     var contextLimit: Int? = nil
+    /// OpenAI `tool_choice` (default `.auto`).
+    var toolChoice: ServerToolChoice = .auto
 }
 
 internal struct ServerCompletionRequest: Equatable, Sendable {
@@ -334,8 +353,27 @@ internal enum ServerParsing {
             media: extracted.media,
             tools: tools,
             responseFormat: parseOpenAIResponseFormat(json["response_format"]),
-            keepAlive: KeepAliveParse.seconds(from: json["keep_alive"])
+            keepAlive: KeepAliveParse.seconds(from: json["keep_alive"]),
+            toolChoice: parseToolChoice(json["tool_choice"])
         )
+    }
+
+    /// Parse OpenAI `tool_choice`: `"auto"|"none"|"required"` or
+    /// `{type:"function", function:{name:"..."}}`. Unknown shapes -> `.auto`.
+    static func parseToolChoice(_ raw: Any?) -> ServerToolChoice {
+        guard let raw = raw else { return .auto }
+        if let s = raw as? String {
+            switch s {
+            case "none": return .none
+            case "required", "any": return .required
+            default: return .auto
+            }
+        }
+        if let obj = raw as? [String: Any], (obj["type"] as? String) == "function",
+           let fn = obj["function"] as? [String: Any], let name = fn["name"] as? String {
+            return .function(name)
+        }
+        return .auto
     }
 
     static func openAICompletionRequest(from json: [String: Any]) throws -> ServerCompletionRequest {
