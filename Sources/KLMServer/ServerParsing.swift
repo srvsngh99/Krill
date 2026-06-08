@@ -78,7 +78,7 @@ internal enum ResponseFormat: Equatable, Sendable {
 /// `.auto` (default) = model decides; `.none` = never call a tool;
 /// `.required` = must call some tool; `.function(name)` = must call exactly
 /// that tool. The forced variants let the server grammar-CONSTRAIN the output
-/// to a valid tool-call JSON (guaranteed-valid calls), where `.auto` leaves
+/// to a valid tool-call JSON (best-effort; fails open), where `.auto` leaves
 /// decoding unconstrained so the model can also answer in prose.
 internal enum ServerToolChoice: Equatable, Sendable {
     case auto

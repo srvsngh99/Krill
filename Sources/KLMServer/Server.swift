@@ -1111,7 +1111,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     ) {
         let toolFormat = ToolCalling.ToolFormat.forFamily(engine.family)
         // tool_choice routing: forced calls (.required / .function) are
-        // grammar-CONSTRAINED to a valid {name,arguments} JSON (guaranteed-valid,
+        // grammar-CONSTRAINED to a valid {name,arguments} JSON (best-effort,
         // name-correct calls); .none suppresses tools; .auto uses the family
         // adapter unconstrained so the model can also answer in prose.
         let forcedSchema: String? = request.toolChoice.forcesCall

@@ -138,7 +138,8 @@ internal enum ToolCalling {
 
     /// Build a JSON-schema string that a forced tool call must match, for
     /// `tool_choice = required | {function:name}`. Decoding is constrained to
-    /// this schema so the emitted call is guaranteed valid + name-correct, and
+    /// this schema so the emitted call is valid + name-correct (best-effort:
+    /// the mask fails open if no valid token is available), and
     /// (for a single resolved tool) argument-schema-correct.
     ///
     /// Shape: `{"type":"object","properties":{"name":{...},"arguments":{...}},
