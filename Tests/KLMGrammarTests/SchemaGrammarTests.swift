@@ -61,6 +61,16 @@ final class SchemaGrammarTests: XCTestCase {
         if let done = g.advance(g.initialState, piece: #"{"city":"NYC"}"#) {
             XCTAssertTrue(g.isComplete(done))
         } else { XCTFail("compact object should complete") }
+
+        // SentencePiece/Gemma decode space-prefixed pieces (e.g. the "▁{" token)
+        // to a leading space + char. Compact rejects that whole piece, so the
+        // mask depends on a BARE value-start piece ("{") being available; if it
+        // is not, the grammar mask fails open (best-effort, not absolute). This
+        // pins that behavior so the trade-off is visible.
+        XCTAssertNil(g.advance(g.initialState, piece: " {"),
+                     "space-prefixed '{' piece must reject in compact mode")
+        XCTAssertNotNil(g.advance(g.initialState, piece: "{"),
+                        "bare '{' piece must be accepted (mask relies on it existing)")
     }
 
     func testNonCompactStillToleratesWhitespace() {

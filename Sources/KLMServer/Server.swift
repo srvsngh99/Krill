@@ -1182,7 +1182,16 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 if let c = ToolCalling.parseForcedToolCall(postReasoning) {
                     calls = [c]; cleaned = ""
                 } else {
+                    // tool_choice forced a call but the (schema-constrained)
+                    // output did not parse as one - e.g. the compact mask fell
+                    // open on a tokenizer lacking a bare value-start piece. Log
+                    // it unconditionally so the failed forcing is never silent;
+                    // the client gets the prose with no tool_calls.
                     calls = []; cleaned = postReasoning
+                    FileHandle.standardError.write(Data((
+                        "[KrillLM] tool_choice forced a call but the constrained "
+                        + "output did not parse as {name,arguments}; returning "
+                        + "content with no tool_calls.\n").utf8))
                 }
             } else if request.toolChoice == .none {
                 calls = []; cleaned = postReasoning   // tools suppressed

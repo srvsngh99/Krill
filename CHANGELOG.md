@@ -12,9 +12,13 @@ reverse chronological order. Versioning follows
   paths now honor `tool_choice`: `"none"` suppresses tools, `"required"` and
   `{type:"function",function:{name}}` FORCE a call. A forced call is decoded
   under a JSON schema built from the tool (`name` pinned, `arguments` = the
-  tool's own parameter schema), so the output is a guaranteed-valid,
-  schema-matched `{"name","arguments"}` object - no malformed JSON, no wrong
-  tool. `.auto` (default) is unchanged (unconstrained, family adapter). To make
+  tool's own parameter schema), constraining the output to a valid,
+  schema-matched `{"name","arguments"}` object. The grammar mask fails open if
+  no valid token is available (e.g. a tokenizer lacking a bare value-start
+  piece), so it is a strong best-effort, not an absolute guarantee; a forced
+  call that still fails to parse is logged and returns content with no
+  tool_calls. `.auto` (default) is unchanged (unconstrained, family adapter).
+  To make
   this work on a greedy thinking-prone model (Gemma), the schema grammar gained
   a COMPACT mode (`OutputFormat.jsonSchemaCompact`) that rejects structural
   whitespace - without it the model loops on grammar-permitted newlines instead

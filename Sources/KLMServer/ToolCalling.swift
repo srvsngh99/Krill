@@ -202,11 +202,11 @@ internal enum ToolCalling {
         var lines = ["You must call a tool. Available tools (JSON schemas):", ""]
         for t in tools {
             lines.append(
-                "{\"name\": \"\(t.name)\", \"description\": \"\(escapeForPrompt(t.description))\", \"parameters\": \(t.parametersJSON)}")
+                "{\"name\": \"\(escapeForPrompt(t.name))\", \"description\": \"\(escapeForPrompt(t.description))\", \"parameters\": \(t.parametersJSON)}")
         }
         lines.append("")
         if case .function(let name) = choice {
-            lines.append("Call the tool named \"\(name)\".")
+            lines.append("Call the tool named \"\(escapeForPrompt(name))\".")
         }
         lines.append("Respond with ONLY a single JSON object of the form:")
         lines.append("{\"name\": \"<tool-name>\", \"arguments\": {<concrete argument values>}}")
