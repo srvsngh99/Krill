@@ -16,23 +16,30 @@ Exit 0 = all colors correct; 1 = at least one miss (or transport error).
 """
 import argparse, io, json, sys, base64, urllib.request
 
+try:
+    from PIL import Image
+except ImportError:
+    sys.exit("verify_gemma4_vision_color: Pillow is required (pip install pillow)")
+
 # Solid RGB primaries + secondaries. The three with R=255 (red, yellow, magenta)
 # are exactly the ones nvfp4 vision degradation corrupts, so they are the
-# load-bearing cases here.
+# load-bearing cases here. `accept` is the set of answers that count as correct;
+# it deliberately EXCLUDES each color's known degradation signature (red->brown,
+# yellow->olive, magenta->purple) so the gate cannot pass on the very defect it
+# guards, while still allowing legitimate synonyms (e.g. fuchsia for magenta).
 COLORS = [
-    ("red",     (255, 0, 0)),
-    ("green",   (0, 255, 0)),
-    ("blue",    (0, 0, 255)),
-    ("yellow",  (255, 255, 0)),
-    ("cyan",    (0, 255, 255)),
-    ("magenta", (255, 0, 255)),
+    ("red",     (255, 0, 0),   ["red", "crimson", "scarlet"]),
+    ("green",   (0, 255, 0),   ["green", "lime"]),
+    ("blue",    (0, 0, 255),   ["blue", "navy"]),
+    ("yellow",  (255, 255, 0), ["yellow", "gold"]),
+    ("cyan",    (0, 255, 255), ["cyan", "aqua", "turquoise"]),
+    ("magenta", (255, 0, 255), ["magenta", "fuchsia", "pink"]),
 ]
 FORCED = "What color is this image? Reply with only the color name."
 OPEN = "Describe this image in one short sentence."
 
 
 def solid_png_b64(rgb, size=448):
-    from PIL import Image
     img = Image.new("RGB", (size, size), rgb)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -66,7 +73,7 @@ def main():
 
     print(f"vision color parity: {args.model} @ {args.url}")
     misses = 0
-    for name, rgb in COLORS:
+    for name, rgb, accept in COLORS:
         img = solid_png_b64(rgb)
         try:
             forced = generate(args.url, args.model, FORCED, img, 24)
@@ -74,7 +81,12 @@ def main():
         except Exception as exc:  # transport / server error -> hard fail
             print(f"  {name:8} ERROR: {exc}")
             return 1
-        ok = name in forced.lower() or name in opened.lower()
+        # Pass/fail is decided ONLY on the forced single-word answer (the
+        # documented repro). `open` is printed for context, never to widen a
+        # pass. A correct answer is any accepted synonym; the degradation
+        # signature (brown/olive/purple) is intentionally not accepted.
+        fl = forced.lower()
+        ok = any(a in fl for a in accept)
         misses += 0 if ok else 1
         print(f"  {name:8} forced={forced[:24]!r:26} open={opened[:60]!r}  "
               f"{'OK' if ok else 'MISS'}")
