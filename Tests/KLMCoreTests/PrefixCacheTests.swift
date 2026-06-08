@@ -308,6 +308,80 @@ final class PrefixCacheTests: XCTestCase {
         #endif
     }
 
+    // MARK: - Disk budget enforcement (issue #177)
+
+    private func tempDir() -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-prefix-budget-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir
+    }
+
+    /// A `KRILL_PREFIX_CACHE_GB=0` budget disables the disk tier: nothing is
+    /// persisted, but the in-memory LRU still serves hits.
+    func testDiskBudgetZeroDisablesDiskWrites() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = PrefixCache(
+                cacheDir: tempDir(), maxMemoryEntries: 4, minPrefixLength: 4, diskBudgetGB: 0)
+            let tokens = Array(0 ..< 8)
+            cache.store(
+                tokens: tokens, modelId: "m",
+                keys: [[makeKV(seqLen: tokens.count, start: 1)]],
+                values: [[makeKV(seqLen: tokens.count, start: 9)]])
+            cache.waitForDiskWrites()
+
+            XCTAssertEqual(cache.diskBytes, 0, "budget=0 must write nothing to disk")
+            XCTAssertNotNil(
+                cache.lookup(tokens: tokens, modelId: "m"),
+                "in-memory tier must still serve hits when the disk tier is disabled")
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    /// A run of distinct prefixes (none ever reused) must not grow the disk
+    /// tier without bound: LRU eviction keeps it within the byte budget.
+    func testDiskBudgetEvictsColdEntriesToStayBounded() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            // Measure one entry's on-disk footprint with an unbounded cache.
+            let probe = PrefixCache(
+                cacheDir: tempDir(), maxMemoryEntries: 16, minPrefixLength: 4, diskBudgetGB: -1)
+            probe.store(
+                tokens: [0, 1, 2, 3, 4, 5], modelId: "m",
+                keys: [[makeKV(seqLen: 6, start: 1)]],
+                values: [[makeKV(seqLen: 6, start: 9)]])
+            probe.waitForDiskWrites()
+            let oneSize = probe.diskBytes
+            XCTAssertGreaterThan(oneSize, 0, "probe entry should have written to disk")
+
+            // Budget sized to hold ~3 entries; store 12 distinct prefixes.
+            let budgetGB = Double(oneSize * 3) / 1_000_000_000
+            let budgetBytes = Int64(budgetGB * 1_000_000_000)
+            let cache = PrefixCache(
+                cacheDir: tempDir(), maxMemoryEntries: 4, minPrefixLength: 4, diskBudgetGB: budgetGB)
+            for i in 0 ..< 12 {
+                let tokens = (0 ..< 6).map { i * 100 + $0 }  // distinct prefix per i
+                cache.store(
+                    tokens: tokens, modelId: "m",
+                    keys: [[makeKV(seqLen: 6, start: Int32(i))]],
+                    values: [[makeKV(seqLen: 6, start: Int32(i + 1000))]])
+            }
+            cache.waitForDiskWrites()
+
+            let bytes = cache.diskBytes
+            XCTAssertLessThanOrEqual(bytes, budgetBytes, "disk tier must stay within its byte budget")
+            XCTAssertGreaterThan(bytes, 0, "recent entries should survive eviction")
+            XCTAssertLessThan(
+                bytes, oneSize * 12, "eviction must have dropped cold entries (not unbounded growth)")
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
     #if canImport(MLX) && os(macOS) && arch(arm64)
     private func withMLXCPU(_ body: () throws -> Void) throws {
         guard MLXMetalRuntime.canInitializeMLXForTests else {
