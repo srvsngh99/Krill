@@ -97,12 +97,35 @@ linked detail doc.
   `fusedSwiGLU`, which already nets 5-12%).
 - **Detail:** `docs/FUSED_Q4_PROBE.md`.
 
-**Cross-cutting read:** three M-series decode-speed levers have now closed the
-same way (spec-decode, compiled-decode, fused-Q4). The consistent signal is that
-MLX puts KrillLM near the hardware bandwidth limit for decode, so raw-throughput
-tuning has low ROI. Direct future effort at **coverage/capability** (more models,
-VLM serving) or at **op fusion** (the one kernel direction with demonstrated
-wins), not at out-tuning MLX's core ops.
+### 4. Activation fusion (fused GEGLU) for Gemma decode
+
+- **Goal:** wire Gemma 4's GEGLU FFN to a fused `gelu_tanh(gate) * up` Metal
+  kernel (the GEGLU analogue of `fusedSwiGLU`), expecting the same FFN win on the
+  12B decode path.
+- **Status:** CLOSED (no measured win). Implemented `fusedGEGLU` + a bf16-safe
+  output cast, parity-gated it, and A/B'd it on `gemma-4-12b` (nvfp4). Result:
+  **single-stream decode 28.0 vs 28.0 tok/s; concurrent agg 32.6/37.1 (N=4/8) vs
+  31.7/37.2 fused** - all within noise. Reverted (not shipped).
+- **Why it's capped:** the prior `fusedSwiGLU` "5-12%" is a *prefill / large-batch*
+  (big `[B*L, inter]`) win. At **decode** the FFN activation is `[rows, inter]`
+  with rows = 1 (or the small batch N), tiny next to streaming the 12B weights
+  each step - so decode (single AND batched) stays weight-bandwidth bound and
+  fusing the activation saves nothing. Same root cause as #1-#3.
+- **Re-attempt trigger:** a *prefill-bound* workload (very long prompts dominating
+  wall time) where the `[B*L, inter]` activation is large - then a fused GEGLU
+  could help prefill (not decode). Use the `fusedSwiGLU`/fused-Q4 parity-gate +
+  bench template. NOTE: `fusedSwiGLU`'s kernel has a latent bf16 bug (a bare
+  `out[elem] = float` fails to compile for bf16 outputs; only fp16 users exist
+  today) - add the `static_cast<metal::remove_reference<decltype(out[elem])>::type>`
+  cast when a bf16 SwiGLU model first needs it.
+
+**Cross-cutting read:** four M-series decode-speed levers have now closed the
+same way (spec-decode, compiled-decode, fused-Q4, fused-GEGLU). The consistent
+signal is that MLX puts KrillLM near the hardware bandwidth limit for decode, so
+raw-throughput tuning has low ROI. Direct future effort at **coverage/capability**
+(more models, VLM serving, structured output, tool/agentic) - NOT at out-tuning
+MLX's core decode ops. (Op fusion's demonstrated wins are prefill/large-batch
+shapes, not decode.)
 
 ---
 
