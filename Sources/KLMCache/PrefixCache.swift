@@ -24,6 +24,29 @@ public final class PrefixCache: @unchecked Sendable {
     private let maxMemoryEntries: Int
     private let minPrefixLength: Int
 
+    /// Byte budget for the on-disk tier (`~/.krillm/cache/`). Enforced by LRU
+    /// eviction after every disk write so a run of unique prompts (each writing
+    /// a full, never-reused KV state) cannot grow the cache without bound and
+    /// ENOSPC-crash `serve` (issue #177). Semantics:
+    ///   - `> 0`: keep total on-disk bytes at or under this budget.
+    ///   - `== 0`: disk tier disabled — no writes (in-memory LRU still works).
+    ///   - `< 0`: unbounded (legacy behavior; nothing enforces a cap).
+    private let diskBudgetBytes: Int64
+
+    /// Running estimate of bytes occupied by the on-disk tier, so the common
+    /// case (a write that leaves us under budget) costs O(1) instead of an
+    /// O(N) directory rescan. Mutated only under ``diskCounterLock``: writes
+    /// run on the serial ``diskQueue``, but ``clear()`` resets it from an
+    /// arbitrary thread. Lazily seeded from a one-time scan on first write so
+    /// a pre-existing cache (e.g. a 109 GB dir from a prior crash) is counted
+    /// and trimmed. A full scan still runs, but ONLY when the counter crosses
+    /// budget — and it then evicts down to a low-water mark so the next batch
+    /// of writes stays scan-free. The scan also recomputes the true total,
+    /// self-correcting any drift in the estimate.
+    private var diskBytesCounter: Int64 = 0
+    private var diskCounterSeeded = false
+    private let diskCounterLock = NSLock()
+
     /// In-memory LRU: key -> (kvState, accessTime).
     /// fp16 and int8 entries share the LRU; their key strings are namespaced
     /// by dtype so a lookup from one path cannot read the other's tensors.
@@ -40,16 +63,30 @@ public final class PrefixCache: @unchecked Sendable {
     private var accessOrder: [String] = []
     private let memoryLock = NSLock()
 
+    /// - Parameter diskBudgetGB: on-disk byte budget in gigabytes. `nil` (the
+    ///   default) resolves from `KRILL_PREFIX_CACHE_GB`, falling back to 2.0 GB
+    ///   — so any `PrefixCache()` is bounded even on paths that don't thread
+    ///   `KrillConfig` through. `0` disables the disk tier; a negative value
+    ///   means unbounded.
     public init(
         cacheDir: URL? = nil,
         maxMemoryEntries: Int = 8,
-        minPrefixLength: Int = 8
+        minPrefixLength: Int = 8,
+        diskBudgetGB: Double? = nil
     ) {
         let dir = cacheDir ?? PrefixCache.defaultCacheDir()
         self.cacheDir = dir
         self.maxMemoryEntries = maxMemoryEntries
         self.minPrefixLength = minPrefixLength
+        let gb = diskBudgetGB ?? PrefixCache.envBudgetGB() ?? 2.0
+        self.diskBudgetBytes = gb < 0 ? -1 : Int64(gb * 1_000_000_000)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    }
+
+    /// `KRILL_PREFIX_CACHE_GB` parsed as a Double, or nil if unset/unparseable.
+    private static func envBudgetGB() -> Double? {
+        guard let v = ProcessInfo.processInfo.environment["KRILL_PREFIX_CACHE_GB"] else { return nil }
+        return Double(v)
     }
 
     static func defaultCacheDir() -> URL {
@@ -306,6 +343,10 @@ public final class PrefixCache: @unchecked Sendable {
         memoryLock.unlock()
         try? FileManager.default.removeItem(at: cacheDir)
         try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        diskCounterLock.lock()
+        diskBytesCounter = 0
+        diskCounterSeeded = true  // dir is now empty; no re-scan needed
+        diskCounterLock.unlock()
     }
 
     /// Number of entries in memory cache.
@@ -434,6 +475,11 @@ extension PrefixCache {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
         guard let arrays = try? loadArrays(url: fileURL) else { return nil }
 
+        // Refresh modification time so a hit marks this entry recently-used and
+        // the disk-budget LRU keeps hot prefixes over cold ones (issue #177).
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date()], ofItemAtPath: fileURL.path)
+
         switch dtype {
         case .fp16:
             // Convention: "layer_0_k", "layer_0_v", "layer_1_k", etc.
@@ -472,6 +518,9 @@ extension PrefixCache {
     }
 
     private func writeToDisk(key: String, entry: MemoryCacheEntry, dtype: KVDtype) {
+        // diskBudgetBytes == 0 disables the disk tier entirely (issue #177).
+        guard diskBudgetBytes != 0 else { return }
+
         let fileURL = cacheDir.appendingPathComponent("\(key).\(dtype.fileSuffix)")
         var arrays: [String: MLXArray] = [:]
 
@@ -494,6 +543,104 @@ extension PrefixCache {
             }
         }
 
+        // Account the new file against the running byte counter. The common
+        // case (still under budget) ends here in O(1); only crossing budget
+        // pays for a directory scan + eviction.
+        let priorSize = fileSizeOnDisk(fileURL)
         try? save(arrays: arrays, url: fileURL)
+        let newSize = fileSizeOnDisk(fileURL)
+
+        let overBudget: Bool
+        diskCounterLock.lock()
+        if !diskCounterSeeded {
+            // First write of this process: seed the counter from a one-time
+            // scan so any pre-existing on-disk cache is counted (and trimmed
+            // below if it already exceeds budget). The scan total includes the
+            // file we just wrote.
+            diskBytesCounter = scanDiskBytes()
+            diskCounterSeeded = true
+        } else {
+            diskBytesCounter += newSize - priorSize
+        }
+        overBudget = diskBudgetBytes > 0 && diskBytesCounter > diskBudgetBytes
+        diskCounterLock.unlock()
+
+        // Evict only when we have actually crossed budget. Runs on the serial
+        // `diskQueue` (all writes do), so evictions never race other writes; a
+        // concurrent reader at worst sees a file vanish between its
+        // exists-check and load and falls through to a clean miss.
+        if overBudget { evictToLowWater() }
+    }
+
+    /// Evict least-recently-used on-disk entries until the cache drops to a
+    /// low-water mark (90% of budget). Recency is the file modification date,
+    /// which a write sets to "now" and a disk hit refreshes (see
+    /// `loadFromDisk`), so a long run of distinct prompts evicts its own cold
+    /// KV states instead of growing without bound (issue #177). Evicting to a
+    /// low-water mark (rather than exactly to budget) leaves headroom so the
+    /// next ~10%-of-budget worth of writes stay scan-free. The post-eviction
+    /// true total is written back to the counter, self-correcting drift.
+    private func evictToLowWater() {
+        guard diskBudgetBytes > 0 else { return }
+        let lowWater = diskBudgetBytes - diskBudgetBytes / 10  // 90% of budget
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey]
+        guard let urls = try? fm.contentsOfDirectory(
+            at: cacheDir, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])
+        else { return }
+
+        var entries: [(url: URL, size: Int64, mtime: Date)] = []
+        var total: Int64 = 0
+        for url in urls where url.pathExtension == "safetensors" {
+            let vals = try? url.resourceValues(forKeys: Set(keys))
+            let size = Int64(vals?.fileSize ?? 0)
+            let mtime = vals?.contentModificationDate ?? Date.distantPast
+            entries.append((url, size, mtime))
+            total += size
+        }
+
+        if total > diskBudgetBytes {
+            // Oldest first; drop until at or below the low-water mark.
+            entries.sort { $0.mtime < $1.mtime }
+            for e in entries {
+                if total <= lowWater { break }
+                if (try? fm.removeItem(at: e.url)) != nil { total -= e.size }
+            }
+        }
+
+        diskCounterLock.lock()
+        diskBytesCounter = total
+        diskCounterSeeded = true
+        diskCounterLock.unlock()
+    }
+
+    /// Size of a single cache file in bytes, or 0 if it does not exist.
+    private func fileSizeOnDisk(_ url: URL) -> Int64 {
+        Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+    }
+
+    /// Sum of all `*.safetensors` cache files currently on disk.
+    private func scanDiskBytes() -> Int64 {
+        let fm = FileManager.default
+        guard let urls = try? fm.contentsOfDirectory(
+            at: cacheDir, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles])
+        else { return 0 }
+        var total: Int64 = 0
+        for url in urls where url.pathExtension == "safetensors" {
+            total += fileSizeOnDisk(url)
+        }
+        return total
+    }
+
+    /// Total bytes the on-disk tier currently occupies (live directory stat,
+    /// not the cached estimate). Used by the budget gate in tests; not on any
+    /// hot path.
+    var diskBytes: Int64 { scanDiskBytes() }
+
+    /// Block until all queued write-behind disk writes (and their budget
+    /// eviction) have completed. Test-only synchronization point — the
+    /// production paths are deliberately fire-and-forget.
+    func waitForDiskWrites() {
+        Self.diskQueue.sync {}
     }
 }
