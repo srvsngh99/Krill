@@ -65,7 +65,15 @@ text MMLU unchanged (~77.6%); vision parity gate green on the requant ckpt.
 
 ---
 
-## Issue 2 — thinking-channel markers leak into responses
+## Issue 2 — thinking-channel markers leak into responses  [RESOLVED]
+
+**Status:** RESOLVED (2026-06-09). The Gemma-4 channel stripping that already
+existed on the tool-call path (`ToolCalling.extractGemma4`) was promoted to a
+shared `ReasoningParser.stripGemmaChannels`, wired into `ReasoningParser.strip`
+and `StreamingReasoningFilter` (so it applies to every server response, stream
+and non-stream) and into the in-process CLI (`krillm run`). Verified: plain
+`/api/generate` (non-stream + stream) and `krillm run` outputs are free of
+`<|channel>`/`<channel|>`/`<|think|>` markers. Detail retained below.
 
 **Severity:** medium (UX/formatting; affects every response).
 
