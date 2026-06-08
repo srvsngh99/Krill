@@ -3,7 +3,7 @@ import Foundation
 /// Strips chain-of-thought / reasoning tags from a model's raw output
 /// before the server formats it for any chat-completion response.
 ///
-/// Two tag shapes leak today:
+/// Three tag shapes leak today:
 ///   - `<thinking>...</thinking>` - the Anthropic-style tag KrillLM
 ///     itself injects when a request opts into `thinking` (see
 ///     `Server.swift` `/v1/messages`).
@@ -11,52 +11,91 @@ import Foundation
 ///     (its instruct templates open the reasoning block before the
 ///     first user turn). Other reasoning models (DeepSeek R1
 ///     distills) emit the same tag.
+///   - `<|channel>...<channel|>` (and `<|think|>...<think|>`) - Gemma 4's
+///     native reasoning channel. These are plain inline text (NOT special
+///     tokens); the checkpoint's own chat template strips them from prior
+///     turns via its `strip_thinking` macro, and we apply the same removal
+///     to the live generation. Previously these were only stripped on the
+///     tool-call path (`ToolCalling.extractGemma4`), so plain chat/generate
+///     responses leaked the literal markers.
 ///
-/// Both shapes are stripped from the visible text returned to the
+/// All shapes are stripped from the visible text returned to the
 /// client. The captured inner text is returned separately so chat
 /// surfaces that support a `thinking` field can populate it; surfaces
 /// that do not just discard the second return value.
 public enum ReasoningParser {
     private static let tags = ["thinking", "think"]
 
-    /// Strip the FIRST `<thinking>` or `<think>` block from `text`.
-    /// Returns the cleaned text and the captured reasoning content
-    /// (trimmed of surrounding whitespace).
+    /// Gemma 4 native reasoning markers as (open, close) pairs. Unlike the
+    /// `<x>`/`</x>` tags these are asymmetric inline text the model emits
+    /// before its visible answer.
+    static let gemmaMarkers: [(open: String, close: String)] = [
+        ("<|channel>", "<channel|>"),
+        ("<|think|>", "<think|>"),
+    ]
+
+    /// Remove EVERY Gemma-4 reasoning-marker span from `text` (the model can
+    /// open more than one channel). On a missing close marker (output
+    /// truncated mid-channel) everything from the open marker to end-of-text
+    /// is dropped. Returns the cleaned text plus the concatenated captured
+    /// reasoning (nil if none). Shared with `ToolCalling.extractGemma4`.
+    static func stripGemmaChannels(_ text: String) -> (visible: String, thinking: String?) {
+        var cleaned = text
+        var captured = ""
+        for (open, close) in gemmaMarkers {
+            while let s = cleaned.range(of: open) {
+                if let e = cleaned.range(of: close, range: s.upperBound ..< cleaned.endIndex) {
+                    captured += cleaned[s.upperBound ..< e.lowerBound]
+                    cleaned.removeSubrange(s.lowerBound ..< e.upperBound)
+                } else {
+                    captured += cleaned[s.upperBound ..< cleaned.endIndex]
+                    cleaned.removeSubrange(s.lowerBound ..< cleaned.endIndex)
+                }
+            }
+        }
+        let t = captured.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (cleaned, t.isEmpty ? nil : t)
+    }
+
+    /// Strip reasoning from `text`: first every Gemma-4 channel span, then the
+    /// FIRST `<thinking>`/`<think>` block. Returns the cleaned text and the
+    /// captured reasoning content (trimmed; nil if empty).
     ///
-    /// If an opening tag is present but the closing tag is missing
-    /// (truncated by `max_tokens` before `</think>`, common with
-    /// reasoning models on small budgets), everything from the
-    /// opening tag to end-of-text is treated as reasoning and
-    /// dropped from the visible output. This prevents the entire
-    /// reasoning chain from leaking when the model never reached
-    /// the closing tag. The pre-tag prefix (typically empty) is
-    /// preserved.
+    /// If a `<think>` opening tag is present but its close is missing
+    /// (truncated by `max_tokens` before `</think>`, common with reasoning
+    /// models on small budgets), everything from the opening tag to
+    /// end-of-text is treated as reasoning and dropped from the visible
+    /// output. This prevents the entire reasoning chain from leaking when the
+    /// model never reached the closing tag. The pre-tag prefix (typically
+    /// empty) is preserved.
     public static func strip(_ text: String) -> (visible: String, thinking: String?) {
+        // Gemma-4 channels first (all occurrences), then the generic tag.
+        let (afterGemma, gemmaThinking) = stripGemmaChannels(text)
+        var captures: [String] = []
+        if let g = gemmaThinking { captures.append(g) }
+
+        var visible = afterGemma
         for tag in tags {
             let open = "<\(tag)>"
             let close = "</\(tag)>"
-            guard let s = text.range(of: open) else { continue }
-            if let e = text.range(of: close, range: s.upperBound ..< text.endIndex) {
-                let captured = String(text[s.upperBound ..< e.lowerBound])
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                var visible = text
+            guard let s = visible.range(of: open) else { continue }
+            if let e = visible.range(of: close, range: s.upperBound ..< visible.endIndex) {
+                captures.append(String(visible[s.upperBound ..< e.lowerBound]))
                 visible.removeSubrange(s.lowerBound ..< e.upperBound)
-                return (
-                    visible.trimmingCharacters(in: .whitespacesAndNewlines),
-                    captured.isEmpty ? nil : captured)
+            } else {
+                // Open tag but no close: discard from the tag onward, keep the
+                // pre-tag prefix.
+                captures.append(String(visible[s.upperBound ..< visible.endIndex]))
+                visible = String(visible[visible.startIndex ..< s.lowerBound])
             }
-            // Open tag but no close: model exceeded max_tokens mid-
-            // reasoning. Discard from `<think>` onward so the client
-            // never sees the raw chain. Keep any pre-tag prefix
-            // (typically empty for Qwen 3, whose template opens the
-            // tag as the first generated token).
-            let captured = String(text[s.upperBound ..< text.endIndex])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let visible = String(text[text.startIndex ..< s.lowerBound])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return (visible, captured.isEmpty ? nil : captured)
+            break  // only the first matched tag is stripped per call
         }
-        return (text, nil)
+
+        let thinking = captures.joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (
+            visible.trimmingCharacters(in: .whitespacesAndNewlines),
+            thinking.isEmpty ? nil : thinking)
     }
 }
 
@@ -107,10 +146,13 @@ public final class StreamingReasoningFilter {
         case afterBlock
     }
 
-    private static let openTags = ["<thinking>", "<think>"]
+    private static let openTags = ["<thinking>", "<think>", "<|channel>", "<|think|>"]
     private static let closingFor: [String: String] = [
         "<thinking>": "</thinking>",
         "<think>": "</think>",
+        // Gemma 4 native reasoning channel (asymmetric open/close).
+        "<|channel>": "<channel|>",
+        "<|think|>": "<think|>",
     ]
     /// Max prefix length we hold while waiting to disambiguate a
     /// partial opening tag. Equal to the longest possible opening

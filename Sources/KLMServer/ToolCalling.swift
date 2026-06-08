@@ -872,18 +872,9 @@ internal enum ToolCalling {
     static func extractGemma4(from text: String)
         -> (calls: [ParsedToolCall], cleanedText: String)
     {
-        var cleaned = text
-
-        // Strip reasoning channels from visible output.
-        for (o, c) in [("<|channel>", "<channel|>"), ("<|think|>", "<think|>")] {
-            while let s = cleaned.range(of: o) {
-                if let e = cleaned.range(of: c, range: s.upperBound ..< cleaned.endIndex) {
-                    cleaned.removeSubrange(s.lowerBound ..< e.upperBound)
-                } else {
-                    cleaned.removeSubrange(s.lowerBound ..< cleaned.endIndex)
-                }
-            }
-        }
+        // Strip reasoning channels from visible output (shared with the
+        // non-tool response path via ReasoningParser).
+        var cleaned = ReasoningParser.stripGemmaChannels(text).visible
 
         var calls: [ParsedToolCall] = []
         while let s = cleaned.range(of: "<|tool_call>") {
