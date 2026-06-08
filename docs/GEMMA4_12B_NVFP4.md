@@ -126,20 +126,37 @@ checkpoint is published to the Hub - a separate, opt-in follow-up.
 # 1. bf16 source (ungated)
 hf download mlx-community/gemma-4-12B-it-bf16
 
-# 2. requant nvfp4 from bf16, o_proj kept 8-bit (the shipped checkpoint)
+# 2. requant nvfp4 from bf16, o_proj kept 8-bit (the shipped checkpoint).
+#    The vision/audio projectors are auto-protected at 8-bit (see below).
 python tools/requant_gemma4_nvfp4.py \
-    --out ~/.cache/huggingface/krillm-requant/gemma-4-12B-it-nvfp4-oproj8 \
+    --out ~/.cache/huggingface/krillm-requant/gemma-4-12B-it-nvfp4-oproj8-vision8 \
     --protect o_proj
-# omit --protect for the uniform nvfp4 baseline
+# --no-protect-vision + omit --protect  =>  pure-uniform nvfp4 baseline
 
 # 3. serve / eval (one 12B at a time; wipe ~/.krillm/cache between runs)
 krillm serve --model <checkpoint-dir> --port 57461
+
+# 4. GATE the multimodal path BEFORE registering (catches vision degradation)
+python tools/verify_gemma4_vision_color.py --url http://127.0.0.1:57461 --model <id>
 ```
 
 `tools/requant_gemma4_nvfp4.py` learns which modules to quantize from the 4-bit
 checkpoint's index (the proven coverage), pulls each weight from bf16, and
 emits a top-level nvfp4 block plus per-module 8-bit overrides for the protected
 set.
+
+### Vision projectors must stay 8-bit
+
+nvfp4 on the vision patch-embedding (`vision_embedder.patch_dense`) and the media
+projections (`embed_vision`/`embed_audio.embedding_projection`) attenuates the
+**red input channel**, so the model misreads red-heavy colors (red->brown,
+yellow->olive, magenta->purple) while text MMLU is unaffected (text never touches
+the vision path). These tensors are tiny, so the requant auto-protects them at
+8-bit affine by default (mirrors the attn `o_proj` protection); pass
+`--no-protect-vision` only for a text-only research baseline. The PR #171
+multimodal correctness gate ran on the non-requant checkpoint and so missed this;
+`tools/verify_gemma4_vision_color.py` is the gate that catches it (six solid
+colors, fails on any miss) and must pass on the **requant** before registering.
 
 ## Iteration 2: where "miles ahead" is real vs physics-capped
 
