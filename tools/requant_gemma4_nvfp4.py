@@ -18,7 +18,7 @@ by full module path, e.g. "language_model.model.layers.0.mlp.down_proj") for the
 protected set - the exact format KrillLM's loader resolves via q.effective(path).
 
 Usage:
-  requant-mixed-nvfp4.py --out <dir> [--protect down_proj --protect o_proj]
+  requant_gemma4_nvfp4.py --out <dir> [--protect down_proj --protect o_proj]
                          [--protect-bits 8] [--protect-gs 64] [--protect-mode affine]
                          [--protect-layers first4,last4]   # protect whole layers
   (no --protect / --protect-layers  =>  uniform nvfp4 baseline = P0)
@@ -60,6 +60,13 @@ def main():
     ORC = snap(args.oracle_4bit)
     DST = os.path.expanduser(args.out)
     os.makedirs(DST, exist_ok=True)
+
+    # MLX requires mxfp8 to use exactly group_size 32 / bits 8; clamp so the
+    # documented --protect-mode mxfp8 never crashes on the default --protect-gs.
+    if args.protect_mode == "mxfp8" and (args.protect_gs != 32 or args.protect_bits != 8):
+        print(f"[requant] mxfp8 requires gs=32 bits=8; overriding "
+              f"gs={args.protect_gs}->32 bits={args.protect_bits}->8")
+        args.protect_gs, args.protect_bits = 32, 8
 
     # ---- learn the quantized-module set from the 4-bit oracle's index ----
     orc_index = json.load(open(os.path.join(ORC, "model.safetensors.index.json")))

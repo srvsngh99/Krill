@@ -10,16 +10,17 @@ is a memory-pressure artifact.
 
 | Checkpoint (same 12B weights) | MMLU-500 | single-stream decode | source |
 | --- | --- | --- | --- |
-| **KrillLM `gemma-4-12b` (nvfp4, o_proj 8-bit)** | **77.6%** (388/500) | **~28 tok/s** | bf16 -> nvfp4, attn o_proj kept 8-bit |
+| **KrillLM `gemma-4-12b` (nvfp4, o_proj 8-bit)** | **77.6%** (388/500) | **27.7 tok/s** | bf16 -> nvfp4, attn o_proj kept 8-bit |
 | KrillLM nvfp4 (uniform, from bf16) | 75.6% (378/500) | 25.9 tok/s | bf16 -> nvfp4 |
 | Ollama `gemma4:12b-mlx` (uniform nvfp4) | 75.8% (379/500) | 27.4 tok/s | reference |
-| KrillLM mixed (4-bit attn + 8-bit MLP) | 75.3% | 19.2 tok/s | prior default |
-| KrillLM nvfp4 (from the **4-bit** ckpt) | 68.8% | 26.3 tok/s | the old defect |
+| KrillLM mixed (4-bit attn + 8-bit MLP) | 73.6% (368/500) | 19.2 tok/s | prior default |
+| KrillLM nvfp4 (from the **4-bit** ckpt) | 71.6% (358/500) | 26.3 tok/s | the old defect |
 
 The shipped `gemma-4-12b` is numerically best on quality and at parity-or-faster
 on single-stream speed, while winning decisively on concurrency, cold start, and
-capability (below). MMLU-500 is no-CoT, greedy (temp 0), last-letter extraction,
-all on the same mlx-swift 0.31.4 binary.
+capability (below). All five rows are measured on the **same 500-question set**,
+no-CoT, greedy (temp 0), last-letter extraction, on the same mlx-swift 0.31.4
+binary, one 12B resident at a time.
 
 ## What changed
 
@@ -33,11 +34,14 @@ from the already-4-bit mixed checkpoint
 dequant(4-bit-affine attn / 8-bit-affine MLP) -> fp -> quantize(nvfp4)
 ```
 
-so attention inherited affine-int4 damage *before* nvfp4 ever applied. Result:
-68.8% MMLU vs Ollama-nvfp4's 75.8%. Requantizing from the **original bf16**
-weights (`mlx-community/gemma-4-12B-it-bf16`, ungated) so attention is
-single-quantized recovers the full 7 points: **75.6%**, statistical parity with
-Ollama (within 0.2 pt). This closes issue #174.
+so attention inherited affine-int4 damage *before* nvfp4 ever applied. On the
+500-question set this scores **71.6%** (358/500) vs Ollama-nvfp4's 75.8%.
+Requantizing from the **original bf16** weights
+(`mlx-community/gemma-4-12B-it-bf16`, ungated) so attention is single-quantized
+lifts this to **75.6%** (378/500) - a +20-question gain that is statistically
+significant (paired McNemar p=0.02) and reaches parity with Ollama (within
+0.2 pt). This closes issue #174. (An earlier 68.8% figure for the defect was
+measured on a 50-question subset; the 71.6% above is the full 500-set number.)
 
 ### 2. Mixed-precision nvfp4 to push past parity
 
@@ -58,11 +62,14 @@ is the high-yield, low-cost lever:
 Protecting `o_proj` alone captures the full quality lift at no speed cost; adding
 more 8-bit modules only slows decode.
 
-**Honesty on significance:** at n=500 the quality edge of o_proj-nvfp4 over both
-Ollama-nvfp4 and our own uniform baseline is suggestive but not statistically
-significant (paired McNemar p=0.31 vs Ollama, p=0.10 vs uniform). At ~4-bit both
-engines sit near the bf16 quality ceiling, so the defensible single-stream claim
-is parity-or-slightly-better, not a blowout. The decisive wins are elsewhere.
+**Honesty on significance.** What *is* statistically significant: both
+bf16-sourced checkpoints beat the from-4-bit defect on the paired 500-set -
+uniform nvfp4 +20 net (p=0.02), o_proj-nvfp4 +30 net (p=0.0004). What is *not*:
+the quality edge of o_proj-nvfp4 over Ollama-nvfp4 or over our own uniform
+baseline is suggestive only (paired McNemar p=0.31 vs Ollama, p=0.10 vs
+uniform). At ~4-bit both engines sit near the bf16 quality ceiling, so the
+defensible single-stream claim is parity-or-slightly-better, not a blowout. The
+decisive wins are elsewhere.
 
 ## Where KrillLM wins decisively
 
@@ -82,8 +89,8 @@ KrillLM's continuous batcher scales ~2x from N=1 to N=8 (one weight read serves
 many decode rows); Ollama is flat (~27.4 at every N - it serializes). At N=8
 KrillLM is **1.38x** Ollama. (*The N=1 aggregate figure is wall-clock including
 batch-formation TTFT, and this arm ran with a small co-resident e2b daemon; the
-clean steady-state single-stream decode is ~28 tok/s, so the concurrency numbers
-are conservative for KrillLM.)
+clean steady-state single-stream decode is ~27.7 tok/s, so the concurrency
+numbers are conservative for KrillLM.)
 
 ### Cold start
 

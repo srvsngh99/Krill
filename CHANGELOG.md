@@ -29,10 +29,11 @@ reverse chronological order. Versioning follows
 
 - **Gemma 4 12B nvfp4 checkpoint (both-axes win vs Ollama).** Requantizing nvfp4
   from the original bf16 weights (not the 4-bit checkpoint) fixes the
-  double-quantized-attention defect: MMLU-500 68.8% -> 75.6%, parity with Ollama
-  `gemma4:12b-mlx` (75.8%) at nvfp4 speed (closes #174). A mixed-precision sweep
-  found that keeping the attention `o_proj` at 8-bit while the bulk stays nvfp4
-  lifts quality to 77.6% at no speed cost (~28 tok/s single-stream). Concurrency
+  double-quantized-attention defect: MMLU-500 71.6% -> 75.6% (paired McNemar
+  p=0.02), parity with Ollama `gemma4:12b-mlx` (75.8%) at nvfp4 speed
+  (closes #174). A mixed-precision sweep found that keeping the attention
+  `o_proj` at 8-bit while the bulk stays nvfp4 lifts quality to 77.6% at no
+  speed cost (~27.7 tok/s single-stream). Concurrency
   scales ~2x via the batcher (1.38x aggregate vs flat Ollama at N=8). Shipped as
   `gemma-4-12b-nvfp4`, with the canonical `gemma-4-12b` promoted to it.
   Reproduce with `tools/requant_gemma4_nvfp4.py`; full results in
