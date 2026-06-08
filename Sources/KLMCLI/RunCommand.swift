@@ -262,12 +262,20 @@ private func generateAndPrint(
         audioData: audioData
     )
 
-    // Stream tokens to stdout
+    // Stream tokens to stdout, filtering reasoning blocks the same way the
+    // server does so CLI output never leaks `<think>` / Gemma 4 `<|channel>`
+    // markers (or their inner reasoning) into the visible answer.
+    let reasoningFilter = StreamingReasoningFilter()
     for await event in stream {
         if event.isEnd { break }
-        print(event.text, terminator: "")
-        fflush(stdout)
+        let visible = reasoningFilter.consume(event.text)
+        if !visible.isEmpty {
+            print(visible, terminator: "")
+            fflush(stdout)
+        }
     }
+    let tail = reasoningFilter.finish()
+    if !tail.isEmpty { print(tail, terminator: "") }
     print() // Final newline
 
     // Print stats

@@ -62,6 +62,66 @@ final class ReasoningParserTests: XCTestCase {
         XCTAssertNil(thinking, "Empty captured content must not leak as an empty `thinking` field")
     }
 
+    // MARK: - Gemma 4 reasoning channels
+
+    func testStripsGemmaChannelMarker() {
+        // The exact shape observed from Gemma-4-12B on a plain prompt.
+        let raw = "<|channel>thought\n<channel|>Brown"
+        let (visible, thinking) = ReasoningParser.strip(raw)
+        XCTAssertEqual(visible, "Brown")
+        XCTAssertEqual(thinking, "thought")
+    }
+
+    func testStripsAllGemmaChannels() {
+        // The model may open more than one channel; every span is removed.
+        let raw = "<|channel>plan<channel|>The answer "
+            + "<|channel>double-check<channel|>is 42."
+        let (visible, thinking) = ReasoningParser.strip(raw)
+        XCTAssertEqual(visible, "The answer is 42.")
+        XCTAssertTrue(thinking?.contains("plan") == true)
+        XCTAssertTrue(thinking?.contains("double-check") == true)
+    }
+
+    func testGemmaThinkMarker() {
+        let raw = "<|think|>reasoning here<think|>Final answer."
+        let (visible, thinking) = ReasoningParser.strip(raw)
+        XCTAssertEqual(visible, "Final answer.")
+        XCTAssertEqual(thinking, "reasoning here")
+    }
+
+    func testUnbalancedGemmaChannelDropsToEnd() {
+        // Truncated mid-channel (no close): drop from the open marker on.
+        let raw = "<|channel>reasoning that never closed"
+        let (visible, thinking) = ReasoningParser.strip(raw)
+        XCTAssertEqual(visible, "")
+        XCTAssertEqual(thinking, "reasoning that never closed")
+    }
+
+    func testGemmaChannelWithNoMarkersUnchanged() {
+        let raw = "A plain Gemma answer with no channel."
+        let (visible, thinking) = ReasoningParser.strip(raw)
+        XCTAssertEqual(visible, raw)
+        XCTAssertNil(thinking)
+    }
+
+    func testStreamingFilterStripsGemmaChannelAcrossChunks() {
+        let f = StreamingReasoningFilter()
+        var out = ""
+        for chunk in ["<|channel>", "thinking ", "stuff", "<channel|>", "Brown"] {
+            out += f.consume(chunk)
+        }
+        out += f.finish()
+        XCTAssertEqual(out, "Brown",
+            "Gemma channel reasoning must not reach the streamed output")
+    }
+
+    func testStreamingFilterDropsTruncatedGemmaChannel() {
+        let f = StreamingReasoningFilter()
+        XCTAssertEqual(f.consume("<|channel>"), "")
+        XCTAssertEqual(f.consume("partial channel never closed"), "")
+        XCTAssertEqual(f.finish(), "")
+    }
+
     // MARK: - Streaming filter
 
     func testStreamingFilterEmitsOnlyPostReasoningTokens() {
