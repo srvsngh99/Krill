@@ -140,3 +140,40 @@ krillm serve --model <checkpoint-dir> --port 57461
 checkpoint's index (the proven coverage), pulls each weight from bf16, and
 emits a top-level nvfp4 block plus per-module 8-bit overrides for the protected
 set.
+
+## Iteration 2: where "miles ahead" is real vs physics-capped
+
+A second pass pushed on beating Ollama across speed, accuracy, tool-calls, and
+agentic. The honest result: **on a 24 GB Mac the 12B is raw-throughput-capped at
+parity-to-1.5x** (same MLX, same memory-bandwidth roof, and a 12B nearly fills
+the box so the GPU saturates under batching). The genuine, shipped "miles ahead"
+is **capability** - things Ollama's MLX gemma tag cannot do at all.
+
+### Performance (raw throughput) - parity-to-modest, by physics
+
+- **Single-stream decode:** ~28 tok/s, parity with Ollama (bandwidth roof).
+- **Concurrency (NUM_PARALLEL=16):** KrillLM aggregate 18.7 / 25.9 / 31.5 / 37.3 /
+  41.9 tok/s at N=1/2/4/8/16; Ollama flat ~28 (it serializes). KrillLM wins from
+  N>=4, **1.5x at N=16** - real but not 2x (the ~2x in `CONCURRENT_THROUGHPUT.md`
+  is a 3B-model result; a 12B saturates compute sooner).
+- **Fused GEGLU (closed):** no decode win - decode is weight-bandwidth bound, not
+  activation bound (see `CEILINGS_AND_REATTEMPTS.md` #4).
+
+### Capability - genuinely miles ahead (Ollama MLX gemma tag does NONE of these)
+
+- **Grammar-constrained tool calls** (PR #179): `tool_choice` forces a call
+  decoded under the tool's JSON schema -> valid, schema-matched `{name,arguments}`
+  (best-effort with a fail-open net). Verified e2e: forced `get_weather` ->
+  `{"days":3,"city":"Paris"}`.
+- **Structured / grammar output** (PR #175): JSON / schema / regex / CFG.
+- **Multimodal:** native vision + audio (the Ollama gemma MLX tag is text-only).
+
+### Accuracy
+
+- nvfp4-from-bf16 + o_proj-8bit: **77.6% MMLU-500**, at/above Ollama-nvfp4 (75.8%);
+  both near the bf16 ceiling. AWQ calibration was scoped but is blocked on the
+  unified model (mlx_lm cannot load the multimodal weights to calibrate), and
+  affine-int4 trails nvfp4 on quality regardless - not pursued.
+
+**Takeaway:** lead with capability + concurrency-on-smaller-models; do not claim a
+single-stream raw-speed lead over Ollama on the 12B - that is physics, not effort.
