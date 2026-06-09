@@ -2143,9 +2143,11 @@ extension InferenceEngine {
     private func makeBatchedPrefillRow(
         _ model: LoadedModel
     ) -> ([Int], [KVCache], Bool) -> MLXArray {
-        let rawPrefill = model.prefillForward ?? model.forward
+        let modelPrefillForward = model.prefillForward
+        let modelForward = model.forward
         let pc = self.prefixCache
         let pcModelId = self.modelId
+        let chunkSize = self.prefillChunkSize
         return { tokens, caches, usePrefixCache in
             var cacheHit = false
             if usePrefixCache,
@@ -2194,7 +2196,11 @@ extension InferenceEngine {
             }
 
             let input = MLXArray(toProcess.map { Int32($0) }).reshaped(1, toProcess.count)
-            let logits = rawPrefill(input, caches)
+            // Chunked so a long concurrent-row prompt does not OOM on MLX's
+            // materialized prefill scores (same bound as the serial path).
+            let logits = chunkedTextPrefill(
+                input: input, caches: caches, chunkSize: chunkSize,
+                prefillForward: modelPrefillForward, forward: modelForward)
             MLX.eval(logits)   // realize the cache fills before snapshotting for store
 
             if usePrefixCache, !cacheHit, tokens.count >= 8 {
@@ -2236,9 +2242,11 @@ extension InferenceEngine {
     private func makeBatchedPrefillRowQuantized(
         _ model: LoadedModel
     ) -> ([Int], [QuantizedKVCache], Bool) -> MLXArray {
-        let rawPrefill = model.prefillForward ?? model.forward
+        let modelPrefillForward = model.prefillForward
+        let modelForward = model.forward
         let pc = self.prefixCache
         let pcModelId = self.modelId
+        let chunkSize = self.prefillChunkSize
         return { tokens, caches, usePrefixCache in
             var cacheHit = false
             if usePrefixCache,
@@ -2279,7 +2287,11 @@ extension InferenceEngine {
             }
 
             let input = MLXArray(toProcess.map { Int32($0) }).reshaped(1, toProcess.count)
-            let logits = rawPrefill(input, caches)
+            // Chunked so a long concurrent-row prompt does not OOM on MLX's
+            // materialized prefill scores (same bound as the serial path).
+            let logits = chunkedTextPrefill(
+                input: input, caches: caches, chunkSize: chunkSize,
+                prefillForward: modelPrefillForward, forward: modelForward)
             MLX.eval(logits)
 
             if usePrefixCache, !cacheHit, tokens.count >= 8 {
