@@ -265,6 +265,60 @@ internal enum ToolCalling {
         return ParsedToolCall(name: name, argumentsJSON: argsJSON)
     }
 
+    // MARK: - Auto tool-call argument constraining (two-pass)
+
+    /// Gate for the two-pass argument constraint: does `argumentsJSON` satisfy
+    /// the tool's `parametersJSON` schema well enough to pass through? True
+    /// when the args parse as a JSON object AND every `required` key in the
+    /// schema is present. Tools with no required keys always pass (an empty
+    /// object is valid for them, so there is nothing to re-generate).
+    ///
+    /// This is intentionally a presence check, not full type validation - it
+    /// targets the dominant small-model failure (empty `{}` / missing required
+    /// fields, e.g. codex's shell tool missing `cmd`) without forcing a second
+    /// pass on otherwise-usable arguments. Pure + unit-testable.
+    static func argsSatisfySchema(argumentsJSON: String, parametersJSON: String) -> Bool {
+        guard let argsData = argumentsJSON.data(using: .utf8),
+              let args = try? JSONSerialization.jsonObject(with: argsData) as? [String: Any]
+        else { return false }  // not even a JSON object -> must re-generate
+        guard let schemaData = parametersJSON.data(using: .utf8),
+              let schema = try? JSONSerialization.jsonObject(with: schemaData) as? [String: Any],
+              let required = schema["required"] as? [String], !required.isEmpty
+        else { return true }   // no required keys -> nothing to enforce
+        return required.allSatisfy { args[$0] != nil }
+    }
+
+    /// Instruction turn for pass 2: ask the model for ONLY the JSON arguments
+    /// object for `tool`. Decoding is grammar-constrained to the tool's
+    /// parameter schema, so this only needs to orient the model.
+    static func argsRegenPrompt(tool: ServerToolSpec) -> String {
+        return "Now output ONLY the JSON arguments object to call the tool "
+            + "\"\(escapeForPrompt(tool.name))\". Its parameter schema is: "
+            + "\(tool.parametersJSON). Respond with a single JSON object giving "
+            + "concrete values for the required arguments - no prose, no code fences."
+    }
+
+    /// Parse a bare arguments object (pass-2 output) into a compact JSON
+    /// string. Tolerant of surrounding whitespace and a stray code fence.
+    /// Returns nil if no JSON object is present.
+    static func parseArgsObject(_ text: String) -> String? {
+        var s = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("```") {
+            s = s.replacingOccurrences(of: "```json", with: "")
+                 .replacingOccurrences(of: "```", with: "")
+                 .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard let lo = s.firstIndex(of: "{"), let hi = s.lastIndex(of: "}"), lo < hi else {
+            return nil
+        }
+        let objStr = String(s[lo...hi])
+        guard let data = objStr.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let out = try? JSONSerialization.data(withJSONObject: obj),
+              let str = String(data: out, encoding: .utf8) else { return nil }
+        return str
+    }
+
     /// Llama 3.x native path. The Llama checkpoint ships a full chat
     /// template whose `tools_in_user_message` branch (default) prepends an
     /// exact instruction + the tool JSON schemas to the first user message;
