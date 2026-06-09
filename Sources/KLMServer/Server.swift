@@ -1004,8 +1004,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             for await ev in tokenStream { if ev.isEnd { break }; full += ev.text }
 
             let (visible, _) = ReasoningParser.strip(full)
-            let (calls, cleaned) = ToolCalling.extractIfToolsOffered(
+            let (calls0, cleaned) = ToolCalling.extractIfToolsOffered(
                 from: visible, hasTools: !p.tools.isEmpty, format: toolFormat)
+            // Constrain auto tool-call arguments to the tool's schema (fixes the
+            // empty-args "missing field cmd" loop codex hit on small models).
+            let calls = await self.constrainToolArgs(
+                calls0, tools: p.tools, baseMessages: msgs, eng: eng, contextLimit: ctxLimit)
             let stats = getStats()
             let inTok = stats?.promptTokens ?? 0
             let outTok = stats?.generatedTokens ?? 0
@@ -1103,6 +1107,64 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     /// `tool_calls` response. Honors `stream` by emitting the assembled
     /// result as a single well-formed SSE / NDJSON sequence (token-level
     /// tool-call deltas are Phase 4 per the parity plan).
+    /// Two-pass argument constraint for AUTO tool calls. When the model emits a
+    /// tool call whose arguments do not satisfy the tool's schema (e.g. empty
+    /// `{}` missing a required field - the failure that dead-loops codex with
+    /// "missing field cmd"), re-generate JUST the arguments under a grammar
+    /// constrained to that tool's parameter schema and splice them in. One extra
+    /// short greedy pass, ONLY for the bad-args case; fails open (keeps the
+    /// original args) if the re-generation still does not satisfy the schema.
+    /// Opt out with `KRILL_NO_TOOL_ARG_CONSTRAIN`.
+    private func constrainToolArgs(
+        _ calls: [ToolCalling.ParsedToolCall],
+        tools: [ServerToolSpec],
+        baseMessages: [[String: String]],
+        eng: InferenceEngine,
+        contextLimit: Int?
+    ) async -> [ToolCalling.ParsedToolCall] {
+        guard !calls.isEmpty, !tools.isEmpty,
+              ProcessInfo.processInfo.environment["KRILL_NO_TOOL_ARG_CONSTRAIN"] == nil
+        else { return calls }
+        var out: [ToolCalling.ParsedToolCall] = []
+        for call in calls {
+            guard let tool = tools.first(where: { $0.name == call.name }),
+                  !ToolCalling.argsSatisfySchema(
+                      argumentsJSON: call.argumentsJSON, parametersJSON: tool.parametersJSON)
+            else { out.append(call); continue }
+
+            if ProcessInfo.processInfo.environment["KRILL_TOOL_DEBUG"] != nil {
+                FileHandle.standardError.write(Data((
+                    "[KRILL_TOOL_DEBUG] arg-constrain: tool=\(call.name) "
+                    + "pass1_args=\(call.argumentsJSON) -> re-generating under schema\n").utf8))
+            }
+            let regen = baseMessages + [[
+                "role": "user", "content": ToolCalling.argsRegenPrompt(tool: tool)]]
+            let (stream, _) = await self.runGenerate(
+                eng, messages: regen, params: .greedy, maxTokens: 256,
+                contextLimit: contextLimit,
+                promptTemplateOverride: modelTemplateOverride(),
+                format: .jsonSchemaCompact(tool.parametersJSON))
+            var raw = ""
+            for await ev in stream { if ev.isEnd { break }; raw += ev.text }
+            let (post, _) = ReasoningParser.strip(raw)
+            let fixed = ToolCalling.parseArgsObject(post)
+            let satisfied = fixed.map {
+                ToolCalling.argsSatisfySchema(argumentsJSON: $0, parametersJSON: tool.parametersJSON)
+            } ?? false
+            if ProcessInfo.processInfo.environment["KRILL_TOOL_DEBUG"] != nil {
+                FileHandle.standardError.write(Data((
+                    "[KRILL_TOOL_DEBUG] arg-constrain: pass2_args=\(fixed ?? "<none>") "
+                    + "satisfied=\(satisfied)\n").utf8))
+            }
+            if let fixed, satisfied {
+                out.append(ToolCalling.ParsedToolCall(name: call.name, argumentsJSON: fixed))
+            } else {
+                out.append(call)  // fail open: keep the original args
+            }
+        }
+        return out
+    }
+
     private func handleToolChat(
         context: ChannelHandlerContext,
         request: ServerChatRequest,
@@ -1175,7 +1237,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             // tool-call extraction so a model that wraps its tool
             // call in a reasoning preamble still yields the call.
             let (postReasoning, _) = ReasoningParser.strip(full)
-            let calls: [ToolCalling.ParsedToolCall]
+            var calls: [ToolCalling.ParsedToolCall]
             let cleaned: String
             if forcedSchema != nil {
                 // Constrained output is a bare {name,arguments} JSON object.
@@ -1198,6 +1260,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             } else {
                 (calls, cleaned) = ToolCalling.extractToolCalls(
                     from: postReasoning, format: toolFormat)
+                // Constrain auto tool-call arguments to the tool's schema so a
+                // small model cannot emit empty/invalid args (which dead-loop
+                // strict agents like codex).
+                calls = await self.constrainToolArgs(
+                    calls, tools: request.tools, baseMessages: messages,
+                    eng: eng, contextLimit: toolCtx)
             }
             let stats = getStats()
             let totalNs = Int64((CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
