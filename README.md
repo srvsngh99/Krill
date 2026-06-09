@@ -368,7 +368,16 @@ KLMTokenizer     swift-transformers tokenizer wrapper
 KRILL_DEFAULT_MODEL=llama-3.2-3b
 KRILL_PORT=57455
 KRILL_KV_CACHE_DTYPE=fp16
+KRILL_PREFILL_CHUNK=2048   # query tokens per prefill forward (0 disables)
 ```
+
+`KRILL_PREFILL_CHUNK` bounds how many prompt tokens are forwarded per prefill
+pass. MLX's attention has no flash prefill kernel, so a single forward over a
+very long prompt materializes a quadratic `[heads, L, L]` score matrix and OOMs
+past ~21k tokens on a 24GB box. Chunking processes the prompt in query-blocks
+(default 2048) while the KV cache accumulates exactly as one pass would, so long
+contexts (32k+) run without crashing and shorter prompts stay untouched. Lower
+it for even longer contexts; set `0` to disable.
 
 ## Why KrillLM?
 

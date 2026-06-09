@@ -206,6 +206,19 @@ public final class InferenceEngine: @unchecked Sendable {
     /// `KRILL_KV_CACHE_DTYPE` env var.
     private let kvCacheDtype: String
 
+    /// Max query tokens per prefill forward. MLX's SDPA has no flash prefill
+    /// kernel - it materializes the full `[heads, L, L]` bf16 score matrix for
+    /// any query length > 1. That buffer grows quadratically and crosses MLX's
+    /// 14.3GB single-buffer limit around L ~ 21k tokens (16 heads x L^2 x 2B), so
+    /// a single forward over a long prompt hard-OOMs past there on a 24GB box;
+    /// below that it still spikes peak memory (e.g. ~8.6GB of scores alone at
+    /// 16k) and pressures swap. Forwarding the prompt in query-chunks of this
+    /// size bounds the scores to `[heads, chunk, L]` while the shared KV cache
+    /// accumulates exactly as in one pass. Default 2048 (scores ~2GB at 32k ctx,
+    /// well under the limit to ~50k+); lower it via `KRILL_PREFILL_CHUNK` for
+    /// even longer contexts, or set 0 to disable chunking. Read once at init.
+    private let prefillChunkSize: Int
+
     /// Continuous batched-decode driver (follow-up #8, Stage C1). Lazily
     /// created on the first eligible `submitBatched` call against the current
     /// model and torn down on `unload()`, so a model swap never decodes against
@@ -213,13 +226,22 @@ public final class InferenceEngine: @unchecked Sendable {
     private var continuousBatcher: ContinuousBatcher?
     private let batcherLock = NSLock()
 
-    public init(modelDirectory: URL, prefixCache: PrefixCache? = nil, kvCacheDtype: String? = nil) {
+    public init(modelDirectory: URL, prefixCache: PrefixCache? = nil,
+                kvCacheDtype: String? = nil, prefillChunkSize: Int? = nil) {
         self.modelDirectory = modelDirectory
         self.prefixCache = prefixCache ?? PrefixCache()
         if let dtype = kvCacheDtype {
             self.kvCacheDtype = dtype
         } else {
             self.kvCacheDtype = ProcessInfo.processInfo.environment["KRILL_KV_CACHE_DTYPE"] ?? "fp16"
+        }
+        if let n = prefillChunkSize, n >= 0 {
+            self.prefillChunkSize = n
+        } else if let raw = ProcessInfo.processInfo.environment["KRILL_PREFILL_CHUNK"],
+                  let n = Int(raw), n >= 0 {
+            self.prefillChunkSize = n
+        } else {
+            self.prefillChunkSize = 2048
         }
     }
 
@@ -1063,8 +1085,9 @@ public final class InferenceEngine: @unchecked Sendable {
             return parts.joined(separator: "|")
         }()
 
+        let capturedPrefillChunkSize = self.prefillChunkSize
         let stream = AsyncStream<TokenEvent> { continuation in
-            Task { [statsHolder, captures] in
+            Task { [statsHolder, captures, capturedPrefillChunkSize] in
                 // Re-bind each Captures field to the closure-body
                 // local name the rest of this Task body uses. Doing
                 // this here (rather than referencing `captures.x`
@@ -1245,16 +1268,23 @@ public final class InferenceEngine: @unchecked Sendable {
                             capturedAudioMel, capturedAudioMask, imageHash)
                     } catch {
                         // Fall back to text-only if preprocessing fails -
-                        // honor `prefillForward` here too.
-                        prefillLogits = (capturedPrefillForward ?? capturedForward)(inputArray, caches)
+                        // honor `prefillForward` (chunked) here too.
+                        prefillLogits = chunkedTextPrefill(
+                            input: inputArray, caches: caches,
+                            chunkSize: capturedPrefillChunkSize,
+                            prefillForward: capturedPrefillForward, forward: capturedForward)
                     }
                 } else {
                     // Text-only prefill. Prefer the `prefillForward`
                     // last-token-only path when the family wired it;
                     // otherwise fall back to the full forward. On a
                     // prefix-cache hit the input is 1 token, so the
-                    // slice is a no-op either way.
-                    prefillLogits = (capturedPrefillForward ?? capturedForward)(inputArray, caches)
+                    // slice is a no-op either way. Chunked so a long prompt
+                    // does not OOM on MLX's materialized prefill scores.
+                    prefillLogits = chunkedTextPrefill(
+                        input: inputArray, caches: caches,
+                        chunkSize: capturedPrefillChunkSize,
+                        prefillForward: capturedPrefillForward, forward: capturedForward)
                 }
                 MLX.eval(prefillLogits)
                 prefillDuration = CFAbsoluteTimeGetCurrent() - startTime
@@ -2495,6 +2525,52 @@ extension InferenceEngine {
 }
 
 // MARK: - Internal Helpers
+
+/// Forward a text prompt through the model in query-chunks so the attention
+/// score matrix stays `[heads, chunk, ctx]` instead of `[heads, L, L]`.
+///
+/// MLX's SDPA has no flash prefill kernel: it materializes the full per-head
+/// `L x L` bf16 score matrix for any query length > 1 (verified - peak grows
+/// quadratically and a single >14.3GB Metal buffer hard-OOMs around L ~ 21k
+/// tokens on a 24GB box, and spikes peak well before that). Chunking bounds the
+/// query dimension to `chunk`; the shared KV cache
+/// accumulates across chunks exactly as a single pass would (the same
+/// cached-suffix forward the partial-prefix-reuse path already relies on), so
+/// the result is numerically the single-pass prefill. Each chunk uses the
+/// `lastTokenOnly` prefill closure (full KV update, cheap single-token LM head)
+/// and is `eval`'d before the next so its scores free first; only the final
+/// chunk's logits are returned.
+///
+/// `chunkSize <= 0` or a prompt that already fits in one chunk forwards in a
+/// single call (zero behavior change for short prompts and prefix-cache hits).
+private func chunkedTextPrefill(
+    input: MLXArray,                                              // [1, L]
+    caches: [KVCacheProtocol],
+    chunkSize: Int,
+    prefillForward: ((MLXArray, [KVCacheProtocol]) -> MLXArray)?,
+    forward: (MLXArray, [KVCacheProtocol]) -> MLXArray
+) -> MLXArray {
+    // Non-escaping closures: select via an explicit branch (a `??` on the
+    // closures would force them to escape).
+    func runChunk(_ toks: MLXArray) -> MLXArray {
+        if let pf = prefillForward { return pf(toks, caches) }
+        return forward(toks, caches)
+    }
+    let total = input.dim(1)
+    if chunkSize <= 0 || total <= chunkSize {
+        return runChunk(input)
+    }
+    var start = 0
+    var last: MLXArray?
+    while start < total {
+        let end = Swift.min(start + chunkSize, total)
+        let logits = runChunk(input[0..., start ..< end])
+        MLX.eval(logits)   // realize this chunk's KV update + free its scores
+        last = logits
+        start = end
+    }
+    return last!
+}
 
 /// Thread-safe holder for generation statistics.
 private final class StatsHolder: @unchecked Sendable {
