@@ -173,6 +173,33 @@ MLX's core decode ops. (Op fusion's demonstrated wins are prefill/large-batch
 shapes, not decode; and lossless KV compression only pays off when memory, not
 compute, is the actual binding constraint.)
 
+### 6. No flash prefill kernel in MLX (long-prompt OOM) - MITIGATED
+
+- **Limit:** MLX (0.31.4) `scaledDotProductAttention` has no flash/streaming
+  prefill kernel - for any query length > 1 it materializes the full per-head
+  `[heads, L, L]` bf16 score matrix (verified: peak grows quadratically; a single
+  buffer crosses Metal's 14.3GB max around L ~ 21k tokens and HARD-OOMs - e.g. a
+  ~35k-token prompt asks for a 39.86GB buffer and aborts the process). Mask mode
+  is irrelevant: `.causal` and `.array(additiveMask)` both materialize (probed in
+  `Gemma4PrefillSDPAProbeTests`). This is a hard cap on single-prompt context.
+- **Status: MITIGATED (not closed) via chunked prefill** - both the serial
+  `generate` path AND the concurrent batcher's per-row prefill
+  (`makeBatchedPrefillRow` + the int8 quantized sibling) forward the prompt in
+  query-chunks of `KRILL_PREFILL_CHUNK` (default 2048), `eval`'ing each so its
+  scores free before the next, while the shared KV cache accumulates exactly as
+  one pass would (the verified partial-prefix-reuse mechanism). Result is
+  numerically the single-pass prefill (greedy within-bf16 at 6.6k); ~35k contexts
+  that previously crashed now run and answer a planted needle; short prompts are
+  untouched (single forward). Gate: `Gemma4ChunkedPrefillTests`.
+- **Residual / re-attempt trigger:** chunking bounds the SCORE matrix, but the KV
+  cache itself still grows with context (Gemma sliding-window caps most layers;
+  full-attention layers do not), so very long contexts remain RAM-bound on 24GB.
+  A real win needs (a) an MLX flash prefill kernel (then drop chunking), or (b)
+  chunking the KEY dimension too (true flash, custom kernel - weigh against the
+  fused-Q4 #3 lesson that hand-rolled attention kernels lose to MLX). The
+  multimodal prefill path is not yet chunked (text-only today, both serial and
+  batched) - a follow-up; image/audio prompts are typically short.
+
 ---
 
 ## Resource ceilings (RAM-blocked on the 24GB dev box)
