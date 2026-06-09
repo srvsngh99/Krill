@@ -2710,6 +2710,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
+        // Optional `keep_alive` (Ollama-compatible): pin/evict the model for
+        // the rest of its resident life. `< 0` keeps it loaded indefinitely —
+        // used by `krillm launch` so an attached agent's multi-minute init can
+        // never trip the idle evictor mid-session.
+        let keepAlive = KeepAliveParse.seconds(from: json["keep_alive"])
+
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let pool = engines
@@ -2728,6 +2734,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 // the idle evictor stays gated by keepAlive in-flight; neither
                 // is changed here.
                 let eng = try await pool.activate(name: modelName)
+                if keepAlive != nil { await pool.touch(eng, keepAlive: keepAlive) }
                 let model = eng.modelName ?? modelName
                 let family = eng.family ?? "unknown"
                 eventLoop.execute {
