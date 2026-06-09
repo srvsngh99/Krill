@@ -121,13 +121,57 @@ linked detail doc.
   0.31.4 in this attempt (Gemma runs bf16), since Metal's bfloat16 has no
   implicit float ctor.
 
-**Cross-cutting read:** four M-series decode-speed levers have now closed the
-same way (spec-decode, compiled-decode, fused-Q4, fused-GEGLU). The consistent
+### 5. int8 KV cache as a default for (Gemma 4) agent sessions
+
+- **Goal:** make int8 quantized KV cache the default for agent sessions (the
+  `gemma-4-12b` unified model), expecting the halved KV footprint to relieve
+  memory pressure on the 24GB box and keep long agent contexts off the swap
+  cliff (the handoff noted 12B decode collapses 23-27 -> 3-7 tok/s under
+  pressure).
+- **Status:** CLOSED (negative result; not shipped, not even as an opt-in). The
+  int8 path is *correct* for the unified family - the unified text decoder reuses
+  the same `Gemma4Attention` (accepts `KVCacheProtocol`) and the loader already
+  wires `batchedDecodeForwardQuantized` identically to plain Gemma 4, so flipping
+  `ModelAdapter.kvCacheQuantization` for `.gemma4Unified` to `.supportsInt8` is a
+  one-liner. A verification harness (int8 vs fp16 greedy, both prompts) confirmed
+  **accuracy is fine** (greedy matches fp16 byte-for-byte at every context
+  length - int8 KV is near-lossless, unlike int4 *weights*). **But speed loses,
+  and the gap WIDENS with context** (gemma-4-12b nvfp4, clean box):
+
+  | context | fp16 tok/s | int8 tok/s | int8 ratio |
+  |---|---|---|---|
+  | short (~tens) | 24.8 | 20.1 | 0.81x |
+  | ~2.2k | 16.1 | 10.6 | 0.66x |
+  | ~6.6k | 12.5 | 5.4 | 0.43x |
+
+- **Why it's capped (two independent reasons):**
+  1. **Decode dequant cost scales with KV length.** Every decode step
+     dequantizes the *entire* past KV before the attention matmul; there is no
+     fused dequant+attention kernel on the KV path (same wall as #3 fused-Q4 -
+     plain dequant-then-GEMM is slower than the bandwidth it saves). On a box
+     that is not swapping, this is pure overhead that grows linearly with context.
+  2. **The memory win is structurally muted for Gemma 4.** Sliding-window
+     attention already caps KV growth for most layers (window 512), so halving
+     the KV barely moves total memory. And the real long-context OOM is the
+     **prefill attention matrix** (O(L^2), bf16: a single 21GB buffer at ~16k ctx
+     exceeded MLX's 14.3GB max-buffer limit) - which int8 KV does nothing for.
+- **Re-attempt trigger:** (a) a **full-attention** family (no sliding window) on
+  this box where KV genuinely dominates memory and fp16 OOMs where int8 fits AND
+  the decode is bandwidth-bound enough that smaller KV nets out faster; or (b) a
+  fused int8-dequant+SDPA Metal kernel (or MLX native quantized-KV attention) that
+  removes the per-step dequant pass; or (c) int4-KV *with* such a fused kernel for
+  a 4x footprint cut, if the accuracy holds. Reuse the greedy-match + short/long
+  tok/s harness from this attempt. NOTE: plain `.gemma4` stays `.supportsInt8`
+  (opt-in via `KRILL_KV_CACHE_DTYPE=int8`) and is unchanged by this finding.
+
+**Cross-cutting read:** five M-series decode levers have now closed the same way
+(spec-decode, compiled-decode, fused-Q4, fused-GEGLU, int8-KV). The consistent
 signal is that MLX puts KrillLM near the hardware bandwidth limit for decode, so
 raw-throughput tuning has low ROI. Direct future effort at **coverage/capability**
 (more models, VLM serving, structured output, tool/agentic) - NOT at out-tuning
 MLX's core decode ops. (Op fusion's demonstrated wins are prefill/large-batch
-shapes, not decode.)
+shapes, not decode; and lossless KV compression only pays off when memory, not
+compute, is the actual binding constraint.)
 
 ---
 
