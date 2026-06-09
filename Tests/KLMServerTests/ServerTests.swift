@@ -514,6 +514,20 @@ final class ServerTests: XCTestCase {
         XCTAssertTrue(req.tools.first?.parametersJSON.contains("city") ?? false)
     }
 
+    func testOpenAIChatRequestAcceptsStreamOptions() throws {
+        // `stream_options` is additive telemetry, not a generation knob, and
+        // real clients (opencode, the OpenAI SDK) send it on every streamed
+        // request. Parsing must accept it (not 400) — regression for the field
+        // that previously sat in the unsupported set and broke those agents.
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "local-model",
+            "messages": [["role": "user", "content": "hello"]],
+            "stream": true,
+            "stream_options": ["include_usage": true],
+        ])
+        XCTAssertTrue(req.stream)
+    }
+
     func testChatRequestNormalizesToolResultTurns() throws {
         // assistant tool_calls + role:tool result must round-trip into the
         // [String:String] message path without a 400.

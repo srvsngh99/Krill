@@ -182,9 +182,12 @@ struct LaunchCommand: AsyncParsableCommand {
         proc.standardError = logHandle
         // Pin the model for the agent session: the spawned serve inherits our
         // environment, but we force its default keep-alive so the pre-loaded
-        // model never idle-unloads while the agent is still initializing.
+        // model never idle-unloads while the agent is still initializing. Inject
+        // the already-parsed seconds (not the raw flag string) so a malformed
+        // `--keep-alive` falls back to the SAME pin (-1) the warm path uses,
+        // rather than the child reparsing junk into its 300s default.
         var childEnv = ProcessInfo.processInfo.environment
-        childEnv["KRILL_KEEP_ALIVE"] = keepAliveStr
+        childEnv["KRILL_KEEP_ALIVE"] = String(keepAliveSecs)
         proc.environment = childEnv
         do {
             try proc.run()
