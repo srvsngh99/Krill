@@ -187,6 +187,22 @@ final class ServerTests: XCTestCase {
         XCTAssertTrue(past)
     }
 
+    /// A negative default keep-alive ("never evict", used by `krillm launch`
+    /// to pin a model for an agent session) must NOT hand the freshly-loaded
+    /// model a deadline in the past (now + negative). Regression: without the
+    /// init guard the model was evicted seconds after load, before the agent's
+    /// first — slow, multi-minute — request ever arrived.
+    func testKeepAliveNegativeDefaultNeverEvictsBeforeFirstRequest() async {
+        let c = KeepAliveController(defaultSeconds: -1)
+        var evict = await c.shouldEvict()
+        XCTAssertFalse(evict, "negative default must not evict an untouched model")
+        // Still pinned far in the future (no deadline at all).
+        evict = await c.shouldEvict(now: Date().addingTimeInterval(86_400))
+        XCTAssertFalse(evict, "negative default stays pinned indefinitely")
+        let deadline = await c.expiresAt()
+        XCTAssertNil(deadline)
+    }
+
     /// PR #18 rereview: keep_alive:0 must evict ONLY after the in-flight
     /// request that carried it drains — never before or during it.
     func testKeepAliveZeroDefersEvictionUntilRequestDrains() async {
@@ -496,6 +512,20 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(req.tools.count, 1)
         XCTAssertEqual(req.tools.first?.name, "get_weather")
         XCTAssertTrue(req.tools.first?.parametersJSON.contains("city") ?? false)
+    }
+
+    func testOpenAIChatRequestAcceptsStreamOptions() throws {
+        // `stream_options` is additive telemetry, not a generation knob, and
+        // real clients (opencode, the OpenAI SDK) send it on every streamed
+        // request. Parsing must accept it (not 400) — regression for the field
+        // that previously sat in the unsupported set and broke those agents.
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "local-model",
+            "messages": [["role": "user", "content": "hello"]],
+            "stream": true,
+            "stream_options": ["include_usage": true],
+        ])
+        XCTAssertTrue(req.stream)
     }
 
     func testChatRequestNormalizesToolResultTurns() throws {

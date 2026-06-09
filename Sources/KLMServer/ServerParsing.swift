@@ -158,8 +158,12 @@ internal enum ServerParsing {
         "functions", "function_call",
         "logprobs", "top_logprobs",
         "stop", "logit_bias",
-        "stream_options"
     ]
+    // `stream_options` (e.g. `{include_usage: true}`) is accepted and ignored,
+    // not rejected: it is additive telemetry that does not change generation
+    // semantics, and real clients (opencode, the OpenAI SDK) send it on every
+    // streamed chat request. Rejecting it with a 400 broke those agents before
+    // their first turn. Unlike `stop`/`logit_bias`, ignoring it is safe.
 
     private static let unsupportedOpenAICompletionFields: Set<String> = [
         "suffix", "best_of", "logprobs", "echo",
