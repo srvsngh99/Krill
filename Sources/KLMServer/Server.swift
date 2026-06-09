@@ -842,7 +842,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 context: context, messages: genMessages,
                 params: effParams, maxTokens: effMax,
                 media: decodedMedia, responseFormat: request.responseFormat,
-                contextLimit: effCtx)
+                contextLimit: effCtx, includeUsage: request.includeUsage)
         } else {
             handleNonStreamingCompletion(
                 context: context, messages: genMessages,
@@ -1339,6 +1339,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 ]
                 self.writeOnLoop(ctx, .head(ServerResponseHeads.openAIStreaming(cors: self.corsHeaders())))
                 self.writeSSEJSON(ctx, chunk)
+                if request.includeUsage {
+                    let chunkId = (response["id"] as? String) ?? "chatcmpl"
+                    self.writeRaw(ctx, sseUsageChunk(
+                        id: chunkId,
+                        promptTokens: stats?.promptTokens ?? 0,
+                        completionTokens: stats?.generatedTokens ?? 0))
+                }
                 self.writeRaw(ctx, "data: [DONE]\n\n")
                 self.writeOnLoop(ctx, .end(nil), flush: true)
             case .ollama:
@@ -1429,7 +1436,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         params: SamplingParams, maxTokens: Int,
         media: DecodedMedia? = nil,
         responseFormat: ResponseFormat? = nil,
-        contextLimit: Int? = nil
+        contextLimit: Int? = nil,
+        includeUsage: Bool = false
     ) {
         // Write the SSE head synchronously within the channelRead call
         // chain (NIO requires the response begin here, not from a detached
@@ -1463,7 +1471,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             defer { self.leaveQueue(releasing: eng) }
 
-            let (tokenStream, _) = await self.runGenerate(eng,
+            let (tokenStream, getStats) = await self.runGenerate(eng,
                 messages: messages,
                 params: params, maxTokens: maxTokens,
                 imageData: imageData, audioData: audioData,
@@ -1491,6 +1499,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     var buf = ByteBufferAllocator().buffer(capacity: chunk.utf8.count)
                     buf.writeString(chunk)
                     self.writeOnLoop(ctx, .body(.byteBuffer(buf)))
+
+                    // Optional usage chunk (OpenAI stream_options.include_usage)
+                    // before the terminator, so harnesses can read token counts.
+                    if includeUsage {
+                        let stats = getStats()
+                        let usage = sseUsageChunk(
+                            id: id,
+                            promptTokens: stats?.promptTokens ?? 0,
+                            completionTokens: stats?.generatedTokens ?? 0)
+                        var ubuf = ByteBufferAllocator().buffer(capacity: usage.utf8.count)
+                        ubuf.writeString(usage)
+                        self.writeOnLoop(ctx, .body(.byteBuffer(ubuf)))
+                    }
 
                     // Send [DONE]
                     let done = "data: [DONE]\n\n"
@@ -2942,6 +2963,29 @@ private func sseChunk(id: String, content: String?, finishReason: String?) -> St
         "choices": [choice]
     ]
 
+    guard let data = try? JSONSerialization.data(withJSONObject: payload),
+          let json = String(data: data, encoding: .utf8) else {
+        return ""
+    }
+    return "data: \(json)\n\n"
+}
+
+/// OpenAI `stream_options.include_usage` terminal chunk: a `chat.completion.chunk`
+/// with an empty `choices` array carrying the run's token `usage`, emitted just
+/// before `data: [DONE]`. Lets streaming harnesses (opencode, the OpenAI SDK)
+/// populate their context/token meter, which otherwise reads zero.
+private func sseUsageChunk(id: String, promptTokens: Int, completionTokens: Int) -> String {
+    let payload: [String: Any] = [
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": Int(Date().timeIntervalSince1970),
+        "choices": [Any](),
+        "usage": [
+            "prompt_tokens": promptTokens,
+            "completion_tokens": completionTokens,
+            "total_tokens": promptTokens + completionTokens,
+        ],
+    ]
     guard let data = try? JSONSerialization.data(withJSONObject: payload),
           let json = String(data: data, encoding: .utf8) else {
         return ""

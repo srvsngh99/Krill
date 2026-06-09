@@ -526,6 +526,21 @@ final class ServerTests: XCTestCase {
             "stream_options": ["include_usage": true],
         ])
         XCTAssertTrue(req.stream)
+        XCTAssertTrue(req.includeUsage, "stream_options.include_usage must be parsed")
+    }
+
+    func testOpenAIChatRequestIncludeUsageDefaultsFalse() throws {
+        // No stream_options, or include_usage:false, must leave includeUsage off
+        // so we never emit a usage chunk a client did not ask for.
+        let plain = try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]], "stream": true,
+        ])
+        XCTAssertFalse(plain.includeUsage)
+        let off = try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "stream": true, "stream_options": ["include_usage": false],
+        ])
+        XCTAssertFalse(off.includeUsage)
     }
 
     func testChatRequestNormalizesToolResultTurns() throws {
