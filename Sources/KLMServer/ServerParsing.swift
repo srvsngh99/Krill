@@ -106,6 +106,10 @@ internal struct ServerChatRequest: Equatable, Sendable {
     var contextLimit: Int? = nil
     /// OpenAI `tool_choice` (default `.auto`).
     var toolChoice: ServerToolChoice = .auto
+    /// OpenAI `stream_options.include_usage`: when true, a streaming response
+    /// emits a final `usage` chunk (choices:[]) before `[DONE]`, so harnesses
+    /// (opencode, the OpenAI SDK) can populate their context/token meter.
+    var includeUsage: Bool = false
 }
 
 internal struct ServerCompletionRequest: Equatable, Sendable {
@@ -159,11 +163,11 @@ internal enum ServerParsing {
         "logprobs", "top_logprobs",
         "stop", "logit_bias",
     ]
-    // `stream_options` (e.g. `{include_usage: true}`) is accepted and ignored,
-    // not rejected: it is additive telemetry that does not change generation
-    // semantics, and real clients (opencode, the OpenAI SDK) send it on every
-    // streamed chat request. Rejecting it with a 400 broke those agents before
-    // their first turn. Unlike `stop`/`logit_bias`, ignoring it is safe.
+    // `stream_options` is accepted (not rejected): real clients (opencode, the
+    // OpenAI SDK) send it on every streamed chat request, and rejecting it with
+    // a 400 broke those agents before their first turn. Its `include_usage`
+    // flag is honored — a final `usage` chunk is emitted before `[DONE]` (see
+    // ServerChatRequest.includeUsage and sseUsageChunk).
 
     private static let unsupportedOpenAICompletionFields: Set<String> = [
         "suffix", "best_of", "logprobs", "echo",
@@ -358,7 +362,8 @@ internal enum ServerParsing {
             tools: tools,
             responseFormat: parseOpenAIResponseFormat(json["response_format"]),
             keepAlive: KeepAliveParse.seconds(from: json["keep_alive"]),
-            toolChoice: parseToolChoice(json["tool_choice"])
+            toolChoice: parseToolChoice(json["tool_choice"]),
+            includeUsage: ((json["stream_options"] as? [String: Any])?["include_usage"] as? Bool) ?? false
         )
     }
 
