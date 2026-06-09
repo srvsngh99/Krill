@@ -123,6 +123,17 @@ public struct KrillConfig: Sendable {
                 serverHost = value
             case "idle_timeout":
                 if let v = Int(value) { idleTimeout = v }
+            case "max_loaded_models":
+                // How many models stay resident simultaneously (route-or-load by
+                // the request's `model` field). Set to 2+ to keep e.g. an
+                // embedding model and a generation model both warm on one port.
+                if let v = Int(value) { maxLoadedModels = v }
+            case "keep_alive":
+                keepAlive = value
+            case "num_parallel":
+                if let v = Int(value) { numParallel = v }
+            case "max_queue":
+                if let v = Int(value) { maxQueue = v }
             default:
                 break
             }
