@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import KLMRegistry
+import KLMServer
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -37,6 +38,9 @@ struct LaunchCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Do not auto-start the server; require an already-running one.")
     var noServe: Bool = false
 
+    @Option(name: .long, help: "Keep the model resident for the agent session. Number/duration (e.g. 30m), 0 to evict when idle, or negative to never evict. Default: pinned (never evict) so a slow agent init can't trip the idle evictor.")
+    var keepAlive: String?
+
     func run() async throws {
         // No agent -> print the roster (like the Ollama launcher screen).
         guard let agentId = agent else {
@@ -66,9 +70,21 @@ struct LaunchCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        // Ensure the server is up with the model loaded.
+        // Resolve the agent-session keep-alive. An attached interactive agent
+        // implies the model must stay resident for the whole session, so we
+        // pin (never evict) by default. Precedence: --keep-alive flag, then an
+        // explicit KRILL_/OLLAMA_KEEP_ALIVE in the environment, else pin (-1).
+        let env0 = ProcessInfo.processInfo.environment
+        let keepAliveStr = keepAlive
+            ?? env0["KRILL_KEEP_ALIVE"]
+            ?? env0["OLLAMA_KEEP_ALIVE"]
+            ?? "-1"
+        let keepAliveSecs = KeepAliveParse.duration(keepAliveStr) ?? -1
+
+        // Ensure the server is up with the model loaded and pinned.
         try await ensureServer(host: h, port: p, baseURL: baseURL,
-                               model: modelName, registry: registry)
+                               model: modelName, registry: registry,
+                               keepAliveStr: keepAliveStr, keepAliveSecs: keepAliveSecs)
 
         // Apply the agent's wiring: config files, then env, then setup commands.
         try applyConfigFiles(profile.configFiles, baseURL: baseURL, model: modelName)
@@ -110,20 +126,30 @@ struct LaunchCommand: AsyncParsableCommand {
     // MARK: - Server lifecycle
 
     private func ensureServer(host: String, port: Int, baseURL: String,
-                              model: String, registry: Registry) async throws {
+                              model: String, registry: Registry,
+                              keepAliveStr: String, keepAliveSecs: Int) async throws {
         if let health = await getHealth(baseURL: baseURL) {
-            // Already running: load the requested model if it is not active.
+            // Already running: load the requested model if it is not active,
+            // and pin it for the agent session either way. The load call
+            // carries keep_alive so an already-loaded model is also pinned —
+            // the agent's slow first-request init can't trip the idle evictor.
             let loaded = (health["model_loaded"] as? Bool) ?? false
             let active = health["model"] as? String
             if !loaded || active != model {
                 print("Loading '\(model)' into the running server...")
                 // Fail loud (like the auto-start branch) so we never exec the
                 // agent against the wrong model on a failed load.
-                guard await loadModel(baseURL: baseURL, model: model) else {
+                guard await loadModel(baseURL: baseURL, model: model,
+                                      keepAlive: keepAliveSecs) else {
                     print("Error: server could not load '\(model)'. "
                           + "Check `krillm list` and the server log.")
                     throw ExitCode.failure
                 }
+            } else {
+                // Already active: pin it (best-effort — a stale keep-alive
+                // shouldn't abort an otherwise-ready session).
+                _ = await loadModel(baseURL: baseURL, model: model,
+                                    keepAlive: keepAliveSecs)
             }
             return
         }
@@ -154,6 +180,12 @@ struct LaunchCommand: AsyncParsableCommand {
         proc.arguments = ["serve", "--model", model, "--port", "\(port)", "--host", host]
         proc.standardOutput = logHandle
         proc.standardError = logHandle
+        // Pin the model for the agent session: the spawned serve inherits our
+        // environment, but we force its default keep-alive so the pre-loaded
+        // model never idle-unloads while the agent is still initializing.
+        var childEnv = ProcessInfo.processInfo.environment
+        childEnv["KRILL_KEEP_ALIVE"] = keepAliveStr
+        proc.environment = childEnv
         do {
             try proc.run()
         } catch {
@@ -186,13 +218,16 @@ struct LaunchCommand: AsyncParsableCommand {
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
-    /// Ask the running server to load `model`. Returns true on HTTP 200.
-    private func loadModel(baseURL: String, model: String) async -> Bool {
+    /// Ask the running server to load `model`, pinning it for the agent
+    /// session via `keep_alive` (negative = never evict). Returns true on
+    /// HTTP 200.
+    private func loadModel(baseURL: String, model: String, keepAlive: Int) async -> Bool {
         guard let url = URL(string: "\(baseURL)/v1/models/load") else { return false }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["model": model])
+        req.httpBody = try? JSONSerialization.data(
+            withJSONObject: ["model": model, "keep_alive": keepAlive])
         guard let (_, resp) = try? await URLSession.shared.data(for: req) else { return false }
         return (resp as? HTTPURLResponse)?.statusCode == 200
     }

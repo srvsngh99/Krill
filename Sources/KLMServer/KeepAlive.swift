@@ -65,7 +65,13 @@ public actor KeepAliveController {
 
     public init(defaultSeconds: Int) {
         self.defaultSeconds = defaultSeconds
-        self.deadline = Date().addingTimeInterval(TimeInterval(defaultSeconds))
+        // A negative default means "never evict" (e.g. `krillm launch` pins the
+        // model for an agent session). Mirror `touch()`'s semantics at init so a
+        // freshly-loaded model with a negative default isn't handed a deadline
+        // in the past (now + negative) and evicted before its first request.
+        self.deadline = defaultSeconds < 0
+            ? nil
+            : Date().addingTimeInterval(TimeInterval(defaultSeconds))
     }
 
     /// Record activity. `override` (seconds) is the request's `keep_alive`:
