@@ -6,6 +6,38 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-09
+
+Patch release: agent-serving robustness. Fixes a fatal bf16 kernel crash, makes
+streaming token-usage visible to coding agents, and lets a single server keep an
+embedding model and a generation model resident at once.
+
+### Fixed
+
+- **Fatal MLX Metal JIT crash in the fused SwiGLU kernel under bf16 models.** The
+  kernel stored its fp32 result into the output via Metal's implicit conversion
+  (`out[elem] = g * sig * u`), which Metal accepts for `half`/`float` but REJECTS
+  for `bfloat` ("assigning to 'bfloat16_t' from incompatible type 'float'"). The
+  first dispatch with a bf16 output failed to JIT-compile and aborted the whole
+  server process - reachable by any bf16 model routed through the fused FFN (Gemma
+  4 12B, Qwen, DeepSeek). Now the output dtype is bound to a template type and the
+  store uses an explicit `static_cast`, valid for fp16/bf16/fp32. Gated by a kernel
+  test that runs all three dtypes. (#188)
+
+### Added
+
+- **`stream_options.include_usage` is honored on streaming chat.** When a client
+  requests it, the server emits a final `chat.completion.chunk` with `choices:[]`
+  carrying token `usage` before `[DONE]`, on both the tool-aware and plain
+  streaming paths. Coding agents (opencode, the OpenAI SDK) now show real
+  context/token counts instead of zero. The Ollama and Responses surfaces already
+  reported usage, so accounting is now consistent across all three. (#187)
+- **`config.toml` reads the serving knobs** `max_loaded_models`, `num_parallel`,
+  `keep_alive`, and `max_queue` (previously env-only). Setting
+  `max_loaded_models = 2` keeps two models resident on one port (routed by the
+  request's `model` field) - so a local deployment can call an embedding model and
+  then a generation model with neither evicted. (#189)
+
 ## [0.5.0] - 2026-06-09
 
 Headline: **Gemma 4 12B, natively.** KrillLM gains a native, encoder-free Gemma 4
