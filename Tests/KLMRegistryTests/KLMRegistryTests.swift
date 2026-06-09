@@ -2,6 +2,25 @@ import XCTest
 @testable import KLMRegistry
 
 final class KLMRegistryTests: XCTestCase {
+    func testConfigTOMLParsesServingKnobs() {
+        // The serving knobs (max_loaded_models, num_parallel, keep_alive,
+        // max_queue) were env-only; config.toml must now read them too, so a
+        // deployment can keep e.g. an embedding model and a generation model
+        // both resident by default (max_loaded_models = 2).
+        var cfg = KrillConfig()
+        XCTAssertEqual(cfg.maxLoadedModels, 1)   // default
+        cfg.mergeFromTOML("""
+            max_loaded_models = 2
+            num_parallel = 4
+            keep_alive = "-1"
+            max_queue = 256
+            """)
+        XCTAssertEqual(cfg.maxLoadedModels, 2)
+        XCTAssertEqual(cfg.numParallel, 4)
+        XCTAssertEqual(cfg.keepAlive, "-1")
+        XCTAssertEqual(cfg.maxQueue, 256)
+    }
+
     func testModelNameValidationRejectsTraversal() {
         XCTAssertTrue(Registry.isValidModelName("llama-3.2-1b"))
         XCTAssertTrue(Registry.isValidModelName("my_model.v2"))
