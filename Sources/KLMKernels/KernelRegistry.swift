@@ -15,11 +15,15 @@ public enum KLMKernels {
     /// JIT-compiled fused SwiGLU kernel.
     /// Computes output[i] = silu(gate[i]) * up[i] without materializing silu(gate).
     ///
-    /// The sigmoid/multiply intermediates run in fp32; the result is
-    /// written through Metal's implicit conversion to the buffer's
-    /// element type. That keeps the kernel correct for fp16, bf16,
-    /// and fp32 outputs (the prior version hardcoded `half(...)`,
-    /// which would silently fp16-truncate bf16 outputs).
+    /// The sigmoid/multiply intermediates run in fp32; the result is then
+    /// **explicitly** cast to the output element type (`OUT_T`, bound to the
+    /// output dtype at dispatch) before the store. Metal allows implicit
+    /// `float -> half`/`float -> float` but REJECTS implicit `float -> bfloat`
+    /// ("assigning to 'bfloat16_t' from incompatible type 'float'"), which made
+    /// the prior implicit-conversion version fail to compile and crash the
+    /// process whenever a bf16 model (e.g. Gemma 4 12B) reached this kernel.
+    /// The explicit `static_cast<OUT_T>` is correct for fp16, bf16, and fp32 and
+    /// keeps the bf16 output (the prior `half(...)` would fp16-truncate bf16).
     private static let _fusedSwiGLUKernel: MLXFast.MLXFastKernel = {
         MLXFast.metalKernel(
             name: "fused_swiglu",
@@ -30,7 +34,7 @@ public enum KLMKernels {
                 float g = float(gate[elem]);
                 float u = float(up[elem]);
                 float sig = 1.0f / (1.0f + exp(-g));
-                out[elem] = g * sig * u;
+                out[elem] = static_cast<OUT_T>(g * sig * u);
             """,
             ensureRowContiguous: true
         )
@@ -54,6 +58,7 @@ public enum KLMKernels {
 
         let results = _fusedSwiGLUKernel(
             [gate, up],
+            template: [("OUT_T", gate.dtype)],
             grid: (grid, 1, 1),
             threadGroup: (threadGroup, 1, 1),
             outputShapes: [gate.shape],
