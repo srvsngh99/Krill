@@ -6,97 +6,89 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-09
+
+Headline: **Gemma 4 12B, natively.** KrillLM gains a native, encoder-free Gemma 4
+12B "unified" multimodal runtime (text + vision + audio) running in 4-bit-float
+nvfp4, plus one-command coding-agent launch (`krillm launch`) wiring Claude Code,
+Codex, OpenCode, Copilot, Droid, Hermes, and Pi to your local server. The wins
+over Ollama on Mac are now primarily on **capability** - constrained tool calls,
+structured output, native multimodal, and native voice that Ollama's MLX Gemma
+tag does not do - and on **concurrency** (~2x via the continuous batcher), **cold
+start**, and **agentic/RAG latency** (shared-prefix KV reuse). Single-stream text
+decode is at parity with Ollama's MLX backend by the MLX bandwidth roof on a 24GB
+box; raw-throughput chasing is explicitly closed (see
+`docs/CEILINGS_AND_REATTEMPTS.md`). The released server runs on the default port
+`57455` and coexists with Ollama on `11434`.
+
 ### Added
 
-- **`tool_choice` with grammar-constrained tool calls.** The OpenAI/Ollama chat
-  paths now honor `tool_choice`: `"none"` suppresses tools, `"required"` and
-  `{type:"function",function:{name}}` FORCE a call. A forced call is decoded
-  under a JSON schema built from the tool (`name` pinned, `arguments` = the
-  tool's own parameter schema), constraining the output to a valid,
-  schema-matched `{"name","arguments"}` object. The grammar mask fails open if
-  no valid token is available (e.g. a tokenizer lacking a bare value-start
-  piece), so it is a strong best-effort, not an absolute guarantee; a forced
-  call that still fails to parse is logged and returns content with no
-  tool_calls. `.auto` (default) is unchanged (unconstrained, family adapter).
-  To make
-  this work on a greedy thinking-prone model (Gemma), the schema grammar gained
-  a COMPACT mode (`OutputFormat.jsonSchemaCompact`) that rejects structural
-  whitespace - without it the model loops on grammar-permitted newlines instead
-  of emitting the object. Whitespace inside string values is unaffected, and
-  the default `response_format` path stays whitespace-tolerant.
+- **Native encoder-free Gemma 4 12B "unified" multimodal runtime.** Text, vision,
+  and audio on one dense Gemma 4 backbone (reused 100%) with new linear
+  vision/audio projectors - no separate vision encoder. Soft-token media runs are
+  wrapped in `<start_of_image>`...`<end_of_image>` markers so the model reads
+  media correctly. Registered as `gemma-4-12b`. (#171)
+- **Native nvfp4 / mxfp4 (4-bit-float) quantization.** A config `mode` is parsed
+  and threaded to MLX's `QuantizationMode` at every quantized-load site (affine
+  stays a byte-identical no-op). The shipped `gemma-4-12b` is an nvfp4 checkpoint
+  requantized from the original bf16 weights with the attention `o_proj` kept at
+  8-bit (mixed precision): MMLU-500 **77.6% at ~27.7 tok/s** single-stream -
+  Ollama-parity quality at nvfp4 speed, a both-axes result. Reproduce with
+  `tools/requant_gemma4_nvfp4.py`; details in `docs/GEMMA4_12B_NVFP4.md`. (#173, #176)
+- **`krillm launch <agent>` - boot a coding agent wired to KrillLM.** One command
+  resolves the agent profile, ensures the server is up with the chosen model
+  loaded and **pinned for the session**, writes/merges the agent's config + env,
+  and execs it. Supports Claude Code, Codex, OpenCode, GitHub Copilot, Droid,
+  Hermes, and Pi across three wire protocols, including a **native OpenAI
+  Responses API** (`/v1/responses`) for Codex and spec-correct Anthropic streaming
+  `tool_use` on `/v1/messages`. See `docs/CONNECT_CODING_AGENTS.md`. (#161, #162,
+  #163, #164, #185)
+- **Tool-calling depth.** `tool_choice` is honored (`none` / `required` / a named
+  function), with forced calls decoded under a JSON schema built from the tool so
+  the output is a valid schema-matched `{"name","arguments"}` object. Auto tool
+  calls get a two-pass argument constraint: if a model emits empty/invalid args
+  for a required-field tool, a short second pass re-generates the args constrained
+  to the tool's schema (fails open). Native per-family tool adapters added for
+  Mistral and Phi. (#179, #184, #124)
+- **More native vision runtimes.** LLaVA-1.5 (CLIP + projector + Llama) end-to-end
+  image serving, Llama-3.2-Vision (mllama) multi-image serving, and Qwen2.5-VL
+  ragged-grid batched window attention. (#129, #130, #133, #143, #132)
+- **DeepSeek-V3 absorbed-MLA runtime** and a **shared SwitchGLU / quantized
+  switched-linear module** that all MoE families reuse. (#127, #125)
+- **N-gram (prompt-lookup) speculative decode wired into the continuous batcher.**
+  No draft model needed; wins on repetitive workloads (RAG, code, structured
+  output). (#136-#142)
+- **Shared-prefix (partial) KV reuse for the agentic/RAG workload** on the serial,
+  concurrent-batched, and Gemma 4 paths, cutting repeat-prefix latency
+  dramatically (e.g. gemma-4-e2b 1001ms -> 158ms). (#148, #151, #156-#159)
+- **On-disk prefix-cache LRU eviction** bounded by `KRILL_PREFIX_CACHE_GB`
+  (O(1) per-write accounting). (#181)
 
 ### Fixed
 
-- **Grammar / structured-output decoding now works on models with a padded
-  vocab (Gemma 4).** The grammar logit mask was built at the tokenizer piece
-  count (e.g. 261707) while the model's logits are the padded config vocab
-  (262144), so the width-mismatch guard silently disabled all
-  JSON/schema/regex/CFG constrained decoding on Gemma 4. The mask now emits at
-  the model's logits width (`GrammarTokenMask.maskWidth`, fed the loaded
-  model's `vocabSize`), with the unused padding token slots blocked. Constrained
-  decoding is enabled whenever the emitted width matches the logits width.
+- **Gemma 4 long-context correctness.** Sliding-window attention is now applied on
+  both the solo and batched-decode paths (fixes empty/looping output past ~2x the
+  sliding window), and KV-shared layers rotate the decode query at the donor's
+  true position. (#166, #167, #168)
+- **Grammar / structured-output decoding on padded-vocab models (Gemma 4)** - the
+  logit mask now emits at the model's logits width, re-enabling
+  JSON/schema/regex/CFG constrained decoding. (#175)
+- **nvfp4 vision color degradation** (red-channel shift) - vision/audio projectors
+  are auto-protected at 8-bit in the requant tool. (#182)
+- **Thinking-channel marker leak** - Gemma `<|channel>thought` markers are stripped
+  from all responses on every server + CLI path. (#183)
+- **`krillm launch` keep-alive and `stream_options`.** The launched server now pins
+  the model so a slow agent init can't trip the idle evictor, and the OpenAI chat
+  path accepts `stream_options` (additive telemetry) instead of rejecting it -
+  which had broken OpenCode and the OpenAI SDK before their first turn. (#185)
+- **Phi-4-mini runtime** (partial RoPE, tied embeds, fused QKV, LongRoPE, stop
+  token) plus the o200k tokenization path. (#124)
 
 ### Changed
 
-- **Default serve port changed from `11434` to `57455`** ("KRILL" on a
-  phone keypad). KrillLM now coexists with Ollama out of the box instead
-  of colliding on Ollama's `11434`. `--port` (and `KRILL_PORT`) still
-  override the default; for a drop-in Ollama replacement, run with
-  `--port 11434`.
-
-### Added
-
-- **Gemma 4 12B nvfp4 checkpoint (both-axes win vs Ollama).** Requantizing nvfp4
-  from the original bf16 weights (not the 4-bit checkpoint) fixes the
-  double-quantized-attention defect: MMLU-500 71.6% -> 75.6% (paired McNemar
-  p=0.02), parity with Ollama `gemma4:12b-mlx` (75.8%) at nvfp4 speed
-  (closes #174). A mixed-precision sweep found that keeping the attention
-  `o_proj` at 8-bit while the bulk stays nvfp4 lifts quality to 77.6% at no
-  speed cost (~27.7 tok/s single-stream). Concurrency
-  scales ~2x via the batcher (1.38x aggregate vs flat Ollama at N=8). Shipped as
-  `gemma-4-12b-nvfp4`, with the canonical `gemma-4-12b` promoted to it.
-  Reproduce with `tools/requant_gemma4_nvfp4.py`; full results in
-  `docs/GEMMA4_12B_NVFP4.md`.
-
-- **Fused Q4-affine matmul probe (closed lever).** `KLMKernels.fusedQ4Gemv` - a
-  JIT Metal kernel that fuses affine-4bit dequant + GEMV for the decode shape,
-  numerically matching MLX's `quantizedMatmul` (cosine > 0.9999 across group
-  sizes). Benchmarked at ~2.9x SLOWER than MLX's tuned built-in on M-series, so
-  it is landed as a probe (correctness gate + benchmark) but NOT wired into the
-  decode hot path - the same disposition as the compiled-decode lever (#128).
-  See `docs/FUSED_Q4_PROBE.md`. `MLX.quantizedMatmul` remains the shipped path.
-
-- **Native Llama-3.2-Vision (mllama) runtime.** `Llama32VisionForCausalLM` - a
-  tiled ViT vision tower (Conv2d patch embed, gated aspect-ratio + position
-  embeddings, a local transformer + a gated global transformer, intermediate-layer
-  concatenation), a multi-modal projector, and a Llama text decoder whose
-  `cross_attention_layers` cross-attend to the projected vision features (gated
-  cross-attention with q/k RMSNorm; vision enters via cross-attention, unlike
-  LLaVA's prefix-embed splice). The `llama_vision` family is detected, loaded
-  (`loadLlamaVision`, with the `vision_model`->`vision_tower` key rename and the
-  PyTorch->MLX conv transpose), and registered. Verified for logit parity against
-  mlx-vlm on a tiny synthetic checkpoint with ALL parameters randomized so the
-  gated cross-attention genuinely contributes (argmax + cosine > 0.9999). Image
-  serving (tile/aspect-ratio preprocessing + a cross-KV decode driver) is a
-  follow-up, so the family advertises text generation only for now; tier
-  `experimental`. The real Llama-3.2-11B-Vision run is RAM-blocked on the 24GB
-  dev box.
-
-- **LLaVA-1.5 image serving.** The native LLaVA-1.5 runtime (`LlavaForCausalLM`
-  — CLIP ViT + multi-modal projector + Llama backbone, landed previously and
-  mlx-vlm logit-parity-verified) is now wired end-to-end through the engine: the
-  `llava` family is registered (detection, capabilities, adapter routing), a CLIP
-  image preprocessor (`LlavaImagePreprocessor`: resize shortest-edge → center-crop
-  336 → CLIP-normalize) feeds the generic multimodal path, and `formatLlavaTokenIds`
-  builds the vicuna prompt with the per-patch image-token run placed inline. You can
-  now POST an image to a llava-1.5 model and get a vision-grounded answer; text-only
-  turns run straight through the Llama backbone. Tier: `experimental` (parity-gated;
-  a serving benchmark gate is pending). Verified end-to-end on
-  mlx-community/llava-1.5-7b-4bit (red image -> "Red", blue -> "Blue", text-only ->
-  correct). Also fixes `LlavaConfig` decoding to fill HF base-Llama defaults for the
-  minimal `text_config` real llava-1.5 checkpoints ship (they omit the Llama dims and
-  rely on transformers' LlamaConfig defaults), which previously made the canonical
-  checkpoint fail to load.
+- **Default serve port is `57455`** ("KRILL" on a phone keypad) so KrillLM coexists
+  with Ollama instead of colliding on `11434`. `--port` / `KRILL_PORT` override;
+  run `--port 11434` for a drop-in Ollama replacement. (#147)
 
 ## [0.4.0] - 2026-06-01
 
