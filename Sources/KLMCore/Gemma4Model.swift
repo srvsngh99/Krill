@@ -1160,17 +1160,45 @@ class Gemma4TextModel: Module {
         }
 
         let fullMode: MLXFast.ScaledDotProductAttentionMaskMode = .array(mask)
-        // Sliding layers attend only the last `slidingWindow` keys (see the solo
-        // path). In the stacked SINGLE-query decode layout, for EVERY row
-        // `query_abs - key_abs == totalLen - 1 - col`, so a key column is
-        // "too old" iff `col < totalLen - window` - row-independent. Add that to
-        // the left-pad mask for sliding layers. Only the L==1 decode step is
-        // windowed here; the multi-query verify mask (spec) is left unwindowed
-        // (a documented follow-up). For prompts within the window this is a no-op.
         let totalLen = mask.dim(3)
         let window = config.slidingWindow
+        let firstShared = config.firstKVSharedLayer
+        // Sliding layers attend only the last `slidingWindow` keys (see the solo
+        // path). Two stacked layouts exist:
+        //
+        //  TRIMMED (rotating per-row caches): sliding layers were stacked at
+        //  the per-row trimmed widths, so their stacked cache is narrower than
+        //  the full layout (`slidingTotal < totalLen`). The caller's mask is in
+        //  FULL coordinates; because rows are right-aligned in both layouts,
+        //  slicing its last `slidingTotal` columns yields exactly the right
+        //  per-row pad mask for the trimmed view (a row's surviving pad in the
+        //  slice equals its trimmed pad). The window rule in the trimmed view
+        //  is `q_abs - k_abs = slidingPre + j - c` - row-independent - applied
+        //  for ANY L, which also windows the multi-query verify forward (the
+        //  full-width layout leaves verify unwindowed, a documented follow-up).
+        //
+        //  FULL (standard per-row caches): the pre-rotating layout, unchanged:
+        //  window column-add at L == 1 only (`col < totalLen - window`).
         let slidingMode: MLXFast.ScaledDotProductAttentionMaskMode
-        if L == 1, totalLen > window {
+        var slidingIdx = -1
+        for i in 0 ..< caches.count where !config.isFullAttention(layerIdx: i) {
+            if !(kvSharingEnabled && i >= firstShared) { slidingIdx = i; break }
+        }
+        let slidingPre = slidingIdx >= 0 ? caches[slidingIdx].sequenceLength : 0
+        let slidingTotal = slidingPre + L
+        if slidingIdx >= 0, slidingTotal < totalLen {
+            // Trimmed layout: slice the full-coordinate mask to the sliding width.
+            var m = mask[0..., 0..., 0..., (totalLen - slidingTotal) ..< totalLen]
+            if slidingTotal > window {
+                let cols = MLXArray(Int32(0) ..< Int32(slidingTotal)).reshaped(1, slidingTotal)
+                let qs = MLXArray(Int32(0) ..< Int32(L)).reshaped(L, 1)
+                let tooOld = (qs + MLXArray(Int32(slidingPre)) - cols) .>= MLXArray(Int32(window))
+                let colAdd = MLX.where(tooOld, MLXArray(Float(-10000)), MLXArray(Float(0)))
+                    .reshaped(1, 1, L, slidingTotal).asType(mask.dtype)
+                m = m + colAdd
+            }
+            slidingMode = .array(m)
+        } else if L == 1, totalLen > window {
             let cols = MLXArray(Int32(0) ..< Int32(totalLen))
             let tooOld = cols .< MLXArray(Int32(totalLen - window))
             let colAdd = MLX.where(tooOld, MLXArray(Float(-10000)), MLXArray(Float(0)))
@@ -1179,7 +1207,6 @@ class Gemma4TextModel: Module {
         } else {
             slidingMode = .array(mask)
         }
-        let firstShared = config.firstKVSharedLayer
 
         for (i, layer) in layers.enumerated() {
             let pleSlice: MLXArray? = combinedPLE.map { ple in
