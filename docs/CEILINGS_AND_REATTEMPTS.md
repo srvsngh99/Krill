@@ -200,6 +200,46 @@ compute, is the actual binding constraint.)
   multimodal prefill path is not yet chunked (text-only today, both serial and
   batched) - a follow-up; image/audio prompts are typically short.
 
+### 7. Long-context decode cliff (Gemma 4 12B) - RESOLVED to near-flat
+
+- **Limit (was):** decode collapsed with context - 19.0 tok/s @2.2k, 9.6 @7.2k,
+  5.4 @18k, and 32k+ was swap-bound to unusable (the box's swap filled; one
+  sweep row ran 40+ min before being killed). Root causes (all software, NOT
+  the bandwidth roof): (1) `KVCache.update()` concatenated the full history
+  EVERY step - an O(context) copy per layer per step on all 48 layers; (2) the
+  40 sliding-window layers stored and READ full-context KV, masked down to
+  their 1024-token window per step; (3) a `[1,1,1,C]` sliding mask was built
+  per decode step.
+- **Status: RESOLVED via two shipped levers** - (a) O(1) in-place KV append
+  (PR #193): preallocated buffer + slice-assign + view returns; (b)
+  `RotatingKVCache` for sliding-window layers: retain only `window-1` tokens
+  (+ current appends), so the retained set IS the allowed key set and decode
+  needs NO sliding mask at all. Numerically identical to full-cache + sliding
+  mask (relative q-k distances preserved; randomized SDPA-parity gates).
+  Measured curve (gemma-4-12b nvfp4, greedy, 64 tokens, chunked prefill):
+
+  | ctx | baseline | +O(1) append | +rotating KV |
+  |---|---|---|---|
+  | 2.2k | 19.0 | 20.7 | 22.6 |
+  | 7.2k | 9.6 | 13.0 | 18.9 |
+  | 18k | 5.4 | 9.6 | 20.6 |
+  | 36k | unusable | - | 19.9 |
+  | 53.6k | unusable | - | 19.1 |
+  | 67k | unusable | - | 8.7 |
+
+  **Near-flat ~19-23 tok/s from zero to ~54k context**; peak engine memory at
+  53.6k is 12.6GB (vs 15.2GB at just 18k before). The ~67k row is where total
+  residency (weights + full-attention KV + activations) crosses the box's
+  comfortable zone and swapping resumes - the practical ceiling on 24GB is
+  ~55-60k, matching the model's usable-context target here.
+- **Residual / notes:** the 8 full-attention layers' KV still grows with
+  context (they are the model's long-range memory - bounding them would break
+  retrieval); that growth is what eventually ends the flat zone. The batched/
+  concurrent path still allocates full-history caches (serial-rotated vs
+  batched-standard outputs agree because rotation == mask semantics); wiring
+  the batcher is the follow-up, and int8-on-full-attention-only is the probe
+  for pushing past ~60k. Kill-switch: `KRILL_ROTATING_KV=0`.
+
 ---
 
 ## Resource ceilings (RAM-blocked on the 24GB dev box)
