@@ -55,7 +55,15 @@ final class Gemma4DecodeSweepTests: XCTestCase {
         """
         var blocks: [String] = ["Document start. Remember the pass phrase."]
         for i in 0..<sections { blocks.append("Section \(i): " + para) }
-        blocks.append("\nQuestion: Summarize what the KrillLM engine supports, then state the secret pass phrase. Answer:")
+        // Default question asks for a summary FIRST, so at 64 max tokens the
+        // phrase often does not fit (needle=N is then a generation-budget
+        // artifact, not a retrieval failure). KLM_SWEEP_DIRECT_Q=1 asks for
+        // the phrase ONLY - use it to validate retrieval at frontier lengths.
+        if ProcessInfo.processInfo.environment["KLM_SWEEP_DIRECT_Q"] == "1" {
+            blocks.append("\nQuestion: What is the secret pass phrase mentioned above? Answer:")
+        } else {
+            blocks.append("\nQuestion: Summarize what the KrillLM engine supports, then state the secret pass phrase. Answer:")
+        }
         return blocks.joined(separator: "\n")
     }
 
@@ -84,7 +92,14 @@ final class Gemma4DecodeSweepTests: XCTestCase {
             text += event.text
         }
         let peakGB = Double(Memory.snapshot().peakMemory - base) / 1_073_741_824
-        let s = stats()
+        // Stats are written by the generation Task as it finalizes; a very
+        // short answer (direct question -> phrase -> EOS) can end the stream
+        // before that write lands. Poll briefly rather than reading zeros.
+        var s = stats()
+        for _ in 0 ..< 20 where (s?.promptTokens ?? 0) == 0 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            s = stats()
+        }
         return Row(
             label: ngram ? "ngram" : "plain",
             promptTokens: s?.promptTokens ?? 0,
@@ -132,7 +147,11 @@ final class Gemma4DecodeSweepTests: XCTestCase {
                 + "\(String(format: "%.1f", plain.decodeTps)) | "
                 + "\(String(format: "%.2f", plain.peakGB)) | \(plain.needle ? "y" : "N") | "
                 + "\(ngramCol) | \(ngramNeedle) | \(spec) |")
-            XCTAssertGreaterThan(plain.decodeTps, 0, "no decode at sections=\(sections)")
+            // A direct-question row can answer in a couple of tokens (decode
+            // rate is then meaningless); the row still proves itself via the
+            // needle. Otherwise require a real decode rate.
+            XCTAssertTrue(plain.decodeTps > 0 || plain.needle,
+                "no decode and no needle at sections=\(sections)")
         }
         emit("=============================================")
         emit("")
