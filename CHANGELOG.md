@@ -6,6 +6,44 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-10
+
+The long-context release. Gemma 4 12B now decodes near-flat (~17-23 tok/s)
+from 0 to ~99k tokens of context on a 24GB machine, and long prompts no
+longer crash the server. Previously decode fell to 5.4 tok/s by 18k context,
+prompts past ~21k tokens aborted the process, and contexts past ~32k
+swap-killed the box.
+
+### Fixed
+
+- **Long prompts no longer OOM: chunked prefill.** MLX has no flash-attention
+  prefill kernel, so a single prefill forward materializes the full
+  `[heads, L, L]` bf16 score matrix - a 35k-token prompt asks for a 39.86GB
+  buffer and aborts the process around 21k tokens. Prefill now runs in query
+  chunks (`KRILL_PREFILL_CHUNK`, default 2048, `0` disables) on both the
+  serial engine and the concurrent batcher; short prompts are untouched. (#192)
+
+### Performance
+
+- **O(1) in-place KV append.** Every decode step appended to the KV cache by
+  full-tensor concat - an O(context) copy per layer per step, across all 48
+  layers. Caches now grow preallocated buffers in steps and append in place:
+  1.78x decode at 20k context from this change alone. Also adds the
+  context-sweep decode benchmark harness. (#193)
+- **Rotating sliding-window KV cache.** Gemma 4's 40 sliding-window layers
+  retained full-context KV that their mask immediately discarded.
+  `RotatingKVCache` keeps only the window for those layers (decode then needs
+  no sliding mask at all), on the serial path (#194) and the concurrent
+  batcher, where per-row trimmed widths drive the batched sliding mask after
+  partial prefix-cache restores (#195). Combined with the above: near-flat
+  decode to ~99k context, needle retrieval verified at ~89k, peak 16.4GB.
+  `KRILL_ROTATING_KV=0` reverts to the previous behavior on both paths. (#194, #195)
+- **Negative results documented so they are not re-chased.** int8 KV as a
+  default (#191) and int8 on the full-attention layers (#196) both lose on
+  speed without a memory payoff (the dequant transient doubles the working
+  set); the practical long-context ceiling on a 24GB box is ~100k of the 128k
+  window. See `docs/CEILINGS_AND_REATTEMPTS.md` entries 5-7. (#191, #196)
+
 ## [0.5.1] - 2026-06-09
 
 Patch release: agent-serving robustness. Fixes a fatal bf16 kernel crash, makes
