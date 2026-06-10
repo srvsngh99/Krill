@@ -2200,7 +2200,7 @@ extension InferenceEngine {
 
     private func makeBatchedPrefillRow(
         _ model: LoadedModel
-    ) -> ([Int], [KVCache], Bool) -> MLXArray {
+    ) -> ([Int], [RestorableKVCache], Bool) -> MLXArray {
         let modelPrefillForward = model.prefillForward
         let modelForward = model.forward
         let pc = self.prefixCache
@@ -2208,9 +2208,11 @@ extension InferenceEngine {
         let chunkSize = self.prefillChunkSize
         return { tokens, caches, usePrefixCache in
             var cacheHit = false
-            // `spansCanSeed`: the batched rows use full-history caches, so a
-            // window-trimmed entry written by the serial rotating path must be
-            // declined (restoring it would corrupt the row - see spanCanSeed).
+            // `spansCanSeed`: a window-trimmed entry (serial rotating store) may
+            // seed a row's RotatingKVCache layers but never a full-history
+            // cache (restoring it there would corrupt the row - see
+            // spanCanSeed). Rows allocated from the cacheSpec accept trimmed
+            // entries on their rotating layers exactly like the serial path.
             if usePrefixCache,
                let hit = pc.lookup(tokens: tokens, modelId: pcModelId, mediaHash: nil),
                !hit.keys.isEmpty, hit.prefixLength == tokens.count,
@@ -2218,7 +2220,7 @@ extension InferenceEngine {
                 for (i, cache) in caches.enumerated() {
                     if i < hit.keys.count, let k = hit.keys[i].first,
                        i < hit.values.count, let v = hit.values[i].first {
-                        cache.restore(keys: k, values: v)
+                        cache.restore(keys: k, values: v, totalSeen: hit.storedLength)
                     }
                 }
                 cacheHit = true
@@ -2235,11 +2237,23 @@ extension InferenceEngine {
             if usePrefixCache, !cacheHit,
                let hit = pc.lookupLongestPrefix(tokens: tokens, modelId: pcModelId, mediaHash: nil),
                !hit.keys.isEmpty, hit.prefixLength <= tokens.count,
-               Self.spansCanSeed(hit: hit, caches: caches) {
+               Self.spansCanSeed(hit: hit, caches: caches),
+               // Rotating layers can only truncate within their retained span
+               // (mirrors the serial LCP pre-check): infeasible -> skip reuse,
+               // cold chunked prefill. Checked BEFORE restoring.
+               {
+                   let keep = min(hit.prefixLength, tokens.count - 1)
+                   return caches.enumerated().allSatisfy { i, cache in
+                       guard cache is RotatingKVCache,
+                             i < hit.keys.count, let k = hit.keys[i].first
+                       else { return true }
+                       return keep >= hit.storedLength - k.dim(2)
+                   }
+               }() {
                 for (i, cache) in caches.enumerated() {
                     if i < hit.keys.count, let k = hit.keys[i].first,
                        i < hit.values.count, let v = hit.values[i].first {
-                        cache.restore(keys: k, values: v)
+                        cache.restore(keys: k, values: v, totalSeen: hit.storedLength)
                     }
                 }
                 partialReuseLen = hit.prefixLength
@@ -2390,7 +2404,20 @@ extension InferenceEngine {
             return { toks, caches, upc in q(toks, caches.map { $0 as! QuantizedKVCache }, upc) }
         }
         let f = makeBatchedPrefillRow(model)
-        return { toks, caches, upc in f(toks, caches.map { $0 as! KVCache }, upc) }
+        // Rows may mix KVCache (full-attention) and RotatingKVCache (sliding)
+        // per the model's cacheSpec; both conform to RestorableKVCache.
+        return { toks, caches, upc in f(toks, caches.map { $0 as! RestorableKVCache }, upc) }
+    }
+
+    /// Adapt the WINDOWED batched forward (trimmed sliding stacks) to the
+    /// protocol-typed shape, or nil when the family does not wire it.
+    private func protocolBatchedForwardWindowed(
+        _ model: LoadedModel
+    ) -> ((MLXArray, [KVCacheProtocol], MLXArray, MLXArray, [Int]) -> MLXArray)? {
+        guard let wf = model.batchedDecodeForwardWindowed else { return nil }
+        return { inp, caches, mask, smask, offs in
+            wf(inp, caches.map { $0 as! KVCache }, mask, smask, offs)
+        }
     }
 
     /// Adapt the chosen fp16/int8 batched forward to the protocol-typed shape.
@@ -2438,8 +2465,16 @@ extension InferenceEngine {
             let deps = ContinuousBatcher.Deps(
                 prefillRow: protocolPrefillRow(model),
                 batchedForward: protocolBatchedForward(model),
+                // Windowed forward for the trimmed sliding stacked layout
+                // (nil for non-Gemma and int8 - rows then stack full-width).
+                batchedForwardWindowed: useQuantizedBatched(model)
+                    ? nil : protocolBatchedForwardWindowed(model),
                 numLayers: model.numLayers,
                 useQuantizedKV: useQuantizedBatched(model),
+                // Rotating sliding-window caches for the rows (Gemma 4): the
+                // per-row prefill and the stacked decode read O(window) KV on
+                // sliding layers. nil for every other family (and int8).
+                cacheSpec: useQuantizedBatched(model) ? nil : model.cacheSpec,
                 decode: { tokenizer.decode(token: $0) },
                 stopIds: stopIds,
                 // Batched n-gram speculation when enabled + fp16 (the spec round

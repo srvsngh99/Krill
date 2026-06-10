@@ -150,20 +150,124 @@ func stackCachesLeftPaddedQuantized(
     return batched
 }
 
+/// Stack one ROTATING (sliding-window) layer: each row's snapshot is already
+/// window-trimmed; right-align rows at their per-row trimmed widths
+/// (`slidingLengths[r] = min(retained_r, window - 1)`) so the stacked sliding
+/// cache is O(window) wide instead of O(context). The trimmed widths are
+/// computed by the CALLER (and stored per row) so stacking and scatter-back
+/// agree on the layout. Correctness: a sliding query attends itself + the
+/// previous `window-1` keys, so the last `window-1` cached rows are the only
+/// ones the next decode step can see - dropping older columns changes nothing
+/// the mask would not already hide, for every row (the relative-distance rule
+/// `q_abs - k_abs = width - 1 - col` is row-independent in a right-aligned
+/// layout).
+private func stackRotatingLayer(
+    snaps: [(keys: MLXArray, values: MLXArray)?],
+    slidingLengths: [Int]
+) -> KVCache {
+    let R = snaps.count
+    let sMaxT = slidingLengths.max() ?? 0
+    var ks: [MLXArray] = []
+    var vs: [MLXArray] = []
+    ks.reserveCapacity(R)
+    vs.reserveCapacity(R)
+    for r in 0 ..< R {
+        let snap = snaps[r]!
+        let t = slidingLengths[r]
+        let w = snap.keys.dim(2)
+        // Last `t` retained rows (the snapshot may retain slightly more than
+        // window-1 right after a multi-token prefill append).
+        let k = w > t ? snap.keys[0..., 0..., (w - t) ..< w, 0...] : snap.keys
+        let v = w > t ? snap.values[0..., 0..., (w - t) ..< w, 0...] : snap.values
+        let pad = sMaxT - t
+        if pad > 0 {
+            let zerosK = MLXArray.zeros([1, k.dim(1), pad, k.dim(3)], dtype: k.dtype)
+            let zerosV = MLXArray.zeros([1, v.dim(1), pad, v.dim(3)], dtype: v.dtype)
+            ks.append(concatenated([zerosK, k], axis: 2))
+            vs.append(concatenated([zerosV, v], axis: 2))
+        } else {
+            ks.append(k)
+            vs.append(v)
+        }
+    }
+    let bc = KVCache()
+    bc.restore(keys: concatenated(ks, axis: 0), values: concatenated(vs, axis: 0))
+    return bc
+}
+
 /// Type-dispatching stack: route a batched set of per-row caches to the fp16
 /// or the quantized stacker by their concrete type. The batcher allocates every
 /// row/layer from one factory, so inspecting any element decides the path. Lets
 /// the (type-agnostic) decode loop hold `[KVCacheProtocol]` while the stacking
 /// stays type-correct.
+///
+/// `slidingLengths` (non-nil when the rows carry `RotatingKVCache` sliding
+/// layers) are the per-row trimmed widths those layers stack at; rotating
+/// layers stack via ``stackRotatingLayer`` (O(window) wide), everything else
+/// via the standard full-width path. The stacked result is plain `KVCache`
+/// per layer either way - it grows by one column per decode step within the
+/// epoch and is scattered back into the per-row caches at the epoch boundary.
 func stackCachesLeftPaddedAny(
-    perRow caches: [[KVCacheProtocol]], lengths: [Int]
+    perRow caches: [[KVCacheProtocol]], lengths: [Int],
+    slidingLengths: [Int]? = nil
 ) -> [KVCacheProtocol] {
     if caches.first?.first is QuantizedKVCache {
         let q = caches.map { $0.map { $0 as! QuantizedKVCache } }
         return stackCachesLeftPaddedQuantized(perRow: q, lengths: lengths)
     }
-    let f = caches.map { $0.map { $0 as! KVCache } }
-    return stackCachesLeftPadded(perRow: f, lengths: lengths)
+    let hasRotating = caches.first?.contains(where: { $0 is RotatingKVCache }) ?? false
+    guard hasRotating else {
+        let f = caches.map { $0.map { $0 as! KVCache } }
+        return stackCachesLeftPadded(perRow: f, lengths: lengths)
+    }
+    guard let slidingLengths else {
+        preconditionFailure(
+            "rows carry RotatingKVCache layers but no slidingLengths were "
+            + "provided - trimmed stacking requires the per-row trimmed widths")
+    }
+    // Mixed standard/rotating rows: stack per layer by kind.
+    let R = caches.count
+    let numLayers = caches[0].count
+    var batched: [KVCacheProtocol] = []
+    batched.reserveCapacity(numLayers)
+    for layer in 0 ..< numLayers {
+        let isRotating = caches[0][layer] is RotatingKVCache
+        let snaps = (0 ..< R).map { caches[$0][layer].snapshot() }
+        let present = snaps.lazy.filter { $0 != nil }.count
+        if present == 0 {
+            batched.append(KVCache())   // KV-shared placeholder layer
+            continue
+        }
+        precondition(
+            present == R,
+            "partially-empty KV layer \(layer): \(present)/\(R) rows cached (batch desync)")
+        if isRotating {
+            batched.append(stackRotatingLayer(snaps: snaps, slidingLengths: slidingLengths))
+        } else {
+            // Full-history layer: same layout as stackCachesLeftPadded.
+            var ks: [MLXArray] = []
+            var vs: [MLXArray] = []
+            for r in 0 ..< R {
+                let snap = snaps[r]!
+                let pad = (lengths.max() ?? 0) - lengths[r]
+                if pad > 0 {
+                    let zerosK = MLXArray.zeros(
+                        [1, snap.keys.dim(1), pad, snap.keys.dim(3)], dtype: snap.keys.dtype)
+                    let zerosV = MLXArray.zeros(
+                        [1, snap.values.dim(1), pad, snap.values.dim(3)], dtype: snap.values.dtype)
+                    ks.append(concatenated([zerosK, snap.keys], axis: 2))
+                    vs.append(concatenated([zerosV, snap.values], axis: 2))
+                } else {
+                    ks.append(snap.keys)
+                    vs.append(snap.values)
+                }
+            }
+            let bc = KVCache()
+            bc.restore(keys: concatenated(ks, axis: 0), values: concatenated(vs, axis: 0))
+            batched.append(bc)
+        }
+    }
+    return batched
 }
 
 /// Build the per-row additive decode mask `[R, 1, 1, totalLen]`: for each row

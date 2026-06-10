@@ -430,10 +430,12 @@ public class Gemma4UnifiedModel: Module {
     /// Stage B/C batched ragged-decode (text-only; decode never carries
     /// media placeholders). Forwards to the shared text path.
     public func batchedDecode(
-        _ tokens: MLXArray, caches: [KVCacheProtocol], mask: MLXArray, rowOffsets: [Int]
+        _ tokens: MLXArray, caches: [KVCacheProtocol], mask: MLXArray, rowOffsets: [Int],
+        slidingMask: MLXArray? = nil
     ) -> MLXArray {
         languageModel.batchedDecode(
-            tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+            tokens, caches: caches, mask: mask, rowOffsets: rowOffsets,
+            slidingMask: slidingMask)
     }
 
     public var numLayers: Int { config.numHiddenLayers }
