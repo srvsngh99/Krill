@@ -282,11 +282,18 @@ public final class PrefixCache: @unchecked Sendable {
         guard tokens.count >= minPrefixLength else { return }
 
         let key = cacheKey(tokens: tokens, modelId: modelId, mediaHash: mediaHash, dtype: .fp16)
+        // Materialize the snapshots before retaining them: `KVCache.snapshot()`
+        // returns lazy slice views over the cache's live backing buffer, and a
+        // long-lived reference to that buffer blocks MLX's donation on every
+        // subsequent in-place cache write (forcing full-buffer copies each
+        // decode step). `contiguous` detaches the entry onto its own storage.
+        let detachedKeys = keys.map { layer in layer.map { contiguous($0) } }
+        let detachedValues = values.map { layer in layer.map { contiguous($0) } }
         // Retain the tokens + identity so a later request sharing this prefix can
         // LCP-match it (see `lookupLongestPrefix`). The KV tensors are kept by the
         // LRU regardless; the token array is a few KB of Ints on top.
         let entry = MemoryCacheEntry(
-            storage: .fp16(keys: keys, values: values),
+            storage: .fp16(keys: detachedKeys, values: detachedValues),
             tokens: tokens, modelId: modelId, mediaHash: mediaHash)
 
         storeInMemory(key: key, entry: entry)
