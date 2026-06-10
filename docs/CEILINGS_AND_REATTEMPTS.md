@@ -155,14 +155,20 @@ linked detail doc.
      the KV barely moves total memory. And the real long-context OOM is the
      **prefill attention matrix** (O(L^2), bf16: a single 21GB buffer at ~16k ctx
      exceeded MLX's 14.3GB max-buffer limit) - which int8 KV does nothing for.
-- **Re-attempt trigger:** (a) a **full-attention** family (no sliding window) on
-  this box where KV genuinely dominates memory and fp16 OOMs where int8 fits AND
-  the decode is bandwidth-bound enough that smaller KV nets out faster; or (b) a
-  fused int8-dequant+SDPA Metal kernel (or MLX native quantized-KV attention) that
-  removes the per-step dequant pass; or (c) int4-KV *with* such a fused kernel for
-  a 4x footprint cut, if the accuracy holds. Reuse the greedy-match + short/long
-  tok/s harness from this attempt. NOTE: plain `.gemma4` stays `.supportsInt8`
-  (opt-in via `KRILL_KV_CACHE_DTYPE=int8`) and is unchanged by this finding.
+- **Re-attempt trigger:** (a) ~~a **full-attention** family (or layer subset)
+  where KV dominates memory~~ - **FIRED AND FAILED (2026-06-10)**: a
+  mixed-precision probe put int8 KV on ONLY the 8 full-attention layers (the
+  one KV term that grows with context; sliding stayed fp16-rotating,
+  `KRILL_FULL_ATTN_KV=int8`). Result: slower at EVERY length (19.4 @2.3k /
+  14.1 @20k / 8.8 @59k vs fp16-rotating's 22.6 / 20.6 / 19.1) AND **higher**
+  peak memory (17.9GB @59k vs 12.6GB @53.6k) - `QuantizedKVCache` dequantizes
+  the whole KV into a transient fp16 buffer every step, so the box pays int8
+  storage PLUS a full fp16 transient PLUS the dequant compute (and the
+  quantized cache still grows by concatenation). Probe code reverted. Only
+  (b) remains live: a fused int8-dequant+SDPA Metal kernel (or MLX native
+  quantized-KV attention) that removes the per-step dequant materialization;
+  (c) int4-KV only WITH such a kernel. NOTE: plain `.gemma4` stays
+  `.supportsInt8` (opt-in via `KRILL_KV_CACHE_DTYPE=int8`), unchanged.
 
 **Cross-cutting read:** five M-series decode levers have now closed the same way
 (spec-decode, compiled-decode, fused-Q4, fused-GEGLU, int8-KV). The consistent
@@ -225,13 +231,23 @@ compute, is the actual binding constraint.)
   | 18k | 5.4 | 9.6 | 20.6 |
   | 36k | unusable | - | 19.9 |
   | 53.6k | unusable | - | 19.1 |
-  | 67k | unusable | - | 8.7 |
+  | 75k | unusable | - | 18.1 |
+  | 89k | unusable | - | 17.5 |
+  | 99k | unusable | - | **16.9** |
 
-  **Near-flat ~19-23 tok/s from zero to ~54k context**; peak engine memory at
-  53.6k is 12.6GB (vs 15.2GB at just 18k before). The ~67k row is where total
-  residency (weights + full-attention KV + activations) crosses the box's
-  comfortable zone and swapping resumes - the practical ceiling on 24GB is
-  ~55-60k, matching the model's usable-context target here.
+  **Near-flat ~17-23 tok/s from zero to ~99k context** (gentle
+  bandwidth-physics slope only); peak engine memory 16.4GB at 99k. An earlier
+  reading of "8.7 tok/s at 67k = the RAM ceiling" was a MEASUREMENT ARTIFACT:
+  that row ran late in a long-lived sweep process whose MLX cache pool +
+  residual swap had inflated; a FRESH process holds 18.1/17.5/16.9 at
+  75k/89k/99k. Operational implication for the server (long-lived process):
+  after very long requests the MLX buffer-recycling pool can depress later
+  long-context requests - cache-pool trimming after long requests is a
+  follow-up. The practical ceiling on the 24GB box is now ~100k+ (the model's
+  trained window is 128k; ~110k+ approaches the Metal working-set edge).
+  Needle retrieval verified by direct question (`KLM_SWEEP_DIRECT_Q=1`) at
+  long contexts; the sweep's default needle column goes N past ~20k purely as
+  a 64-token generation-budget artifact (summary-first prompt).
 - **Residual / notes:** the 8 full-attention layers' KV still grows with
   context (they are the model's long-range memory - bounding them would break
   retrieval); that growth is what eventually ends the flat zone. The batched/
