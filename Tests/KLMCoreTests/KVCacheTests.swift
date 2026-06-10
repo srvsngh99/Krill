@@ -236,6 +236,100 @@ final class KVCacheTests: XCTestCase {
         #endif
     }
 
+    func testTruncateThenUpdateOverwritesStaleRows() throws {
+        // The spec-decode rollback pattern: append K tokens, reject some
+        // (truncate), then append replacements. With the in-place buffer the
+        // truncated rows are stale storage that the next update must overwrite.
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = KVCache()
+            _ = cache.update(
+                keys: makeKV(seqLen: 10, headDim: 2, start: 0),
+                values: makeKV(seqLen: 10, headDim: 2, start: 1000)
+            )
+            cache.truncate(to: 6)
+            XCTAssertEqual(cache.sequenceLength, 6)
+
+            let result = cache.update(
+                keys: makeKV(seqLen: 2, headDim: 2, start: 500),
+                values: makeKV(seqLen: 2, headDim: 2, start: 600)
+            )
+            XCTAssertEqual(cache.sequenceLength, 8)
+            XCTAssertEqual(result.0.shape, [1, 2, 8, 2])
+            // Reference: a fresh cache fed the same final sequence.
+            let ref = KVCache()
+            _ = ref.update(
+                keys: makeKV(seqLen: 10, headDim: 2, start: 0)[0..., 0..., 0 ..< 6, 0...],
+                values: makeKV(seqLen: 10, headDim: 2, start: 1000)[0..., 0..., 0 ..< 6, 0...]
+            )
+            let refResult = ref.update(
+                keys: makeKV(seqLen: 2, headDim: 2, start: 500),
+                values: makeKV(seqLen: 2, headDim: 2, start: 600)
+            )
+            XCTAssertEqual(result.0.asArray(Int32.self), refResult.0.asArray(Int32.self))
+            XCTAssertEqual(result.1.asArray(Int32.self), refResult.1.asArray(Int32.self))
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    func testRestoreDoesNotAliasSourceArrays() throws {
+        // restore() must copy: the restored source (e.g. a prefix-cache LRU
+        // entry) must NOT change when the cache is subsequently truncated and
+        // updated in place.
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let sourceKeys = makeKV(seqLen: 4, headDim: 2, start: 200)
+            let sourceValues = makeKV(seqLen: 4, headDim: 2, start: 300)
+            let sourceKeysBefore = sourceKeys.asArray(Int32.self)
+            let sourceValuesBefore = sourceValues.asArray(Int32.self)
+
+            let cache = KVCache()
+            cache.restore(keys: sourceKeys, values: sourceValues)
+            cache.truncate(to: 2)
+            _ = cache.update(
+                keys: makeKV(seqLen: 2, headDim: 2, start: 900),
+                values: makeKV(seqLen: 2, headDim: 2, start: 950)
+            )
+
+            XCTAssertEqual(sourceKeys.asArray(Int32.self), sourceKeysBefore,
+                "restore() aliased the source keys - in-place writes corrupted them")
+            XCTAssertEqual(sourceValues.asArray(Int32.self), sourceValuesBefore,
+                "restore() aliased the source values - in-place writes corrupted them")
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    func testGrowthAcrossCapacityBoundaryPreservesContents() throws {
+        // Push the cache across at least one internal capacity-growth
+        // reallocation and verify the whole sequence survives intact.
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = KVCache()
+            var expectedKeys: [Int32] = []
+            let steps = 300  // > one 256-row growth step with seqLen 2 chunks
+            for i in 0 ..< steps {
+                let start = Int32(i * 10)
+                _ = cache.update(
+                    keys: makeKV(heads: 1, seqLen: 2, headDim: 1, start: start),
+                    values: makeKV(heads: 1, seqLen: 2, headDim: 1, start: start)
+                )
+                expectedKeys.append(start)
+                expectedKeys.append(start + 1)
+            }
+            XCTAssertEqual(cache.sequenceLength, steps * 2)
+            let snapshot = try XCTUnwrap(cache.snapshot())
+            XCTAssertEqual(snapshot.keys.shape, [1, 1, steps * 2, 1])
+            XCTAssertEqual(snapshot.keys.asArray(Int32.self), expectedKeys)
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
     #if canImport(MLX) && os(macOS) && arch(arm64)
     private func withMLXCPU(_ body: () throws -> Void) throws {
         guard MLXMetalRuntime.canInitializeMLXForTests else {
