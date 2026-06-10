@@ -927,6 +927,7 @@ public final class InferenceEngine: @unchecked Sendable {
         // value is complete. nil format → no work.
         let grammarMask: (any GrammarLogitMask)? = format.map { self.grammarMask(for: $0, stopIds: stopIds) } ?? nil
         let numLayers = loadedModel.numLayers
+        let cacheSpec = loadedModel.cacheSpec
         let forwardFn = loadedModel.forward
         let prefillForwardFn = loadedModel.prefillForward
         let multimodalFn = loadedModel.multimodalForward
@@ -1118,10 +1119,13 @@ public final class InferenceEngine: @unchecked Sendable {
                 var prefillDuration: Double = 0
                 var cacheHit = false
 
-                // Create KV caches. fp16 path uses concrete KVCache so the prefix-cache
-                // path (snapshot/restore/truncate) works; int8 uses QuantizedKVCache
+                // Create KV caches. fp16 path uses RestorableKVCache so the
+                // prefix-cache path (snapshot/restore/truncate) works across
+                // both full-history `KVCache` and windowed `RotatingKVCache`
+                // (per the family's `cacheSpec`); int8 uses QuantizedKVCache
                 // and its parallel quantized snapshot/restore path.
-                let fp16Caches: [KVCache]? = useInt8KV ? nil : makeKVCaches(numLayers: numLayers)
+                let fp16Caches: [RestorableKVCache]? = useInt8KV
+                    ? nil : makeKVCaches(spec: cacheSpec, numLayers: numLayers)
                 let int8Caches: [QuantizedKVCache]? = useInt8KV ? makeQuantizedKVCaches(numLayers: numLayers) : nil
                 let caches: [KVCacheProtocol] = useInt8KV ? int8Caches! : fp16Caches!
 
@@ -1134,11 +1138,17 @@ public final class InferenceEngine: @unchecked Sendable {
                     if let fp16Caches {
                         if let hit = capturedPrefixCache.lookup(
                             tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash
-                        ), !hit.keys.isEmpty, hit.prefixLength == promptTokens.count {
+                        ), !hit.keys.isEmpty, hit.prefixLength == promptTokens.count,
+                           Self.spansCanSeed(hit: hit, caches: fp16Caches) {
                             for (i, cache) in fp16Caches.enumerated() {
                                 if i < hit.keys.count, let k = hit.keys[i].first,
                                    i < hit.values.count, let v = hit.values[i].first {
-                                    cache.restore(keys: k, values: v)
+                                    // totalSeen places a window-trimmed span
+                                    // (rotating layer) at its true absolute
+                                    // position; for full-history layers the
+                                    // span IS the whole prefix.
+                                    cache.restore(keys: k, values: v,
+                                                  totalSeen: hit.storedLength)
                                 }
                             }
                             cacheHit = true
@@ -1186,11 +1196,33 @@ public final class InferenceEngine: @unchecked Sendable {
                     if let fp16Caches,
                        let hit = capturedPrefixCache.lookupLongestPrefix(
                            tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash
-                       ), !hit.keys.isEmpty, hit.prefixLength <= promptTokens.count {
+                       ), !hit.keys.isEmpty, hit.prefixLength <= promptTokens.count,
+                       // Rotating layers store only the window tail, so a
+                       // partial hit is reusable only when (a) every span can
+                       // seed its cache kind at all (`spansCanSeed` - a
+                       // trimmed span must never seed a full-history cache)
+                       // and (b) the kept prefix still lies inside every
+                       // rotating layer's retained span
+                       // (`keep >= storedLength - retained`). Infeasible
+                       // (divergence deeper than ~a window before the entry's
+                       // end) -> skip reuse, cold chunked prefill. Computed
+                       // from the hit BEFORE restoring so no cache is left
+                       // half-restored.
+                       Self.spansCanSeed(hit: hit, caches: fp16Caches),
+                       {
+                           let keep = min(hit.prefixLength, promptTokens.count - 1)
+                           return fp16Caches.enumerated().allSatisfy { i, cache in
+                               guard cache is RotatingKVCache,
+                                     i < hit.keys.count, let k = hit.keys[i].first
+                               else { return true }
+                               return keep >= hit.storedLength - k.dim(2)
+                           }
+                       }() {
                         for (i, cache) in fp16Caches.enumerated() {
                             if i < hit.keys.count, let k = hit.keys[i].first,
                                i < hit.values.count, let v = hit.values[i].first {
-                                cache.restore(keys: k, values: v)
+                                cache.restore(keys: k, values: v,
+                                              totalSeen: hit.storedLength)
                             }
                         }
                         partialReuseLen = hit.prefixLength
@@ -2140,6 +2172,32 @@ extension InferenceEngine {
     /// greedy tie; dense families stay byte-identical - see
     /// `Gemma4PartialReuseLiveTests` for the standard.) `mediaHash` is nil: the
     /// batched path is text-only (image/audio requests are routed serially).
+    /// Whether every span a prefix-cache hit carries can seed the cache it
+    /// would be restored into. A `RotatingKVCache` understands window-trimmed
+    /// spans (it places them at their absolute position via `totalSeen`); a
+    /// full-history `KVCache` does NOT - adopting a trimmed span there would
+    /// set its length to the window instead of the true prefix, no-op the
+    /// follow-up `truncate(to: count-1)`, and forward the last token at the
+    /// wrong RoPE position (silent corruption). Trimmed entries are written by
+    /// the serial rotating path; the batched path (standard caches) and a
+    /// `KRILL_ROTATING_KV=0` serial run must therefore DECLINE them (treat as
+    /// a miss) rather than restore them.
+    static func spanCanSeed(
+        cache: KVCacheProtocol, spanLength: Int, storedLength: Int
+    ) -> Bool {
+        cache is RotatingKVCache || spanLength >= storedLength
+    }
+
+    /// `spanCanSeed` over every layer a hit carries (layers the hit does not
+    /// cover - the Gemma KV-shared empty suffix - pass trivially).
+    static func spansCanSeed(hit: PrefixCacheHit, caches: [any KVCacheProtocol]) -> Bool {
+        caches.enumerated().allSatisfy { i, cache in
+            guard i < hit.keys.count, let k = hit.keys[i].first else { return true }
+            return spanCanSeed(cache: cache, spanLength: k.dim(2),
+                               storedLength: hit.storedLength)
+        }
+    }
+
     private func makeBatchedPrefillRow(
         _ model: LoadedModel
     ) -> ([Int], [KVCache], Bool) -> MLXArray {
@@ -2150,9 +2208,13 @@ extension InferenceEngine {
         let chunkSize = self.prefillChunkSize
         return { tokens, caches, usePrefixCache in
             var cacheHit = false
+            // `spansCanSeed`: the batched rows use full-history caches, so a
+            // window-trimmed entry written by the serial rotating path must be
+            // declined (restoring it would corrupt the row - see spanCanSeed).
             if usePrefixCache,
                let hit = pc.lookup(tokens: tokens, modelId: pcModelId, mediaHash: nil),
-               !hit.keys.isEmpty, hit.prefixLength == tokens.count {
+               !hit.keys.isEmpty, hit.prefixLength == tokens.count,
+               Self.spansCanSeed(hit: hit, caches: caches) {
                 for (i, cache) in caches.enumerated() {
                     if i < hit.keys.count, let k = hit.keys[i].first,
                        i < hit.values.count, let v = hit.values[i].first {
@@ -2172,7 +2234,8 @@ extension InferenceEngine {
             var partialReuseLen = 0
             if usePrefixCache, !cacheHit,
                let hit = pc.lookupLongestPrefix(tokens: tokens, modelId: pcModelId, mediaHash: nil),
-               !hit.keys.isEmpty, hit.prefixLength <= tokens.count {
+               !hit.keys.isEmpty, hit.prefixLength <= tokens.count,
+               Self.spansCanSeed(hit: hit, caches: caches) {
                 for (i, cache) in caches.enumerated() {
                     if i < hit.keys.count, let k = hit.keys[i].first,
                        i < hit.values.count, let v = hit.values[i].first {

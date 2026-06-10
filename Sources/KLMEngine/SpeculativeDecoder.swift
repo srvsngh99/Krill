@@ -111,7 +111,7 @@ public final class SpeculativeDecoder: @unchecked Sendable {
     /// - Returns: Array of accepted tokens (1 to K+1 tokens)
     public func step(
         lastToken: Int,
-        targetCaches: [KVCache],
+        targetCaches: [RestorableKVCache],
         draftCaches: [KVCache]
     ) -> [Int] {
         guard let targetModel, let draftModel else {
@@ -248,7 +248,7 @@ public final class SpeculativeDecoder: @unchecked Sendable {
     /// - Returns: 1 to K+1 accepted tokens (1 on a no-match plain step).
     public func ngramStep(
         lastToken: Int,
-        targetCaches: [KVCache],
+        targetCaches: [RestorableKVCache],
         proposer: NgramProposer
     ) -> [Int] {
         guard let targetModel else {

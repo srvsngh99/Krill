@@ -159,6 +159,7 @@ public final class PrefixCache: @unchecked Sendable {
 
         var bestKey: String? = nil
         var bestLen = 0
+        var bestStored = 0
         var bestKeys: [[MLXArray]] = []
         var bestValues: [[MLXArray]] = []
         let wantMedia = mediaHash ?? ""
@@ -174,6 +175,7 @@ public final class PrefixCache: @unchecked Sendable {
             // always holds and the caller's truncate(to: lcp) is in range.
             if lcp >= minPrefixLength, lcp > bestLen {
                 bestLen = lcp
+                bestStored = entry.tokens.count
                 bestKey = key
                 bestKeys = keys
                 bestValues = values
@@ -181,7 +183,8 @@ public final class PrefixCache: @unchecked Sendable {
         }
         guard let hitKey = bestKey else { return nil }
         touchEntryLocked(hitKey)
-        return PrefixCacheHit(keys: bestKeys, values: bestValues, prefixLength: bestLen)
+        return PrefixCacheHit(keys: bestKeys, values: bestValues,
+                              prefixLength: bestLen, storedLength: bestStored)
     }
 
     /// int8 analogue of `lookupLongestPrefix`: returns the per-layer quantized
@@ -379,8 +382,24 @@ public struct PrefixCacheHit {
     /// Per-layer cached values: [numLayers][numKVHeads, prefixLen, headDim]
     public let values: [[MLXArray]]
 
-    /// How many tokens this cache covers.
+    /// How many leading tokens of the REQUEST this hit covers (the shared
+    /// length for an LCP hit; the full prompt for an exact hit).
     public let prefixLength: Int
+
+    /// The stored ENTRY's total token count - the absolute position one past
+    /// the last stored KV row. Equal to `prefixLength` for an exact hit;
+    /// >= `prefixLength` for an LCP hit (the carried KV is the entry's full
+    /// stored state). Rotating (windowed) caches need this to place a
+    /// window-trimmed span at its true absolute position on restore.
+    public let storedLength: Int
+
+    init(keys: [[MLXArray]], values: [[MLXArray]], prefixLength: Int,
+         storedLength: Int? = nil) {
+        self.keys = keys
+        self.values = values
+        self.prefixLength = prefixLength
+        self.storedLength = storedLength ?? prefixLength
+    }
 }
 
 /// A successful int8 prefix cache hit.
