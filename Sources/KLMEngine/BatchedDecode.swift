@@ -216,9 +216,14 @@ func stackCachesLeftPaddedAny(
         return stackCachesLeftPaddedQuantized(perRow: q, lengths: lengths)
     }
     let hasRotating = caches.first?.contains(where: { $0 is RotatingKVCache }) ?? false
-    guard hasRotating, let slidingLengths else {
+    guard hasRotating else {
         let f = caches.map { $0.map { $0 as! KVCache } }
         return stackCachesLeftPadded(perRow: f, lengths: lengths)
+    }
+    guard let slidingLengths else {
+        preconditionFailure(
+            "rows carry RotatingKVCache layers but no slidingLengths were "
+            + "provided - trimmed stacking requires the per-row trimmed widths")
     }
     // Mixed standard/rotating rows: stack per layer by kind.
     let R = caches.count

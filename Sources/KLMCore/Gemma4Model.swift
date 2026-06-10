@@ -1138,7 +1138,8 @@ class Gemma4TextModel: Module {
     /// (documented follow-up). Matches the solo path's
     /// `createSlidingWindowCausalMask`.
     func batchedDecode(
-        _ tokens: MLXArray, caches: [KVCacheProtocol], mask: MLXArray, rowOffsets: [Int]
+        _ tokens: MLXArray, caches: [KVCacheProtocol], mask: MLXArray, rowOffsets: [Int],
+        slidingMask: MLXArray? = nil
     ) -> MLXArray {
         let B = tokens.dim(0)
         let L = tokens.dim(1)
@@ -1168,28 +1169,26 @@ class Gemma4TextModel: Module {
         //
         //  TRIMMED (rotating per-row caches): sliding layers were stacked at
         //  the per-row trimmed widths, so their stacked cache is narrower than
-        //  the full layout (`slidingTotal < totalLen`). The caller's mask is in
-        //  FULL coordinates; because rows are right-aligned in both layouts,
-        //  slicing its last `slidingTotal` columns yields exactly the right
-        //  per-row pad mask for the trimmed view (a row's surviving pad in the
-        //  slice equals its trimmed pad). The window rule in the trimmed view
-        //  is `q_abs - k_abs = slidingPre + j - c` - row-independent - applied
-        //  for ANY L, which also windows the multi-query verify forward (the
-        //  full-width layout leaves verify unwindowed, a documented follow-up).
+        //  the full layout. The CALLER builds `slidingMask` in those trimmed
+        //  coordinates from the per-row trimmed widths it recorded at stack
+        //  time (the full-coordinate mask CANNOT be sliced into it: after a
+        //  partial-prefix restore a row's trimmed width is not derivable from
+        //  its total length, so the pads differ). The window rule in the
+        //  trimmed right-aligned view is `q_abs - k_abs = slidingPre + j - c`
+        //  - row-independent because every row's newest key sits at the same
+        //  column distance from its query - applied for ANY L, which also
+        //  windows the multi-query verify forward (the full-width layout
+        //  leaves verify unwindowed, a documented follow-up).
         //
-        //  FULL (standard per-row caches): the pre-rotating layout, unchanged:
-        //  window column-add at L == 1 only (`col < totalLen - window`).
+        //  FULL (standard per-row caches, `slidingMask == nil`): the
+        //  pre-rotating layout, unchanged: window column-add at L == 1 only
+        //  (`col < totalLen - window`).
         let slidingMode: MLXFast.ScaledDotProductAttentionMaskMode
-        var slidingIdx = -1
-        for i in 0 ..< caches.count where !config.isFullAttention(layerIdx: i) {
-            if !(kvSharingEnabled && i >= firstShared) { slidingIdx = i; break }
-        }
-        let slidingPre = slidingIdx >= 0 ? caches[slidingIdx].sequenceLength : 0
-        let slidingTotal = slidingPre + L
-        if slidingIdx >= 0, slidingTotal < totalLen {
-            // Trimmed layout: slice the full-coordinate mask to the sliding width.
-            var m = mask[0..., 0..., 0..., (totalLen - slidingTotal) ..< totalLen]
+        if let slidingMask {
+            var m = slidingMask
+            let slidingTotal = slidingMask.dim(3)
             if slidingTotal > window {
+                let slidingPre = slidingTotal - L
                 let cols = MLXArray(Int32(0) ..< Int32(slidingTotal)).reshaped(1, slidingTotal)
                 let qs = MLXArray(Int32(0) ..< Int32(L)).reshaped(L, 1)
                 let tooOld = (qs + MLXArray(Int32(slidingPre)) - cols) .>= MLXArray(Int32(window))
@@ -1279,10 +1278,12 @@ public class Gemma4ForCausalLM: Module {
     /// (the softcap is per-element, so it commutes with the per-row batching).
     /// `L == 1` already, so no `lastTokenOnly` slice is needed.
     public func batchedDecode(
-        _ tokens: MLXArray, caches: [KVCacheProtocol], mask: MLXArray, rowOffsets: [Int]
+        _ tokens: MLXArray, caches: [KVCacheProtocol], mask: MLXArray, rowOffsets: [Int],
+        slidingMask: MLXArray? = nil
     ) -> MLXArray {
         let hidden = model.batchedDecode(
-            tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+            tokens, caches: caches, mask: mask, rowOffsets: rowOffsets,
+            slidingMask: slidingMask)
         let logits = lmHead(hidden)
         let cap = config.finalLogitSoftcapping
         return MLX.tanh(logits / cap) * cap
@@ -1523,10 +1524,12 @@ public class Gemma4MultimodalModel: Module {
     /// Forwards to `Gemma4ForCausalLM.batchedDecode` (text-only - the batched
     /// path never carries image/audio placeholders).
     public func batchedDecode(
-        _ tokens: MLXArray, caches: [KVCacheProtocol], mask: MLXArray, rowOffsets: [Int]
+        _ tokens: MLXArray, caches: [KVCacheProtocol], mask: MLXArray, rowOffsets: [Int],
+        slidingMask: MLXArray? = nil
     ) -> MLXArray {
         languageModel.batchedDecode(
-            tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+            tokens, caches: caches, mask: mask, rowOffsets: rowOffsets,
+            slidingMask: slidingMask)
     }
 
     /// Number of transformer layers (for KV cache creation).

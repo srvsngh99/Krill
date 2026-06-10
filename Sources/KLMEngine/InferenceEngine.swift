@@ -2409,6 +2409,17 @@ extension InferenceEngine {
         return { toks, caches, upc in f(toks, caches.map { $0 as! RestorableKVCache }, upc) }
     }
 
+    /// Adapt the WINDOWED batched forward (trimmed sliding stacks) to the
+    /// protocol-typed shape, or nil when the family does not wire it.
+    private func protocolBatchedForwardWindowed(
+        _ model: LoadedModel
+    ) -> ((MLXArray, [KVCacheProtocol], MLXArray, MLXArray, [Int]) -> MLXArray)? {
+        guard let wf = model.batchedDecodeForwardWindowed else { return nil }
+        return { inp, caches, mask, smask, offs in
+            wf(inp, caches.map { $0 as! KVCache }, mask, smask, offs)
+        }
+    }
+
     /// Adapt the chosen fp16/int8 batched forward to the protocol-typed shape.
     private func protocolBatchedForward(
         _ model: LoadedModel
@@ -2454,6 +2465,10 @@ extension InferenceEngine {
             let deps = ContinuousBatcher.Deps(
                 prefillRow: protocolPrefillRow(model),
                 batchedForward: protocolBatchedForward(model),
+                // Windowed forward for the trimmed sliding stacked layout
+                // (nil for non-Gemma and int8 - rows then stack full-width).
+                batchedForwardWindowed: useQuantizedBatched(model)
+                    ? nil : protocolBatchedForwardWindowed(model),
                 numLayers: model.numLayers,
                 useQuantizedKV: useQuantizedBatched(model),
                 // Rotating sliding-window caches for the rows (Gemma 4): the

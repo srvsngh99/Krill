@@ -167,4 +167,67 @@ final class Gemma4BatchedLongContextLiveTests: XCTestCase {
         engine.unload()
         try? await Task.sleep(nanoseconds: 500_000_000)
     }
+
+    /// SHARED-PREFIX concurrent rows (`usePrefixCache: true`): rows 2+ take an
+    /// LCP partial restore of a window-trimmed entry, then truncate to the
+    /// shared length - leaving their rotating layers' retained span SHORTER
+    /// than window-1 while their total length is far past the window. That is
+    /// exactly the state where the sliding pad mask CANNOT be derived from the
+    /// full-coordinate mask (PR #195 round-1 blocker): the trimmed layout's
+    /// leading zero-pads must be masked from per-row trimmed widths, or the
+    /// rows attend pad zeros and degrade. Mid-scaffold needles (outside the
+    /// window) verify retrieval through the full-attention layers after the
+    /// partial restore.
+    func testConcurrentSharedPrefixPartialRestoreRows() async throws {
+        guard let p = ProcessInfo.processInfo.environment["KLM_BATCH_MODEL_PATH"], !p.isEmpty
+        else { throw XCTSkip("KLM_BATCH_MODEL_PATH not set") }
+        let engine = InferenceEngine(modelDirectory: URL(fileURLWithPath: p, isDirectory: true))
+        try await engine.load()
+        guard engine.supportsBatchedDecode else {
+            throw XCTSkip("loaded model is not batched-eligible")
+        }
+
+        // Long shared scaffold (past the sliding window) with a needle mid-way.
+        let filler = [
+            "The continuous batcher serves many concurrent decode rows per weight read.",
+            "Prefix KV cache is shared across requests to avoid re-prefilling context.",
+            "Native Swift pipelines handle vision and voice without a Python bridge.",
+            "Tool calling uses per-family adapters that emit the native call format.",
+            "Grammar-constrained decoding can force schema-valid JSON output.",
+            "Cold model load and total request latency are measured wins over Ollama.",
+        ]
+        var s: [String] = []
+        for i in 0 ..< 180 { s.append(filler[i % filler.count]) }
+        s.insert("The internal project codename is Puffin-Eight.", at: 90)
+        let scaffold = s.joined(separator: " ")
+
+        func ask(_ question: String) async -> String {
+            guard let r = engine.submitBatched(
+                BatchGenRequest(messages: [["role": "user",
+                                            "content": scaffold + "\n\n" + question]],
+                                params: .greedy, maxTokens: 16, usePrefixCache: true),
+                maxRows: 4, windowMs: 80) else { return "" }
+            var out = ""
+            for await ev in r.stream { if ev.isEnd { break }; out += ev.text }
+            return out
+        }
+
+        // Prime the prefix cache (stores the window-trimmed rotating spans).
+        _ = await ask("Question: What is the internal project codename?\nAnswer:")
+
+        // Concurrent rows sharing the scaffold with DIVERGING tails: each takes
+        // an LCP partial restore (retained < window-1 after the truncate).
+        async let a = ask("Question: State the internal project codename exactly.\nAnswer:")
+        async let b = ask("Question: What codename was mentioned in the document?\nAnswer:")
+        let (outA, outB) = await (a, b)
+
+        for (label, out) in [("A", outA), ("B", outB)] {
+            XCTAssertTrue(out.lowercased().contains("puffin"),
+                "shared-prefix row \(label) did not retrieve the needle after a "
+                + "partial restore; got: \(out)")
+        }
+
+        engine.unload()
+        try? await Task.sleep(nanoseconds: 500_000_000)
+    }
 }

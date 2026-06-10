@@ -75,6 +75,17 @@ public struct LoadedModel: @unchecked Sendable {
     /// its serial behavior (those families already fall back to fp16 serially).
     public let batchedDecodeForwardQuantized: ((MLXArray, [QuantizedKVCache], MLXArray, [Int]) -> MLXArray)?
 
+    /// Optional WINDOWED batched ragged-decode forward for the rotating
+    /// (sliding-window-trimmed) stacked layout: `(tokens, caches, fullMask,
+    /// slidingMask, rowOffsets) -> [R, L, vocab]`. `slidingMask` is built by
+    /// the batcher in the TRIMMED sliding coordinates from the per-row trimmed
+    /// widths it recorded at stack time - the full-coordinate mask cannot be
+    /// derived into it (after a partial-prefix restore a row's trimmed width
+    /// is not a function of its total length). Set only by families with a
+    /// rotating cacheSpec (Gemma 4); nil means the batcher must stack
+    /// full-width (it only builds trimmed stacks when this closure exists).
+    public let batchedDecodeForwardWindowed: ((MLXArray, [KVCache], MLXArray, MLXArray, [Int]) -> MLXArray)?
+
     /// Vocab size for validation
     public let vocabSize: Int
 
@@ -101,6 +112,7 @@ public struct LoadedModel: @unchecked Sendable {
         multimodalPrefillForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, MLXArray?, String?) -> MLXArray)? = nil,
         batchedDecodeForward: ((MLXArray, [KVCache], MLXArray, [Int]) -> MLXArray)? = nil,
         batchedDecodeForwardQuantized: ((MLXArray, [QuantizedKVCache], MLXArray, [Int]) -> MLXArray)? = nil,
+        batchedDecodeForwardWindowed: ((MLXArray, [KVCache], MLXArray, MLXArray, [Int]) -> MLXArray)? = nil,
         vocabSize: Int,
         cacheSpec: [KVCacheKind]? = nil
     ) {
@@ -113,6 +125,7 @@ public struct LoadedModel: @unchecked Sendable {
         self.multimodalPrefillForward = multimodalPrefillForward
         self.batchedDecodeForward = batchedDecodeForward
         self.batchedDecodeForwardQuantized = batchedDecodeForwardQuantized
+        self.batchedDecodeForwardWindowed = batchedDecodeForwardWindowed
         self.vocabSize = vocabSize
         self.cacheSpec = cacheSpec
     }
@@ -853,6 +866,10 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
             batchedDecodeForwardQuantized: { tokens, caches, mask, rowOffsets in
                 model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
             },
+            batchedDecodeForwardWindowed: { tokens, caches, mask, slidingMask, rowOffsets in
+                model.batchedDecode(tokens, caches: caches, mask: mask,
+                                    rowOffsets: rowOffsets, slidingMask: slidingMask)
+            },
             vocabSize: config.vocabSize,
             cacheSpec: gemma4CacheSpec(config: config)
         )
@@ -920,6 +937,10 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
         // int8 batched decode (Stage C4): see the multimodal branch.
         batchedDecodeForwardQuantized: { tokens, caches, mask, rowOffsets in
             model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
+        batchedDecodeForwardWindowed: { tokens, caches, mask, slidingMask, rowOffsets in
+            model.batchedDecode(tokens, caches: caches, mask: mask,
+                                rowOffsets: rowOffsets, slidingMask: slidingMask)
         },
         vocabSize: config.vocabSize,
         cacheSpec: gemma4CacheSpec(config: config)
@@ -1014,6 +1035,10 @@ private func loadGemma4Unified(configData: Data, directory: URL) throws -> Loade
         },
         batchedDecodeForwardQuantized: { tokens, caches, mask, rowOffsets in
             model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
+        batchedDecodeForwardWindowed: { tokens, caches, mask, slidingMask, rowOffsets in
+            model.batchedDecode(tokens, caches: caches, mask: mask,
+                                rowOffsets: rowOffsets, slidingMask: slidingMask)
         },
         vocabSize: config.vocabSize,
         cacheSpec: gemma4CacheSpec(config: config)

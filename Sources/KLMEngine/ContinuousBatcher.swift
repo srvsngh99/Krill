@@ -37,6 +37,13 @@ final class ContinuousBatcher: @unchecked Sendable {
         /// the int8 (`QuantizedKVCache`) paths.
         let prefillRow: ([Int], [KVCacheProtocol], Bool) -> MLXArray
         let batchedForward: (MLXArray, [KVCacheProtocol], MLXArray, [Int]) -> MLXArray
+        /// WINDOWED batched forward for the rotating (sliding-trimmed) stacked
+        /// layout: `(tokens, caches, fullMask, slidingMask, rowOffsets)`. The
+        /// batcher builds `slidingMask` in trimmed sliding coordinates from the
+        /// per-row trimmed widths recorded at stack time. Required whenever the
+        /// rows carry rotating caches; the batcher only builds trimmed stacks
+        /// when this is non-nil.
+        var batchedForwardWindowed: ((MLXArray, [KVCacheProtocol], MLXArray, MLXArray, [Int]) -> MLXArray)? = nil
         let numLayers: Int
         /// When true, rows allocate `QuantizedKVCache` (int8) instead of fp16
         /// `KVCache` (Stage C4, Gemma 4 only - the engine sets this from
@@ -303,12 +310,25 @@ final class ContinuousBatcher: @unchecked Sendable {
                 row.epochBaseLen = row.caches.first?.sequenceLength ?? row.promptLen
                 if let rot = row.caches.first(where: { $0 is RotatingKVCache }) as? RotatingKVCache {
                     row.epochSlidingBaseLen = Swift.min(rot.retainedLength, rot.window - 1)
+                    // Every rotating layer of a row advances in lockstep (one
+                    // update per forward; prefix restores write uniform spans),
+                    // so the first one's retained length speaks for all - and
+                    // the trimmed stacking depends on it. Catch a desync here
+                    // rather than as silent garbage attention.
+                    assert(row.caches.allSatisfy {
+                        ($0 as? RotatingKVCache).map { $0.retainedLength == rot.retainedLength } ?? true
+                    }, "rotating layers of one row desynced (retained lengths differ)")
                 } else {
                     row.epochSlidingBaseLen = 0
                 }
             }
             let sMax = rows.map { $0.epochBaseLen }.max() ?? 0
-            let hasRotating = rows.first?.caches.contains(where: { $0 is RotatingKVCache }) ?? false
+            // Trimmed sliding stacking requires the windowed forward (the
+            // sliding mask must be built in trimmed coordinates - it cannot be
+            // derived from the full-coordinate mask after partial-prefix
+            // restores). Without it, stack full-width (legacy layout).
+            let hasRotating = (rows.first?.caches.contains(where: { $0 is RotatingKVCache }) ?? false)
+                && deps.batchedForwardWindowed != nil
             let stacked = stackCachesLeftPaddedAny(
                 perRow: rows.map { $0.caches }, lengths: rows.map { $0.epochBaseLen },
                 slidingLengths: hasRotating ? rows.map { $0.epochSlidingBaseLen } : nil)
@@ -327,6 +347,7 @@ final class ContinuousBatcher: @unchecked Sendable {
                 // --- Decode within the epoch until the set changes. ---
                 var step = 0
                 var cancelledMidEpoch = false
+                let sMaxT = rows.map { $0.epochSlidingBaseLen }.max() ?? 0
                 while true {
                     if Task.isCancelled { cancelledMidEpoch = true; break }
                     let R = rows.count
@@ -336,7 +357,19 @@ final class ContinuousBatcher: @unchecked Sendable {
                         lengths: rows.map { $0.epochBaseLen }, sMax: sMax,
                         totalLen: totalLen, dtype: kDtype)
                     let input = MLXArray(rows.map { Int32($0.current) }).reshaped(R, 1)
-                    let logits = deps.batchedForward(input, stacked, mask, offsets)
+                    let logits: MLXArray
+                    if hasRotating, let wf = deps.batchedForwardWindowed {
+                        // Trimmed sliding layout: build the sliding-layer pad
+                        // mask in TRIMMED coordinates from the per-row trimmed
+                        // widths (same builder, sliding lengths). The model
+                        // adds the window rule on top.
+                        let slidingMask = buildBatchedDecodeMask(
+                            lengths: rows.map { $0.epochSlidingBaseLen }, sMax: sMaxT,
+                            totalLen: sMaxT + step + 1, dtype: kDtype)
+                        logits = wf(input, stacked, mask, slidingMask, offsets)
+                    } else {
+                        logits = deps.batchedForward(input, stacked, mask, offsets)
+                    }
                     MLX.eval(logits)
                     step += 1
 
@@ -494,7 +527,21 @@ final class ContinuousBatcher: @unchecked Sendable {
         }
         let offsets = rows.map { $0.epochBaseLen }
         let mask = buildBatchedVerifyMask(lengths: offsets, sMax: sMax, newLen: W, dtype: kDtype)
-        let bl = deps.batchedForward(MLXArray(flat).reshaped(R, W), stacked, mask, offsets)
+        let specHasRotating = (rows.first?.caches.contains(where: { $0 is RotatingKVCache }) ?? false)
+            && deps.batchedForwardWindowed != nil
+        let bl: MLXArray
+        if specHasRotating, let wf = deps.batchedForwardWindowed {
+            // Trimmed sliding layout: the verify mask for sliding layers is
+            // built in TRIMMED coordinates (same builder, sliding lengths);
+            // the model adds the window rule for the W-wide forward.
+            let sMaxTSpec = rows.map { $0.epochSlidingBaseLen }.max() ?? 0
+            let slidingMask = buildBatchedVerifyMask(
+                lengths: rows.map { $0.epochSlidingBaseLen }, sMax: sMaxTSpec,
+                newLen: W, dtype: kDtype)
+            bl = wf(MLXArray(flat).reshaped(R, W), stacked, mask, slidingMask, offsets)
+        } else {
+            bl = deps.batchedForward(MLXArray(flat).reshaped(R, W), stacked, mask, offsets)
+        }
         MLX.eval(bl)
         let predFlat = argMax(bl, axis: -1).asType(.int32).reshaped(-1)
             .asArray(Int32.self).map(Int.init)
