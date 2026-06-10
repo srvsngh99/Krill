@@ -927,6 +927,7 @@ public final class InferenceEngine: @unchecked Sendable {
         // value is complete. nil format → no work.
         let grammarMask: (any GrammarLogitMask)? = format.map { self.grammarMask(for: $0, stopIds: stopIds) } ?? nil
         let numLayers = loadedModel.numLayers
+        let cacheSpec = loadedModel.cacheSpec
         let forwardFn = loadedModel.forward
         let prefillForwardFn = loadedModel.prefillForward
         let multimodalFn = loadedModel.multimodalForward
@@ -1118,10 +1119,13 @@ public final class InferenceEngine: @unchecked Sendable {
                 var prefillDuration: Double = 0
                 var cacheHit = false
 
-                // Create KV caches. fp16 path uses concrete KVCache so the prefix-cache
-                // path (snapshot/restore/truncate) works; int8 uses QuantizedKVCache
+                // Create KV caches. fp16 path uses RestorableKVCache so the
+                // prefix-cache path (snapshot/restore/truncate) works across
+                // both full-history `KVCache` and windowed `RotatingKVCache`
+                // (per the family's `cacheSpec`); int8 uses QuantizedKVCache
                 // and its parallel quantized snapshot/restore path.
-                let fp16Caches: [KVCache]? = useInt8KV ? nil : makeKVCaches(numLayers: numLayers)
+                let fp16Caches: [RestorableKVCache]? = useInt8KV
+                    ? nil : makeKVCaches(spec: cacheSpec, numLayers: numLayers)
                 let int8Caches: [QuantizedKVCache]? = useInt8KV ? makeQuantizedKVCaches(numLayers: numLayers) : nil
                 let caches: [KVCacheProtocol] = useInt8KV ? int8Caches! : fp16Caches!
 
@@ -1138,7 +1142,12 @@ public final class InferenceEngine: @unchecked Sendable {
                             for (i, cache) in fp16Caches.enumerated() {
                                 if i < hit.keys.count, let k = hit.keys[i].first,
                                    i < hit.values.count, let v = hit.values[i].first {
-                                    cache.restore(keys: k, values: v)
+                                    // totalSeen places a window-trimmed span
+                                    // (rotating layer) at its true absolute
+                                    // position; for full-history layers the
+                                    // span IS the whole prefix.
+                                    cache.restore(keys: k, values: v,
+                                                  totalSeen: hit.storedLength)
                                 }
                             }
                             cacheHit = true
@@ -1186,11 +1195,29 @@ public final class InferenceEngine: @unchecked Sendable {
                     if let fp16Caches,
                        let hit = capturedPrefixCache.lookupLongestPrefix(
                            tokens: promptTokens, modelId: capturedModelId, mediaHash: mediaHash
-                       ), !hit.keys.isEmpty, hit.prefixLength <= promptTokens.count {
+                       ), !hit.keys.isEmpty, hit.prefixLength <= promptTokens.count,
+                       // Rotating layers store only the window tail, so a
+                       // partial hit is reusable only when the kept prefix
+                       // still lies inside every rotating layer's retained
+                       // span (`keep >= storedLength - retained`). Infeasible
+                       // (divergence deeper than ~a window before the entry's
+                       // end) -> skip reuse, cold chunked prefill. Computed
+                       // from the hit BEFORE restoring so no cache is left
+                       // half-restored.
+                       {
+                           let keep = min(hit.prefixLength, promptTokens.count - 1)
+                           return fp16Caches.enumerated().allSatisfy { i, cache in
+                               guard cache is RotatingKVCache,
+                                     i < hit.keys.count, let k = hit.keys[i].first
+                               else { return true }
+                               return keep >= hit.storedLength - k.dim(2)
+                           }
+                       }() {
                         for (i, cache) in fp16Caches.enumerated() {
                             if i < hit.keys.count, let k = hit.keys[i].first,
                                i < hit.values.count, let v = hit.values[i].first {
-                                cache.restore(keys: k, values: v)
+                                cache.restore(keys: k, values: v,
+                                              totalSeen: hit.storedLength)
                             }
                         }
                         partialReuseLen = hit.prefixLength

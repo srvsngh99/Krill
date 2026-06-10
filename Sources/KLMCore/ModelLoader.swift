@@ -78,6 +78,15 @@ public struct LoadedModel: @unchecked Sendable {
     /// Vocab size for validation
     public let vocabSize: Int
 
+    /// Optional per-layer KV cache spec (serial fp16 path). nil = uniform
+    /// `.standard` (full-history) caches - every family without sliding-window
+    /// layers stays byte-for-byte unchanged. Gemma 4 marks its sliding-window
+    /// layers `.rotating(window:)` so decode reads O(window) KV instead of
+    /// O(context); its full-attention layers (and the KV-shared placeholder
+    /// layers, which are never written) stay `.standard`. The batched path and
+    /// the int8 path ignore this for now (they allocate their own caches).
+    public let cacheSpec: [KVCacheKind]?
+
     /// Explicit memberwise init so `prefillForward` and
     /// `multimodalForward` can default to `nil` for callers that
     /// only set the bare `forward` (the Swift-synthesized
@@ -92,7 +101,8 @@ public struct LoadedModel: @unchecked Sendable {
         multimodalPrefillForward: ((MLXArray, [KVCacheProtocol]?, MLXArray?, MLXArray?, MLXArray?, String?) -> MLXArray)? = nil,
         batchedDecodeForward: ((MLXArray, [KVCache], MLXArray, [Int]) -> MLXArray)? = nil,
         batchedDecodeForwardQuantized: ((MLXArray, [QuantizedKVCache], MLXArray, [Int]) -> MLXArray)? = nil,
-        vocabSize: Int
+        vocabSize: Int,
+        cacheSpec: [KVCacheKind]? = nil
     ) {
         self.module = module
         self.numLayers = numLayers
@@ -104,6 +114,7 @@ public struct LoadedModel: @unchecked Sendable {
         self.batchedDecodeForward = batchedDecodeForward
         self.batchedDecodeForwardQuantized = batchedDecodeForwardQuantized
         self.vocabSize = vocabSize
+        self.cacheSpec = cacheSpec
     }
 }
 
@@ -693,6 +704,27 @@ private func loadPhi(configData: Data, directory: URL) throws -> LoadedModel {
     )
 }
 
+/// Per-layer KV cache spec for Gemma 4 (serial path): sliding-window layers
+/// get a `RotatingKVCache` capped at the config window, so decode reads
+/// O(window) KV instead of O(context) on 40 of 48 layers (the dominant term
+/// in the long-context decode cliff). Full-attention layers keep full-history
+/// caches (they ARE the model's long-range memory), and KV-shared placeholder
+/// layers (e2b/e4b suffix; never written - they read the donor via
+/// `sharedCache`) stay standard. Kill-switch for A/B and rollback:
+/// `KRILL_ROTATING_KV=0` returns nil (uniform standard caches).
+private func gemma4CacheSpec(config: Gemma4Config) -> [KVCacheKind]? {
+    if ProcessInfo.processInfo.environment["KRILL_ROTATING_KV"] == "0" { return nil }
+    guard config.slidingWindow > 1 else { return nil }
+    return (0 ..< config.numHiddenLayers).map { i in
+        if config.numKVSharedLayers > 0 && i >= config.firstKVSharedLayer {
+            return .standard  // KV-shared placeholder, never written
+        }
+        return config.isFullAttention(layerIdx: i)
+            ? .standard
+            : .rotating(window: config.slidingWindow)
+    }
+}
+
 private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(Gemma4Config.self, from: configData)
 
@@ -821,7 +853,8 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
             batchedDecodeForwardQuantized: { tokens, caches, mask, rowOffsets in
                 model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
             },
-            vocabSize: config.vocabSize
+            vocabSize: config.vocabSize,
+            cacheSpec: gemma4CacheSpec(config: config)
         )
     }
 
@@ -888,7 +921,8 @@ private func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel 
         batchedDecodeForwardQuantized: { tokens, caches, mask, rowOffsets in
             model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
         },
-        vocabSize: config.vocabSize
+        vocabSize: config.vocabSize,
+        cacheSpec: gemma4CacheSpec(config: config)
     )
 }
 
@@ -981,7 +1015,8 @@ private func loadGemma4Unified(configData: Data, directory: URL) throws -> Loade
         batchedDecodeForwardQuantized: { tokens, caches, mask, rowOffsets in
             model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
         },
-        vocabSize: config.vocabSize
+        vocabSize: config.vocabSize,
+        cacheSpec: gemma4CacheSpec(config: config)
     )
 }
 

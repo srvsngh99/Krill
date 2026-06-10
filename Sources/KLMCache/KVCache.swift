@@ -12,6 +12,31 @@ public protocol KVCacheProtocol: AnyObject {
     var sequenceLength: Int { get }
 }
 
+/// The fp16 cache operations the engine's prefix-cache and speculative-decode
+/// paths need beyond `KVCacheProtocol`: restoring a stored span and dropping a
+/// tail. Conformers: `KVCache` (full history - restore/truncate are total) and
+/// `RotatingKVCache` (windowed - only the retained tail can be truncated, so
+/// callers must consult `canTruncate` and fall back to a cold prefill).
+public protocol RestorableKVCache: KVCacheProtocol {
+    /// Restore a stored span whose LAST row sat at absolute position
+    /// `totalSeen - 1`. For a full-history cache `keys.dim(2) == totalSeen`;
+    /// for a rotating cache the span may be just the retained window tail.
+    func restore(keys: MLXArray, values: MLXArray, totalSeen: Int)
+    /// Whether `truncate(to: n)` can be honored exactly.
+    func canTruncate(to n: Int) -> Bool
+    /// Drop rows so the cache covers absolute positions `0 ..< n`.
+    func truncate(to n: Int)
+}
+
+/// Which cache implementation a model layer needs. Families with uniform
+/// full-history attention use `.standard` everywhere (the default); families
+/// mixing sliding-window layers (Gemma 4) mark those `.rotating` so decode
+/// reads O(window) KV instead of O(context).
+public enum KVCacheKind: Sendable, Equatable {
+    case standard
+    case rotating(window: Int)
+}
+
 /// Per-layer Key-Value cache for transformer attention.
 ///
 /// Stores accumulated K/V tensors and grows along the sequence dimension
@@ -132,6 +157,31 @@ public final class KVCache: KVCacheProtocol, @unchecked Sendable {
 /// Create an array of empty KV caches, one per transformer layer.
 public func makeKVCaches(numLayers: Int) -> [KVCache] {
     (0 ..< numLayers).map { _ in KVCache() }
+}
+
+/// Create per-layer caches from a per-layer spec. `nil` (or a spec of the
+/// wrong length) falls back to uniform `.standard`, so families that never
+/// declare a spec are byte-for-byte unchanged.
+public func makeKVCaches(spec: [KVCacheKind]?, numLayers: Int) -> [RestorableKVCache] {
+    guard let spec, spec.count == numLayers else {
+        return makeKVCaches(numLayers: numLayers)
+    }
+    return spec.map { kind in
+        switch kind {
+        case .standard: return KVCache()
+        case .rotating(let window): return RotatingKVCache(window: window)
+        }
+    }
+}
+
+extension KVCache: RestorableKVCache {
+    /// Full-history restore: the stored span IS positions `0 ..< totalSeen`.
+    public func restore(keys: MLXArray, values: MLXArray, totalSeen: Int) {
+        restore(keys: keys, values: values)
+    }
+
+    /// A full-history cache can truncate to any non-negative length.
+    public func canTruncate(to n: Int) -> Bool { n >= 0 }
 }
 
 // MARK: - Updatable conformance

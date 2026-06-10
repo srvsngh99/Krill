@@ -1051,10 +1051,35 @@ class Gemma4TextModel: Module {
         // byte-identical to the pre-windowing path.
         let fullMask = createCachedCausalMask(
             newLen: L, cacheLen: cacheLen, dtype: .bfloat16)
-        let slidingMask = createSlidingWindowCausalMask(
-            newLen: L, cacheLen: cacheLen, window: config.slidingWindow, dtype: .bfloat16)
         let fullMode: MLXFast.ScaledDotProductAttentionMaskMode = fullMask != nil ? .array(fullMask!) : .none
-        let slidingMode: MLXFast.ScaledDotProductAttentionMaskMode = slidingMask != nil ? .array(slidingMask!) : .none
+        // Sliding mask: when the engine allocated `RotatingKVCache`s for the
+        // sliding layers (the serial fp16 path), their `update()` already trims
+        // the retained KV to the window, so:
+        //   - decode (L == 1): the retained set IS exactly the allowed key set
+        //     (self + previous window-1) -> NO mask at all, killing the
+        //     per-step [1, 1, 1, C] mask alloc;
+        //   - multi-token forward (chunked prefill / spec verify / partial
+        //     resume): the standard sliding mask, but over the RETAINED length
+        //     (`maskCacheLength`), not the absolute context - relative q-k
+        //     distances are identical, so the result is unchanged.
+        // Without a rotating cache (int8 KV, batched stacked path, legacy) the
+        // pre-windowing full-context mask path is byte-for-byte unchanged.
+        let rotating = caches?.lazy.compactMap { $0 as? RotatingKVCache }.first
+        let slidingMode: MLXFast.ScaledDotProductAttentionMaskMode
+        if let rotating {
+            if L == 1 {
+                slidingMode = .none
+            } else {
+                let slidingMask = createSlidingWindowCausalMask(
+                    newLen: L, cacheLen: rotating.maskCacheLength,
+                    window: config.slidingWindow, dtype: .bfloat16)
+                slidingMode = slidingMask != nil ? .array(slidingMask!) : .none
+            }
+        } else {
+            let slidingMask = createSlidingWindowCausalMask(
+                newLen: L, cacheLen: cacheLen, window: config.slidingWindow, dtype: .bfloat16)
+            slidingMode = slidingMask != nil ? .array(slidingMask!) : .none
+        }
 
         // KV sharing donor indices (pre-computed at init)
         let firstShared = config.firstKVSharedLayer

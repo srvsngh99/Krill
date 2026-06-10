@@ -369,7 +369,14 @@ KRILL_DEFAULT_MODEL=llama-3.2-3b
 KRILL_PORT=57455
 KRILL_KV_CACHE_DTYPE=fp16
 KRILL_PREFILL_CHUNK=2048   # query tokens per prefill forward (0 disables)
+KRILL_ROTATING_KV=1        # windowed KV for Gemma sliding layers (0 disables)
 ```
+
+`KRILL_ROTATING_KV` (default on) caps each Gemma 4 sliding-window layer's KV
+cache at the layer's trained window instead of the full context, so long-context
+decode reads O(window) KV on 40 of 48 layers instead of O(context). Numerically
+identical to the full-cache + sliding-mask path (the window is what the model
+attends either way); set `0` to fall back to full-history caches.
 
 `KRILL_PREFILL_CHUNK` bounds how many prompt tokens are forwarded per prefill
 pass. MLX's attention has no flash prefill kernel, so a single forward over a
