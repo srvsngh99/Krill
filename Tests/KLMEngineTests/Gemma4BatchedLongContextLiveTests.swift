@@ -87,4 +87,147 @@ final class Gemma4BatchedLongContextLiveTests: XCTestCase {
                 "batched row did not retrieve its mid-context needle \(needle); got: \(out)")
         }
     }
+
+    /// TRUE concurrency (R > 1) at long context with RAGGED row lengths: the
+    /// rotating-trimmed stacked layout right-aligns sliding layers at per-row
+    /// trimmed widths while full-attention layers stack at full width - the
+    /// pad/slice coordinate math between those two layouts is exactly what this
+    /// pins (plus epoch scatter-back through the rotating branch when rows
+    /// finish at different times). Distinct mid-context needles per row guard
+    /// against cross-row KV bleed in either layout.
+    func testConcurrentRaggedLongContextRows() async throws {
+        guard let p = ProcessInfo.processInfo.environment["KLM_BATCH_MODEL_PATH"], !p.isEmpty
+        else { throw XCTSkip("KLM_BATCH_MODEL_PATH not set") }
+        let engine = InferenceEngine(modelDirectory: URL(fileURLWithPath: p, isDirectory: true))
+        try await engine.load()
+        guard engine.supportsBatchedDecode else {
+            throw XCTSkip("loaded model is not batched-eligible")
+        }
+
+        // Ragged: different filler counts -> different prompt lengths, all past
+        // the sliding window. Different maxTokens -> rows FINISH at different
+        // steps, forcing epoch breaks + scatter-back mid-flight.
+        let rows: [(needle: String, repeats: Int, maxTokens: Int)] = [
+            ("Orca-Nine", 140, 12),
+            ("Heron-Five", 180, 18),
+            ("Lynx-Two", 220, 24),
+        ]
+        let submitted: [(needle: String, stream: AsyncStream<TokenEvent>)] = rows.compactMap { row in
+            let filler = [
+                "The continuous batcher serves many concurrent decode rows per weight read.",
+                "Prefix KV cache is shared across requests to avoid re-prefilling context.",
+                "Native Swift pipelines handle vision and voice without a Python bridge.",
+                "Tool calling uses per-family adapters that emit the native call format.",
+                "Grammar-constrained decoding can force schema-valid JSON output.",
+                "Cold model load and total request latency are measured wins over Ollama.",
+            ]
+            var s: [String] = []
+            for i in 0 ..< row.repeats { s.append(filler[i % filler.count]) }
+            s.insert("The internal project codename is \(row.needle).", at: row.repeats / 2)
+            let text = s.joined(separator: " ")
+                + "\n\nQuestion: What is the internal project codename?\nAnswer:"
+            guard let r = engine.submitBatched(
+                BatchGenRequest(messages: [["role": "user", "content": text]],
+                                params: .greedy, maxTokens: row.maxTokens,
+                                usePrefixCache: false),
+                maxRows: 4, windowMs: 80) else { return nil }
+            return (row.needle, r.stream)
+        }
+        XCTAssertEqual(submitted.count, rows.count, "a row failed to submit")
+
+        // Drain all three CONCURRENTLY so they decode in one stacked batch.
+        let outs: [String] = await withTaskGroup(of: (Int, String).self) { group in
+            for (idx, s) in submitted.enumerated() {
+                group.addTask {
+                    var out = ""
+                    for await ev in s.stream { if ev.isEnd { break }; out += ev.text }
+                    return (idx, out)
+                }
+            }
+            var collected = [String](repeating: "", count: submitted.count)
+            for await (idx, out) in group { collected[idx] = out }
+            return collected
+        }
+
+        for (i, out) in outs.enumerated() {
+            let needle = submitted[i].needle
+            let lead = needle.split(separator: "-").first.map(String.init) ?? needle
+            XCTAssertTrue(out.lowercased().contains(lead.lowercased()),
+                "concurrent row \(i) did not retrieve its needle \(needle); got: \(out)")
+        }
+
+        // Tear the batcher down BEFORE the test process exits: this test ends
+        // right as the last stream drains, and exiting while the batcher's
+        // background runLoop is still in its post-epoch bookkeeping races MLX
+        // cleanup at process teardown (a pre-existing exit-time flake - it
+        // reproduces with KRILL_ROTATING_KV=0 too; production servers never
+        // exit after a request). unload() cancels the loop but does not JOIN
+        // it (stop() is fire-and-forget - a follow-up), so give the cancelled
+        // task a beat to unwind before the process exits.
+        engine.unload()
+        try? await Task.sleep(nanoseconds: 500_000_000)
+    }
+
+    /// SHARED-PREFIX concurrent rows (`usePrefixCache: true`): rows 2+ take an
+    /// LCP partial restore of a window-trimmed entry, then truncate to the
+    /// shared length - leaving their rotating layers' retained span SHORTER
+    /// than window-1 while their total length is far past the window. That is
+    /// exactly the state where the sliding pad mask CANNOT be derived from the
+    /// full-coordinate mask (PR #195 round-1 blocker): the trimmed layout's
+    /// leading zero-pads must be masked from per-row trimmed widths, or the
+    /// rows attend pad zeros and degrade. Mid-scaffold needles (outside the
+    /// window) verify retrieval through the full-attention layers after the
+    /// partial restore.
+    func testConcurrentSharedPrefixPartialRestoreRows() async throws {
+        guard let p = ProcessInfo.processInfo.environment["KLM_BATCH_MODEL_PATH"], !p.isEmpty
+        else { throw XCTSkip("KLM_BATCH_MODEL_PATH not set") }
+        let engine = InferenceEngine(modelDirectory: URL(fileURLWithPath: p, isDirectory: true))
+        try await engine.load()
+        guard engine.supportsBatchedDecode else {
+            throw XCTSkip("loaded model is not batched-eligible")
+        }
+
+        // Long shared scaffold (past the sliding window) with a needle mid-way.
+        let filler = [
+            "The continuous batcher serves many concurrent decode rows per weight read.",
+            "Prefix KV cache is shared across requests to avoid re-prefilling context.",
+            "Native Swift pipelines handle vision and voice without a Python bridge.",
+            "Tool calling uses per-family adapters that emit the native call format.",
+            "Grammar-constrained decoding can force schema-valid JSON output.",
+            "Cold model load and total request latency are measured wins over Ollama.",
+        ]
+        var s: [String] = []
+        for i in 0 ..< 180 { s.append(filler[i % filler.count]) }
+        s.insert("The internal project codename is Puffin-Eight.", at: 90)
+        let scaffold = s.joined(separator: " ")
+
+        func ask(_ question: String) async -> String {
+            guard let r = engine.submitBatched(
+                BatchGenRequest(messages: [["role": "user",
+                                            "content": scaffold + "\n\n" + question]],
+                                params: .greedy, maxTokens: 16, usePrefixCache: true),
+                maxRows: 4, windowMs: 80) else { return "" }
+            var out = ""
+            for await ev in r.stream { if ev.isEnd { break }; out += ev.text }
+            return out
+        }
+
+        // Prime the prefix cache (stores the window-trimmed rotating spans).
+        _ = await ask("Question: What is the internal project codename?\nAnswer:")
+
+        // Concurrent rows sharing the scaffold with DIVERGING tails: each takes
+        // an LCP partial restore (retained < window-1 after the truncate).
+        async let a = ask("Question: State the internal project codename exactly.\nAnswer:")
+        async let b = ask("Question: What codename was mentioned in the document?\nAnswer:")
+        let (outA, outB) = await (a, b)
+
+        for (label, out) in [("A", outA), ("B", outB)] {
+            XCTAssertTrue(out.lowercased().contains("puffin"),
+                "shared-prefix row \(label) did not retrieve the needle after a "
+                + "partial restore; got: \(out)")
+        }
+
+        engine.unload()
+        try? await Task.sleep(nanoseconds: 500_000_000)
+    }
 }

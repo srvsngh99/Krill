@@ -37,11 +37,24 @@ final class ContinuousBatcher: @unchecked Sendable {
         /// the int8 (`QuantizedKVCache`) paths.
         let prefillRow: ([Int], [KVCacheProtocol], Bool) -> MLXArray
         let batchedForward: (MLXArray, [KVCacheProtocol], MLXArray, [Int]) -> MLXArray
+        /// WINDOWED batched forward for the rotating (sliding-trimmed) stacked
+        /// layout: `(tokens, caches, fullMask, slidingMask, rowOffsets)`. The
+        /// batcher builds `slidingMask` in trimmed sliding coordinates from the
+        /// per-row trimmed widths recorded at stack time. Required whenever the
+        /// rows carry rotating caches; the batcher only builds trimmed stacks
+        /// when this is non-nil.
+        var batchedForwardWindowed: ((MLXArray, [KVCacheProtocol], MLXArray, MLXArray, [Int]) -> MLXArray)? = nil
         let numLayers: Int
         /// When true, rows allocate `QuantizedKVCache` (int8) instead of fp16
         /// `KVCache` (Stage C4, Gemma 4 only - the engine sets this from
         /// `usesQuantizedKVCache` AND a quantized batched forward being wired).
         let useQuantizedKV: Bool
+        /// Per-layer cache spec from the loaded model (fp16 rows only): Gemma 4
+        /// marks sliding-window layers `.rotating(window:)` so per-row prefill
+        /// AND the stacked decode read O(window) KV on those layers instead of
+        /// O(context). nil (or int8) = uniform full-history caches, the
+        /// pre-rotating layout, byte-for-byte.
+        var cacheSpec: [KVCacheKind]? = nil
         let decode: (Int) -> String
         let stopIds: Set<Int>
         /// When true (and fp16 KV), each batched round is an n-gram speculative
@@ -108,7 +121,12 @@ final class ContinuousBatcher: @unchecked Sendable {
         var recent: [Int]
         var prefillTime: Double
         var admittedAt: Double
-        var epochBaseLen = 0    // cache length at the current epoch's start
+        var epochBaseLen = 0    // cache length (total tokens) at the current epoch's start
+        /// Trimmed width the row's ROTATING (sliding) layers were stacked at
+        /// this epoch (`min(retained, window-1)`); 0 when the row has no
+        /// rotating layers. Set beside `epochBaseLen` so stacking and
+        /// scatter-back agree on the sliding layout.
+        var epochSlidingBaseLen = 0
         var isFinished = false  // set once by finalize(); guards double-finish
         var decodeStartedAt: Double?   // wall time of this row's first batched step
         var proposer: NgramProposer?   // per-row n-gram draft source (spec path only)
@@ -283,10 +301,37 @@ final class ContinuousBatcher: @unchecked Sendable {
             if rows.isEmpty { continue }   // all newcomers terminated on first token
 
             // --- Build the epoch: stack the active set left-padded once. ---
-            for row in rows { row.epochBaseLen = row.caches.first?.sequenceLength ?? row.promptLen }
+            // epochBaseLen is the row's TOTAL token count (a RotatingKVCache's
+            // sequenceLength reports total-seen, not retained, so RoPE offsets
+            // and the pad mask stay in true coordinates). Rotating sliding
+            // layers additionally record the trimmed width they stack at,
+            // so scatter-back can slice the sliding layout consistently.
+            for row in rows {
+                row.epochBaseLen = row.caches.first?.sequenceLength ?? row.promptLen
+                if let rot = row.caches.first(where: { $0 is RotatingKVCache }) as? RotatingKVCache {
+                    row.epochSlidingBaseLen = Swift.min(rot.retainedLength, rot.window - 1)
+                    // Every rotating layer of a row advances in lockstep (one
+                    // update per forward; prefix restores write uniform spans),
+                    // so the first one's retained length speaks for all - and
+                    // the trimmed stacking depends on it. Catch a desync here
+                    // rather than as silent garbage attention.
+                    assert(row.caches.allSatisfy {
+                        ($0 as? RotatingKVCache).map { $0.retainedLength == rot.retainedLength } ?? true
+                    }, "rotating layers of one row desynced (retained lengths differ)")
+                } else {
+                    row.epochSlidingBaseLen = 0
+                }
+            }
             let sMax = rows.map { $0.epochBaseLen }.max() ?? 0
+            // Trimmed sliding stacking requires the windowed forward (the
+            // sliding mask must be built in trimmed coordinates - it cannot be
+            // derived from the full-coordinate mask after partial-prefix
+            // restores). Without it, stack full-width (legacy layout).
+            let hasRotating = (rows.first?.caches.contains(where: { $0 is RotatingKVCache }) ?? false)
+                && deps.batchedForwardWindowed != nil
             let stacked = stackCachesLeftPaddedAny(
-                perRow: rows.map { $0.caches }, lengths: rows.map { $0.epochBaseLen })
+                perRow: rows.map { $0.caches }, lengths: rows.map { $0.epochBaseLen },
+                slidingLengths: hasRotating ? rows.map { $0.epochSlidingBaseLen } : nil)
             let kDtype = stacked.first?.snapshot()?.keys.dtype ?? .float16
 
             if deps.specEnabled {
@@ -302,6 +347,7 @@ final class ContinuousBatcher: @unchecked Sendable {
                 // --- Decode within the epoch until the set changes. ---
                 var step = 0
                 var cancelledMidEpoch = false
+                let sMaxT = rows.map { $0.epochSlidingBaseLen }.max() ?? 0
                 while true {
                     if Task.isCancelled { cancelledMidEpoch = true; break }
                     let R = rows.count
@@ -311,7 +357,19 @@ final class ContinuousBatcher: @unchecked Sendable {
                         lengths: rows.map { $0.epochBaseLen }, sMax: sMax,
                         totalLen: totalLen, dtype: kDtype)
                     let input = MLXArray(rows.map { Int32($0.current) }).reshaped(R, 1)
-                    let logits = deps.batchedForward(input, stacked, mask, offsets)
+                    let logits: MLXArray
+                    if hasRotating, let wf = deps.batchedForwardWindowed {
+                        // Trimmed sliding layout: build the sliding-layer pad
+                        // mask in TRIMMED coordinates from the per-row trimmed
+                        // widths (same builder, sliding lengths). The model
+                        // adds the window rule on top.
+                        let slidingMask = buildBatchedDecodeMask(
+                            lengths: rows.map { $0.epochSlidingBaseLen }, sMax: sMaxT,
+                            totalLen: sMaxT + step + 1, dtype: kDtype)
+                        logits = wf(input, stacked, mask, slidingMask, offsets)
+                    } else {
+                        logits = deps.batchedForward(input, stacked, mask, offsets)
+                    }
                     MLX.eval(logits)
                     step += 1
 
@@ -366,7 +424,7 @@ final class ContinuousBatcher: @unchecked Sendable {
         let start = CFAbsoluteTimeGetCurrent()
         let caches: [KVCacheProtocol] = deps.useQuantizedKV
             ? makeQuantizedKVCaches(numLayers: deps.numLayers)
-            : makeKVCaches(numLayers: deps.numLayers)
+            : makeKVCaches(spec: deps.cacheSpec, numLayers: deps.numLayers)
         // Prefix-cache aware: a full hit restores this prompt's KV and forwards
         // only the last token, yielding KV identical to a cold prefill (so the
         // stacked decode is unchanged); a miss prefills cold and stores
@@ -469,7 +527,21 @@ final class ContinuousBatcher: @unchecked Sendable {
         }
         let offsets = rows.map { $0.epochBaseLen }
         let mask = buildBatchedVerifyMask(lengths: offsets, sMax: sMax, newLen: W, dtype: kDtype)
-        let bl = deps.batchedForward(MLXArray(flat).reshaped(R, W), stacked, mask, offsets)
+        let specHasRotating = (rows.first?.caches.contains(where: { $0 is RotatingKVCache }) ?? false)
+            && deps.batchedForwardWindowed != nil
+        let bl: MLXArray
+        if specHasRotating, let wf = deps.batchedForwardWindowed {
+            // Trimmed sliding layout: the verify mask for sliding layers is
+            // built in TRIMMED coordinates (same builder, sliding lengths);
+            // the model adds the window rule for the W-wide forward.
+            let sMaxTSpec = rows.map { $0.epochSlidingBaseLen }.max() ?? 0
+            let slidingMask = buildBatchedVerifyMask(
+                lengths: rows.map { $0.epochSlidingBaseLen }, sMax: sMaxTSpec,
+                newLen: W, dtype: kDtype)
+            bl = wf(MLXArray(flat).reshaped(R, W), stacked, mask, slidingMask, offsets)
+        } else {
+            bl = deps.batchedForward(MLXArray(flat).reshaped(R, W), stacked, mask, offsets)
+        }
         MLX.eval(bl)
         let predFlat = argMax(bl, axis: -1).asType(.int32).reshaped(-1)
             .asArray(Int32.self).map(Int.init)
@@ -479,9 +551,15 @@ final class ContinuousBatcher: @unchecked Sendable {
             ($0 as? KVCache)?.snapshot()
         }
         let now = CFAbsoluteTimeGetCurrent()
+        // Trimmed sliding layout: rotating sliding layers were stacked at
+        // sMaxT (max per-row trimmed width), so THEIR new-token columns start
+        // at sMaxT, not sMax. Full-history layers keep the sMax base.
+        let sMaxT = rows.map { $0.epochSlidingBaseLen }.max() ?? 0
 
         // Per-row accept + emit; gather cache commits to realize in one eval.
-        var commits: [(dst: KVCache, k: MLXArray, v: MLXArray)] = []
+        // The commit APPENDS via update() (works for both KVCache and
+        // RotatingKVCache - the rotating cache trims and advances totalSeen).
+        var commits: [(dst: KVCacheProtocol, k: MLXArray, v: MLXArray)] = []
         for i in 0 ..< R {
             let row = rows[i]
             if row.decodeStartedAt == nil { row.decodeStartedAt = now }
@@ -504,11 +582,13 @@ final class ContinuousBatcher: @unchecked Sendable {
             accepted.append(finalToken)
 
             for l in 0 ..< row.caches.count {
-                guard let snap = snaps[l], let dst = row.caches[l] as? KVCache else { continue }
+                guard let snap = snaps[l] else { continue }   // KV-shared placeholder
+                let dst = row.caches[l]
+                let base = dst is RotatingKVCache ? sMaxT : sMax
                 commits.append((
                     dst,
-                    snap.keys[i ..< (i + 1), 0..., sMax ..< (sMax + cacheEntries), 0...],
-                    snap.values[i ..< (i + 1), 0..., sMax ..< (sMax + cacheEntries), 0...]))
+                    snap.keys[i ..< (i + 1), 0..., base ..< (base + cacheEntries), 0...],
+                    snap.values[i ..< (i + 1), 0..., base ..< (base + cacheEntries), 0...]))
             }
             if k > 0 {
                 row.proposer?.recordOutcome(
@@ -551,7 +631,15 @@ final class ContinuousBatcher: @unchecked Sendable {
         // epoch). A KV-shared / empty layer snapshots nil and is skipped, so the
         // row's empty cache stays empty (matching the fp16 contract).
         var fp16Realized: [(dst: KVCache, k: MLXArray, v: MLXArray)] = []
+        var rotRealized: [(dst: RotatingKVCache, k: MLXArray, v: MLXArray, totalSeen: Int)] = []
         var quantRealized: [(dst: QuantizedKVCache, snap: QuantizedKVSnapshot)] = []
+        // Trimmed sliding layout (rotating rows): sliding layers stacked at
+        // sMaxT = max per-row trimmed width, so their valid end after `steps`
+        // forwards is sMaxT + steps, and row i's sliding span starts at its own
+        // trimmed left-pad. Computed from the same per-row epochSlidingBaseLen
+        // the stacker used.
+        let sMaxT = rows.map { $0.epochSlidingBaseLen }.max() ?? 0
+        let slidingValidEnd = sMaxT + steps
         for (i, row) in rows.enumerated() {
             let start = sMax - row.epochBaseLen   // left-pad width for row i
             for l in 0 ..< row.caches.count {
@@ -567,6 +655,16 @@ final class ContinuousBatcher: @unchecked Sendable {
                         valueZeros: s.valueZeros[i ..< (i + 1), 0..., start ..< validEnd, 0...])
                     quantRealized.append((dst, sliced))
                 } else if let f = stacked[l] as? KVCache,
+                          let dst = row.caches[l] as? RotatingKVCache {
+                    // Sliding-trimmed layer: slice in SLIDING coordinates and
+                    // restore at the row's absolute position; the rotating
+                    // cache's next update trims back to window-1.
+                    guard let snap = f.snapshot() else { continue }
+                    let rStart = sMaxT - row.epochSlidingBaseLen
+                    let k = snap.keys[i ..< (i + 1), 0..., rStart ..< slidingValidEnd, 0...]
+                    let v = snap.values[i ..< (i + 1), 0..., rStart ..< slidingValidEnd, 0...]
+                    rotRealized.append((dst, k, v, row.epochBaseLen + steps))
+                } else if let f = stacked[l] as? KVCache,
                           let dst = row.caches[l] as? KVCache {
                     guard let snap = f.snapshot() else { continue }
                     let k = snap.keys[i ..< (i + 1), 0..., start ..< validEnd, 0...]
@@ -576,11 +674,13 @@ final class ContinuousBatcher: @unchecked Sendable {
             }
         }
         MLX.eval(fp16Realized.flatMap { [$0.k, $0.v] }
+            + rotRealized.flatMap { [$0.k, $0.v] }
             + quantRealized.flatMap {
                 [$0.snap.keys, $0.snap.values, $0.snap.keyScales,
                  $0.snap.keyZeros, $0.snap.valueScales, $0.snap.valueZeros]
             })
         for e in fp16Realized { e.dst.restore(keys: e.k, values: e.v) }
+        for e in rotRealized { e.dst.restore(keys: e.k, values: e.v, totalSeen: e.totalSeen) }
         for e in quantRealized { e.dst.restoreQuantized(e.snap) }
     }
 }

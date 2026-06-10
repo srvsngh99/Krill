@@ -235,10 +235,15 @@ compute, is the actual binding constraint.)
 - **Residual / notes:** the 8 full-attention layers' KV still grows with
   context (they are the model's long-range memory - bounding them would break
   retrieval); that growth is what eventually ends the flat zone. The batched/
-  concurrent path still allocates full-history caches (serial-rotated vs
-  batched-standard outputs agree because rotation == mask semantics); wiring
-  the batcher is the follow-up, and int8-on-full-attention-only is the probe
-  for pushing past ~60k. Kill-switch: `KRILL_ROTATING_KV=0`.
+  concurrent path is ALSO rotating now: rows allocate from the cacheSpec, the
+  stacker right-aligns sliding layers at per-row trimmed widths (O(window)
+  wide instead of O(context) - what previously made concurrent long-context
+  stacking memory-impossible), `batchedDecode` slices the full-coordinate mask
+  to the sliding width (which also windows the multi-query verify forward,
+  closing that documented follow-up for the trimmed layout), and scatter-back/
+  spec-commit handle the sliding coordinates. int8-on-full-attention-only is
+  the probe for pushing past ~60k. Kill-switch: `KRILL_ROTATING_KV=0` (both
+  paths).
 
 ---
 
