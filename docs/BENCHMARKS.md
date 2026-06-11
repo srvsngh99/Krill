@@ -226,7 +226,7 @@ section, not a code defect. The shared-prefix *reuse* win above (180 ms cached
 prefill) still holds; it is the *concurrent decode* under a near-full RAM budget
 that regresses on this hardware.
 
-### Long context (Gemma 4 12B, 16k-99k) — the survivability axis (2026-06-11)
+### Long context (Gemma 4 12B, 16k-99k) - the survivability axis (2026-06-11)
 
 Same prompt on both engines (repeated structured sections, needle planted at the
 start, question at the end - `tools/longctx_head2head.py`), both read via their

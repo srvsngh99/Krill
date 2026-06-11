@@ -176,9 +176,10 @@ def main():
                   f"{r['rss_mb']/1024:.2f} | {r['wall_s']:.0f} | "
                   f"FAILED: {r['error'][:90]} |", flush=True)
             continue
-        # Actual tokens ~1.12x target, so anything at or below the target
-        # means the engine dropped part of the prompt.
-        truncated = r["prompt_eval_count"] < 1.0 * ctx
+        # Actual tokens run ~1.12x the section-based target, so a healthy run
+        # reports well above 1.08x; anything below it dropped part of the
+        # prompt (e.g. Ollama silently truncating to num_ctx).
+        truncated = r["prompt_eval_count"] < 1.08 * ctx
         note = "TRUNCATED!" if truncated \
             else f"ev={r['eval_count']} {r['response_head'][:48]}"
         print(f"| {ctx} | {r['prompt_eval_count']} | {r['prefill_s']:.1f} | "
