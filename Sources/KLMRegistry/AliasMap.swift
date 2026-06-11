@@ -186,11 +186,12 @@ private let aliases: [String: ResolvedModel] = [
     // multimodal SKU. `family: .gemma4Unified` routes it to the
     // `Gemma4UnifiedModel` loader (raw-patch / raw-audio linear front-ends
     // over the shared dense Gemma 4 backbone), NOT the SigLIP/USM path the
-    // e2b/e4b/.gemma4 entries use. 256K context.
+    // e2b/e4b/.gemma4 entries use. Trained window 131072 (the checkpoint's
+    // max_position_embeddings; an earlier 262144 here was the vocab size).
     "gemma-4-12b": ResolvedModel(
         repo: "mlx-community/gemma-4-12B-it-4bit",
         name: "gemma-4-12b", family: .gemma4Unified, params: "12B", quant: "4bit",
-        context: 262144),
+        context: 131072),
     // Google's Gemma 4 lineup is E2B / E4B / 12B (unified) / 26B-A4B / 31B.
     // 26B-A4B and 31B are not aliased here yet (the `Gemma4Model` loader is
     // currently e2b-shape-specific) - see docs/FOLLOWUPS_AGENT_DOGFOOD.md §1.
