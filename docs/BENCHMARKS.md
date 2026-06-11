@@ -271,7 +271,10 @@ rate is 17.2 (proven by a cold/warm pair on an identical prompt: 11.0 vs 24.6 on
 the same 8-token answer). Quote long-ctx decode only from runs with >=128 decoded
 tokens. At <=16k, where their runner is not yet swap-bound, Ollama's nvfp4 decode
 is marginally ahead (same parity-by-physics as the short-ctx section; this run used
-KrillLM's mixed-weights blob, not `gemma-4-12b-nvfp4`).
+KrillLM's mixed-weights blob, not `gemma-4-12b-nvfp4`). Re-measured on the nvfp4
+blob same-day: 22.7 tok/s at 16k (0.93x) - tighter, inside the parity-within-noise
+band, still not a win. Short-ctx single-stream decode stays parity; the long-ctx
+cells above are where the engines diverge.
 
 ---
 
