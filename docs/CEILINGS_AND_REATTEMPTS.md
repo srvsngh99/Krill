@@ -243,11 +243,24 @@ compute, is the actual binding constraint.)
   75k/89k/99k. Operational implication for the server (long-lived process):
   after very long requests the MLX buffer-recycling pool can depress later
   long-context requests - cache-pool trimming after long requests is a
-  follow-up. The practical ceiling on the 24GB box is now ~100k+ (the model's
-  trained window is 128k; ~110k+ approaches the Metal working-set edge).
+  follow-up.
   Needle retrieval verified by direct question (`KLM_SWEEP_DIRECT_Q=1`) at
   long contexts; the sweep's default needle column goes N past ~20k purely as
   a 64-token generation-budget artifact (summary-first prompt).
+
+  **Frontier probe (2026-06-11), fresh process per row:** the usable ceiling
+  on the 24GB box is **~123k tokens at 15.6 tok/s** (needle correct, peak
+  18.5GB). At ~127k retrieval is STILL correct but decode collapses into swap
+  (0.9 tok/s default; 3.5 tok/s with `KRILL_PREFILL_CHUNK=1024`, which also
+  cuts peak memory 18.65 -> 14.29GB - the transient prefill buffer, not KV,
+  is the frontier memory hog). So the full 131072 trained window is
+  correctness-intact but not speed-intact on 24GB; the speed wall between
+  123k and 127k is the Metal working-set edge, and a smaller prefill chunk
+  helps memory but not the decode-time wall. A warm-process row even
+  retrieved the needle at 140.9k (past the trained window) - recorded as a
+  curiosity, not evidence (long-lived-process artifact). Beware the sweep's
+  section-count target: actual tokens run ~12% over (a "110k" target
+  measures 123k).
 - **Residual / notes:** the 8 full-attention layers' KV still grows with
   context (they are the model's long-range memory - bounding them would break
   retrieval); that growth is what eventually ends the flat zone. The batched/

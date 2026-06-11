@@ -226,6 +226,53 @@ section, not a code defect. The shared-prefix *reuse* win above (180 ms cached
 prefill) still holds; it is the *concurrent decode* under a near-full RAM budget
 that regresses on this hardware.
 
+### Long context (Gemma 4 12B, 16k-99k) - the survivability axis (2026-06-11)
+
+Same prompt on both engines (repeated structured sections, needle planted at the
+start, question at the end - `tools/longctx_head2head.py`), both read via their
+own `/api/generate` timing fields, engines run strictly sequentially. KrillLM
+`gemma-4-12b` vs Ollama `gemma4:12b-mlx` (their MLX backend; v0.30.6).
+
+**Decode (128-token answers - see the measurement note below):**
+
+| ctx tokens | KrillLM tok/s | Ollama tok/s | Ratio |
+|--:|--:|--:|:--|
+| ~16k | 21.9 | **24.4** | 0.90x |
+| ~53k | **20.5** | 8.0-13.0 | **1.6-2.6x** |
+| ~99k | **17.2** | 7.5-11.6 | **1.5-2.3x** |
+
+**Prefill (same runs):**
+
+| ctx tokens | KrillLM s | Ollama s | KrillLM |
+|--:|--:|--:|:--|
+| ~16k | **90.8** | 120.3 | **1.3x faster** |
+| ~53k | **345** | 644-686 | **1.9-2.0x faster** |
+| ~99k | **746** | 2701-3057 | **3.6-4.1x faster** |
+
+**Memory at ~99k:** KrillLM peaks ~18.5GB inside the box's budget (RotatingKVCache
+caps the 40 sliding-window layers; only the 8 full-attention layers grow). Ollama's
+MLX runner preallocates full-`num_ctx` KV on ALL layers - at 99k it reports **41GB**
+on the 24GB box and drives system swap to ~36GB. It survives, but by thrashing the
+whole machine; its long-ctx decode varies run-to-run with accumulated swap state
+(the ranges above), KrillLM's does not. Needle retrieval was correct in every cell
+on both engines. KrillLM's usable ceiling is ~123k at 15.6 tok/s
+(`docs/CEILINGS_AND_REATTEMPTS.md` #7); Ollama was not probed past 99k - the box
+was already 36GB into swap there.
+
+**Prefix-cache bonus (agentic axis at long ctx):** repeating a 16k prompt against
+KrillLM hits the shared-prefix KV cache - prefill drops 88.5s -> **0.1s**. Ollama
+re-prefills unless its own slot cache happens to hold the exact context.
+
+**Measurement note (the 8-token trap).** With a direct needle question the model
+answers in ~8 tokens, and "decode tok/s" over 8 tokens is dominated by fixed
+post-prefill overhead (on KrillLM's side the O(ctx) prefix-cache store), NOT the
+per-token rate - it made the serve path read 5.4 tok/s at 99k when its true decode
+rate is 17.2 (proven by a cold/warm pair on an identical prompt: 11.0 vs 24.6 on
+the same 8-token answer). Quote long-ctx decode only from runs with >=128 decoded
+tokens. At <=16k, where their runner is not yet swap-bound, Ollama's nvfp4 decode
+is marginally ahead (same parity-by-physics as the short-ctx section; this run used
+KrillLM's mixed-weights blob, not `gemma-4-12b-nvfp4`).
+
 ---
 
 ## How to run
@@ -266,6 +313,13 @@ python3 tools/agentic_benchmark.py \
 #   (Gemma 4 agentic head-to-head - the path closed in #156-#159:)
 python3 tools/agentic_benchmark.py \
   --krill-model gemma-4-e2b --ollama-model gemma4:e2b --concurrency 1,4 --max-tokens 48
+
+# 6. Long-context head-to-head (12B; one engine loaded at a time, ~2h total -
+#    the summary question + 128 tokens is what makes decode tok/s meaningful):
+python3 tools/longctx_head2head.py --engine krillm --port 57455 \
+  --model gemma-4-12b --ctx 14300,47400,88600 --question summary --max-tokens 128
+python3 tools/longctx_head2head.py --engine ollama --port 11434 \
+  --model gemma4:12b-mlx --ctx 14300,47400,88600 --question summary --max-tokens 128
 ```
 
 `tools/bench_suite.py` auto-uses `/tmp/klmbench/red.png` and
