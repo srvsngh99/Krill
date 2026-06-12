@@ -276,6 +276,33 @@ blob same-day: 22.7 tok/s at 16k (0.93x) - tighter, inside the parity-within-noi
 band, still not a win. Short-ctx single-stream decode stays parity; the long-ctx
 cells above are where the engines diverge.
 
+**Generality check: full-attention families (llama-3.2-3b, 2026-06-12).** The
+universal long-context levers (chunked prefill, O(1) KV append) carry every
+family: llama-3.2-3b prefills to ~94k tokens with no OOM (pre-chunking it OOMed
+near 21k) and KrillLM prefill leads at every rung (161 vs 178 s at ~50k). But the
+near-flat DECODE curve is Gemma-family-specific: a full-attention model grows KV
+on all layers (no sliding window for RotatingKVCache to exploit), and on that
+shape Ollama's GGUF/llama.cpp flash-attention decode pulls ahead past ~30k:
+
+| ctx | KrillLM tok/s (engine / serve) | Ollama GGUF tok/s | verdict |
+|--:|--|--|--|
+| ~2k | 81.7 | (short-ctx table: KrillLM 1.08x) | KrillLM |
+| ~15k | 54.1 | 54.9 | parity |
+| ~30k | 30.6 / 34.4 | **40.9** | Ollama 1.2-1.3x |
+| ~50k | 20.6 / 17.8 | **28.8** | Ollama 1.4-1.6x |
+
+Two caveats that bound how much this matters: (1) llama-3.2-3b fails the planted-
+needle retrieval by ~15-28k on BOTH engines (direct question included) - the 3B
+quality envelope ends well before the decode gap opens, so the contested region is
+mostly past the model's useful range; (2) early KrillLM readings of a "cliff" at
+50k+ (6.6, then 0.3-1.2 tok/s at ~94k) were box-state artifacts - accumulated swap
+from prior runs plus the serve prefix-cache store materializing a full KV copy
+(~10GB at 94k on a full-attention 28-layer model; Gemma's stored entry stays small
+because 40 of 48 layers are window-capped). Clean-box reruns gave the table above.
+Operational follow-up: cap or skip the prefix-cache store above a KV-size
+threshold for full-attention models. Re-attempt trigger for the 30k+ decode gap:
+MLX gaining a fused flash-attention decode kernel (CEILINGS territory).
+
 ---
 
 ## How to run
