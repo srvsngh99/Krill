@@ -274,6 +274,21 @@ compute, is the actual binding constraint.)
   the probe for pushing past ~60k. Kill-switch: `KRILL_ROTATING_KV=0` (both
   paths).
 
+  **Full-attention-family corollary (llama-3.2-3b, 2026-06-12):** the rotating
+  win does NOT generalize to families with no sliding window. The universal
+  levers still help (chunked prefill carries llama-3.2-3b to ~94k with no OOM;
+  prefill leads Ollama at every rung), but on long-context DECODE Ollama's
+  GGUF/llama.cpp flash-attention kernel pulls ahead past ~30k (40.9 vs 30.6 at
+  ~30k, 28.8 vs 20.6 at ~50k, clean box, engine harness). Mostly moot in
+  practice - the 3B fails planted-needle retrieval by ~15-28k on both engines -
+  but it is the honest cell. RE-ATTEMPT TRIGGER: MLX shipping a fused
+  flash-attention DECODE kernel (the same missing kernel as the prefill
+  ceiling in item 6). Related operational hazard: the serve prefix-cache
+  store materializes a full KV copy per request - tiny for window-capped
+  Gemma, ~10GB at 94k for a 28-layer full-attention model, which can push a
+  24GB box into swap; follow-up = cap/skip the store above a KV-size
+  threshold for full-attention models.
+
 ---
 
 ## Resource ceilings (RAM-blocked on the 24GB dev box)
