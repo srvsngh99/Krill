@@ -168,6 +168,77 @@ final class PrefixCacheTests: XCTestCase {
         #endif
     }
 
+    // MARK: - Per-entry size cap
+
+    /// A temp cache with an explicit per-entry GB cap (bypasses env/default).
+    private func makeCappedCache(maxEntryGB: Double) -> PrefixCache {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("krillm-prefix-cap-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return PrefixCache(cacheDir: dir, maxMemoryEntries: 4, minPrefixLength: 4,
+                           maxEntryGB: maxEntryGB)
+    }
+
+    /// An entry under the cap stores and replays normally (the cap is inert on
+    /// the common small-prefix path).
+    func testEntryWithinCapIsStored() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            // makeKV default is 96 bytes/array; a 1e-6 GB (1000-byte) cap leaves
+            // the ~192-byte entry comfortably under.
+            let cache = makeCappedCache(maxEntryGB: 1e-6)
+            let tokens = Array(0 ..< 6)
+            cache.store(tokens: tokens, modelId: "m",
+                        keys: [[makeKV(seqLen: tokens.count, start: 10)]],
+                        values: [[makeKV(seqLen: tokens.count, start: 100)]])
+            XCTAssertEqual(cache.memoryCount, 1, "under-cap entry must be retained")
+            XCTAssertNotNil(cache.lookup(tokens: tokens, modelId: "m"))
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    /// An entry over the cap is skipped wholesale: nothing in memory, lookup
+    /// misses, and no disk file is written. This is the full-attention
+    /// long-context guard (a real ~10GB KV would otherwise spike memory).
+    func testOversizedEntryIsSkipped() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            // ~192-byte entry against a 1e-7 GB (100-byte) cap -> over budget.
+            let cache = makeCappedCache(maxEntryGB: 1e-7)
+            let tokens = Array(0 ..< 6)
+            cache.store(tokens: tokens, modelId: "m",
+                        keys: [[makeKV(seqLen: tokens.count, start: 10)]],
+                        values: [[makeKV(seqLen: tokens.count, start: 100)]])
+            cache.waitForDiskWrites()
+            XCTAssertEqual(cache.memoryCount, 0, "over-cap entry must not be retained")
+            XCTAssertNil(cache.lookup(tokens: tokens, modelId: "m"))
+            XCTAssertEqual(cache.diskCount, 0, "over-cap entry must not hit disk")
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
+    /// `maxEntryGB <= 0` disables the cap: the same entry that the tiny cap
+    /// rejected is now stored (legacy unbounded behavior, opt-in).
+    func testCapDisabledStoresAnySize() throws {
+        #if canImport(MLX) && os(macOS) && arch(arm64)
+        try withMLXCPU {
+            let cache = makeCappedCache(maxEntryGB: 0)
+            let tokens = Array(0 ..< 6)
+            cache.store(tokens: tokens, modelId: "m",
+                        keys: [[makeKV(seqLen: tokens.count, start: 10)]],
+                        values: [[makeKV(seqLen: tokens.count, start: 100)]])
+            XCTAssertEqual(cache.memoryCount, 1, "cap disabled -> entry stored regardless of size")
+            XCTAssertNotNil(cache.lookup(tokens: tokens, modelId: "m"))
+        }
+        #else
+        throw XCTSkip("MLX tensor tests require MLX on macOS arm64.")
+        #endif
+    }
+
     // MARK: - Longest-common-prefix (shared-prefix) lookup
 
     func testCommonPrefixLength() {

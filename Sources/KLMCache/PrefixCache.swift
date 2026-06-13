@@ -33,6 +33,24 @@ public final class PrefixCache: @unchecked Sendable {
     ///   - `< 0`: unbounded (legacy behavior; nothing enforces a cap).
     private let diskBudgetBytes: Int64
 
+    /// Per-entry KV byte cap for the in-memory tier. A `store` whose KV state
+    /// exceeds this is skipped entirely (no in-memory copy, no disk write), so
+    /// a single huge prefix cannot spike memory and push the box into swap.
+    /// This bites FULL-ATTENTION families at long context (their KV grows on
+    /// every layer — llama-3.2-3b at ~94k is ~10GB), while a sliding-window
+    /// model (Gemma 4) is unaffected: its `RotatingKVCache.snapshot()` is
+    /// window-trimmed, so the stored entry stays small at any context length.
+    /// The cap is therefore expressed in bytes, not as a family flag — the
+    /// size IS the signal. Semantics:
+    ///   - `> 0`: skip storing any entry whose KV exceeds this many bytes.
+    ///   - `<= 0`: no cap (legacy behavior; store entries of any size).
+    private let maxEntryBytes: Int64
+
+    /// One-shot guard so the "skipped a huge entry" notice prints once per
+    /// process, not once per oversized request.
+    private var didNoteEntryTooLarge = false
+    private let entryNoteLock = NSLock()
+
     /// Running estimate of bytes occupied by the on-disk tier, so the common
     /// case (a write that leaves us under budget) costs O(1) instead of an
     /// O(N) directory rescan. Mutated only under ``diskCounterLock``: writes
@@ -68,11 +86,18 @@ public final class PrefixCache: @unchecked Sendable {
     ///   — so any `PrefixCache()` is bounded even on paths that don't thread
     ///   `KrillConfig` through. `0` disables the disk tier; a negative value
     ///   means unbounded.
+    /// - Parameter maxEntryGB: per-entry in-memory KV cap in gigabytes. `nil`
+    ///   resolves from `KRILL_PREFIX_CACHE_MAX_ENTRY_GB`, falling back to 4.0 GB
+    ///   — chosen for a 24 GB box: a 4 GB resident entry plus its ~4 GB
+    ///   transient materialization on top of a ~9 GB model stays under the swap
+    ///   line, where an 8 GB entry would not. `0` (or negative) disables the
+    ///   cap. Raise it on a larger-RAM machine.
     public init(
         cacheDir: URL? = nil,
         maxMemoryEntries: Int = 8,
         minPrefixLength: Int = 8,
-        diskBudgetGB: Double? = nil
+        diskBudgetGB: Double? = nil,
+        maxEntryGB: Double? = nil
     ) {
         let dir = cacheDir ?? PrefixCache.defaultCacheDir()
         self.cacheDir = dir
@@ -80,12 +105,21 @@ public final class PrefixCache: @unchecked Sendable {
         self.minPrefixLength = minPrefixLength
         let gb = diskBudgetGB ?? PrefixCache.envBudgetGB() ?? 2.0
         self.diskBudgetBytes = gb < 0 ? -1 : Int64(gb * 1_000_000_000)
+        let entryGB = maxEntryGB ?? PrefixCache.envMaxEntryGB() ?? 4.0
+        self.maxEntryBytes = entryGB <= 0 ? -1 : Int64(entryGB * 1_000_000_000)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
 
     /// `KRILL_PREFIX_CACHE_GB` parsed as a Double, or nil if unset/unparseable.
     private static func envBudgetGB() -> Double? {
         guard let v = ProcessInfo.processInfo.environment["KRILL_PREFIX_CACHE_GB"] else { return nil }
+        return Double(v)
+    }
+
+    /// `KRILL_PREFIX_CACHE_MAX_ENTRY_GB` parsed as a Double, or nil if
+    /// unset/unparseable.
+    private static func envMaxEntryGB() -> Double? {
+        guard let v = ProcessInfo.processInfo.environment["KRILL_PREFIX_CACHE_MAX_ENTRY_GB"] else { return nil }
         return Double(v)
     }
 
@@ -284,6 +318,15 @@ public final class PrefixCache: @unchecked Sendable {
     ) {
         guard tokens.count >= minPrefixLength else { return }
 
+        // Skip a single oversized entry before it is materialized: `nbytes` on
+        // the lazy snapshot views is metadata-only (no evaluation), so this
+        // costs nothing on the common (small) path and avoids the full
+        // `contiguous` copy below for a giant full-attention prefix.
+        if maxEntryBytes > 0 {
+            let bytes = fp16KVBytes(keys: keys, values: values)
+            if bytes > maxEntryBytes { noteEntryTooLargeOnce(bytes: bytes); return }
+        }
+
         let key = cacheKey(tokens: tokens, modelId: modelId, mediaHash: mediaHash, dtype: .fp16)
         // Materialize the snapshots before retaining them: `KVCache.snapshot()`
         // returns lazy slice views over the cache's live backing buffer, and a
@@ -327,6 +370,14 @@ public final class PrefixCache: @unchecked Sendable {
         mediaHash: String? = nil
     ) {
         guard tokens.count >= minPrefixLength, !snapshots.isEmpty else { return }
+
+        // Same per-entry size guard as the fp16 path. int8 KV is ~4x smaller
+        // per token, so this rarely trips, but a long enough full-attention
+        // prefix can still cross the cap.
+        if maxEntryBytes > 0 {
+            let bytes = int8KVBytes(snapshots: snapshots)
+            if bytes > maxEntryBytes { noteEntryTooLargeOnce(bytes: bytes); return }
+        }
 
         let key = cacheKey(tokens: tokens, modelId: modelId, mediaHash: mediaHash, dtype: .int8)
         // Retain tokens + identity so a later request sharing this prefix can
@@ -638,6 +689,46 @@ extension PrefixCache {
         diskBytesCounter = total
         diskCounterSeeded = true
         diskCounterLock.unlock()
+    }
+
+    /// Total bytes of an fp16 entry's KV tensors, summed from `nbytes` (shape
+    /// and dtype metadata only — does not evaluate the lazy snapshot views).
+    private func fp16KVBytes(keys: [[MLXArray]], values: [[MLXArray]]) -> Int64 {
+        var total: Int64 = 0
+        for layer in keys { for a in layer { total += Int64(a.nbytes) } }
+        for layer in values { for a in layer { total += Int64(a.nbytes) } }
+        return total
+    }
+
+    /// Total bytes of an int8 entry's per-layer snapshots (quantized payload
+    /// plus the fp16 scales/zeros), summed from `nbytes`.
+    private func int8KVBytes(snapshots: [QuantizedKVSnapshot]) -> Int64 {
+        var total: Int64 = 0
+        for s in snapshots {
+            total += Int64(s.keys.nbytes + s.values.nbytes
+                + s.keyScales.nbytes + s.keyZeros.nbytes
+                + s.valueScales.nbytes + s.valueZeros.nbytes)
+        }
+        return total
+    }
+
+    /// Emit the "skipped an oversized entry" notice once per process. The cap
+    /// is a memory-safety floor, so an operator who actually wants to cache
+    /// huge prefixes needs to know the knob exists.
+    private func noteEntryTooLargeOnce(bytes: Int64) {
+        entryNoteLock.lock(); defer { entryNoteLock.unlock() }
+        guard !didNoteEntryTooLarge else { return }
+        didNoteEntryTooLarge = true
+        let gb = Double(bytes) / 1_000_000_000
+        let capGB = Double(maxEntryBytes) / 1_000_000_000
+        FileHandle.standardError.write(Data((
+            "[KrillLM] prefix-cache: not caching a "
+            + String(format: "%.1f", gb) + "GB KV prefix (over the "
+            + String(format: "%.1f", capGB)
+            + "GB per-entry cap; raise KRILL_PREFIX_CACHE_MAX_ENTRY_GB or set it "
+            + "to 0 to disable). Long full-attention contexts are not reused to "
+            + "avoid memory pressure; windowed models (Gemma 4) are unaffected.\n"
+        ).utf8))
     }
 
     /// Size of a single cache file in bytes, or 0 if it does not exist.

@@ -299,8 +299,10 @@ mostly past the model's useful range; (2) early KrillLM readings of a "cliff" at
 from prior runs plus the serve prefix-cache store materializing a full KV copy
 (~10GB at 94k on a full-attention 28-layer model; Gemma's stored entry stays small
 because 40 of 48 layers are window-capped). Clean-box reruns gave the table above.
-Operational follow-up: cap or skip the prefix-cache store above a KV-size
-threshold for full-attention models. Re-attempt trigger for the 30k+ decode gap:
+That store hazard is now fixed: the prefix cache skips any entry whose KV exceeds
+a per-entry cap (`KRILL_PREFIX_CACHE_MAX_ENTRY_GB`, default 4 GB), which is
+size-based so it only ever bites long full-attention prefixes, never windowed
+Gemma. Re-attempt trigger for the 30k+ decode gap:
 MLX gaining a fused flash-attention decode kernel (CEILINGS territory).
 
 ---

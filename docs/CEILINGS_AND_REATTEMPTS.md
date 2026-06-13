@@ -283,11 +283,15 @@ compute, is the actual binding constraint.)
   practice - the 3B fails planted-needle retrieval by ~15-28k on both engines -
   but it is the honest cell. RE-ATTEMPT TRIGGER: MLX shipping a fused
   flash-attention DECODE kernel (the same missing kernel as the prefill
-  ceiling in item 6). Related operational hazard: the serve prefix-cache
-  store materializes a full KV copy per request - tiny for window-capped
-  Gemma, ~10GB at 94k for a 28-layer full-attention model, which can push a
-  24GB box into swap; follow-up = cap/skip the store above a KV-size
-  threshold for full-attention models.
+  ceiling in item 6). Related operational hazard, now FIXED: the serve
+  prefix-cache store materialized a full KV copy per request - tiny for
+  window-capped Gemma, ~10GB at 94k for a 28-layer full-attention model,
+  which could push a 24GB box into swap. The store now skips any entry whose
+  KV exceeds a per-entry byte cap (`KRILL_PREFIX_CACHE_MAX_ENTRY_GB` /
+  `prefix_cache_max_entry_gb`, default 4 GB; `0` disables). The cap is
+  size-based, not family-based: a windowed Gemma snapshot stays small and is
+  never skipped, while a long full-attention prefix is. Raise it on a
+  larger-RAM box.
 
 ---
 

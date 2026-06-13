@@ -16,6 +16,12 @@ public struct KrillConfig: Sendable {
     /// Maximum size in GB for prefix cache memory tier.
     public var prefixCacheSizeGB: Double
 
+    /// Per-entry KV cap in GB for the prefix cache: a prefill whose KV state
+    /// exceeds this is not cached (skips memory + disk), so one huge
+    /// full-attention prefix cannot spike memory into swap. `<= 0` disables the
+    /// cap. `KRILL_PREFIX_CACHE_MAX_ENTRY_GB`.
+    public var prefixCacheMaxEntryGB: Double
+
     /// Enable speculative decoding by default.
     public var speculativeDecoding: Bool
 
@@ -58,6 +64,7 @@ public struct KrillConfig: Sendable {
         self.defaultQuant = 4
         self.kvCacheDtype = "fp16"
         self.prefixCacheSizeGB = 2.0
+        self.prefixCacheMaxEntryGB = 4.0
         self.speculativeDecoding = false
         self.modelsDir = nil
         self.serverPort = 57455   // "KRILL" on a phone keypad; unique vs Ollama's 11434
@@ -113,6 +120,8 @@ public struct KrillConfig: Sendable {
                 kvCacheDtype = value
             case "prefix_cache_size_gb":
                 if let v = Double(value) { prefixCacheSizeGB = v }
+            case "prefix_cache_max_entry_gb":
+                if let v = Double(value) { prefixCacheMaxEntryGB = v }
             case "speculative_decoding":
                 speculativeDecoding = value == "true" || value == "1"
             case "models_dir":
@@ -198,6 +207,9 @@ public struct KrillConfig: Sendable {
         }
         if let v = ProcessInfo.processInfo.environment["KRILL_PREFIX_CACHE_GB"], let d = Double(v) {
             prefixCacheSizeGB = d
+        }
+        if let v = ProcessInfo.processInfo.environment["KRILL_PREFIX_CACHE_MAX_ENTRY_GB"], let d = Double(v) {
+            prefixCacheMaxEntryGB = d
         }
         if let v = ProcessInfo.processInfo.environment["KRILL_SPECULATIVE"] {
             speculativeDecoding = v == "true" || v == "1"

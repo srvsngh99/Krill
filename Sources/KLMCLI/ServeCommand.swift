@@ -54,7 +54,8 @@ struct ServeCommand: AsyncParsableCommand {
         // by default; its keys already namespace by model id, so models never
         // read each other's prefixes, and the GB budget stays singular rather
         // than multiplying by MAX_LOADED_MODELS).
-        let sharedPrefix = PrefixCache(diskBudgetGB: config.prefixCacheSizeGB)
+        let sharedPrefix = PrefixCache(diskBudgetGB: config.prefixCacheSizeGB,
+                                       maxEntryGB: config.prefixCacheMaxEntryGB)
         let engine: InferenceEngine
 
         if let model {
