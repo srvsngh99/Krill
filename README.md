@@ -1,19 +1,26 @@
-# KrillLM
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/srvsngh99/KrillLM/main/assets/krillm-lockup-paper.png">
+    <img src="https://raw.githubusercontent.com/srvsngh99/KrillLM/main/assets/krillm-lockup-ink.png" alt="KrillLM — a Sourav AI Labs project" width="340">
+  </picture>
+</p>
 
-A Mac-native LLM inference CLI for Apple Silicon.
-
-Built on Apple's [MLX](https://github.com/ml-explore/mlx-swift) framework. Ships as a single CLI binary.
+<p align="center">
+  A Mac-native LLM inference CLI for Apple Silicon, built on Apple's <a href="https://github.com/ml-explore/mlx-swift">MLX</a>. Ships as a single CLI binary.
+</p>
 
 ## Release Status
 
-**Current release: v0.5.0** (`brew tap srvsngh99/krillm && brew install krillm`).
+**Current release: v0.6.0 — the long-context release** (`brew tap srvsngh99/krillm && brew install krillm`).
 
-The headline of this release is **Gemma 4 12B, natively** - a native, encoder-free
-Gemma 4 12B "unified" multimodal runtime (text + vision + audio on one dense
-backbone, no separate vision encoder) running in 4-bit-float nvfp4 - plus
-**one-command coding-agent launch**: `krillm launch <agent>` wires Claude Code,
-Codex, OpenCode, GitHub Copilot, Droid, Hermes, or Pi to your local server with no
-manual config (see [`docs/CONNECT_CODING_AGENTS.md`](docs/CONNECT_CODING_AGENTS.md)).
+The headline of this release is **long context that stays fast**: Gemma 4 12B now
+decodes near-flat (~17-23 tok/s) from 0 to ~99k tokens of context on a 24GB Mac, and
+long prompts no longer OOM (chunked prefill). It builds on **Gemma 4 12B running
+natively** - an encoder-free "unified" multimodal runtime (text + vision + audio on one
+dense backbone, no separate vision encoder) in 4-bit-float nvfp4 - plus **one-command
+coding-agent launch**: `krillm launch <agent>` wires Claude Code, Codex, OpenCode,
+GitHub Copilot, Droid, Hermes, or Pi to your local server with no manual config (see
+[`docs/CONNECT_CODING_AGENTS.md`](docs/CONNECT_CODING_AGENTS.md)).
 
 Everything runs on the native Swift+MLX engine with **no Python dependency**. The
 server is a drop-in for both the OpenAI and Ollama HTTP APIs and listens on the
