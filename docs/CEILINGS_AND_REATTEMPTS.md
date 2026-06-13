@@ -289,9 +289,12 @@ compute, is the actual binding constraint.)
   which could push a 24GB box into swap. The store now skips any entry whose
   KV exceeds a per-entry byte cap (`KRILL_PREFIX_CACHE_MAX_ENTRY_GB` /
   `prefix_cache_max_entry_gb`, default 4 GB; `0` disables). The cap is
-  size-based, not family-based: a windowed Gemma snapshot stays small and is
-  never skipped, while a long full-attention prefix is. Raise it on a
-  larger-RAM box.
+  size-based, not family-based: a long full-attention prefix crosses it early
+  (llama-3.2-3b around a few-thousand tokens past the agentic/RAG range),
+  while a windowed Gemma 4 12B prefix crosses only around ~61k context (its 40
+  windowed layers stay tiny but its 8 global layers still grow). Realistic
+  reuse prefixes (system prompts, RAG, tool schemas) sit far under the cap on
+  every family. Raise it on a larger-RAM box.
 
 ---
 

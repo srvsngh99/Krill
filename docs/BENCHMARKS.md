@@ -300,9 +300,11 @@ from prior runs plus the serve prefix-cache store materializing a full KV copy
 (~10GB at 94k on a full-attention 28-layer model; Gemma's stored entry stays small
 because 40 of 48 layers are window-capped). Clean-box reruns gave the table above.
 That store hazard is now fixed: the prefix cache skips any entry whose KV exceeds
-a per-entry cap (`KRILL_PREFIX_CACHE_MAX_ENTRY_GB`, default 4 GB), which is
-size-based so it only ever bites long full-attention prefixes, never windowed
-Gemma. Re-attempt trigger for the 30k+ decode gap:
+a per-entry cap (`KRILL_PREFIX_CACHE_MAX_ENTRY_GB`, default 4 GB). It is
+size-based, so a full-attention prefix crosses it early while a windowed Gemma 4
+12B prefix only crosses around ~61k context (8 global layers still grow); either
+way, realistic few-thousand-token reuse prefixes stay well under it. Re-attempt
+trigger for the 30k+ decode gap:
 MLX gaining a fused flash-attention decode kernel (CEILINGS territory).
 
 ---

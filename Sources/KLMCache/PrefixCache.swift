@@ -37,11 +37,14 @@ public final class PrefixCache: @unchecked Sendable {
     /// exceeds this is skipped entirely (no in-memory copy, no disk write), so
     /// a single huge prefix cannot spike memory and push the box into swap.
     /// This bites FULL-ATTENTION families at long context (their KV grows on
-    /// every layer — llama-3.2-3b at ~94k is ~10GB), while a sliding-window
-    /// model (Gemma 4) is unaffected: its `RotatingKVCache.snapshot()` is
-    /// window-trimmed, so the stored entry stays small at any context length.
-    /// The cap is therefore expressed in bytes, not as a family flag — the
-    /// size IS the signal. Semantics:
+    /// every layer - llama-3.2-3b at ~94k is ~10GB. A sliding-window model
+    /// (Gemma 4) is hit far later: its 40 windowed layers stay tiny via
+    /// `RotatingKVCache.snapshot()`, but its 8 GLOBAL (full-attention) layers
+    /// still grow, so a 12B entry crosses a 4GB cap only around ~61k context
+    /// (vs a few-thousand-token full-attention prefix). The cap is therefore
+    /// expressed in bytes, not as a family flag - the size IS the signal, and
+    /// realistic reuse prefixes (system prompts, RAG, tool schemas; a few
+    /// thousand tokens) sit far under it on every family. Semantics:
     ///   - `> 0`: skip storing any entry whose KV exceeds this many bytes.
     ///   - `<= 0`: no cap (legacy behavior; store entries of any size).
     private let maxEntryBytes: Int64
@@ -88,7 +91,7 @@ public final class PrefixCache: @unchecked Sendable {
     ///   means unbounded.
     /// - Parameter maxEntryGB: per-entry in-memory KV cap in gigabytes. `nil`
     ///   resolves from `KRILL_PREFIX_CACHE_MAX_ENTRY_GB`, falling back to 4.0 GB
-    ///   — chosen for a 24 GB box: a 4 GB resident entry plus its ~4 GB
+    ///   chosen for a 24 GB box: a 4 GB resident entry plus its ~4 GB
     ///   transient materialization on top of a ~9 GB model stays under the swap
     ///   line, where an 8 GB entry would not. `0` (or negative) disables the
     ///   cap. Raise it on a larger-RAM machine.
@@ -692,7 +695,7 @@ extension PrefixCache {
     }
 
     /// Total bytes of an fp16 entry's KV tensors, summed from `nbytes` (shape
-    /// and dtype metadata only — does not evaluate the lazy snapshot views).
+    /// and dtype metadata only - does not evaluate the lazy snapshot views).
     private func fp16KVBytes(keys: [[MLXArray]], values: [[MLXArray]]) -> Int64 {
         var total: Int64 = 0
         for layer in keys { for a in layer { total += Int64(a.nbytes) } }
