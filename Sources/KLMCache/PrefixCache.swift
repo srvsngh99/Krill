@@ -730,7 +730,8 @@ extension PrefixCache {
             + String(format: "%.1f", capGB)
             + "GB per-entry cap; raise KRILL_PREFIX_CACHE_MAX_ENTRY_GB or set it "
             + "to 0 to disable). Long full-attention contexts are not reused to "
-            + "avoid memory pressure; windowed models (Gemma 4) are unaffected.\n"
+            + "avoid memory pressure; windowed models (Gemma 4) are hit only at "
+            + "much longer context.\n"
         ).utf8))
     }
 
