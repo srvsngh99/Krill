@@ -277,6 +277,52 @@ krillm run gemma-4-e2b "Describe this image" --image ./photo.png --max-tokens 64
 krillm run gemma-4-e2b "Transcribe this audio." --audio ./clip.wav --max-tokens 64
 ```
 
+`--image` works for **any** vision-capable family (Gemma 4, Qwen2.5-VL, LLaVA,
+mllama), not just Gemma 4 - the flag is gated on the loaded model's real
+capability, and fails loudly on a text-only model rather than silently dropping
+the image.
+
+### Interactive multimodal chat (attach mid-conversation)
+
+The interactive REPL (`krillm run <model>` with no prompt) accepts images and
+audio without leaving the session. Attach a file three ways:
+
+```text
+> /image ~/Pictures/cat.png        # explicit command (/audio, /img too)
+> /Users/me/My Photos/cat.png      # drag a file into the terminal (its path is pasted)
+> what breed is @~/Pictures/cat.png?   # inline @path inside your message
+```
+
+Attachments apply to your **next** message, then clear. Manage them with
+`/attach` (list pending), `/clear` (discard), and `/help` (full command list).
+Images accumulate for multi-image models (mllama); single-image models use the
+first. `--image` / `--audio` passed on the command line pre-attach to the first
+turn.
+
+### Live microphone voice input
+
+In interactive chat with an audio-capable Gemma 4 model, `/mic` records from the
+default input device and attaches the clip (press Enter to stop):
+
+```text
+> /mic
+Recording... press Enter to stop.
+> what did I just say?
+```
+
+macOS attributes microphone access to the running app, so `/mic` needs KrillLM
+to run from a code-signed bundle that declares the mic-usage string. Build it
+with:
+
+```bash
+make app-bundle                 # produces dist/krillm.app (ad-hoc signed)
+dist/krillm.app/Contents/MacOS/krillm run gemma-4-e2b
+```
+
+The first `/mic` triggers the system microphone permission prompt under
+KrillLM's own identity. Run the bare `.build/release/krillm` binary instead and
+the prompt (and permission) attach to your terminal app.
+
 ## API Compatibility
 
 KrillLM serves on port 57455 (configurable) with all of:
