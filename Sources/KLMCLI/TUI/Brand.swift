@@ -17,22 +17,35 @@ enum Brand {
 
     // MARK: - Masthead (persistent top bar)
 
-    /// A full-width inverse-video header bar: wordmark on the left, the loaded
-    /// model on the right. Mirrors the ink/paper inversion of the brand lockup.
+    /// A light two-part masthead line (NOT a solid inverse bar): the bold
+    /// wordmark + lab on the left, the loaded model dim on the right. Pair with
+    /// `headerRule` on the row beneath for the underline. Degrades on narrow
+    /// terminals so the line never overflows onto the rule row: drop the model
+    /// (still shown in the footer) when there is no room, then clip the wordmark.
     static func header(width: Int, model: String) -> String {
-        let left = " \(wordmark)  \(lab) "
-        let right = "\(model) "
-        let pad = max(1, width - visibleCount(left) - visibleCount(right))
-        let bar = left + String(repeating: " ", count: pad) + right
-        return Ansi.inverse(Ansi.bold(clip(bar, width: width)))
+        let leftPlain = "  \(wordmark)  \(lab)"
+        let rightPlain = "\(model)  "
+        let styledLeft = "  " + Ansi.bold(wordmark) + "  " + Ansi.dim(lab)
+        if width >= leftPlain.count + rightPlain.count + 1 {
+            let pad = width - leftPlain.count - rightPlain.count
+            return styledLeft + String(repeating: " ", count: pad) + Ansi.dim(model) + "  "
+        }
+        if width >= leftPlain.count { return styledLeft }
+        return Ansi.bold(String(leftPlain.prefix(max(0, width))))
     }
 
-    /// A dim footer line: status on the left, the lab site on the right.
-    static func footer(width: Int, status: String) -> String {
-        let left = " \(status)"
-        let right = "\(lab) \u{00B7} \(site) "
-        let pad = max(1, width - visibleCount(left) - visibleCount(right))
-        let line = left + String(repeating: " ", count: pad) + right
+    /// A dim full-width rule drawn under the masthead.
+    static func headerRule(width: Int) -> String {
+        Ansi.dim(String(repeating: "\u{2500}", count: max(0, width)))
+    }
+
+    /// A dim footer line: `left` status on the left, `right` session info on the
+    /// right.
+    static func footer(width: Int, left: String, right: String) -> String {
+        let l = "  \(left)"
+        let r = "\(right)  "
+        let pad = max(1, width - l.count - r.count)
+        let line = l + String(repeating: " ", count: pad) + r
         return Ansi.dim(clip(line, width: width))
     }
 
