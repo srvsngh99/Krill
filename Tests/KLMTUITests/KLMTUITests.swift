@@ -157,6 +157,16 @@ final class ChromeBorderTests: XCTestCase {
         XCTAssertEqual(Chrome.centerPad(visibleWidth: 10, totalWidth: 20), 5)
         XCTAssertEqual(Chrome.centerPad(visibleWidth: 30, totalWidth: 20), 0)   // over-wide
     }
+
+    func testAnchorBlankTop() {
+        // Bottom-anchored: short content hugs the bottom (all slack above).
+        XCTAssertEqual(Chrome.anchorBlankTop(paneCount: 4, convHeight: 10, centered: false), 6)
+        // Centered (splash): slack split in half.
+        XCTAssertEqual(Chrome.anchorBlankTop(paneCount: 4, convHeight: 10, centered: true), 3)
+        // Overflowing content is not padded (it scrolls).
+        XCTAssertEqual(Chrome.anchorBlankTop(paneCount: 20, convHeight: 10, centered: false), 0)
+        XCTAssertEqual(Chrome.anchorBlankTop(paneCount: 10, convHeight: 10, centered: false), 0)
+    }
 }
 
 final class BannerTests: XCTestCase {
