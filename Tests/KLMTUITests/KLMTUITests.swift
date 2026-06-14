@@ -218,6 +218,30 @@ final class CustomCommandTests: XCTestCase {
         XCTAssertEqual(c.expand(arguments: "hi"), "Echo: hi")
     }
 
+    func testMultiDigitPositionalLeftLiteral() {
+        // $10 is unsupported and must not be eaten as $1 + "0".
+        let c = CustomCommand(name: "x", description: "", template: "price $10 and $2")
+        // No placeholder substituted for $10; $2 is the only real positional.
+        XCTAssertEqual(c.expand(arguments: "a b c"), "price $10 and b")
+    }
+
+    func testArgumentContainingTokenNotReExpanded() {
+        // A user word that looks like a token must be taken literally, not
+        // re-expanded by a second pass.
+        let c = CustomCommand(name: "x", description: "", template: "[$1]")
+        XCTAssertEqual(c.expand(arguments: "$INPUT extra"), "[$INPUT]")
+    }
+
+    func testArgsPrefixOfArgumentsNotCorrupted() {
+        let c = CustomCommand(name: "x", description: "", template: "<$ARGUMENTS>")
+        XCTAssertEqual(c.expand(arguments: "hello"), "<hello>")
+    }
+
+    func testLoneDollarLeftLiteral() {
+        let c = CustomCommand(name: "x", description: "", template: "cost is $ and $x")
+        XCTAssertEqual(c.expand(arguments: ""), "cost is $ and $x")
+    }
+
     func testParseFrontmatterDescription() {
         let src = "---\ndescription: Code review helper\n---\nReview: $ARGS\n"
         let c = CustomCommandStore.parse(name: "Review", contents: src)
@@ -247,6 +271,15 @@ final class CustomCommandTests: XCTestCase {
         XCTAssertFalse(CustomCommandStore.isValidName(""))
         XCTAssertFalse(CustomCommandStore.isValidName("has space"))
         XCTAssertFalse(CustomCommandStore.isValidName("dot.name"))
+    }
+
+    func testStoreDedupsByName() {
+        let store = CustomCommandStore(commands: [
+            CustomCommand(name: "review", description: "first", template: "1"),
+            CustomCommand(name: "review", description: "second", template: "2"),
+        ])
+        XCTAssertEqual(store.commands.count, 1)
+        XCTAssertEqual(store.command(named: "review")?.description, "first")  // first wins
     }
 }
 

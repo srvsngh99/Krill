@@ -25,29 +25,56 @@ public struct CustomCommand: Equatable, Sendable {
         self.template = template
     }
 
+    /// Whole-argument tokens, longest first so `$ARGUMENTS` is matched before
+    /// its `$ARGS` prefix.
     private static let wholeTokens = ["$ARGUMENTS", "$ARGS", "$INPUT"]
 
     /// Expand the template against the user-supplied argument string.
+    ///
+    /// A single forward pass over the template: at each `$` the longest known
+    /// token wins (`$ARGUMENTS` before `$ARGS`; a lone `$1`..`$9` but never a
+    /// multi-digit `$10`, which stays literal). Substituted *values* are never
+    /// re-scanned, so a user argument that itself contains `$INPUT` is taken
+    /// literally rather than re-expanded.
     public func expand(arguments: String) -> String {
         let args = arguments.trimmingCharacters(in: .whitespacesAndNewlines)
         let words = args.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-        var out = template
+        let chars = Array(template)
+        var out = ""
+        out.reserveCapacity(template.count)
+        var substituted = false
+        var i = 0
 
-        let referencesPositional = (1...9).contains { template.contains("$\($0)") }
-        for i in 1...9 where out.contains("$\(i)") {
-            let val = i <= words.count ? words[i - 1] : ""
-            out = out.replacingOccurrences(of: "$\(i)", with: val)
+        while i < chars.count {
+            guard chars[i] == "$" else { out.append(chars[i]); i += 1; continue }
+
+            // Whole-argument token (longest first).
+            if let token = Self.wholeTokens.first(where: { Self.matches($0, chars, at: i) }) {
+                out += args; i += token.count; substituted = true; continue
+            }
+
+            // Positional $1..$9, but only a lone single digit (a multi-digit run
+            // like $10 is left verbatim).
+            if i + 1 < chars.count, let d = chars[i + 1].wholeNumberValue, (1...9).contains(d),
+               !(i + 2 < chars.count && chars[i + 2].isNumber) {
+                out += d <= words.count ? words[d - 1] : ""
+                i += 2; substituted = true; continue
+            }
+
+            out.append(chars[i]); i += 1   // literal `$`
         }
 
-        let referencesWhole = Self.wholeTokens.contains { template.contains($0) }
-        for token in Self.wholeTokens {
-            out = out.replacingOccurrences(of: token, with: args)
-        }
-
-        if !referencesWhole, !referencesPositional, !args.isEmpty {
-            out += "\n\n" + args
-        }
+        // A template with no placeholder still receives the args (appended).
+        if !substituted, !args.isEmpty { out += "\n\n" + args }
         return out
+    }
+
+    /// True if `token` (as characters) appears in `chars` starting at `i`.
+    private static func matches(_ token: String, _ chars: [Character], at i: Int) -> Bool {
+        let t = Array(token)
+        guard i + t.count <= chars.count else { return false }
+        for k in 0..<t.count where chars[i + k] != t[k] { return false }
+        return true
     }
 }
 
@@ -57,7 +84,11 @@ public struct CustomCommandStore: Sendable {
     public let commands: [CustomCommand]
 
     public init(commands: [CustomCommand]) {
-        self.commands = commands.sorted { $0.name < $1.name }
+        // Dedup by (lowercased) name so two files differing only in case do not
+        // produce duplicate entries; the first one encountered wins.
+        var seen = Set<String>()
+        let unique = commands.filter { seen.insert($0.name).inserted }
+        self.commands = unique.sorted { $0.name < $1.name }
     }
 
     public var isEmpty: Bool { commands.isEmpty }
