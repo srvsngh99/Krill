@@ -38,6 +38,8 @@ final class ChatTUI {
     private var input = ""
     private var cursor = 0           // index into `input`
     private var menu = SlashMenu()
+    private var picker: ModelPicker?          // active modal model picker, if any
+    private var pendingModelLoad: String?     // model the picker chose; loaded by the run loop
     private var inputHistory: [String] = []
     private var historyIndex = 0
     private var scrollOffset = 0     // lines scrolled up from bottom
@@ -97,6 +99,12 @@ final class ChatTUI {
             }
             render()
             if let text = submit, !shouldQuit { await processSubmit(text) }
+            // The picker chose a model: load (or download then load) it now.
+            if let name = pendingModelLoad, !shouldQuit {
+                pendingModelLoad = nil
+                await switchOrDownload(name)
+                render()
+            }
         }
     }
 
@@ -104,6 +112,8 @@ final class ChatTUI {
 
     /// Mutate UI state for a key; return non-nil text to submit on Enter.
     private func handleKey(_ key: Key) -> String? {
+        // The model picker is modal: while open it owns the keyboard.
+        if picker != nil { handlePickerKey(key); return nil }
         switch key {
         case .ctrlD:
             if input.isEmpty { shouldQuit = true }
@@ -171,6 +181,109 @@ final class ChatTUI {
         menu.close()
     }
 
+    // MARK: - Model picker
+
+    /// Key handling while the modal model picker is open: Up/Down to move, Enter
+    /// to choose (the run loop then loads or downloads it), Esc/Ctrl-C to cancel.
+    private func handlePickerKey(_ key: Key) {
+        switch key {
+        case .up: picker?.selectPrevious()
+        case .down: picker?.selectNext()
+        case .enter:
+            if let chosen = picker?.current?.name { pendingModelLoad = chosen }
+            picker = nil
+        case .escape, .ctrlC: picker = nil
+        default: break
+        }
+    }
+
+    /// Build the picker entries: every chat-capable built-in alias plus any
+    /// catalog models, each flagged as downloaded. Embedding/reranker models are
+    /// excluded - you cannot chat with them. Downloaded models sort first.
+    private func modelPickerEntries() -> [ModelPicker.Entry] {
+        var seen = Set<String>()
+        var entries: [ModelPicker.Entry] = []
+        func add(_ name: String, _ params: String, _ quant: String, _ family: ModelFamily) {
+            guard !seen.contains(name) else { return }
+            guard ModelCapabilities.capabilities(for: family).contains(.textGeneration) else { return }
+            seen.insert(name)
+            entries.append(.init(name: name, detail: "\(params) \u{00B7} \(quant)",
+                                 downloaded: registry.hasModel(name)))
+        }
+        for (_, m) in AliasMap.allAliases { add(m.name, m.params, m.quant, m.family) }
+        if let catalog = ModelCatalogStore(baseDir: registry.baseDir).load() {
+            for e in catalog.models { add(e.alias, e.params, e.quant, e.family) }
+        }
+        return entries.sorted { a, b in
+            a.downloaded != b.downloaded ? a.downloaded : a.name < b.name
+        }
+    }
+
+    /// Switch to `name` if it is already downloaded, otherwise pull it (with a
+    /// live progress line) and then switch.
+    private func switchOrDownload(_ name: String) async {
+        if registry.hasModel(name) { await switchModel(name); return }
+        let store = ModelCatalogStore(baseDir: registry.baseDir)
+        guard let resolved = AliasMap.resolve(name, catalog: store) else {
+            note("Unknown model: \(name)"); return
+        }
+        note("Downloading \(name) ...")
+        render()
+        // The progress closure is @Sendable, so capture only value types (no
+        // self) and write the progress line straight to the footer row.
+        let footerRow = rows
+        let width = cols
+        let label = name
+        let puller = Puller(registry: registry)
+        do {
+            _ = try await puller.pull(resolved) { done, total, file in
+                guard file != "done" else { return }
+                let pct = total > 0 ? Int(Double(done) / Double(total) * 100.0) : 0
+                let line = "  Downloading \(label): \(pct)%  \(file)"
+                Output.write("\u{1B}[\(footerRow);1H\u{1B}[2K" + Ansi.dim(String(line.prefix(max(0, width)))))
+            }
+            note("Downloaded \(name).")
+            await switchModel(name)
+        } catch {
+            note("Download failed for \(name): \(error)")
+        }
+    }
+
+    /// Render the modal picker list: downloaded models read bright (switch
+    /// instantly), not-yet-downloaded ones read dim with a "will download" hint;
+    /// the highlighted row is inverse-video. A filled dot marks downloaded, a
+    /// hollow dot not-downloaded.
+    private func renderPicker(_ p: ModelPicker, width: Int, height: Int) -> [String] {
+        let margin = "  "
+        var out: [String] = [
+            margin + Ansi.bold("Select a model"),
+            margin + Ansi.dim("downloaded switch instantly \u{00B7} faded ones download first"),
+            "",
+        ]
+        let maxVisible = max(3, height - 5)
+        let total = p.entries.count
+        var winStart = 0
+        if total > maxVisible { winStart = min(max(0, p.selected - maxVisible / 2), total - maxVisible) }
+        let winEnd = min(winStart + maxVisible, total)
+        let nameW = min(20, p.entries.map { $0.name.count }.max() ?? 12)
+        if winStart > 0 { out.append(margin + Ansi.dim("  ...")) }
+        for i in winStart..<winEnd {
+            let e = p.entries[i]
+            let dot = e.downloaded ? "\u{25CF}" : "\u{25CB}"
+            let name = e.name.padding(toLength: nameW, withPad: " ", startingAt: 0)
+            let hint = e.downloaded ? "" : "   will download"
+            let body = "\(dot) \(name)  \(e.detail)\(hint)"
+            let line = margin + "  " + String(body.prefix(max(0, width - 4)))
+            if i == p.selected { out.append(Ansi.inverse(line)) }
+            else if e.downloaded { out.append(Ansi.white(line)) }
+            else { out.append(Ansi.dim(line)) }
+        }
+        if winEnd < total { out.append(margin + Ansi.dim("  ...")) }
+        out.append("")
+        out.append(margin + Ansi.dim("Up/Down select \u{00B7} Enter switch \u{00B7} Esc cancel"))
+        return out
+    }
+
     // MARK: - Submit / commands
 
     private func processSubmit(_ text: String) async {
@@ -222,7 +335,8 @@ final class ChatTUI {
             if arg.isEmpty { note(system.map { "System: \($0)" } ?? "No system prompt. Usage: /system <text>") }
             else { system = arg; note("System prompt updated.") }
         case "/model":
-            if arg.isEmpty { note("Current model: \(modelName)") } else { await switchModel(arg) }
+            if arg.isEmpty { picker = ModelPicker(entries: modelPickerEntries(), current: modelName) }
+            else { await switchOrDownload(arg) }
         case "/save": saveTranscript(arg)
         case "/attach": note(attachSummary())
         case "/remove": removeAttachment(arg)
@@ -368,14 +482,18 @@ final class ChatTUI {
         let box = inputBox(width: width)             // 3 lines: top / field / bottom
         let boxTop = max(paneTop + 1, rows - box.count)
         let footerRow = max(rows, boxTop + box.count)
-        let pane = paneLines(width: width)
         let menuLines = menu.isActive ? renderMenu(width: width) : []
         let availRows = max(0, boxTop - paneTop)     // rows paneTop .. boxTop-1
         let convHeight = max(0, availRows - menuLines.count)
 
-        // Bottom-anchor the conversation against the input box (new messages
-        // appear where you type); the splash stays vertically centered.
-        let blankTop = Chrome.anchorBlankTop(paneCount: pane.count, convHeight: convHeight, centered: view.isEmpty)
+        // The modal model picker replaces the conversation pane (top-anchored);
+        // otherwise the conversation bottom-anchors against the input box and the
+        // splash stays vertically centered.
+        let pane = picker.map { renderPicker($0, width: width, height: convHeight) }
+            ?? paneLines(width: width)
+        let blankTop = picker != nil
+            ? 0
+            : Chrome.anchorBlankTop(paneCount: pane.count, convHeight: convHeight, centered: view.isEmpty)
         let maxStart = max(0, pane.count - convHeight)
         scrollOffset = min(scrollOffset, maxStart)   // clamp: cannot scroll past the top
         let start = max(0, maxStart - scrollOffset)
