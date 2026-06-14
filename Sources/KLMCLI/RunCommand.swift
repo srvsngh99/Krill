@@ -126,7 +126,7 @@ struct RunCommand: AsyncParsableCommand {
         // Native vision/audio runtimes exist for several families (Gemma 4,
         // Qwen2.5-VL, LLaVA, mllama). Gate on the loaded model's actual
         // capability rather than a model-name allowlist, so `--image` works for
-        // every vision-capable family and fails loudly for text-only ones —
+        // every vision-capable family and fails loudly for text-only ones -
         // never a silent text-only run. (The mlx-vlm bridge was removed in WS6.)
         if image != nil && !engine.supportsNativeImage {
             print("Error: --image requires a vision-capable model; this model cannot process images.")
@@ -354,7 +354,7 @@ private func interactiveMode(
         case .unsupported(let k):
             print("This model cannot process \(k.rawValue) input."); continue
         case .notFound, .notMedia:
-            break   // not a media path — fall through
+            break   // not a media path - fall through
         }
 
         // A "/word" line that is neither a known command nor an existing path is
@@ -470,7 +470,7 @@ private func extractInlineMedia(_ line: String, engine: InferenceEngine)
                     print("This model cannot process \(k.rawValue) input (@\(tok)).")
                     i = j; atBoundary = false; continue
                 case .notFound, .notMedia:
-                    break   // not media — fall through and keep the '@' literally
+                    break   // not media - fall through and keep the '@' literally
                 }
             }
         }
@@ -494,7 +494,7 @@ private func recordFromMic() async -> Data? {
         print("\(error)")
         return nil
     }
-    print("🎙  Recording… press Enter to stop.")
+    print("Recording... press Enter to stop.")
     _ = readLine()
     do {
         let wav = try recorder.stop()

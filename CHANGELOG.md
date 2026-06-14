@@ -16,7 +16,7 @@ reverse chronological order. Versioning follows
   / `--audio` flags pre-attach to the first turn.
 - **Live microphone voice input.** `/mic` records from the default input device
   (Enter to stop) and attaches the clip to the next message, on audio-capable
-  Gemma 4 models. Capture is native AVAudioEngine → WAV, reusing the existing
+  Gemma 4 models. Capture is native AVAudioEngine -> WAV, reusing the existing
   16 kHz resample pipeline.
 - **`make app-bundle` / `make dist-app`.** Builds a code-signed `krillm.app`
   with `NSMicrophoneUsageDescription` so macOS attributes `/mic` permission to

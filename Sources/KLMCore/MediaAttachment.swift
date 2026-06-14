@@ -96,7 +96,7 @@ public enum MediaAttachment {
     ///   * a `~`-relative path,
     ///   * an inline `@path` reference (leading `@` stripped by the caller).
     ///
-    /// Returns the absolute, tilde-expanded path. No filesystem access — the
+    /// Returns the absolute, tilde-expanded path. No filesystem access - the
     /// caller checks existence.
     public static func normalizePath(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)

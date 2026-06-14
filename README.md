@@ -271,7 +271,7 @@ krillm run gemma-4-e2b "Transcribe this audio." --audio ./clip.wav --max-tokens 
 ```
 
 `--image` works for **any** vision-capable family (Gemma 4, Qwen2.5-VL, LLaVA,
-mllama), not just Gemma 4 — the flag is gated on the loaded model's real
+mllama), not just Gemma 4 - the flag is gated on the loaded model's real
 capability, and fails loudly on a text-only model rather than silently dropping
 the image.
 
@@ -299,7 +299,7 @@ default input device and attaches the clip (press Enter to stop):
 
 ```text
 > /mic
-🎙  Recording… press Enter to stop.
+Recording... press Enter to stop.
 > what did I just say?
 ```
 
