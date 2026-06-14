@@ -25,7 +25,7 @@ final class ChatTUI {
     private let registry: Registry
 
     // Conversation
-    private struct Msg { enum Role { case user, assistant, note }; let role: Role; var text: String }
+    private struct Msg { enum Role { case user, assistant, note, pre }; let role: Role; var text: String }
     private var view: [Msg] = []
     private var modelTurns: [(role: String, content: String)] = []
 
@@ -210,7 +210,7 @@ final class ChatTUI {
         let arg = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : ""
         switch cmd {
         case "/quit", "/exit", "/q": shouldQuit = true
-        case "/help": view.append(Msg(role: .note, text: helpText()))
+        case "/help": view.append(Msg(role: .pre, text: helpText()))
         case "/clear": pendingImages.removeAll(); pendingAudio = nil; note("Cleared pending attachments.")
         case "/reset":
             modelTurns.removeAll(); view.removeAll(); pendingImages.removeAll(); pendingAudio = nil
@@ -433,6 +433,18 @@ final class ChatTUI {
                 for l in TUIMarkdown.render(msg.text, width: w) { lines.append(margin + Ansi.dimStyled(l)) }
             case .note:
                 for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.dim(l)) }
+            case .pre:
+                // Preformatted (help / transcript): keep spacing verbatim - no
+                // word-wrap that would collapse aligned columns. A non-indented,
+                // non-empty line is a section header (rendered bright).
+                for raw in msg.text.split(separator: "\n", omittingEmptySubsequences: false) {
+                    let clipped = String(String(raw).prefix(w))
+                    if !clipped.isEmpty && !clipped.hasPrefix(" ") {
+                        lines.append(margin + Ansi.bold(clipped))
+                    } else {
+                        lines.append(margin + Ansi.dim(clipped))
+                    }
+                }
             }
             lines.append("")
         }
@@ -597,14 +609,33 @@ final class ChatTUI {
 
     // MARK: - Help / transcript
 
+    /// A document-style help screen: section headers with one item per line and
+    /// aligned descriptions (rendered preformatted as a `.pre` message so the
+    /// columns are not collapsed by word-wrap). Commands come from the canonical
+    /// `SlashMenu.all` so they never drift from the autosuggest list.
     private func helpText() -> String {
-        """
-        Keys: Up/Down history (or cycle slash menu) \u{00B7} Tab accept \u{00B7} Enter send
-              PgUp/PgDn scroll \u{00B7} Ctrl-C cancel reply / clear \u{00B7} Ctrl-D quit
-        Commands: /image /audio /mic /attach /remove /clear /system /model
-                  /history /save /reset /help /quit
-        Attach by dragging a file in or typing @path in your message.
-        """
+        let pad = (SlashMenu.all.map { $0.name.count }.max() ?? 8) + 2
+        var lines = ["Commands"]
+        for item in SlashMenu.all {
+            lines.append("  " + item.name.padding(toLength: pad, withPad: " ", startingAt: 0) + item.summary)
+        }
+        lines.append("")
+        lines.append("Keys")
+        let keys: [(String, String)] = [
+            ("Up / Down", "History, or cycle the slash menu"),
+            ("Tab", "Accept the highlighted command"),
+            ("Enter", "Send the message"),
+            ("PgUp / PgDn", "Scroll the conversation"),
+            ("Ctrl-C", "Cancel the reply, or clear the input"),
+            ("Ctrl-D", "Quit"),
+        ]
+        for (k, desc) in keys {
+            lines.append("  " + k.padding(toLength: 14, withPad: " ", startingAt: 0) + desc)
+        }
+        lines.append("")
+        lines.append("Attachments")
+        lines.append("  Drag a file into the window, or type @path in your message.")
+        return lines.joined(separator: "\n")
     }
 
     private func saveTranscript(_ arg: String) {
