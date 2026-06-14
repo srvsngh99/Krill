@@ -9,6 +9,7 @@ public enum Key: Equatable {
     case escape
     case up, down, left, right
     case home, end, pageUp, pageDown, delete
+    case scrollUp, scrollDown
     case ctrlC, ctrlD, ctrlU, ctrlA, ctrlE, ctrlW, ctrlK, ctrlL
 }
 
@@ -24,6 +25,14 @@ public enum KeyDecoder {
         while i < bytes.count {
             let b = bytes[i]
             if b == 0x1b {
+                // SGR mouse report ( ESC [ < ... M/m ) - we use it for the wheel.
+                if i + 2 < bytes.count, bytes[i + 1] == 0x5b, bytes[i + 2] == 0x3c {
+                    if let (key, consumed) = parseMouse(bytes, from: i) {
+                        if let key { keys.append(key) }
+                        i += consumed
+                        continue
+                    }
+                }
                 // CSI ( ESC [ ) or SS3 ( ESC O ) sequence?
                 if i + 1 < bytes.count, bytes[i + 1] == 0x5b || bytes[i + 1] == 0x4f {
                     if let (key, consumed) = parseEscape(bytes, from: i) {
@@ -100,6 +109,39 @@ public enum KeyDecoder {
             }
         }
         return nil
+    }
+
+    /// Parse an SGR mouse report `ESC [ < Cb ; Cx ; Cy (M|m)` starting at `start`.
+    /// We only care about the wheel: button code 64 = wheel up, 65 = wheel down;
+    /// every other mouse event (clicks, motion) is recognized-but-ignored so it
+    /// does not leak into the input as stray characters.
+    private static func parseMouse(_ bytes: [UInt8], from start: Int) -> (key: Key?, consumed: Int)? {
+        var j = start + 3   // skip ESC [ <
+        var cb = 0
+        var hasDigit = false
+        while j < bytes.count {
+            let c = bytes[j]
+            if c >= 0x30, c <= 0x39 {
+                if !hasDigit { cb = 0 }       // only the first field (button) matters
+                if cb < 1_000_000 { cb = cb * 10 + Int(c - 0x30) }
+                hasDigit = true
+                j += 1
+            } else if c == 0x3b {              // ';' end of the button field
+                break
+            } else if c == 0x4d || c == 0x6d { // 'M'/'m' with no ';' (malformed); stop
+                break
+            } else {
+                return nil
+            }
+        }
+        // Skip to the terminating M/m.
+        while j < bytes.count, bytes[j] != 0x4d, bytes[j] != 0x6d { j += 1 }
+        guard j < bytes.count else { return nil }     // incomplete report
+        let consumed = j - start + 1
+        guard hasDigit else { return (nil, consumed) }
+        if cb == 64 { return (.scrollUp, consumed) }
+        if cb == 65 { return (.scrollDown, consumed) }
+        return (nil, consumed)
     }
 }
 

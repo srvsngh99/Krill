@@ -10,7 +10,7 @@ private nonisolated(unsafe) var krillmTermiosValid = false
 
 private func krillmRestoreTerminal() {
     guard krillmTermiosValid else { return }
-    let seq = "\u{1B}[?25h\u{1B}[?1049l"
+    let seq = "\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?25h\u{1B}[?1049l"
     _ = seq.withCString { write(STDOUT_FILENO, $0, strlen($0)) }
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &krillmSavedTermios)
     krillmTermiosValid = false
@@ -55,13 +55,16 @@ final class RawTerminal {
         atexit(krillmRestoreTerminal)
         for sig in [SIGTERM, SIGHUP, SIGQUIT] { signal(sig, krillmFatalSignal) }
 
-        Output.write("\u{1B}[?1049h\u{1B}[?25l\u{1B}[2J")  // alt screen, hide cursor, clear
+        // Alt screen, hide cursor, enable SGR mouse reporting (for wheel scroll),
+        // clear. (Hold Option/Fn to select text while mouse reporting is on.)
+        Output.write("\u{1B}[?1049h\u{1B}[?25l\u{1B}[?1000h\u{1B}[?1006h\u{1B}[2J")
         entered = true
     }
 
     func leave() {
         guard entered else { return }
-        Output.write("\u{1B}[?25h\u{1B}[?1049l")  // show cursor, leave alt screen
+        // Disable mouse reporting, show cursor, leave alt screen.
+        Output.write("\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?25h\u{1B}[?1049l")
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &original)
         krillmTermiosValid = false
         entered = false

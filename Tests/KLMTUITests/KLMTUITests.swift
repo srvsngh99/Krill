@@ -33,6 +33,16 @@ final class KeyDecoderTests: XCTestCase {
                        [.char("h"), .char("i"), .enter])
     }
 
+    func testMouseWheelScroll() {
+        // SGR mouse reports: button 64 = wheel up, 65 = wheel down.
+        XCTAssertEqual(KeyDecoder.decode(Array("\u{1b}[<64;10;5M".utf8)), [.scrollUp])
+        XCTAssertEqual(KeyDecoder.decode(Array("\u{1b}[<65;10;5M".utf8)), [.scrollDown])
+        // A normal click (button 0) is recognized but ignored, not leaked as text.
+        XCTAssertEqual(KeyDecoder.decode(Array("\u{1b}[<0;3;4M".utf8)), [])
+        // Wheel report followed by a typed char still decodes the char.
+        XCTAssertEqual(KeyDecoder.decode(Array("\u{1b}[<64;1;1Mx".utf8)), [.scrollUp, .char("x")])
+    }
+
     func testUTF8Multibyte() {
         // "é" is two bytes; should decode to a single char.
         XCTAssertEqual(KeyDecoder.decode(Array("é".utf8)), [.char("é")])

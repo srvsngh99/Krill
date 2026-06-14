@@ -136,6 +136,8 @@ final class ChatTUI {
         case .ctrlE, .end: cursor = input.count; return nil
         case .pageUp: scrollOffset += max(1, paneHeight() - 1); return nil
         case .pageDown: scrollOffset = max(0, scrollOffset - max(1, paneHeight() - 1)); return nil
+        case .scrollUp: scrollOffset += 3; return nil
+        case .scrollDown: scrollOffset = max(0, scrollOffset - 3); return nil
         case .escape: menu.close(); return nil
         case .left: if cursor > 0 { cursor -= 1 }; return nil
         case .right: if cursor < input.count { cursor += 1 }; return nil
@@ -200,8 +202,8 @@ final class ChatTUI {
     /// to choose (the run loop then loads or downloads it), Esc/Ctrl-C to cancel.
     private func handlePickerKey(_ key: Key) {
         switch key {
-        case .up: picker?.selectPrevious()
-        case .down: picker?.selectNext()
+        case .up, .scrollUp: picker?.selectPrevious()
+        case .down, .scrollDown: picker?.selectNext()
         case .enter:
             if let chosen = picker?.current?.name { pendingModelLoad = chosen }
             picker = nil
@@ -456,6 +458,8 @@ final class ChatTUI {
                 if keys.contains(.ctrlC) { cancelled = true; break }
                 if keys.contains(.pageUp) { scrollOffset += paneHeight() - 1; render() }
                 if keys.contains(.pageDown) { scrollOffset = max(0, scrollOffset - (paneHeight() - 1)); render() }
+                if keys.contains(.scrollUp) { scrollOffset += 3; render() }
+                if keys.contains(.scrollDown) { scrollOffset = max(0, scrollOffset - 3); render() }
             }
             if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize() }
         }
