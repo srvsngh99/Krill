@@ -482,11 +482,18 @@ final class ChatTUI {
         let ctx = st.promptTokens + st.generatedTokens
         if contextWindow > 0 {
             let pct = min(100, Int((Double(ctx) / Double(contextWindow)) * 100.0))
-            parts.append("ctx \(ctx) (\(pct)%)")
+            parts.append("ctx \(ctx) / \(formatContext(contextWindow)) (\(pct)%)")
         } else {
             parts.append("ctx \(ctx)")
         }
         return parts.joined(separator: " \u{00B7} ")
+    }
+
+    /// Compact context-window size, e.g. 131072 -> "128K", 8192 -> "8K".
+    private func formatContext(_ n: Int) -> String {
+        guard n >= 1024 else { return "\(n)" }
+        let k = Double(n) / 1024
+        return k == k.rounded() ? "\(Int(k))K" : String(format: "%.0fK", k)
     }
 
     private func switchModel(_ name: String) async {
