@@ -40,6 +40,7 @@ final class ChatTUI {
     private var menu = SlashMenu()
     private var picker: ModelPicker?          // active modal model picker, if any
     private var pendingModelLoad: String?     // model the picker chose; loaded by the run loop
+    private var pendingVoiceCapture = false   // Space-to-talk armed; run loop records
     private var inputHistory: [String] = []
     private var historyIndex = 0
     private var scrollOffset = 0     // lines scrolled up from bottom
@@ -105,6 +106,12 @@ final class ChatTUI {
                 await switchOrDownload(name)
                 render()
             }
+            // Push-to-talk: record while Space is held, send on release.
+            if pendingVoiceCapture, !shouldQuit {
+                pendingVoiceCapture = false
+                await holdToTalk()
+                render()
+            }
         }
     }
 
@@ -164,6 +171,12 @@ final class ChatTUI {
             input = ""; cursor = 0; menu.close(); scrollOffset = 0
             return text.isEmpty ? nil : text
         case .char(let c):
+            // On a voice-capable model, Space on an empty composer is push-to-talk
+            // (hold to talk, release to send) rather than a typed space.
+            if c == " " && input.isEmpty && engine.canUseNativeAudio {
+                pendingVoiceCapture = true
+                return nil
+            }
             let idx = input.index(input.startIndex, offsetBy: cursor)
             input.insert(c, at: idx); cursor += 1; menu.update(for: input)
             return nil
@@ -352,8 +365,8 @@ final class ChatTUI {
 
     // MARK: - Generation
 
-    private func generate(prompt: String) async {
-        view.append(Msg(role: .user, text: prompt))
+    private func generate(prompt: String, display: String? = nil) async {
+        view.append(Msg(role: .user, text: display ?? prompt))
         modelTurns.append((role: "user", content: prompt))
         let usedImgs = pendingImages.count
         let usedAud = pendingAudio != nil
@@ -438,6 +451,53 @@ final class ChatTUI {
             contextWindow = AliasMap.resolve(name)?.context ?? 0
             note("Switched to \(name). Conversation kept.")
         } catch { note("Failed to load \(name): \(error)") }
+    }
+
+    /// Push-to-talk: record while Space is held, send the clip when released.
+    /// Terminals report no key-release, so we use the OS key-repeat stream as the
+    /// "still held" signal and treat a short gap with no Space as the release.
+    private func holdToTalk() async {
+        guard engine.canUseNativeAudio else { return }
+        guard await MicrophoneRecorder.requestAccess() else {
+            note(MicrophoneCaptureError.permissionDenied.description); return
+        }
+        let rec = MicrophoneRecorder()
+        do { try rec.start() } catch { note("\(error)"); return }
+        lastStatus = "Listening... (release Space to send, Esc to cancel)"
+        render()
+
+        let releaseTicks = 8       // ~800ms with no Space repeat => released
+        var idle = 0
+        var cancelled = false
+        var done = false
+        while !done {
+            if raw.waitForInput(timeoutMs: 100) {
+                for k in reader.read() {
+                    if k == .char(" ") { idle = 0 }                 // still held (auto-repeat)
+                    else if k == .enter { done = true }             // explicit send
+                    else if k == .escape || k == .ctrlC { cancelled = true; done = true }
+                }
+            } else {
+                idle += 1
+                if idle >= releaseTicks { done = true }             // released
+            }
+            if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize(); render() }
+        }
+
+        if cancelled {
+            _ = try? rec.stop(); lastStatus = ""; note("Voice cancelled."); return
+        }
+        do {
+            let wav = try rec.stop()
+            await sendVoice(wav, seconds: rec.capturedSeconds)
+        } catch { note("\(error)") }
+    }
+
+    /// Attach a recorded voice clip and send it as the next turn (the audio is
+    /// the message; the model responds to it natively).
+    private func sendVoice(_ wav: Data, seconds: Double) async {
+        pendingAudio = makeAtt(.audio, wav, "voice")
+        await generate(prompt: "", display: String(format: "(voice message %.1fs)", seconds))
     }
 
     private func recordMic() async {
@@ -614,7 +674,9 @@ final class ChatTUI {
         var body: String
         if chars.isEmpty {
             // Block cursor then a dim placeholder, clipped/padded to the field.
-            let placeholder = "type a message   /help for commands"
+            let placeholder = engine.canUseNativeAudio
+                ? "hold Space to talk, or type a message"
+                : "type a message   /help for commands"
             let clipped = String(placeholder.prefix(max(0, textWidth - 1)))
             let pad = String(repeating: " ", count: max(0, textWidth - 1 - clipped.count))
             body = Ansi.bold(promptStr) + Ansi.inverse(" ") + Ansi.dim(clipped) + pad
