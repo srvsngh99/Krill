@@ -22,6 +22,9 @@ let package = Package(
         // macOS libedit (readline-compatible) for the interactive REPL: line
         // editing, history, and tab completion with no third-party dependency.
         .systemLibrary(name: "CEditLine", path: "Sources/CEditLine"),
+        // Pure, dependency-free TUI logic (key decoding, text wrap, slash menu)
+        // split out so it is unit-testable without a terminal.
+        .target(name: "KLMTUI", dependencies: []),
         .target(
             name: "KLMRuntime",
             dependencies: []
@@ -120,6 +123,7 @@ let package = Package(
                 "KLMRegistry",
                 "KLMServer",
                 "CEditLine",
+                "KLMTUI",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
@@ -159,6 +163,10 @@ let package = Package(
                 .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ]
+        ),
+        .testTarget(
+            name: "KLMTUITests",
+            dependencies: ["KLMTUI"]
         ),
         .testTarget(
             name: "KLMRegistryTests",

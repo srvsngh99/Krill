@@ -8,6 +8,16 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **Full-screen chat TUI (default for `krillm run`).** An opencode-style
+  alternate-screen interface in the Sourav AI Labs monochrome identity: branded
+  masthead, scrollable conversation pane, bottom input box, status footer. Type
+  `/` for a slash-command autosuggest popup you cycle with Up/Down and run with
+  Enter (Tab to fill and add arguments). Streaming markdown, PgUp/PgDn scroll,
+  Ctrl-C cancel, Ctrl-D quit, resize-aware. Built raw (termios + ANSI, no TUI
+  dependency). `--classic` selects the libedit line REPL, and KrillLM
+  auto-falls-back to it when stdout is not a TTY. Pure logic (key decoding, text
+  wrap, slash menu) lives in a new unit-tested `KLMTUI` library.
+
 - **Polished interactive chat REPL.** `krillm run <model>` (no prompt) is now a
   real multi-turn conversation (it previously discarded history between turns).
   Backed by macOS libedit (no third-party dependency): Up/Down history, in-line

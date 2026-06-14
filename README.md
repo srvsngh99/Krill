@@ -282,15 +282,19 @@ mllama), not just Gemma 4 - the flag is gated on the loaded model's real
 capability, and fails loudly on a text-only model rather than silently dropping
 the image.
 
-### Interactive chat REPL
+### Interactive chat (full-screen TUI)
 
-`krillm run <model>` with no prompt opens a multi-turn chat that remembers the
-conversation. It uses libedit for line editing, so you get history (Up/Down),
-in-line editing (Ctrl-A/E/K/U), and Tab completion of slash commands and file
-paths. Output streams with a thinking spinner, light markdown styling, and a
-per-turn status line (`model | tokens | tok/s | ctx`); Ctrl-C cancels a reply
-without leaving the session. Color is auto-disabled when output is not a TTY or
-`NO_COLOR` is set.
+`krillm run <model>` with no prompt opens a full-screen chat in the Sourav AI
+Labs identity: a branded masthead, a scrollable conversation pane, a bottom
+input box, and a status footer. It is a multi-turn conversation that remembers
+context. Type `/` and a **slash-command autosuggest popup** appears; cycle it
+with Up/Down and run with Enter (or Tab to fill it and add arguments). Replies
+stream with light markdown styling; PgUp/PgDn scroll the pane, Ctrl-C cancels a
+reply, Ctrl-D quits. Resize-aware.
+
+Run `krillm run <model> --classic` for the lighter libedit line REPL instead
+(history, in-line editing, Tab completion). KrillLM auto-uses the line REPL when
+output is not a TTY (piped/redirected), and disables color under `NO_COLOR`.
 
 Attach images and audio without leaving the session, three ways:
 
