@@ -54,15 +54,21 @@ public enum Chrome {
     }
 }
 
-/// ASCII-art wordmark banners for the splash. Pure ASCII (figlet "small" font)
-/// so they sit inside the house ASCII rule and render in any terminal.
+/// ASCII-art wordmark banners for the splash. Pure ASCII (figlet "colossal"
+/// font) so they sit inside the house ASCII rule and render in any terminal.
 public enum Banner {
-    /// The "KrillLM" wordmark. All rows are the same width.
+    /// The "KrillLM" wordmark, a dense filled block banner. All rows are the
+    /// same width; ~49 columns, so callers should fall back to a plain wordmark
+    /// on terminals too narrow to fit it.
     public static let krillm: [String] = [
-        " _  __    _ _ _ _    __  __ ",
-        "| |/ /_ _(_) | | |  |  \\/  |",
-        "| ' <| '_| | | | |__| |\\/| |",
-        "|_|\\_\\_| |_|_|_|____|_|  |_|",
+        "888    d8P        d8b888888888     888b     d888 ",
+        "888   d8P         Y8P888888888     8888b   d8888 ",
+        "888  d8P             888888888     88888b.d88888 ",
+        "888d88K    888d888888888888888     888Y88888P888 ",
+        "8888888b   888P\"  888888888888     888 Y888P 888 ",
+        "888  Y88b  888    888888888888     888  Y8P  888 ",
+        "888   Y88b 888    888888888888     888   \"   888 ",
+        "888    Y88b888    88888888888888888888       888 ",
     ]
 
     /// The pixel width of a banner (its widest row).
