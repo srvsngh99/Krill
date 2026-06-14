@@ -97,3 +97,76 @@ final class SlashMenuTests: XCTestCase {
         XCTAssertEqual(m.current?.name, picked)
     }
 }
+
+final class ChromeInputFieldTests: XCTestCase {
+    // The field interior is always exactly textWidth columns, regardless of
+    // input length or cursor position, so the box frame never breaks.
+    func testWidthInvariant() {
+        for textWidth in [1, 2, 5, 20, 80] {
+            for len in [0, 1, 5, 50, 200] {
+                let text = Array(String(repeating: "x", count: len))
+                for cursor in [0, len / 2, len] {
+                    let (content, col) = Chrome.inputField(text: text, cursor: cursor, textWidth: textWidth)
+                    XCTAssertEqual(content.count, textWidth, "w=\(textWidth) len=\(len) cur=\(cursor)")
+                    XCTAssertTrue((0..<textWidth).contains(col), "cursor col out of range")
+                }
+            }
+        }
+    }
+
+    func testShortInputNotScrolled() {
+        let (content, col) = Chrome.inputField(text: Array("hi"), cursor: 2, textWidth: 10)
+        XCTAssertTrue(content.hasPrefix("hi"))
+        XCTAssertEqual(col, 2)                       // trailing cursor cell
+    }
+
+    func testLongInputScrollsToShowCursorTail() {
+        let text = Array("abcdefghij")               // 10 chars
+        let (content, col) = Chrome.inputField(text: text, cursor: 10, textWidth: 4)
+        XCTAssertEqual(content.count, 4)
+        XCTAssertEqual(col, 3)                        // cursor pinned to last column
+        XCTAssertTrue(content.contains("j"))         // tail is visible
+        XCTAssertFalse(content.contains("a"))        // head scrolled off
+    }
+
+    func testCursorInMiddleStaysVisible() {
+        let text = Array("abcdefghij")
+        let (content, col) = Chrome.inputField(text: text, cursor: 0, textWidth: 4)
+        XCTAssertEqual(content.count, 4)
+        XCTAssertEqual(col, 0)
+        XCTAssertEqual(String(Array(content)[0]), "a")
+    }
+}
+
+final class ChromeBorderTests: XCTestCase {
+    func testBorderExactWidth() {
+        for w in [2, 3, 8, 80] {
+            let b = Chrome.border(width: w, left: "[", fill: "-", right: "]")
+            XCTAssertEqual(b.count, w)
+            XCTAssertTrue(b.hasPrefix("["))
+            XCTAssertTrue(b.hasSuffix("]"))
+        }
+    }
+
+    func testBorderClipsBelowTwo() {
+        XCTAssertLessThanOrEqual(Chrome.border(width: 1, left: "[", fill: "-", right: "]").count, 1)
+        XCTAssertEqual(Chrome.border(width: 0, left: "[", fill: "-", right: "]"), "")
+    }
+
+    func testCenterPadNeverNegative() {
+        XCTAssertEqual(Chrome.centerPad(visibleWidth: 10, totalWidth: 20), 5)
+        XCTAssertEqual(Chrome.centerPad(visibleWidth: 30, totalWidth: 20), 0)   // over-wide
+    }
+}
+
+final class BannerTests: XCTestCase {
+    func testRowsEqualWidthAndPureAscii() {
+        let rows = Banner.krillm
+        let w = Banner.width(rows)
+        XCTAssertGreaterThan(w, 0)
+        for row in rows {
+            XCTAssertEqual(row.count, w, "banner rows must be equal width")
+            XCTAssertTrue(row.allSatisfy { $0.isASCII }, "banner must be pure ASCII")
+        }
+    }
+}
