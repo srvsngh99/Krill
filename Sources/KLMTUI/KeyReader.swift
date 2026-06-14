@@ -25,7 +25,7 @@ public enum KeyDecoder {
             let b = bytes[i]
             if b == 0x1b {
                 // CSI ( ESC [ ) or SS3 ( ESC O ) sequence?
-                if i + 2 < bytes.count + 1, i + 1 < bytes.count, bytes[i + 1] == 0x5b || bytes[i + 1] == 0x4f {
+                if i + 1 < bytes.count, bytes[i + 1] == 0x5b || bytes[i + 1] == 0x4f {
                     if let (key, consumed) = parseEscape(bytes, from: i) {
                         if let key { keys.append(key) }
                         i += consumed

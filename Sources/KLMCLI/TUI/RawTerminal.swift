@@ -1,5 +1,27 @@
 import Foundation
 
+// Saved terminal state for restoration from an atexit / fatal-signal context
+// (where only async-signal-safe calls and a sig_atomic_t-style global are
+// allowed). Restores cursor + main screen + the original termios so an
+// abnormal exit (SIGTERM/SIGHUP, or a crash that still runs atexit) does not
+// leave the user's terminal stuck in raw mode on the alternate screen.
+private nonisolated(unsafe) var krillmSavedTermios = termios()
+private nonisolated(unsafe) var krillmTermiosValid = false
+
+private func krillmRestoreTerminal() {
+    guard krillmTermiosValid else { return }
+    let seq = "\u{1B}[?25h\u{1B}[?1049l"
+    _ = seq.withCString { write(STDOUT_FILENO, $0, strlen($0)) }
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &krillmSavedTermios)
+    krillmTermiosValid = false
+}
+
+private func krillmFatalSignal(_ sig: Int32) {
+    krillmRestoreTerminal()
+    signal(sig, SIG_DFL)
+    raise(sig)
+}
+
 /// Owns the terminal's raw-mode lifecycle for the full-screen TUI: switches to
 /// the alternate screen buffer, puts the tty in raw mode (no echo, no canonical
 /// line editing, no terminal-generated signals so Ctrl-C arrives as a byte),
@@ -26,6 +48,13 @@ final class RawTerminal {
         raw.c_cc.16 = 1   // VMIN  = 1: block for at least one byte
         raw.c_cc.17 = 0   // VTIME = 0: no inter-byte timer
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw)
+
+        // Arm restoration for abnormal exits (the normal path uses leave()).
+        krillmSavedTermios = original
+        krillmTermiosValid = true
+        atexit(krillmRestoreTerminal)
+        for sig in [SIGTERM, SIGHUP, SIGQUIT] { signal(sig, krillmFatalSignal) }
+
         Output.write("\u{1B}[?1049h\u{1B}[?25l\u{1B}[2J")  // alt screen, hide cursor, clear
         entered = true
     }
@@ -34,6 +63,7 @@ final class RawTerminal {
         guard entered else { return }
         Output.write("\u{1B}[?25h\u{1B}[?1049l")  // show cursor, leave alt screen
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &original)
+        krillmTermiosValid = false
         entered = false
     }
 

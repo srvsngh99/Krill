@@ -184,9 +184,13 @@ final class ChatTUI {
         await generate(prompt: prompt)
     }
 
+    /// Aliases accepted by handleCommand but kept out of the autosuggest list to
+    /// avoid cluttering it.
+    private static let commandAliases: Set<String> = ["/img", "/exit", "/q"]
+
     private func isCommand(_ s: String) -> Bool {
         let first = String(s.split(separator: " ").first ?? "")
-        return SlashMenu.all.contains { $0.name == first }
+        return SlashMenu.all.contains { $0.name == first } || Self.commandAliases.contains(first)
     }
 
     private func handleCommand(_ s: String) async {
@@ -341,6 +345,7 @@ final class ChatTUI {
         let menuLines = menu.isActive ? renderMenu(width: width) : []
         let convHeight = max(0, ph - menuLines.count)
         let maxStart = max(0, pane.count - convHeight)
+        scrollOffset = min(scrollOffset, maxStart)   // clamp: cannot scroll past the top
         let start = max(0, maxStart - scrollOffset)
         for i in 0..<convHeight {
             let row = 2 + i
@@ -391,14 +396,26 @@ final class ChatTUI {
     }
 
     private func renderMenu(width: Int) -> [String] {
+        let maxVisible = 8
+        let total = menu.matches.count
+        // Window the visible items around the selection so cycling past the
+        // window keeps the highlighted command on screen.
+        var winStart = 0
+        if total > maxVisible {
+            winStart = min(max(0, menu.selected - maxVisible / 2), total - maxVisible)
+        }
+        let winEnd = min(winStart + maxVisible, total)
         var out: [String] = []
-        let shown = Array(menu.matches.prefix(8))
-        for (i, item) in shown.enumerated() {
+        if winStart > 0 { out.append(Ansi.dim("    ...")) }
+        for i in winStart..<winEnd {
+            let item = menu.matches[i]
             let marker = i == menu.selected ? ">" : " "
-            let label = String(format: "  %@ %-9@ %@", marker, item.name, item.summary)
+            let name = item.name.padding(toLength: 9, withPad: " ", startingAt: 0)
+            let label = "  \(marker) \(name)  \(item.summary)"
             let clipped = String(label.prefix(width))
             out.append(i == menu.selected ? Ansi.inverse(clipped) : Ansi.dim(clipped))
         }
+        if winEnd < total { out.append(Ansi.dim("    ...")) }
         return out
     }
 
