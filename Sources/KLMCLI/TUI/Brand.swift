@@ -1,4 +1,5 @@
 import Foundation
+import KLMTUI
 
 /// Sourav AI Labs / KrillLM brand surface for the TUI, rendered in the brand's
 /// monochrome (ink-on-paper) identity: bold for the wordmark, dim for secondary
@@ -40,12 +41,7 @@ enum Brand {
     /// The KrillLM wordmark as an ASCII block banner (figlet "small" font, pure
     /// ASCII so it stays inside the house ASCII rule). The hero of the splash,
     /// echoing the big wordmark on the social-preview brand asset.
-    static let banner: [String] = [
-        " _  __    _ _ _ _    __  __ ",
-        "| |/ /_ _(_) | | |  |  \\/  |",
-        "| ' <| '_| | | | |__| |\\/| |",
-        "|_|\\_\\_| |_|_|_|____|_|  |_|",
-    ]
+    static let banner: [String] = Banner.krillm
 
     /// Centered launch splash in the brand identity: the block wordmark, a
     /// terminal-style tagline (the `>_` device typing the brand line, with "Mac"
@@ -53,11 +49,9 @@ enum Brand {
     /// capability chips, and the lab/site line.
     static func splash(width: Int) -> [String] {
         func center(_ s: String, _ vis: Int) -> String {
-            let pad = max(0, (width - vis) / 2)
-            return String(repeating: " ", count: pad) + s
+            String(repeating: " ", count: Chrome.centerPad(visibleWidth: vis, totalWidth: width)) + s
         }
-        let bannerWidth = banner.map { $0.count }.max() ?? 0
-        let bannerPad = String(repeating: " ", count: max(0, (width - bannerWidth) / 2))
+        let bannerPad = String(repeating: " ", count: Chrome.centerPad(visibleWidth: Banner.width(banner), totalWidth: width))
 
         // Tagline split on "Mac" so it can be reverse-highlighted like the brand
         // asset, with the `>_` device prefixed (the line reads as a terminal

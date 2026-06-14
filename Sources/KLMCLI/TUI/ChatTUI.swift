@@ -340,11 +340,14 @@ final class ChatTUI {
         // Row 1: masthead.
         frame += positioned(1, Brand.header(width: width, model: modelName))
 
-        // Layout from the bottom up: footer on the last row, the 3-row input box
-        // just above it, the conversation pane fills everything in between.
-        let footerRow = rows
+        // Layout from the bottom up: the 3-row input box, then the footer below
+        // it, with the conversation pane filling everything above. `boxTop` is
+        // floored at row 2 so the box never overwrites the masthead (row 1) or
+        // emits an invalid CSI on tiny terminals; the footer is pushed below the
+        // box (off-screen, harmlessly, if the terminal is too short).
         let box = inputBox(width: width)             // 3 lines: top / field / bottom
-        let boxTop = rows - box.count                // first box row
+        let boxTop = max(2, rows - box.count)        // first box row
+        let footerRow = max(rows, boxTop + box.count)
         let pane = paneLines(width: width)
         let menuLines = menu.isActive ? renderMenu(width: width) : []
         let availRows = max(0, (boxTop - 1) - 2 + 1) // rows 2 .. boxTop-1
@@ -441,41 +444,34 @@ final class ChatTUI {
     /// never broken.
     private func inputBox(width: Int) -> [String] {
         let w = max(8, width)
-        let inner = w - 2                      // span between the two side borders
         let h = "\u{2500}", v = "\u{2502}"     // light horizontal / vertical
         let tl = "\u{256D}", tr = "\u{256E}"   // rounded corners
         let bl = "\u{2570}", br = "\u{256F}"
-        let top = Ansi.dim(tl + String(repeating: h, count: inner) + tr)
-        let bottom = Ansi.dim(bl + String(repeating: h, count: inner) + br)
+        let top = Ansi.dim(Chrome.border(width: w, left: tl, fill: h, right: tr))
+        let bottom = Ansi.dim(Chrome.border(width: w, left: bl, fill: h, right: br))
 
-        let fieldWidth = max(2, inner - 2)     // one space of padding each side
+        let fieldWidth = max(2, w - 4)         // inner span minus one pad space each side
         let promptStr = "> "
         let textWidth = max(1, fieldWidth - promptStr.count)
         let chars = Array(input)
 
         var body: String
         if chars.isEmpty {
+            // Block cursor then a dim placeholder, clipped/padded to the field.
             let placeholder = "type a message   /help for commands"
             let clipped = String(placeholder.prefix(max(0, textWidth - 1)))
-            let visible = 1 + clipped.count    // block cursor + placeholder
-            let pad = String(repeating: " ", count: max(0, textWidth - visible))
+            let pad = String(repeating: " ", count: max(0, textWidth - 1 - clipped.count))
             body = Ansi.bold(promptStr) + Ansi.inverse(" ") + Ansi.dim(clipped) + pad
         } else {
-            // Window the text so the cursor stays on screen as it moves right.
-            let winStart = cursor >= textWidth ? cursor - textWidth + 1 : 0
-            let winEnd = min(chars.count, winStart + textWidth)
+            // Pure geometry windows the text and locates the cursor; we only
+            // apply the inverse-video block cursor to that one cell.
+            let (content, cursorCol) = Chrome.inputField(text: chars, cursor: cursor, textWidth: textWidth)
+            let cs = Array(content)
             var rendered = ""
-            var visible = 0
-            for i in winStart..<winEnd {
-                let s = String(chars[i])
-                rendered += i == cursor ? Ansi.inverse(s) : s
-                visible += 1
+            for (i, ch) in cs.enumerated() {
+                rendered += i == cursorCol ? Ansi.inverse(String(ch)) : String(ch)
             }
-            if cursor >= chars.count && visible < textWidth {
-                rendered += Ansi.inverse(" "); visible += 1
-            }
-            let pad = String(repeating: " ", count: max(0, textWidth - visible))
-            body = Ansi.bold(promptStr) + rendered + pad
+            body = Ansi.bold(promptStr) + rendered
         }
         let field = Ansi.dim(v) + " " + body + " " + Ansi.dim(v)
         return [top, field, bottom]
