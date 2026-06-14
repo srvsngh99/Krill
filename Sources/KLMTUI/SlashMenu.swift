@@ -18,12 +18,12 @@ public struct SlashMenu {
         Item(name: "/mic", summary: "Record from the microphone"),
         Item(name: "/attach", summary: "List pending attachments"),
         Item(name: "/remove", summary: "Drop attachment number n"),
-        Item(name: "/clear", summary: "Drop all pending attachments"),
+        Item(name: "/drop", summary: "Drop all pending attachments"),
         Item(name: "/system", summary: "Set the system prompt"),
         Item(name: "/model", summary: "Switch to another model"),
         Item(name: "/history", summary: "Show the conversation"),
         Item(name: "/save", summary: "Save the transcript"),
-        Item(name: "/reset", summary: "Clear the conversation"),
+        Item(name: "/clear", summary: "Clear the conversation"),
         Item(name: "/quit", summary: "Exit"),
     ]
 

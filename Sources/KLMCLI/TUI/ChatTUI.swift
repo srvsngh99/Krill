@@ -377,7 +377,7 @@ final class ChatTUI {
 
     /// Aliases accepted by handleCommand but kept out of the autosuggest list to
     /// avoid cluttering it.
-    private static let commandAliases: Set<String> = ["/img", "/exit", "/q"]
+    private static let commandAliases: Set<String> = ["/img", "/exit", "/q", "/reset"]
 
     private func isCommand(_ s: String) -> Bool {
         let first = String(s.split(separator: " ").first ?? "")
@@ -391,10 +391,10 @@ final class ChatTUI {
         switch cmd {
         case "/quit", "/exit", "/q": shouldQuit = true
         case "/help": view.append(Msg(role: .pre, text: helpText()))
-        case "/clear": pendingImages.removeAll(); pendingAudio = nil; note("Cleared pending attachments.")
-        case "/reset":
+        case "/drop": pendingImages.removeAll(); pendingAudio = nil; note("Dropped pending attachments.")
+        case "/clear", "/reset":   // /reset kept as an alias for clearing the chat
             modelTurns.removeAll(); view.removeAll(); pendingImages.removeAll(); pendingAudio = nil
-            note("Conversation reset.")
+            note("Conversation cleared.")
         case "/history":
             note(modelTurns.isEmpty ? "No conversation yet."
                  : modelTurns.map { "\($0.role): \($0.content)" }.joined(separator: "\n"))
