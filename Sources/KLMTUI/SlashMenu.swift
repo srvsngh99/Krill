@@ -22,6 +22,7 @@ public struct SlashMenu {
         Item(name: "/system", summary: "Set the system prompt"),
         Item(name: "/model", summary: "Switch to another model"),
         Item(name: "/history", summary: "Show the conversation"),
+        Item(name: "/compact", summary: "Summarize and shrink the conversation"),
         Item(name: "/save", summary: "Save the transcript"),
         Item(name: "/clear", summary: "Clear the conversation"),
         Item(name: "/quit", summary: "Exit"),

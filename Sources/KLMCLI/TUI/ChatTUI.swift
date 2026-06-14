@@ -398,6 +398,7 @@ final class ChatTUI {
         case "/history":
             note(modelTurns.isEmpty ? "No conversation yet."
                  : modelTurns.map { "\($0.role): \($0.content)" }.joined(separator: "\n"))
+        case "/compact": await compactConversation()
         case "/system":
             if arg.isEmpty { note(system.map { "System: \($0)" } ?? "No system prompt. Usage: /system <text>") }
             else { system = arg; note("System prompt updated.") }
@@ -554,6 +555,41 @@ final class ChatTUI {
             let wav = try rec.stop()
             await transcribeVoice(wav)
         } catch { note("\(error)") }
+    }
+
+    /// Summarize the conversation so far into a concise briefing and replace the
+    /// history with it, freeing context while preserving continuity (like Claude
+    /// Code's /compact). The on-screen view is reset to show the summary.
+    private func compactConversation() async {
+        guard !modelTurns.isEmpty else { note("Nothing to compact yet."); return }
+        lastStatus = "Compacting..."
+        render()
+        var messages: [[String: String]] = []
+        if let system, !system.isEmpty { messages.append(["role": "system", "content": system]) }
+        for t in modelTurns { messages.append(["role": t.role, "content": t.content]) }
+        messages.append(["role": "user", "content":
+            "Summarize our conversation so far as a concise briefing that preserves all key facts, decisions, code, names, numbers, and open threads, so we can continue seamlessly. Output only the summary."])
+        let gen = engine.generate(
+            messages: messages, params: params, maxTokens: maxTokens,
+            imageData: nil, audioData: nil, imagesData: [])
+        let filter = StreamingReasoningFilter()
+        var summary = ""
+        for await event in gen.stream {
+            if event.isEnd { break }
+            summary += filter.consume(event.text)
+        }
+        summary += filter.finish()
+        lastStatus = ""
+        let clean = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { note("Compaction failed; conversation unchanged."); return }
+        modelTurns = [
+            ("user", "Summary of our earlier conversation (for context):\n\(clean)"),
+            ("assistant", "Understood. Let's continue."),
+        ]
+        view.removeAll()
+        view.append(Msg(role: .note, text: "Conversation compacted into a summary."))
+        view.append(Msg(role: .assistant, text: clean))
+        scrollOffset = 0
     }
 
     /// Transcribe a recorded clip with the audio model and drop the text into the
