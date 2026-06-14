@@ -70,6 +70,19 @@ public enum Banner {
         "|_|\\_\\_|  |_|_|_|______|_|  |_|",
     ]
 
+    /// A small pixel-art "krill" mascot (block glyphs, written as `\u{}` escapes
+    /// so the source bytes stay ASCII). Faces right toward the wordmark it sits
+    /// beside, with an eye, antenna, and little swimmeret legs. All rows padded
+    /// to the same width for clean side-by-side alignment.
+    public static let krillMascot: [String] = [
+        "            \u{2597}\u{2584}",
+        "  \u{2584}\u{2584}\u{2584}\u{2584}\u{2584}\u{2584}\u{2584}  \u{2597}\u{259B} ",
+        " \u{259F}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2599}",
+        " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{25CF}\u{258C}",
+        " \u{259C}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{259B}",
+        "  \u{2598} \u{2598} \u{2598} \u{2598} \u{2598} \u{2598} ",
+    ]
+
     /// The pixel width of a banner (its widest row).
     public static func width(_ banner: [String]) -> Int { banner.map(\.count).max() ?? 0 }
 }

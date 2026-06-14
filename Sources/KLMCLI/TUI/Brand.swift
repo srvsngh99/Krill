@@ -65,13 +65,23 @@ enum Brand {
         func center(_ s: String, _ vis: Int) -> String {
             String(repeating: " ", count: Chrome.centerPad(visibleWidth: vis, totalWidth: width)) + s
         }
-        // Fall back to the plain wordmark when the block banner would overflow.
+        // Hero = the krill mascot beside the block wordmark, centered as one
+        // unit. Falls back to the plain `>_ KrillLM` line on terminals too
+        // narrow to fit the pair.
+        let mascot = Banner.krillMascot
+        let mascotWidth = Banner.width(mascot)
         let bannerWidth = Banner.width(banner)
-        let heroRows: [String] = width >= bannerWidth
-            ? banner.map { row in
-                String(repeating: " ", count: Chrome.centerPad(visibleWidth: bannerWidth, totalWidth: width)) + Ansi.bold(row)
+        let gap = "   "
+        let combinedWidth = mascotWidth + gap.count + bannerWidth
+        let heroRows: [String]
+        if width >= combinedWidth {
+            let pad = String(repeating: " ", count: Chrome.centerPad(visibleWidth: combinedWidth, totalWidth: width))
+            heroRows = zip(mascot, banner).map { m, b in
+                pad + Ansi.bold(m.padding(toLength: mascotWidth, withPad: " ", startingAt: 0)) + gap + Ansi.bold(b)
             }
-            : [center(Ansi.bold(wordmark), visibleCount(wordmark))]
+        } else {
+            heroRows = [center(Ansi.bold(wordmark), visibleCount(wordmark))]
+        }
 
         // Tagline split on "Mac" so it can be reverse-highlighted like the brand
         // asset, with the `>_` device prefixed (the line reads as a terminal
