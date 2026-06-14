@@ -38,6 +38,7 @@ final class ChatTUI {
     private var input = ""
     private var cursor = 0           // index into `input`
     private var menu = SlashMenu()
+    private let customCommands: CustomCommandStore
     private var picker: ModelPicker?          // active modal model picker, if any
     private var pendingModelLoad: String?     // model the picker chose; loaded by the run loop
     private var pendingVoiceCapture = false   // Space-to-talk armed; run loop records
@@ -71,8 +72,18 @@ final class ChatTUI {
         self.maxTokens = maxTokens
         self.registry = registry
         self.contextWindow = AliasMap.resolve(modelName)?.context ?? 0
+        self.customCommands = CustomCommandStore.load(from: Self.commandsDir)
+        menu.extra = customCommands.commands.map {
+            SlashMenu.Item(name: "/\($0.name)", summary: $0.description)
+        }
         if let initialImage { pendingImages.append(makeAtt(.image, initialImage, "image")) }
         if let initialAudio { pendingAudio = makeAtt(.audio, initialAudio, "audio") }
+    }
+
+    /// Where user-authored slash commands live: `~/.krillm/commands/<name>.md`.
+    private static var commandsDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".krillm").appendingPathComponent("commands")
     }
 
     // MARK: - Run loop
@@ -381,7 +392,9 @@ final class ChatTUI {
 
     private func isCommand(_ s: String) -> Bool {
         let first = String(s.split(separator: " ").first ?? "")
-        return SlashMenu.all.contains { $0.name == first } || Self.commandAliases.contains(first)
+        return SlashMenu.all.contains { $0.name == first }
+            || Self.commandAliases.contains(first)
+            || customCommands.command(named: first) != nil
     }
 
     private func handleCommand(_ s: String) async {
@@ -412,7 +425,12 @@ final class ChatTUI {
             if arg.isEmpty { note("Usage: \(cmd) <path>") }
             else if attach(path: arg) { note(attachSummary()) }
         case "/mic": await recordMic()
-        default: note("Unknown command \(cmd).")
+        default:
+            if let custom = customCommands.command(named: cmd) {
+                await generate(prompt: custom.expand(arguments: arg))
+            } else {
+                note("Unknown command \(cmd).")
+            }
         }
     }
 
@@ -914,6 +932,14 @@ final class ChatTUI {
         var lines = ["Commands"]
         for item in SlashMenu.all {
             lines.append("  " + item.name.padding(toLength: pad, withPad: " ", startingAt: 0) + item.summary)
+        }
+        if !customCommands.isEmpty {
+            let cpad = (customCommands.commands.map { $0.name.count + 1 }.max() ?? 8) + 2
+            lines.append("")
+            lines.append("Custom commands  (~/.krillm/commands/*.md)")
+            for c in customCommands.commands {
+                lines.append("  " + "/\(c.name)".padding(toLength: cpad, withPad: " ", startingAt: 0) + c.description)
+            }
         }
         lines.append("")
         lines.append("Keys")

@@ -190,3 +190,86 @@ final class BannerTests: XCTestCase {
         }
     }
 }
+
+final class CustomCommandTests: XCTestCase {
+    func testExpandWholeArgumentTokens() {
+        for token in ["$ARGUMENTS", "$ARGS", "$INPUT"] {
+            let c = CustomCommand(name: "x", description: "", template: "Review this: \(token)")
+            XCTAssertEqual(c.expand(arguments: "  the diff  "), "Review this: the diff")
+        }
+    }
+
+    func testExpandPositional() {
+        let c = CustomCommand(name: "x", description: "", template: "from $1 to $2")
+        XCTAssertEqual(c.expand(arguments: "a b c"), "from a to b")
+        // Missing positional -> empty string, not the literal token.
+        XCTAssertEqual(c.expand(arguments: "only"), "from only to ")
+    }
+
+    func testNoPlaceholderAppendsArgs() {
+        let c = CustomCommand(name: "x", description: "", template: "Summarize the text.")
+        XCTAssertEqual(c.expand(arguments: "hello"), "Summarize the text.\n\nhello")
+        // No args -> template unchanged, no trailing blank lines.
+        XCTAssertEqual(c.expand(arguments: ""), "Summarize the text.")
+    }
+
+    func testPlaceholderPresentMeansNoAppend() {
+        let c = CustomCommand(name: "x", description: "", template: "Echo: $ARGS")
+        XCTAssertEqual(c.expand(arguments: "hi"), "Echo: hi")
+    }
+
+    func testParseFrontmatterDescription() {
+        let src = "---\ndescription: Code review helper\n---\nReview: $ARGS\n"
+        let c = CustomCommandStore.parse(name: "Review", contents: src)
+        XCTAssertEqual(c.name, "review")          // lowercased
+        XCTAssertEqual(c.description, "Code review helper")
+        XCTAssertEqual(c.template, "Review: $ARGS")
+    }
+
+    func testParseNoFrontmatterUsesFirstLine() {
+        let c = CustomCommandStore.parse(name: "tldr", contents: "Make a TLDR.\nMore detail.")
+        XCTAssertEqual(c.description, "Make a TLDR.")
+        XCTAssertEqual(c.template, "Make a TLDR.\nMore detail.")
+    }
+
+    func testLookupWithOrWithoutSlash() {
+        let store = CustomCommandStore(commands: [
+            CustomCommand(name: "review", description: "", template: "t"),
+        ])
+        XCTAssertNotNil(store.command(named: "review"))
+        XCTAssertNotNil(store.command(named: "/review"))
+        XCTAssertNotNil(store.command(named: "/REVIEW"))
+        XCTAssertNil(store.command(named: "/nope"))
+    }
+
+    func testIsValidName() {
+        XCTAssertTrue(CustomCommandStore.isValidName("code-review_2"))
+        XCTAssertFalse(CustomCommandStore.isValidName(""))
+        XCTAssertFalse(CustomCommandStore.isValidName("has space"))
+        XCTAssertFalse(CustomCommandStore.isValidName("dot.name"))
+    }
+}
+
+final class SlashMenuExtraTests: XCTestCase {
+    func testExtraCommandsMatch() {
+        var m = SlashMenu()
+        m.extra = [SlashMenu.Item(name: "/review", summary: "custom")]
+        m.update(for: "/rev")
+        XCTAssertEqual(m.matches.map { $0.name }, ["/review"])
+    }
+
+    func testBuiltinShadowsExtra() {
+        var m = SlashMenu()
+        // An extra named like a built-in must not appear twice.
+        m.extra = [SlashMenu.Item(name: "/help", summary: "dupe")]
+        m.update(for: "/help")
+        XCTAssertEqual(m.matches.filter { $0.name == "/help" }.count, 1)
+    }
+
+    func testBuiltinsStillMatchWithExtras() {
+        var m = SlashMenu()
+        m.extra = [SlashMenu.Item(name: "/review", summary: "custom")]
+        m.update(for: "/mo")
+        XCTAssertEqual(m.matches.map { $0.name }, ["/model"])
+    }
+}
