@@ -21,6 +21,16 @@ import ImageIO
 /// Performance features wired in:
 /// - Prefix cache: skips prefill for cached token prefixes (TTFT <100ms)
 /// - Speculative decoding: draft model proposes K tokens per step (1.5-3x decode)
+/// One-shot, thread-safe cancellation flag for a single `generate` stream. Set
+/// from the AsyncStream's onTermination (any thread) and polled by the decode
+/// loop so an abandoned reply stops decoding instead of running to maxTokens.
+final class GenerationCancelToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+}
+
 public final class InferenceEngine: @unchecked Sendable {
     private var loadedModel: LoadedModel?
     private var tokenizer: KLMTokenizer?
@@ -1087,8 +1097,15 @@ public final class InferenceEngine: @unchecked Sendable {
         }()
 
         let capturedPrefillChunkSize = self.prefillChunkSize
+        // Cooperative cancellation: when the consumer stops iterating (e.g. the
+        // REPL cancels the reply on Ctrl-C), AsyncStream fires onTermination,
+        // which trips this flag; the decode loops below poll it and stop so the
+        // GPU is not left decoding an abandoned reply. Mirrors the
+        // ContinuousBatcher CancelFlag pattern.
+        let genCancel = GenerationCancelToken()
         let stream = AsyncStream<TokenEvent> { continuation in
-            Task { [statsHolder, captures, capturedPrefillChunkSize] in
+            continuation.onTermination = { _ in genCancel.cancel() }
+            Task { [statsHolder, captures, capturedPrefillChunkSize, genCancel] in
                 // Re-bind each Captures field to the closure-body
                 // local name the rest of this Task body uses. Doing
                 // this here (rather than referencing `captures.x`
@@ -1474,6 +1491,7 @@ public final class InferenceEngine: @unchecked Sendable {
                     }
 
                     while generatedCount < maxTokens && !stopIds.contains(nextToken) {
+                        if genCancel.isCancelled { break }
                         // Speculative step: get multiple tokens at once.
                         // Spec path requires fp16 caches; shouldSpec already excludes int8.
                         let accepted = specDec.step(
@@ -1537,6 +1555,7 @@ public final class InferenceEngine: @unchecked Sendable {
                     }
 
                     while generatedCount < maxTokens && !stopIds.contains(nextToken) {
+                        if genCancel.isCancelled { break }
                         // ngramStep appends accepted tokens to the proposer itself.
                         let accepted = ngramDec.ngramStep(
                             lastToken: nextToken,
@@ -1584,6 +1603,7 @@ public final class InferenceEngine: @unchecked Sendable {
                     // forward N+1, so kernel launch and host string work overlap
                     // with kernel execution.
                     while generatedCount < maxTokens {
+                        if genCancel.isCancelled { break }
                         if stopIds.contains(nextToken) {
                             continuation.yield(TokenEvent(
                                 tokenId: nextToken, text: "",

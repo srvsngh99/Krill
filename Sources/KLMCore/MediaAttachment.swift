@@ -135,6 +135,47 @@ public enum MediaAttachment {
         return s
     }
 
+    /// Best-effort pixel dimensions from an image header (PNG, GIF, JPEG).
+    /// Returns nil when the format is unrecognized or the header is truncated.
+    /// Used for attachment previews, so a miss is harmless.
+    public static func imageDimensions(_ data: Data) -> (width: Int, height: Int)? {
+        let b = [UInt8](data)
+        // PNG: 8-byte signature, then IHDR with width/height as big-endian u32
+        // at byte offsets 16 and 20.
+        if b.count >= 24, Array(b.prefix(8)) == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
+            let w = (Int(b[16]) << 24) | (Int(b[17]) << 16) | (Int(b[18]) << 8) | Int(b[19])
+            let h = (Int(b[20]) << 24) | (Int(b[21]) << 16) | (Int(b[22]) << 8) | Int(b[23])
+            if w > 0, h > 0 { return (w, h) }
+        }
+        // GIF: width/height are little-endian u16 at offsets 6 and 8.
+        if b.count >= 10, b[0] == 0x47, b[1] == 0x49, b[2] == 0x46, b[3] == 0x38 {
+            let w = Int(b[6]) | (Int(b[7]) << 8)
+            let h = Int(b[8]) | (Int(b[9]) << 8)
+            if w > 0, h > 0 { return (w, h) }
+        }
+        // JPEG: scan segments for a Start-Of-Frame marker (0xFFC0..0xFFCF,
+        // excluding the non-SOF markers C4/C8/CC); height/width follow as
+        // big-endian u16.
+        if b.count >= 4, b[0] == 0xFF, b[1] == 0xD8 {
+            var i = 2
+            while i + 9 < b.count {
+                guard b[i] == 0xFF else { i += 1; continue }
+                let marker = b[i + 1]
+                if marker >= 0xC0, marker <= 0xCF, marker != 0xC4, marker != 0xC8, marker != 0xCC {
+                    let h = (Int(b[i + 5]) << 8) | Int(b[i + 6])
+                    let w = (Int(b[i + 7]) << 8) | Int(b[i + 8])
+                    if w > 0, h > 0 { return (w, h) }
+                    return nil
+                }
+                // Skip this segment using its big-endian length field.
+                let segLen = (Int(b[i + 2]) << 8) | Int(b[i + 3])
+                if segLen < 2 { break }
+                i += 2 + segLen
+            }
+        }
+        return nil
+    }
+
     /// Encode a mono Float (`[-1, 1]`) waveform as 16-bit PCM WAV bytes. Used by
     /// live microphone capture: writing WAV at the device's native sample rate
     /// lets the existing `AudioPreprocessor` decode + resample path run

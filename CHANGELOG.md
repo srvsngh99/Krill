@@ -8,6 +8,17 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **Polished interactive chat REPL.** `krillm run <model>` (no prompt) is now a
+  real multi-turn conversation (it previously discarded history between turns).
+  Backed by macOS libedit (no third-party dependency): Up/Down history, in-line
+  editing, and Tab completion of slash commands and file paths. Streamed output
+  gets a thinking spinner, light markdown styling (bold, `code`, fenced blocks,
+  headings), and a per-turn status line (`model | tokens | tok/s | ctx`); Ctrl-C
+  cancels a reply without exiting. Color auto-disables off-TTY or under
+  `NO_COLOR`. New session commands: `/system`, `/model` (switch in place),
+  `/history`, `/save`, `/reset`, plus `/attach` previews (kind, name, image
+  dimensions, size) and `/remove <n>`.
+
 - **Interactive multimodal chat input.** The `krillm run <model>` REPL now
   accepts images and audio mid-conversation, three ways: a `/image` / `/audio`
   command, a path dragged into the terminal (escaped spaces, quotes and `~`
