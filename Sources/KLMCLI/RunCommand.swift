@@ -39,6 +39,9 @@ struct RunCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Audio file path for audio-capable Gemma 4 (native USM; wav/mp3/flac/ogg/m4a). In interactive mode, attach with /audio, /mic, a dragged path, or @path.")
     var audio: String?
 
+    @Flag(name: .long, help: "Use the classic line REPL instead of the full-screen TUI")
+    var classic = false
+
     @Option(name: .long, help: "Tools JSON file for function calling (not yet supported)")
     var tools: String?
 
@@ -160,11 +163,20 @@ struct RunCommand: AsyncParsableCommand {
                 params: params, maxTokens: maxTokens,
                 imageData: imageData, audioData: audioData
             )
+        } else if RawTerminal.isInteractive && !classic {
+            // Full-screen opencode-style chat TUI (Sourav AI Labs identity):
+            // branded masthead, scrollable pane, slash-command autosuggest with
+            // Up/Down cycling, status footer. Any media passed via
+            // --image/--audio pre-attaches to the first turn.
+            let tui = ChatTUI(
+                engine: engine, modelName: modelPath, system: system,
+                params: params, maxTokens: maxTokens, registry: registry,
+                initialImage: imageData, initialAudio: audioData)
+            await tui.run()
         } else {
-            // Interactive chat REPL: multi-turn memory, libedit line editing /
-            // history / tab completion, streamed markdown output, and
-            // mid-conversation media attach (image / audio / mic). Any media
-            // passed via --image/--audio pre-attaches to the first turn.
+            // Classic line REPL (forced with --classic, or auto when stdout is
+            // not a TTY, e.g. piped/redirected): multi-turn memory, libedit
+            // editing/history/tab-completion, streamed markdown, media attach.
             let session = InteractiveSession(
                 engine: engine, modelName: modelPath, system: system,
                 params: params, maxTokens: maxTokens, registry: registry,
