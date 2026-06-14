@@ -22,7 +22,7 @@ GEMMA4_BENCH_WARMUP ?= 1
 KRILLM_PYTHON ?= $(HOME)/.krillm/venv/bin/python3
 KRILLM_VENV_PYTHON ?= python3
 
-.PHONY: build release install uninstall clean test bench bench-compare bench-concurrent bench-gemma4-multimodal bench-release-gate parity-gate metallib dist version
+.PHONY: build release install uninstall clean test bench bench-compare bench-concurrent bench-gemma4-multimodal bench-release-gate parity-gate metallib dist dist-app app-bundle version
 
 # Debug build (default)
 build:
@@ -216,6 +216,66 @@ dist: release
 		-C $(BUILD_DIR) $(BINARY_NAME) mlx.metallib mlx-swift_Cmlx.bundle
 	@echo "Tarball at dist/krillm-$(VERSION)-arm64-apple-macos.tar.gz"
 	shasum -a 256 dist/krillm-$(VERSION)-arm64-apple-macos.tar.gz
+
+# macOS .app bundle. Live microphone capture (`/mic` in interactive chat) needs
+# the OS to attribute mic access to KrillLM rather than the parent terminal,
+# which requires running inside a code-signed bundle that declares
+# NSMicrophoneUsageDescription. This target produces that bundle: the release
+# binary + adjacent metallib (the MLX loader searches the executable directory
+# first) + Info.plist, ad-hoc signed for local TCC.
+APP_DIR ?= dist/krillm.app
+BUNDLE_ID ?= io.github.srvsngh99.krillm
+CODESIGN_ID ?= -
+MLX_BUNDLE ?= mlx-swift_Cmlx.bundle
+
+app-bundle: release
+	@echo "Packaging $(APP_DIR)…"
+	@rm -rf "$(APP_DIR)"
+	@mkdir -p "$(APP_DIR)/Contents/MacOS" "$(APP_DIR)/Contents/Resources/$(MLX_BUNDLE)"
+	@cp "$(BUILD_DIR)/$(BINARY_NAME)" "$(APP_DIR)/Contents/MacOS/$(BINARY_NAME)"
+	# The metallib must live in Contents/Resources (codesign rejects non-code
+	# files in Contents/MacOS). The KLMRuntime loader searches the SPM resource
+	# bundle Contents/Resources/$(MLX_BUNDLE)/default.metallib, so reproduce that
+	# bundle here — WITH its own Info.plist so `codesign --deep` accepts it as a
+	# nested bundle (a bare *.bundle folder is rejected as "unsuitable format").
+	@cp "$(BUILD_DIR)/mlx.metallib" "$(APP_DIR)/Contents/Resources/$(MLX_BUNDLE)/default.metallib"
+	@printf '%s\n' \
+		'<?xml version="1.0" encoding="UTF-8"?>' \
+		'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+		'<plist version="1.0"><dict>' \
+		'  <key>CFBundleIdentifier</key><string>$(BUNDLE_ID).mlx</string>' \
+		'  <key>CFBundleName</key><string>$(MLX_BUNDLE)</string>' \
+		'  <key>CFBundlePackageType</key><string>BNDL</string>' \
+		'  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>' \
+		'</dict></plist>' > "$(APP_DIR)/Contents/Resources/$(MLX_BUNDLE)/Info.plist"
+	@printf '%s\n' \
+		'<?xml version="1.0" encoding="UTF-8"?>' \
+		'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+		'<plist version="1.0">' \
+		'<dict>' \
+		'  <key>CFBundleIdentifier</key><string>$(BUNDLE_ID)</string>' \
+		'  <key>CFBundleName</key><string>KrillLM</string>' \
+		'  <key>CFBundleExecutable</key><string>$(BINARY_NAME)</string>' \
+		'  <key>CFBundlePackageType</key><string>APPL</string>' \
+		'  <key>CFBundleShortVersionString</key><string>$(VERSION)</string>' \
+		'  <key>CFBundleVersion</key><string>$(VERSION)</string>' \
+		'  <key>LSMinimumSystemVersion</key><string>14.0</string>' \
+		'  <key>NSMicrophoneUsageDescription</key><string>KrillLM records microphone audio for local voice input to on-device speech and multimodal models.</string>' \
+		'</dict>' \
+		'</plist>' > "$(APP_DIR)/Contents/Info.plist"
+	@codesign --force --deep --sign "$(CODESIGN_ID)" --identifier "$(BUNDLE_ID)" "$(APP_DIR)" \
+		&& echo "Signed $(APP_DIR) (identity=$(CODESIGN_ID))" \
+		|| echo "WARNING: codesign failed — /mic permission may attribute to the terminal instead of KrillLM."
+	@echo "App bundle at $(APP_DIR)"
+	@echo "Run interactive chat (mic enabled):"
+	@echo "  $(APP_DIR)/Contents/MacOS/$(BINARY_NAME) run gemma-4-e2b"
+
+# Zip the .app bundle for distribution.
+dist-app: app-bundle
+	@mkdir -p dist
+	@cd dist && zip -qry "krillm-$(VERSION)-arm64-apple-macos-app.zip" "krillm.app"
+	@echo "Tarball at dist/krillm-$(VERSION)-arm64-apple-macos-app.zip"
+	@shasum -a 256 "dist/krillm-$(VERSION)-arm64-apple-macos-app.zip"
 
 # Print version
 version:

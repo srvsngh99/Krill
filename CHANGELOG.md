@@ -6,6 +6,29 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+### Added
+
+- **Interactive multimodal chat input.** The `krillm run <model>` REPL now
+  accepts images and audio mid-conversation, three ways: a `/image` / `/audio`
+  command, a path dragged into the terminal (escaped spaces, quotes and `~`
+  handled), or an inline `@path` inside the message. Attachments apply to the
+  next turn then clear; `/attach`, `/clear`, and `/help` manage them. `--image`
+  / `--audio` flags pre-attach to the first turn.
+- **Live microphone voice input.** `/mic` records from the default input device
+  (Enter to stop) and attaches the clip to the next message, on audio-capable
+  Gemma 4 models. Capture is native AVAudioEngine → WAV, reusing the existing
+  16 kHz resample pipeline.
+- **`make app-bundle` / `make dist-app`.** Builds a code-signed `krillm.app`
+  with `NSMicrophoneUsageDescription` so macOS attributes `/mic` permission to
+  KrillLM rather than the parent terminal. The metallib ships as a signed
+  nested resource bundle.
+
+### Changed
+
+- **`--image` works for every vision-capable family** (Gemma 4, Qwen2.5-VL,
+  LLaVA, mllama), gated on the loaded model's real capability instead of a
+  Gemma-4-only name check; text-only models reject it loudly.
+
 ## [0.6.0] - 2026-06-10
 
 The long-context release. Gemma 4 12B now decodes near-flat (~17-23 tok/s)
