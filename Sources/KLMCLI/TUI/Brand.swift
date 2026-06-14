@@ -19,14 +19,19 @@ enum Brand {
 
     /// A light two-part masthead line (NOT a solid inverse bar): the bold
     /// wordmark + lab on the left, the loaded model dim on the right. Pair with
-    /// `headerRule` on the row beneath for the underline.
+    /// `headerRule` on the row beneath for the underline. Degrades on narrow
+    /// terminals so the line never overflows onto the rule row: drop the model
+    /// (still shown in the footer) when there is no room, then clip the wordmark.
     static func header(width: Int, model: String) -> String {
         let leftPlain = "  \(wordmark)  \(lab)"
         let rightPlain = "\(model)  "
-        let pad = max(1, width - leftPlain.count - rightPlain.count)
-        let left = "  " + Ansi.bold(wordmark) + "  " + Ansi.dim(lab)
-        let right = Ansi.dim(model) + "  "
-        return left + String(repeating: " ", count: pad) + right
+        let styledLeft = "  " + Ansi.bold(wordmark) + "  " + Ansi.dim(lab)
+        if width >= leftPlain.count + rightPlain.count + 1 {
+            let pad = width - leftPlain.count - rightPlain.count
+            return styledLeft + String(repeating: " ", count: pad) + Ansi.dim(model) + "  "
+        }
+        if width >= leftPlain.count { return styledLeft }
+        return Ansi.bold(String(leftPlain.prefix(max(0, width))))
     }
 
     /// A dim full-width rule drawn under the masthead.
