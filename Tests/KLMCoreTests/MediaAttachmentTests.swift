@@ -74,6 +74,33 @@ final class MediaAttachmentTests: XCTestCase {
         XCTAssertEqual(MediaAttachment.normalizePath("  /tmp/plain.png  "), "/tmp/plain.png")
     }
 
+    // MARK: - imageDimensions
+
+    func testPNGDimensions() {
+        // 5x3 PNG IHDR: 8-byte sig, "IHDR" len, then width=5,height=3 big-endian.
+        var png = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        png.append(Data([0, 0, 0, 13]))                   // IHDR length
+        png.append(Data(Array("IHDR".utf8)))
+        png.append(Data([0, 0, 0, 5, 0, 0, 0, 3]))        // width=5, height=3
+        png.append(Data([8, 2, 0, 0, 0]))                 // bit depth, color type, ...
+        let dims = MediaAttachment.imageDimensions(png)
+        XCTAssertEqual(dims?.width, 5)
+        XCTAssertEqual(dims?.height, 3)
+    }
+
+    func testGIFDimensions() {
+        // "GIF89a" then width=4 (LE), height=7 (LE).
+        var gif = Data(Array("GIF89a".utf8))
+        gif.append(Data([4, 0, 7, 0]))
+        let dims = MediaAttachment.imageDimensions(gif)
+        XCTAssertEqual(dims?.width, 4)
+        XCTAssertEqual(dims?.height, 7)
+    }
+
+    func testUnknownImageDimensionsNil() {
+        XCTAssertNil(MediaAttachment.imageDimensions(Data([0x12, 0x34, 0x56])))
+    }
+
     // MARK: - encodeWAV
 
     func testEncodeWAVHeaderAndRoundtrip() throws {

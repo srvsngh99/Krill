@@ -1,0 +1,5 @@
+module CEditLine {
+    header "shim.h"
+    link "edit"
+    export *
+}

@@ -282,10 +282,17 @@ mllama), not just Gemma 4 - the flag is gated on the loaded model's real
 capability, and fails loudly on a text-only model rather than silently dropping
 the image.
 
-### Interactive multimodal chat (attach mid-conversation)
+### Interactive chat REPL
 
-The interactive REPL (`krillm run <model>` with no prompt) accepts images and
-audio without leaving the session. Attach a file three ways:
+`krillm run <model>` with no prompt opens a multi-turn chat that remembers the
+conversation. It uses libedit for line editing, so you get history (Up/Down),
+in-line editing (Ctrl-A/E/K/U), and Tab completion of slash commands and file
+paths. Output streams with a thinking spinner, light markdown styling, and a
+per-turn status line (`model | tokens | tok/s | ctx`); Ctrl-C cancels a reply
+without leaving the session. Color is auto-disabled when output is not a TTY or
+`NO_COLOR` is set.
+
+Attach images and audio without leaving the session, three ways:
 
 ```text
 > /image ~/Pictures/cat.png        # explicit command (/audio, /img too)
@@ -293,11 +300,16 @@ audio without leaving the session. Attach a file three ways:
 > what breed is @~/Pictures/cat.png?   # inline @path inside your message
 ```
 
-Attachments apply to your **next** message, then clear. Manage them with
-`/attach` (list pending), `/clear` (discard), and `/help` (full command list).
+Attachments apply to your **next** message, then clear. `/attach` lists them
+with index, dimensions, and size; `/remove <n>` drops one; `/clear` drops all.
 Images accumulate for multi-image models (mllama); single-image models use the
 first. `--image` / `--audio` passed on the command line pre-attach to the first
 turn.
+
+Session commands: `/system <text>` sets the system prompt, `/model <name>`
+switches model in place (keeping the conversation), `/history` prints the turns
+so far, `/save [file]` writes the transcript, `/reset` clears it, and `/help`
+lists everything.
 
 ### Live microphone voice input
 
