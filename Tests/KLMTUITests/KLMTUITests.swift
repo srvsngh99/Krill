@@ -250,6 +250,42 @@ final class CustomCommandTests: XCTestCase {
     }
 }
 
+final class ModelPickerTests: XCTestCase {
+    private let entries = [
+        ModelPicker.Entry(name: "gemma-4-e2b", detail: "2B", downloaded: true),
+        ModelPicker.Entry(name: "gemma-4-12b", detail: "12B", downloaded: true),
+        ModelPicker.Entry(name: "qwen2.5-3b", detail: "3B", downloaded: false),
+    ]
+
+    func testStartsOnCurrentModel() {
+        let p = ModelPicker(entries: entries, current: "gemma-4-12b")
+        XCTAssertEqual(p.selected, 1)
+        XCTAssertEqual(p.current?.name, "gemma-4-12b")
+    }
+
+    func testUnknownCurrentDefaultsToFirst() {
+        let p = ModelPicker(entries: entries, current: "not-installed")
+        XCTAssertEqual(p.selected, 0)
+        XCTAssertEqual(p.current?.name, "gemma-4-e2b")
+    }
+
+    func testCycleWraps() {
+        var p = ModelPicker(entries: entries)        // starts at 0
+        p.selectNext(); XCTAssertEqual(p.selected, 1)
+        p.selectNext(); XCTAssertEqual(p.selected, 2)
+        p.selectNext(); XCTAssertEqual(p.selected, 0)   // wrap forward
+        p.selectPrevious(); XCTAssertEqual(p.selected, 2) // wrap backward
+    }
+
+    func testEmptyPickerIsSafe() {
+        var p = ModelPicker(entries: [])
+        XCTAssertTrue(p.isEmpty)
+        XCTAssertNil(p.current)
+        p.selectNext(); p.selectPrevious()              // no crash, no move
+        XCTAssertEqual(p.selected, 0)
+    }
+}
+
 final class SlashMenuExtraTests: XCTestCase {
     func testExtraCommandsMatch() {
         var m = SlashMenu()
