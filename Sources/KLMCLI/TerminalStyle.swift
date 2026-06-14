@@ -20,6 +20,7 @@ enum Ansi {
     static func dim(_ s: String) -> String { wrap(s, "2") }
     static func inverse(_ s: String) -> String { wrap(s, "7") }
     static func underline(_ s: String) -> String { wrap(s, "4") }
+    static func white(_ s: String) -> String { wrap(s, "97") }
     static func cyan(_ s: String) -> String { wrap(s, "36") }
     static func green(_ s: String) -> String { wrap(s, "32") }
     static func yellow(_ s: String) -> String { wrap(s, "33") }

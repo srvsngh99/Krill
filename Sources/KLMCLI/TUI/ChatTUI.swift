@@ -330,7 +330,8 @@ final class ChatTUI {
 
     // MARK: - Rendering
 
-    private func paneHeight() -> Int { max(1, rows - 3) }   // header + input + footer
+    // Rows consumed by chrome: 1 masthead + 3 input box + 1 footer.
+    private func paneHeight() -> Int { max(1, rows - 5) }
 
     private func render() {
         let width = cols
@@ -339,28 +340,35 @@ final class ChatTUI {
         // Row 1: masthead.
         frame += positioned(1, Brand.header(width: width, model: modelName))
 
-        // Conversation pane (rows 2 .. rows-2).
+        // Layout from the bottom up: the 3-row input box, then the footer below
+        // it, with the conversation pane filling everything above. `boxTop` is
+        // floored at row 2 so the box never overwrites the masthead (row 1) or
+        // emits an invalid CSI on tiny terminals; the footer is pushed below the
+        // box (off-screen, harmlessly, if the terminal is too short).
+        let box = inputBox(width: width)             // 3 lines: top / field / bottom
+        let boxTop = max(2, rows - box.count)        // first box row
+        let footerRow = max(rows, boxTop + box.count)
         let pane = paneLines(width: width)
-        let ph = paneHeight()
         let menuLines = menu.isActive ? renderMenu(width: width) : []
-        let convHeight = max(0, ph - menuLines.count)
+        let availRows = max(0, (boxTop - 1) - 2 + 1) // rows 2 .. boxTop-1
+        let convHeight = max(0, availRows - menuLines.count)
         let maxStart = max(0, pane.count - convHeight)
         scrollOffset = min(scrollOffset, maxStart)   // clamp: cannot scroll past the top
         let start = max(0, maxStart - scrollOffset)
         for i in 0..<convHeight {
-            let row = 2 + i
             let lineIdx = start + i
             let content = lineIdx < pane.count ? pane[lineIdx] : ""
-            frame += positioned(row, content)
+            frame += positioned(2 + i, content)
         }
-        // Slash popup sits just above the input line.
+        // Slash popup sits just above the input box.
         for (i, line) in menuLines.enumerated() {
             frame += positioned(2 + convHeight + i, line)
         }
-
-        // Input line (row rows-1) and footer (row rows).
-        frame += positioned(rows - 1, inputLine(width: width))
-        frame += positioned(rows, Brand.footer(width: width, status: lastStatus.isEmpty ? "ready" : lastStatus))
+        // Input box, then footer.
+        for (i, line) in box.enumerated() {
+            frame += positioned(boxTop + i, line)
+        }
+        frame += positioned(footerRow, Brand.footer(width: width, status: lastStatus.isEmpty ? "ready" : lastStatus))
         frame += "\u{1B}[J"   // clear anything below
         Output.write(frame)
     }
@@ -369,20 +377,30 @@ final class ChatTUI {
         "\u{1B}[\(row);1H\u{1B}[2K" + content
     }
 
+    /// Conversation pane lines. Turns are distinguished by SHADE, not by role
+    /// labels: the user's own words read bright white, the model's reply reads in
+    /// the calmer default markdown styling. A faint rule opens each new exchange
+    /// (before every user turn but the first) so the back-and-forth groups
+    /// visually without any "you"/"krilllm" name tags.
     private func paneLines(width: Int) -> [String] {
         guard !view.isEmpty else { return verticallyCentered(Brand.splash(width: width), in: paneHeight()) }
-        let w = max(10, width - 2)
+        let margin = "  "
+        let w = max(10, width - 4)                       // 2-space margin both sides
+        let rule = Ansi.dim(margin + String(repeating: "\u{2500}", count: min(w, 48)))
         var lines: [String] = []
+        var sawTurn = false
         for msg in view {
             switch msg.role {
             case .user:
-                lines.append(Ansi.green("you"))
-                for l in Layout.wrap(msg.text, width: w) { lines.append("  " + l) }
+                if sawTurn { lines.append(rule); lines.append("") }
+                sawTurn = true
+                for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.white(l)) }
             case .assistant:
-                lines.append(Ansi.cyan(Brand.product.lowercased()))
-                for l in TUIMarkdown.render(msg.text, width: w) { lines.append("  " + l) }
+                sawTurn = true
+                lines.append("")
+                for l in TUIMarkdown.render(msg.text, width: w) { lines.append(margin + l) }
             case .note:
-                for l in Layout.wrap(msg.text, width: width) { lines.append(Ansi.dim(l)) }
+                for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.dim(l)) }
             }
             lines.append("")
         }
@@ -419,16 +437,44 @@ final class ChatTUI {
         return out
     }
 
-    private func inputLine(width: Int) -> String {
-        let prompt = Ansi.bold("> ")
-        // Fake block cursor (we keep the real cursor hidden).
+    /// The bottom input as a rounded, padded 3-row box (top border, field,
+    /// bottom border). The field shows a "> " prompt, the typed text with a fake
+    /// inverse-video block cursor (the real cursor stays hidden), and a dim
+    /// placeholder when empty. Long input scrolls horizontally so the frame is
+    /// never broken.
+    private func inputBox(width: Int) -> [String] {
+        let w = max(8, width)
+        let h = "\u{2500}", v = "\u{2502}"     // light horizontal / vertical
+        let tl = "\u{256D}", tr = "\u{256E}"   // rounded corners
+        let bl = "\u{2570}", br = "\u{256F}"
+        let top = Ansi.dim(Chrome.border(width: w, left: tl, fill: h, right: tr))
+        let bottom = Ansi.dim(Chrome.border(width: w, left: bl, fill: h, right: br))
+
+        let fieldWidth = max(2, w - 4)         // inner span minus one pad space each side
+        let promptStr = "> "
+        let textWidth = max(1, fieldWidth - promptStr.count)
         let chars = Array(input)
-        var rendered = ""
-        for (i, c) in chars.enumerated() {
-            rendered += i == cursor ? Ansi.inverse(String(c)) : String(c)
+
+        var body: String
+        if chars.isEmpty {
+            // Block cursor then a dim placeholder, clipped/padded to the field.
+            let placeholder = "type a message   /help for commands"
+            let clipped = String(placeholder.prefix(max(0, textWidth - 1)))
+            let pad = String(repeating: " ", count: max(0, textWidth - 1 - clipped.count))
+            body = Ansi.bold(promptStr) + Ansi.inverse(" ") + Ansi.dim(clipped) + pad
+        } else {
+            // Pure geometry windows the text and locates the cursor; we only
+            // apply the inverse-video block cursor to that one cell.
+            let (content, cursorCol) = Chrome.inputField(text: chars, cursor: cursor, textWidth: textWidth)
+            let cs = Array(content)
+            var rendered = ""
+            for (i, ch) in cs.enumerated() {
+                rendered += i == cursorCol ? Ansi.inverse(String(ch)) : String(ch)
+            }
+            body = Ansi.bold(promptStr) + rendered
         }
-        if cursor >= chars.count { rendered += Ansi.inverse(" ") }
-        return prompt + rendered
+        let field = Ansi.dim(v) + " " + body + " " + Ansi.dim(v)
+        return [top, field, bottom]
     }
 
     // MARK: - Size / signals
