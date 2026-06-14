@@ -51,12 +51,13 @@ enum Brand {
 
     // MARK: - Launch splash
 
-    /// The KrillLM wordmark as an ASCII block banner (figlet "small" font, pure
-    /// ASCII so it stays inside the house ASCII rule). The hero of the splash,
-    /// echoing the big wordmark on the social-preview brand asset.
+    /// The KrillLM wordmark as a dense ASCII block banner (figlet "colossal",
+    /// pure ASCII so it stays inside the house ASCII rule). The hero of the
+    /// splash, echoing the big wordmark on the social-preview brand asset.
     static let banner: [String] = Banner.krillm
 
-    /// Centered launch splash in the brand identity: the block wordmark, a
+    /// Centered launch splash in the brand identity: the block wordmark (or a
+    /// plain `>_ KrillLM` fallback on terminals too narrow for the banner), a
     /// terminal-style tagline (the `>_` device typing the brand line, with "Mac"
     /// reverse-highlighted exactly as the social preview highlights it),
     /// capability chips, and the lab/site line.
@@ -64,7 +65,13 @@ enum Brand {
         func center(_ s: String, _ vis: Int) -> String {
             String(repeating: " ", count: Chrome.centerPad(visibleWidth: vis, totalWidth: width)) + s
         }
-        let bannerPad = String(repeating: " ", count: Chrome.centerPad(visibleWidth: Banner.width(banner), totalWidth: width))
+        // Fall back to the plain wordmark when the block banner would overflow.
+        let bannerWidth = Banner.width(banner)
+        let heroRows: [String] = width >= bannerWidth
+            ? banner.map { row in
+                String(repeating: " ", count: Chrome.centerPad(visibleWidth: bannerWidth, totalWidth: width)) + Ansi.bold(row)
+            }
+            : [center(Ansi.bold(wordmark), visibleCount(wordmark))]
 
         // Tagline split on "Mac" so it can be reverse-highlighted like the brand
         // asset, with the `>_` device prefixed (the line reads as a terminal
@@ -81,7 +88,7 @@ enum Brand {
         let labLine = "a \(lab) project \u{00B7} \(site)"
 
         var out: [String] = [""]
-        for row in banner { out.append(bannerPad + Ansi.bold(row)) }
+        out.append(contentsOf: heroRows)
         out.append("")
         out.append(taglineLine)
         out.append("")
