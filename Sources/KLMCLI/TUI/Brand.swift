@@ -51,9 +51,9 @@ enum Brand {
 
     // MARK: - Launch splash
 
-    /// The KrillLM wordmark as a dense ASCII block banner (figlet "colossal",
-    /// pure ASCII so it stays inside the house ASCII rule). The hero of the
-    /// splash, echoing the big wordmark on the social-preview brand asset.
+    /// The KrillLM wordmark as a scaled-up line-drawing ASCII banner (figlet
+    /// "big", pure ASCII so it stays inside the house ASCII rule). The hero of
+    /// the splash, echoing the wordmark on the social-preview brand asset.
     static let banner: [String] = Banner.krillm
 
     /// Centered launch splash in the brand identity: the block wordmark (or a
