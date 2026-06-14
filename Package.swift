@@ -19,6 +19,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto", from: "3.8.0"),
     ],
     targets: [
+        // macOS libedit (readline-compatible) for the interactive REPL: line
+        // editing, history, and tab completion with no third-party dependency.
+        .systemLibrary(name: "CEditLine", path: "Sources/CEditLine"),
         .target(
             name: "KLMRuntime",
             dependencies: []
@@ -116,6 +119,7 @@ let package = Package(
                 "KLMSampler",
                 "KLMRegistry",
                 "KLMServer",
+                "CEditLine",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
