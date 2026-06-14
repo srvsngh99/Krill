@@ -37,26 +37,52 @@ enum Brand {
 
     // MARK: - Launch splash
 
-    /// Centered launch splash: wordmark, tagline, capability chips, lab line.
-    /// Returns styled lines sized to `width`.
+    /// The KrillLM wordmark as an ASCII block banner (figlet "small" font, pure
+    /// ASCII so it stays inside the house ASCII rule). The hero of the splash,
+    /// echoing the big wordmark on the social-preview brand asset.
+    static let banner: [String] = [
+        " _  __    _ _ _ _    __  __ ",
+        "| |/ /_ _(_) | | |  |  \\/  |",
+        "| ' <| '_| | | | |__| |\\/| |",
+        "|_|\\_\\_| |_|_|_|____|_|  |_|",
+    ]
+
+    /// Centered launch splash in the brand identity: the block wordmark, a
+    /// terminal-style tagline (the `>_` device typing the brand line, with "Mac"
+    /// reverse-highlighted exactly as the social preview highlights it),
+    /// capability chips, and the lab/site line.
     static func splash(width: Int) -> [String] {
         func center(_ s: String, _ vis: Int) -> String {
             let pad = max(0, (width - vis) / 2)
             return String(repeating: " ", count: pad) + s
         }
-        let chipRow = chips.map { "[ \($0) ]" }.joined(separator: "   ")
+        let bannerWidth = banner.map { $0.count }.max() ?? 0
+        let bannerPad = String(repeating: " ", count: max(0, (width - bannerWidth) / 2))
+
+        // Tagline split on "Mac" so it can be reverse-highlighted like the brand
+        // asset, with the `>_` device prefixed (the line reads as a terminal
+        // prompt typing the brand line).
+        let parts = tagline.components(separatedBy: "Mac")
+        let head = parts.first ?? tagline
+        let tail = parts.count > 1 ? parts[1] : ""
+        let taglineVis = 3 + head.count + (parts.count > 1 ? 3 : 0) + tail.count
+        var styledTagline = Ansi.dim(">_ ") + Ansi.dim(head)
+        if parts.count > 1 { styledTagline += Ansi.inverse(Ansi.bold("Mac")) + Ansi.dim(tail) }
+        let taglineLine = center(styledTagline, taglineVis)
+
+        let chipRow = chips.map { " \($0) " }.joined(separator: "  ")
         let labLine = "a \(lab) project \u{00B7} \(site)"
-        return [
-            "",
-            center(Ansi.bold(wordmark), visibleCount(wordmark)),
-            "",
-            center(Ansi.dim(tagline), visibleCount(tagline)),
-            "",
-            center(Ansi.inverse(chipRow), visibleCount(chipRow)),
-            "",
-            center(Ansi.dim(labLine), visibleCount(labLine)),
-            "",
-        ]
+
+        var out: [String] = [""]
+        for row in banner { out.append(bannerPad + Ansi.bold(row)) }
+        out.append("")
+        out.append(taglineLine)
+        out.append("")
+        out.append(center(Ansi.inverse(chipRow), visibleCount(chipRow)))
+        out.append("")
+        out.append(center(Ansi.dim(labLine), visibleCount(labLine)))
+        out.append("")
+        return out
     }
 
     // MARK: - Helpers
