@@ -62,8 +62,11 @@ final class Spinner: @unchecked Sendable {
         }
     }
 
-    func stop() {
+    /// Stop animating and clear the line. Awaits the animation task's exit
+    /// first, so no stray frame can print after the line is cleared.
+    func stop() async {
         task?.cancel()
+        await task?.value
         task = nil
         if Ansi.enabled {
             print(Ansi.clearLine, terminator: "")

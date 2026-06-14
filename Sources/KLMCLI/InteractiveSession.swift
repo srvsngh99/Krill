@@ -6,11 +6,24 @@ import KLMRegistry
 import KLMSampler
 import KLMServer
 
-// SIGINT during generation sets this flag; the stream loop polls it and stops,
-// so Ctrl-C cancels the current response instead of killing the process. A C
-// signal handler may only touch a sig_atomic_t global.
-private nonisolated(unsafe) var krillCancelFlag: sig_atomic_t = 0
-private func krillSigintHandler(_ sig: Int32) { krillCancelFlag = 1 }
+// SIGINT during a reply sets this flag (async-signal-safe: only a sig_atomic_t
+// is touched). The decode display loop polls it and breaks; breaking ends the
+// for-await, the stream deinits, its onTermination fires, and the engine decode
+// loop stops (see GenerationCancelToken). So Ctrl-C halts the GPU work, not just
+// the on-screen stream. Installed only for the duration of a reply.
+private nonisolated(unsafe) var replyCancelFlag: sig_atomic_t = 0
+private func replySigintHandler(_ sig: Int32) { replyCancelFlag = 1 }
+
+/// Install the reply-cancel SIGINT handler and make sure SIGINT is unblocked on
+/// this thread (the Swift/dispatch runtime blocks it by default, which would
+/// leave a Ctrl-C pending and undelivered).
+private func installReplySigint() {
+    var unblock = sigset_t()
+    sigemptyset(&unblock)
+    sigaddset(&unblock, SIGINT)
+    pthread_sigmask(SIG_UNBLOCK, &unblock, nil)
+    signal(SIGINT, replySigintHandler)
+}
 
 /// The interactive chat REPL: multi-turn conversation memory, libedit line
 /// editing + history + tab completion, streamed markdown-lite output with a
@@ -70,6 +83,7 @@ final class InteractiveSession {
 
     func run() async throws {
         ReplCompletion.install()
+        installReplySigint()
         print(Ansi.bold("\nKrillLM interactive chat") + " " + Ansi.dim("(\(modelName))"))
         print(Ansi.dim("Type a message. /help for commands, Tab to complete, Up/Down for history, /quit to exit.\n"))
         if !pendingImages.isEmpty || pendingAudio != nil { printPending() }
@@ -189,26 +203,28 @@ final class InteractiveSession {
         let usedImages = pendingImages.count
         let usedAudio = pendingAudio != nil
 
-        let spinner = Spinner("thinking")
-        spinner.start()
-
-        let (stream, getStats) = engine.generate(
-            messages: messages, params: params, maxTokens: maxTokens,
-            imageData: imgs.first, audioData: pendingAudio?.data, imagesData: imgs)
-
         let filter = StreamingReasoningFilter()
         let md = MarkdownStream()
-        var assistant = ""
-        var first = true
-        var cancelled = false
-        krillCancelFlag = 0
-        let prevHandler = signal(SIGINT, krillSigintHandler)
+        let spinner = Spinner("thinking")
+
+        // The SIGINT handler is installed for the whole session (see
+        // installReplySigint); just arm it for this reply.
+        replyCancelFlag = 0
 
         print()
-        for await event in stream {
-            if krillCancelFlag != 0 { cancelled = true; break }
+        spinner.start()
+        let generation = engine.generate(
+            messages: messages, params: params, maxTokens: maxTokens,
+            imageData: imgs.first, audioData: pendingAudio?.data, imagesData: imgs)
+        var stream: AsyncStream<TokenEvent>? = generation.stream
+        let getStats = generation.stats
+
+        var assistant = ""
+        var first = true
+        for await event in stream! {
+            if replyCancelFlag != 0 { break }
             if event.isEnd { break }
-            if first { spinner.stop(); first = false }
+            if first { await spinner.stop(); first = false }
             let visible = filter.consume(event.text)
             if !visible.isEmpty {
                 assistant += visible
@@ -216,19 +232,26 @@ final class InteractiveSession {
                 fflush(stdout)
             }
         }
-        signal(SIGINT, prevHandler)
-        if first { spinner.stop() }
+        if first { await spinner.stop() }
+        let cancelled = replyCancelFlag != 0
+        // Drop the stream now so its onTermination fires immediately and the
+        // engine stops decoding an abandoned reply (rather than at scope exit).
+        stream = nil
+
         let tail = filter.finish()
         if !tail.isEmpty { assistant += tail; print(md.consume(tail), terminator: "") }
         print(md.finish(), terminator: "")
         print()
         if cancelled { print(Ansi.yellow("(cancelled)")) }
 
-        history.append((role: "user", content: userText))
-        history.append((role: "assistant", content: assistant))
+        // Record the turn only when it completed normally, so a cancelled (often
+        // empty) reply does not pollute the conversation context.
+        if !cancelled {
+            history.append((role: "user", content: userText))
+            history.append((role: "assistant", content: assistant))
+            if let stats = getStats() { printStatusLine(stats, images: usedImages, audio: usedAudio) }
+        }
         pendingImages.removeAll(); pendingAudio = nil
-
-        if let stats = getStats() { printStatusLine(stats, images: usedImages, audio: usedAudio) }
         print()
     }
 
