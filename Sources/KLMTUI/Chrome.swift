@@ -41,6 +41,17 @@ public enum Chrome {
     public static func centerPad(visibleWidth: Int, totalWidth: Int) -> Int {
         max(0, (totalWidth - visibleWidth) / 2)
     }
+
+    /// Leading blank ROWS to place `paneCount` content lines within `convHeight`
+    /// visible rows: bottom-anchored by default (content hugs the bottom, so new
+    /// messages appear just above the input), or vertically centered when
+    /// `centered` (used for the splash). Returns 0 when content overflows the
+    /// viewport (it scrolls instead of being padded).
+    public static func anchorBlankTop(paneCount: Int, convHeight: Int, centered: Bool) -> Int {
+        guard paneCount < convHeight else { return 0 }
+        let slack = convHeight - paneCount
+        return centered ? slack / 2 : slack
+    }
 }
 
 /// ASCII-art wordmark banners for the splash. Pure ASCII (figlet "small" font)

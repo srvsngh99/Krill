@@ -43,7 +43,17 @@ final class ChatTUI {
     private var scrollOffset = 0     // lines scrolled up from bottom
     private var rows = 24, cols = 80
     private var lastStatus = ""
+    private var contextWindow = 0          // model's max context (tokens), 0 = unknown
     private var shouldQuit = false
+
+    // Working-directory label for the footer (e.g. "KrillLM:main"). Computed once.
+    private lazy var cwdLabel: String = {
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).lastPathComponent
+        guard let head = try? String(contentsOfFile: ".git/HEAD", encoding: .utf8),
+              let r = head.range(of: "refs/heads/") else { return dir }
+        let branch = head[r.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        return branch.isEmpty ? dir : "\(dir):\(branch)"
+    }()
 
     private let raw = RawTerminal()
     private let reader = KeyReader()
@@ -57,6 +67,7 @@ final class ChatTUI {
         self.params = params
         self.maxTokens = maxTokens
         self.registry = registry
+        self.contextWindow = AliasMap.resolve(modelName)?.context ?? 0
         if let initialImage { pendingImages.append(makeAtt(.image, initialImage, "image")) }
         if let initialAudio { pendingAudio = makeAtt(.audio, initialAudio, "audio") }
     }
@@ -289,7 +300,13 @@ final class ChatTUI {
         if images > 0 { parts.append("\(images) img") }
         if audio { parts.append("audio") }
         parts.append(String(format: "%.0f tok/s", st.decodeTokensPerSecond))
-        parts.append("ctx \(st.promptTokens + st.generatedTokens)")
+        let ctx = st.promptTokens + st.generatedTokens
+        if contextWindow > 0 {
+            let pct = min(100, Int((Double(ctx) / Double(contextWindow)) * 100.0))
+            parts.append("ctx \(ctx) (\(pct)%)")
+        } else {
+            parts.append("ctx \(ctx)")
+        }
         return parts.joined(separator: " \u{00B7} ")
     }
 
@@ -304,6 +321,7 @@ final class ChatTUI {
         do {
             try await newEngine.load()
             engine = newEngine; modelName = name
+            contextWindow = AliasMap.resolve(name)?.context ?? 0
             note("Switched to \(name). Conversation kept.")
         } catch { note("Failed to load \(name): \(error)") }
     }
@@ -330,45 +348,58 @@ final class ChatTUI {
 
     // MARK: - Rendering
 
-    // Rows consumed by chrome: 1 masthead + 3 input box + 1 footer.
-    private func paneHeight() -> Int { max(1, rows - 5) }
+    // Rows consumed by chrome: 2 masthead (line + rule) + 3 input box + 1 footer.
+    private let paneTop = 3
+    private func paneHeight() -> Int { max(1, rows - 6) }
 
     private func render() {
         let width = cols
         var frame = "\u{1B}[H"   // cursor home
 
-        // Row 1: masthead.
+        // Rows 1-2: light masthead (wordmark line + dim rule).
         frame += positioned(1, Brand.header(width: width, model: modelName))
+        frame += positioned(2, Brand.headerRule(width: width))
 
         // Layout from the bottom up: the 3-row input box, then the footer below
-        // it, with the conversation pane filling everything above. `boxTop` is
-        // floored at row 2 so the box never overwrites the masthead (row 1) or
-        // emits an invalid CSI on tiny terminals; the footer is pushed below the
-        // box (off-screen, harmlessly, if the terminal is too short).
+        // it, with the conversation pane filling everything between the masthead
+        // and the box. `boxTop` is floored below the masthead so the box never
+        // overwrites it or emits an invalid CSI on tiny terminals; the footer is
+        // pushed below the box (off-screen, harmlessly, if the terminal is short).
         let box = inputBox(width: width)             // 3 lines: top / field / bottom
-        let boxTop = max(2, rows - box.count)        // first box row
+        let boxTop = max(paneTop + 1, rows - box.count)
         let footerRow = max(rows, boxTop + box.count)
         let pane = paneLines(width: width)
         let menuLines = menu.isActive ? renderMenu(width: width) : []
-        let availRows = max(0, (boxTop - 1) - 2 + 1) // rows 2 .. boxTop-1
+        let availRows = max(0, boxTop - paneTop)     // rows paneTop .. boxTop-1
         let convHeight = max(0, availRows - menuLines.count)
+
+        // Bottom-anchor the conversation against the input box (new messages
+        // appear where you type); the splash stays vertically centered.
+        let blankTop = Chrome.anchorBlankTop(paneCount: pane.count, convHeight: convHeight, centered: view.isEmpty)
         let maxStart = max(0, pane.count - convHeight)
         scrollOffset = min(scrollOffset, maxStart)   // clamp: cannot scroll past the top
         let start = max(0, maxStart - scrollOffset)
         for i in 0..<convHeight {
-            let lineIdx = start + i
-            let content = lineIdx < pane.count ? pane[lineIdx] : ""
-            frame += positioned(2 + i, content)
+            let content: String
+            if i < blankTop {
+                content = ""
+            } else {
+                let lineIdx = start + (i - blankTop)
+                content = lineIdx < pane.count ? pane[lineIdx] : ""
+            }
+            frame += positioned(paneTop + i, content)
         }
         // Slash popup sits just above the input box.
         for (i, line) in menuLines.enumerated() {
-            frame += positioned(2 + convHeight + i, line)
+            frame += positioned(paneTop + convHeight + i, line)
         }
         // Input box, then footer.
         for (i, line) in box.enumerated() {
             frame += positioned(boxTop + i, line)
         }
-        frame += positioned(footerRow, Brand.footer(width: width, status: lastStatus.isEmpty ? "ready" : lastStatus))
+        let status = lastStatus.isEmpty ? "ready" : lastStatus
+        let right = "\(cwdLabel) \u{00B7} \(KrillLMVersionTag)"
+        frame += positioned(footerRow, Brand.footer(width: width, left: status, right: right))
         frame += "\u{1B}[J"   // clear anything below
         Output.write(frame)
     }
@@ -378,12 +409,13 @@ final class ChatTUI {
     }
 
     /// Conversation pane lines. Turns are distinguished by SHADE, not by role
-    /// labels: the user's own words read bright white, the model's reply reads in
-    /// the calmer default markdown styling. A faint rule opens each new exchange
-    /// (before every user turn but the first) so the back-and-forth groups
-    /// visually without any "you"/"krilllm" name tags.
+    /// labels: the user's own words read bright white; the model's reply reads
+    /// dim gray so the user's turn clearly stands out. A faint rule opens each
+    /// new exchange (before every user turn but the first) so the back-and-forth
+    /// groups visually without any "you"/"krilllm" name tags. Vertical placement
+    /// (bottom-anchor vs. centered splash) is handled by `render`.
     private func paneLines(width: Int) -> [String] {
-        guard !view.isEmpty else { return verticallyCentered(Brand.splash(width: width), in: paneHeight()) }
+        guard !view.isEmpty else { return Brand.splash(width: width) }
         let margin = "  "
         let w = max(10, width - 4)                       // 2-space margin both sides
         let rule = Ansi.dim(margin + String(repeating: "\u{2500}", count: min(w, 48)))
@@ -398,19 +430,13 @@ final class ChatTUI {
             case .assistant:
                 sawTurn = true
                 lines.append("")
-                for l in TUIMarkdown.render(msg.text, width: w) { lines.append(margin + l) }
+                for l in TUIMarkdown.render(msg.text, width: w) { lines.append(margin + Ansi.dimStyled(l)) }
             case .note:
                 for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.dim(l)) }
             }
             lines.append("")
         }
         return lines
-    }
-
-    private func verticallyCentered(_ block: [String], in height: Int) -> [String] {
-        guard block.count < height else { return block }
-        let top = (height - block.count) / 2
-        return Array(repeating: "", count: top) + block
     }
 
     private func renderMenu(width: Int) -> [String] {

@@ -27,6 +27,16 @@ enum Ansi {
     static func magenta(_ s: String) -> String { wrap(s, "35") }
     static func gray(_ s: String) -> String { wrap(s, "90") }
 
+    /// Gray-tint an already-styled string: set gray as the base color and
+    /// re-enter gray after every inner reset, so embedded spans (code, bold)
+    /// keep their own styling but plain text reads dim. Used to calm the model's
+    /// reply against the user's bright-white turn.
+    static func dimStyled(_ s: String) -> String {
+        guard enabled else { return s }
+        let reEnter = "\u{1B}[0m\u{1B}[90m"
+        return "\u{1B}[90m" + s.replacingOccurrences(of: "\u{1B}[0m", with: reEnter) + "\u{1B}[0m"
+    }
+
     /// Clear the current line and return the cursor to column 0.
     static var clearLine: String { enabled ? "\r\u{1B}[2K" : "\r" }
 
