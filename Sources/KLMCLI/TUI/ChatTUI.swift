@@ -220,8 +220,22 @@ final class ChatTUI {
             guard !seen.contains(name) else { return }
             guard ModelCapabilities.capabilities(for: family).contains(.textGeneration) else { return }
             seen.insert(name)
-            entries.append(.init(name: name, detail: "\(params) \u{00B7} \(quant)",
-                                 downloaded: registry.hasModel(name)))
+            let downloaded = registry.hasModel(name)
+            // Real on-disk size when installed (the manifest's sizeBytes is often
+            // 0, so sum the files); otherwise an estimate from the parameter count
+            // and quantization so the download cost is visible up front.
+            let size: String
+            let onDisk = downloaded ? directorySize(registry.modelPath(name)) : 0
+            if onDisk > 0 {
+                size = formatSize(onDisk)
+            } else if let est = estimatedSizeBytes(params: params, quant: quant) {
+                size = "~" + formatSize(est)
+            } else {
+                size = ""
+            }
+            let detail = size.isEmpty ? "\(params) \u{00B7} \(quant)"
+                                      : "\(params) \u{00B7} \(quant) \u{00B7} \(size)"
+            entries.append(.init(name: name, detail: detail, downloaded: downloaded))
         }
         for (_, m) in AliasMap.allAliases { add(m.name, m.params, m.quant, m.family) }
         if let catalog = ModelCatalogStore(baseDir: registry.baseDir).load() {
@@ -230,6 +244,44 @@ final class ChatTUI {
         return entries.sorted { a, b in
             a.downloaded != b.downloaded ? a.downloaded : a.name < b.name
         }
+    }
+
+    /// Total size of the regular files under `url` (the model's on-disk weight).
+    private func directorySize(_ url: URL) -> Int64 {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
+        guard let en = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys) else { return 0 }
+        var total: Int64 = 0
+        for case let f as URL in en {
+            if let v = try? f.resourceValues(forKeys: Set(keys)), v.isRegularFile == true {
+                total += Int64(v.fileSize ?? 0)
+            }
+        }
+        return total
+    }
+
+    /// Human-readable byte size (decimal units, matching how disk size is shown).
+    private func formatSize(_ bytes: Int64) -> String {
+        let gb = Double(bytes) / 1_000_000_000
+        if gb >= 1 { return String(format: "%.1f GB", gb) }
+        return String(format: "%.0f MB", Double(bytes) / 1_000_000)
+    }
+
+    /// Rough download size from the parameter count and quantization, for models
+    /// not yet on disk (so the picker can show "~6 GB" before you pull). Returns
+    /// nil if the parameter string has no number to work with.
+    private func estimatedSizeBytes(params: String, quant: String) -> Int64? {
+        let p = params.lowercased()
+        let nums = p.split { !"0123456789.".contains($0) }.compactMap { Double($0) }
+        guard !nums.isEmpty else { return nil }
+        // "8x7B" multiplies (mixture of experts); a range like "1B-7B" takes the max.
+        let billions = p.contains("x") ? nums.reduce(1, *) : (nums.max() ?? nums[0])
+        let q = quant.lowercased()
+        let bytesPerParam: Double
+        if q.contains("32") { bytesPerParam = 4.2 }
+        else if q.contains("16") { bytesPerParam = 2.1 }
+        else if q.contains("8bit") { bytesPerParam = 1.1 }
+        else { bytesPerParam = 0.6 }      // 4-bit family (incl. nvfp4/mxfp4)
+        return Int64(billions * 1_000_000_000 * bytesPerParam)
     }
 
     /// Switch to `name` if it is already downloaded, otherwise pull it (with a
@@ -365,8 +417,8 @@ final class ChatTUI {
 
     // MARK: - Generation
 
-    private func generate(prompt: String, display: String? = nil) async {
-        view.append(Msg(role: .user, text: display ?? prompt))
+    private func generate(prompt: String) async {
+        view.append(Msg(role: .user, text: prompt))
         modelTurns.append((role: "user", content: prompt))
         let usedImgs = pendingImages.count
         let usedAud = pendingAudio != nil
@@ -489,15 +541,32 @@ final class ChatTUI {
         }
         do {
             let wav = try rec.stop()
-            await sendVoice(wav, seconds: rec.capturedSeconds)
+            await transcribeVoice(wav)
         } catch { note("\(error)") }
     }
 
-    /// Attach a recorded voice clip and send it as the next turn (the audio is
-    /// the message; the model responds to it natively).
-    private func sendVoice(_ wav: Data, seconds: Double) async {
-        pendingAudio = makeAtt(.audio, wav, "voice")
-        await generate(prompt: "", display: String(format: "(voice message %.1fs)", seconds))
+    /// Transcribe a recorded clip with the audio model and drop the text into the
+    /// composer for the user to review, edit, and send (dictation) - we do NOT
+    /// auto-send. The audio itself is discarded; the sent turn is plain text.
+    private func transcribeVoice(_ wav: Data) async {
+        lastStatus = "Transcribing..."
+        render()
+        let instruction = "Transcribe the spoken audio to text. Output only the exact words spoken, with no extra commentary or punctuation you are unsure of."
+        let gen = engine.generate(
+            messages: [["role": "user", "content": instruction]],
+            params: params, maxTokens: maxTokens,
+            imageData: nil, audioData: wav, imagesData: [])
+        let filter = StreamingReasoningFilter()
+        var transcript = ""
+        for await event in gen.stream {
+            if event.isEnd { break }
+            transcript += filter.consume(event.text)
+        }
+        transcript += filter.finish()
+        lastStatus = ""
+        let clean = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.isEmpty { note("Didn't catch that - try again."); return }
+        setInput(clean)   // populate the composer; user reviews and presses Enter
     }
 
     private func recordMic() async {
