@@ -318,9 +318,63 @@ final class ChatTUI {
         case .enter:
             if let chosen = picker?.current?.name { pendingModelLoad = chosen }
             picker = nil
+        case .right, .char("i"), .char("I"):
+            if let name = picker?.current?.name { picker = nil; showModelDeepDive(name) }
         case .escape, .ctrlC: picker = nil
         default: break
         }
+    }
+
+    /// Build and open the model deep-dive screen: a stylized family wordmark, the
+    /// live specs (params/quant/context/size/inputs derived from the registry and
+    /// capabilities), and the curated profile (vendor, release, strengths,
+    /// weaknesses, good-for). Falls back with a note for an unknown model.
+    private func showModelDeepDive(_ name: String) {
+        let store = ModelCatalogStore(baseDir: registry.baseDir)
+        guard let m = AliasMap.resolve(name, catalog: store) else { note("No info for \(name)."); return }
+        let caps = ModelCapabilities.capabilities(for: m.family)
+        let profile = ModelProfiles.profile(for: m.family)
+        let onDisk = registry.hasModel(name) ? directorySize(registry.modelPath(name)) : 0
+        let sizeStr: String
+        if onDisk > 0 { sizeStr = "\(formatSize(onDisk)) (installed)" }
+        else if let est = estimatedSizeBytes(params: m.params, quant: m.quant) { sizeStr = "~\(formatSize(est)) (download)" }
+        else { sizeStr = "unknown" }
+        var inputs = ["text"]
+        if caps.contains(.visionInput) { inputs.append("image") }
+        if caps.contains(.audioInput) { inputs.append("audio") }
+        var feats: [String] = []
+        if caps.contains(.tools) { feats.append("tools") }
+        if caps.contains(.structuredOutput) { feats.append("structured output") }
+        if caps.contains(.moe) { feats.append("MoE") }
+
+        var lines = BlockFont.render(profile?.displayName ?? name.uppercased())
+        lines.append("")
+        if let p = profile {
+            lines.append("  \(p.vendor)  \u{00B7}  released \(p.released)")
+            lines.append("  training cutoff: \(p.trainingCutoff)")
+            lines.append("  \(p.tagline)")
+            lines.append("")
+        }
+        lines.append("Specs")
+        lines.append("  params      \(m.params)")
+        lines.append("  quant       \(m.quant)")
+        lines.append("  context     \(formatContext(m.context))")
+        lines.append("  size        \(sizeStr)")
+        lines.append("  inputs      \(inputs.joined(separator: ", "))")
+        if !feats.isEmpty { lines.append("  features    \(feats.joined(separator: ", "))") }
+        lines.append("  repo        \(m.repo)")
+        if let p = profile {
+            lines.append("")
+            lines.append("Strengths")
+            for s in p.strengths { lines.append("  + \(s)") }
+            lines.append("")
+            lines.append("Weaknesses")
+            for w in p.weaknesses { lines.append("  - \(w)") }
+            lines.append("")
+            lines.append("Good for")
+            lines.append("  \(p.goodFor.joined(separator: ", "))")
+        }
+        showOverlay(name, lines.joined(separator: "\n"))
     }
 
     /// Build the picker entries: every chat-capable built-in alias plus any
@@ -465,7 +519,7 @@ final class ChatTUI {
         }
         if winEnd < total { out.append(margin + Ansi.chrome("   ...")) }
         out.append("")
-        out.append(margin + Ansi.chrome("Up/Down  \u{00B7}  Enter switch  \u{00B7}  Esc cancel"))
+        out.append(margin + Ansi.chrome("Up/Down  \u{00B7}  Enter switch  \u{00B7}  i details  \u{00B7}  Esc cancel"))
         return out
     }
 
@@ -525,6 +579,10 @@ final class ChatTUI {
             } else { system = arg; note("System prompt updated.") }
         case "/model":
             if arg.isEmpty { picker = ModelPicker(entries: modelPickerEntries(), current: modelName) }
+            else if arg.lowercased() == "info" || arg.lowercased().hasPrefix("info ") {
+                let n = String(arg.dropFirst(4)).trimmingCharacters(in: .whitespaces)
+                showModelDeepDive(n.isEmpty ? modelName : n)
+            }
             else { await switchOrDownload(arg) }
         case "/save": saveTranscript(arg)
         case "/attach": note(attachSummary())

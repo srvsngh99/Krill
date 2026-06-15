@@ -48,6 +48,7 @@ Tab to fill it and add arguments. `/help` lists everything.
 |---------|--------|
 | `/help` | Show keys and commands |
 | `/model [name]` | Open the model picker, or switch/download a named model in place |
+| `/model info [name]` | Open the model deep-dive (also `i` / right-arrow on a row in the picker) |
 | `/system <text>` | Set the system prompt |
 | `/history` | Print the turns so far |
 | `/compact` | Summarize the conversation and replace history with the summary (frees context) |
@@ -62,6 +63,16 @@ Tab to fill it and add arguments. `/help` lists everything.
 | `/voice` | Show the current voice state (posture + engine) |
 | `/voice engine apple\|whisper` | Choose the dictation engine (see Voice) |
 | `/quit` | Exit (`/exit`, `/q` too) |
+
+## Model deep-dive
+
+In the model picker, press `i` (or the right-arrow) on a row - or run
+`/model info [name]` - to open a deep-dive screen for that model: a stylized
+family wordmark, the live specs (parameters, quantization, context window,
+on-disk/download size, supported inputs, features, repo), and a short curated
+profile (vendor, release, strengths, weaknesses, and what it is good for). The
+specs are derived from the registry and capability metadata; the profile is a
+hand-written blurb per family. Esc closes it.
 
 ## Custom slash commands
 
