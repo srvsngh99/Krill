@@ -62,15 +62,18 @@ final class ChatTUI {
     private let raw = RawTerminal()
     private let reader = KeyReader()
 
+    private let themeOverride: String?
+
     init(engine: InferenceEngine, modelName: String, system: String?,
          params: SamplingParams, maxTokens: Int, registry: Registry,
-         initialImage: Data?, initialAudio: Data?) {
+         initialImage: Data?, initialAudio: Data?, theme: String? = nil) {
         self.engine = engine
         self.modelName = modelName
         self.system = system
         self.params = params
         self.maxTokens = maxTokens
         self.registry = registry
+        self.themeOverride = theme
         self.contextWindow = AliasMap.resolve(modelName)?.context ?? 0
         self.customCommands = CustomCommandStore.load(from: Self.commandsDir)
         menu.extra = customCommands.commands.map {
@@ -86,10 +89,25 @@ final class ChatTUI {
             .appendingPathComponent(".krillm").appendingPathComponent("commands")
     }
 
+    /// Pick the shade palette for the terminal background so turns stay readable
+    /// on light AND dark terminals. Order: explicit `--theme` / `KRILL_TUI_THEME`
+    /// override, then `COLORFGBG`, then a best-effort OSC 11 query, else the
+    /// always-safe palette. Runs once, after raw mode is on (OSC 11 needs it).
+    private func resolveTheme() {
+        let env = ProcessInfo.processInfo.environment
+        let override = themeOverride ?? env["KRILL_TUI_THEME"]
+        var bg = Theme.resolve(override: override, colorFGBG: env["COLORFGBG"])
+        if bg == .unknown, override == nil || override?.lowercased() == "auto" {
+            if let lum = raw.queryBackgroundLuminance() { bg = Theme.background(forLuminance: lum) }
+        }
+        Ansi.theme = Theme.palette(for: bg)
+    }
+
     // MARK: - Run loop
 
     func run() async {
         raw.enter()
+        resolveTheme()
         installWinch()
         updateSize()
         defer { raw.leave() }
@@ -318,7 +336,7 @@ final class ChatTUI {
                 guard file != "done" else { return }
                 let pct = total > 0 ? Int(Double(done) / Double(total) * 100.0) : 0
                 let line = "  Downloading \(label): \(pct)%  \(file)"
-                Output.write("\u{1B}[\(footerRow);1H\u{1B}[2K" + Ansi.dim(String(line.prefix(max(0, width)))))
+                Output.write("\u{1B}[\(footerRow);1H\u{1B}[2K" + Ansi.chrome(String(line.prefix(max(0, width)))))
             }
             note("Downloaded \(name).")
             await switchModel(name)
@@ -335,7 +353,7 @@ final class ChatTUI {
         let margin = "  "
         var out: [String] = [
             margin + Ansi.bold("Select a model"),
-            margin + Ansi.dim("downloaded switch instantly \u{00B7} faded ones download first"),
+            margin + Ansi.chrome("downloaded switch instantly \u{00B7} faded ones download first"),
             "",
         ]
         let maxVisible = max(3, height - 5)
@@ -344,7 +362,7 @@ final class ChatTUI {
         if total > maxVisible { winStart = min(max(0, p.selected - maxVisible / 2), total - maxVisible) }
         let winEnd = min(winStart + maxVisible, total)
         let nameW = min(20, p.entries.map { $0.name.count }.max() ?? 12)
-        if winStart > 0 { out.append(margin + Ansi.dim("  ...")) }
+        if winStart > 0 { out.append(margin + Ansi.chrome("  ...")) }
         for i in winStart..<winEnd {
             let e = p.entries[i]
             let dot = e.downloaded ? "\u{25CF}" : "\u{25CB}"
@@ -353,12 +371,12 @@ final class ChatTUI {
             let body = "\(dot) \(name)  \(e.detail)\(hint)"
             let line = margin + "  " + String(body.prefix(max(0, width - 4)))
             if i == p.selected { out.append(Ansi.inverse(line)) }
-            else if e.downloaded { out.append(Ansi.white(line)) }
-            else { out.append(Ansi.dim(line)) }
+            else if e.downloaded { out.append(Ansi.user(line)) }
+            else { out.append(Ansi.chrome(line)) }
         }
-        if winEnd < total { out.append(margin + Ansi.dim("  ...")) }
+        if winEnd < total { out.append(margin + Ansi.chrome("  ...")) }
         out.append("")
-        out.append(margin + Ansi.dim("Up/Down select \u{00B7} Enter switch \u{00B7} Esc cancel"))
+        out.append(margin + Ansi.chrome("Up/Down select \u{00B7} Enter switch \u{00B7} Esc cancel"))
         return out
     }
 
@@ -730,7 +748,7 @@ final class ChatTUI {
         guard !view.isEmpty else { return Brand.splash(width: width) }
         let margin = "  "
         let w = max(10, width - 4)                       // 2-space margin both sides
-        let rule = Ansi.dim(margin + String(repeating: "\u{2500}", count: min(w, 48)))
+        let rule = Ansi.chrome(margin + String(repeating: "\u{2500}", count: min(w, 48)))
         var lines: [String] = []
         var sawTurn = false
         for msg in view {
@@ -738,13 +756,13 @@ final class ChatTUI {
             case .user:
                 if sawTurn { lines.append(rule); lines.append("") }
                 sawTurn = true
-                for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.white(l)) }
+                for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.user(l)) }
             case .assistant:
                 sawTurn = true
                 lines.append("")
-                for l in TUIMarkdown.render(msg.text, width: w) { lines.append(margin + Ansi.dimStyled(l)) }
+                for l in TUIMarkdown.render(msg.text, width: w) { lines.append(margin + Ansi.model(l)) }
             case .note:
-                for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.dim(l)) }
+                for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.chrome(l)) }
             case .pre:
                 // Preformatted (help / transcript): keep spacing verbatim - no
                 // word-wrap that would collapse aligned columns. A non-indented,
@@ -754,7 +772,7 @@ final class ChatTUI {
                     if !clipped.isEmpty && !clipped.hasPrefix(" ") {
                         lines.append(margin + Ansi.bold(clipped))
                     } else {
-                        lines.append(margin + Ansi.dim(clipped))
+                        lines.append(margin + Ansi.chrome(clipped))
                     }
                 }
             }
@@ -774,16 +792,16 @@ final class ChatTUI {
         }
         let winEnd = min(winStart + maxVisible, total)
         var out: [String] = []
-        if winStart > 0 { out.append(Ansi.dim("    ...")) }
+        if winStart > 0 { out.append(Ansi.chrome("    ...")) }
         for i in winStart..<winEnd {
             let item = menu.matches[i]
             let marker = i == menu.selected ? ">" : " "
             let name = item.name.padding(toLength: 9, withPad: " ", startingAt: 0)
             let label = "  \(marker) \(name)  \(item.summary)"
             let clipped = String(label.prefix(width))
-            out.append(i == menu.selected ? Ansi.inverse(clipped) : Ansi.dim(clipped))
+            out.append(i == menu.selected ? Ansi.inverse(clipped) : Ansi.chrome(clipped))
         }
-        if winEnd < total { out.append(Ansi.dim("    ...")) }
+        if winEnd < total { out.append(Ansi.chrome("    ...")) }
         return out
     }
 
@@ -797,8 +815,8 @@ final class ChatTUI {
         let h = "\u{2500}", v = "\u{2502}"     // light horizontal / vertical
         let tl = "\u{256D}", tr = "\u{256E}"   // rounded corners
         let bl = "\u{2570}", br = "\u{256F}"
-        let top = Ansi.dim(Chrome.border(width: w, left: tl, fill: h, right: tr))
-        let bottom = Ansi.dim(Chrome.border(width: w, left: bl, fill: h, right: br))
+        let top = Ansi.chrome(Chrome.border(width: w, left: tl, fill: h, right: tr))
+        let bottom = Ansi.chrome(Chrome.border(width: w, left: bl, fill: h, right: br))
 
         let fieldWidth = max(2, w - 4)         // inner span minus one pad space each side
         let promptStr = "> "
@@ -813,7 +831,7 @@ final class ChatTUI {
                 : "type a message   /help for commands"
             let clipped = String(placeholder.prefix(max(0, textWidth - 1)))
             let pad = String(repeating: " ", count: max(0, textWidth - 1 - clipped.count))
-            body = Ansi.bold(promptStr) + Ansi.inverse(" ") + Ansi.dim(clipped) + pad
+            body = Ansi.bold(promptStr) + Ansi.inverse(" ") + Ansi.chrome(clipped) + pad
         } else {
             // Pure geometry windows the text and locates the cursor; we only
             // apply the inverse-video block cursor to that one cell.
@@ -825,7 +843,7 @@ final class ChatTUI {
             }
             body = Ansi.bold(promptStr) + rendered
         }
-        let field = Ansi.dim(v) + " " + body + " " + Ansi.dim(v)
+        let field = Ansi.chrome(v) + " " + body + " " + Ansi.chrome(v)
         return [top, field, bottom]
     }
 

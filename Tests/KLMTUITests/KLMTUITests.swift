@@ -283,6 +283,54 @@ final class CustomCommandTests: XCTestCase {
     }
 }
 
+final class ThemeTests: XCTestCase {
+    func testOverrideWins() {
+        XCTAssertEqual(Theme.resolve(override: "light", colorFGBG: "15;0"), .light)
+        XCTAssertEqual(Theme.resolve(override: "dark", colorFGBG: "0;15"), .dark)
+        XCTAssertEqual(Theme.resolve(override: "LIGHT", colorFGBG: nil), .light)  // case-insensitive
+    }
+
+    func testAutoOrUnknownOverrideFallsThrough() {
+        XCTAssertEqual(Theme.resolve(override: "auto", colorFGBG: "0;15"), .light)
+        XCTAssertEqual(Theme.resolve(override: "nonsense", colorFGBG: "15;0"), .dark)
+        XCTAssertEqual(Theme.resolve(override: nil, colorFGBG: nil), .unknown)
+        XCTAssertEqual(Theme.resolve(override: "auto", colorFGBG: nil), .unknown)
+    }
+
+    func testColorFGBGBackgroundIsLastField() {
+        XCTAssertEqual(Theme.resolve(override: nil, colorFGBG: "15;0"), .dark)   // bg 0
+        XCTAssertEqual(Theme.resolve(override: nil, colorFGBG: "0;15"), .light)  // bg 15
+        XCTAssertEqual(Theme.resolve(override: nil, colorFGBG: "7;0;15"), .light) // 3-field, bg 15
+        XCTAssertEqual(Theme.resolve(override: nil, colorFGBG: "0;7"), .light)   // bg 7 = light gray
+        XCTAssertEqual(Theme.resolve(override: nil, colorFGBG: "15;8"), .dark)   // bg 8 = dark gray
+        XCTAssertEqual(Theme.resolve(override: nil, colorFGBG: "garbage"), .unknown)
+    }
+
+    func testPalettes() {
+        XCTAssertEqual(Theme.palette(for: .dark).userSGR, "97")
+        XCTAssertEqual(Theme.palette(for: .dark).modelSGR, "90")
+        XCTAssertEqual(Theme.palette(for: .light).userSGR, "1")   // bold default, not 97
+        XCTAssertEqual(Theme.palette(for: .light).modelSGR, "90")
+        XCTAssertEqual(Theme.palette(for: .unknown).userSGR, "1")
+        XCTAssertNil(Theme.palette(for: .unknown).modelSGR)        // terminal default fg
+        XCTAssertEqual(Theme.palette(for: .unknown).chromeSGR, "2")
+    }
+
+    func testLuminanceFromOSC11() {
+        // White background -> high luminance -> light.
+        let white = Theme.luminance(fromOSC11: "\u{1b}]11;rgb:ffff/ffff/ffff\u{07}")
+        XCTAssertNotNil(white)
+        XCTAssertEqual(Theme.background(forLuminance: white!), .light)
+        // Black background -> low luminance -> dark.
+        let black = Theme.luminance(fromOSC11: "\u{1b}]11;rgb:0000/0000/0000\u{07}")
+        XCTAssertEqual(Theme.background(forLuminance: black!), .dark)
+        // Two-digit channels normalise too.
+        XCTAssertEqual(Theme.background(forLuminance: Theme.luminance(fromOSC11: "rgb:ff/ff/ff")!), .light)
+        // Garbage -> nil.
+        XCTAssertNil(Theme.luminance(fromOSC11: "\u{1b}[0m"))
+    }
+}
+
 final class ModelPickerTests: XCTestCase {
     private let entries = [
         ModelPicker.Entry(name: "gemma-4-e2b", detail: "2B", downloaded: true),

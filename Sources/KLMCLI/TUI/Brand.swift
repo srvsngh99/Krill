@@ -25,10 +25,10 @@ enum Brand {
     static func header(width: Int, model: String) -> String {
         let leftPlain = "  \(wordmark)  \(lab)"
         let rightPlain = "\(model)  "
-        let styledLeft = "  " + Ansi.bold(wordmark) + "  " + Ansi.dim(lab)
+        let styledLeft = "  " + Ansi.bold(wordmark) + "  " + Ansi.chrome(lab)
         if width >= leftPlain.count + rightPlain.count + 1 {
             let pad = width - leftPlain.count - rightPlain.count
-            return styledLeft + String(repeating: " ", count: pad) + Ansi.dim(model) + "  "
+            return styledLeft + String(repeating: " ", count: pad) + Ansi.chrome(model) + "  "
         }
         if width >= leftPlain.count { return styledLeft }
         return Ansi.bold(String(leftPlain.prefix(max(0, width))))
@@ -36,7 +36,7 @@ enum Brand {
 
     /// A dim full-width rule drawn under the masthead.
     static func headerRule(width: Int) -> String {
-        Ansi.dim(String(repeating: "\u{2500}", count: max(0, width)))
+        Ansi.chrome(String(repeating: "\u{2500}", count: max(0, width)))
     }
 
     /// A dim footer line: `left` status on the left, `right` session info on the
@@ -46,7 +46,7 @@ enum Brand {
         let r = "\(right)  "
         let pad = max(1, width - l.count - r.count)
         let line = l + String(repeating: " ", count: pad) + r
-        return Ansi.dim(clip(line, width: width))
+        return Ansi.chrome(clip(line, width: width))
     }
 
     // MARK: - Launch splash
@@ -90,8 +90,8 @@ enum Brand {
         let head = parts.first ?? tagline
         let tail = parts.count > 1 ? parts[1] : ""
         let taglineVis = 3 + head.count + (parts.count > 1 ? 3 : 0) + tail.count
-        var styledTagline = Ansi.dim(">_ ") + Ansi.dim(head)
-        if parts.count > 1 { styledTagline += Ansi.inverse(Ansi.bold("Mac")) + Ansi.dim(tail) }
+        var styledTagline = Ansi.chrome(">_ ") + Ansi.chrome(head)
+        if parts.count > 1 { styledTagline += Ansi.inverse(Ansi.bold("Mac")) + Ansi.chrome(tail) }
         let taglineLine = center(styledTagline, taglineVis)
 
         let chipRow = chips.map { " \($0) " }.joined(separator: "  ")
@@ -104,7 +104,7 @@ enum Brand {
         out.append("")
         out.append(center(Ansi.inverse(chipRow), visibleCount(chipRow)))
         out.append("")
-        out.append(center(Ansi.dim(labLine), visibleCount(labLine)))
+        out.append(center(Ansi.chrome(labLine), visibleCount(labLine)))
         out.append("")
         return out
     }
