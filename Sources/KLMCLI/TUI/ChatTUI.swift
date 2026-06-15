@@ -48,6 +48,12 @@ final class ChatTUI {
     // as an audio turn the model answers. Toggle with /voice.
     private enum VoiceMode { case dictate, send }
     private var voiceMode: VoiceMode = .dictate
+    // Which speech-to-text engine dictation uses. `.apple` (default) is Apple's
+    // on-device recognizer (no download). `.whisper` is KrillLM's native MLX
+    // Whisper runtime (best accuracy, downloaded model) - in development; until
+    // it ships, selecting it falls back to Apple.
+    private enum VoiceEngine { case apple, whisper }
+    private var voiceEngine: VoiceEngine = .apple
     private let speech = SpeechRecognizer()
     private var inputHistory: [String] = []
     private var historyIndex = 0
@@ -451,17 +457,21 @@ final class ChatTUI {
             else if attach(path: arg) { note(attachSummary()) }
         case "/mic": await recordMic()
         case "/voice":
-            switch arg.lowercased() {
-            case "send": voiceMode = .send
-            case "dictate": voiceMode = .dictate
-            case "": voiceMode = (voiceMode == .send) ? .dictate : .send
-            default: note("Usage: /voice send|dictate"); return
+            let parts = arg.lowercased().split(separator: " ").map(String.init)
+            switch parts.first ?? "" {
+            case "send": voiceMode = .send; note(voiceModeNote())
+            case "dictate": voiceMode = .dictate; note(voiceModeNote())
+            case "engine":
+                switch parts.count > 1 ? parts[1] : "" {
+                case "apple": voiceEngine = .apple
+                    note("Voice engine: Apple on-device speech-to-text (no download).")
+                case "whisper": voiceEngine = .whisper
+                    note("Voice engine: Whisper - native MLX runtime is in development; dictation uses Apple on-device until it ships.")
+                default: view.append(Msg(role: .pre, text: voiceEngineInfo()))
+                }
+            case "": voiceMode = (voiceMode == .send) ? .dictate : .send; note(voiceModeNote())
+            default: note("Usage: /voice send|dictate  |  /voice engine apple|whisper")
             }
-            note(voiceMode == .send
-                 ? "Voice: send as audio - the model answers your speech."
-                 : (SpeechRecognizer.isAvailable
-                    ? "Voice: dictate to the composer (on-device speech-to-text)."
-                    : "Voice: dictate to the composer (best-effort; no on-device speech-to-text here, the model may answer instead)."))
         default:
             if let custom = customCommands.command(named: cmd) {
                 await generate(prompt: custom.expand(arguments: arg))
@@ -472,6 +482,25 @@ final class ChatTUI {
     }
 
     private func note(_ s: String) { view.append(Msg(role: .note, text: s)) }
+
+    private func voiceModeNote() -> String {
+        if voiceMode == .send { return "Voice: send as audio - the model answers your speech." }
+        let engine = voiceEngine == .apple && SpeechRecognizer.isAvailable
+            ? "on-device speech-to-text" : "best-effort (no on-device engine here)"
+        return "Voice: dictate to the composer (\(engine)). /voice engine to choose."
+    }
+
+    /// A small preformatted card showing the dictation engine choice and the
+    /// tradeoffs, so `/voice engine` lets the user pick with eyes open.
+    private func voiceEngineInfo() -> String {
+        func mark(_ e: VoiceEngine) -> String { voiceEngine == e ? ">" : " " }
+        return """
+        Dictation engine            /voice engine apple | whisper
+        \(mark(.apple)) apple      Apple on-device speech. No download, instant, macOS-only.
+        \(mark(.whisper)) whisper    Native MLX Whisper. Best accuracy + 99 languages;
+                     downloads a small model (~40-460MB). In development.
+        """
+    }
 
     // MARK: - Generation
 
