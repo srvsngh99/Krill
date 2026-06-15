@@ -16,13 +16,21 @@ public enum WhisperModelManager {
     }
 
     public static let skus: [SKU] = [
+        // English-only: faster and a touch more accurate on English.
         SKU(id: "tiny.en", repo: "openai/whisper-tiny.en", approxMB: 151),
         SKU(id: "base.en", repo: "openai/whisper-base.en", approxMB: 290),
         SKU(id: "small.en", repo: "openai/whisper-small.en", approxMB: 967),
+        // Multilingual: ~99 languages with automatic language detection.
+        SKU(id: "tiny", repo: "openai/whisper-tiny", approxMB: 151),
+        SKU(id: "base", repo: "openai/whisper-base", approxMB: 290),
+        SKU(id: "small", repo: "openai/whisper-small", approxMB: 967),
     ]
 
     /// Balanced default: noticeably better than tiny, far lighter than small.
     public static let defaultSKU = "base.en"
+
+    /// True for the multilingual SKUs (no `.en` suffix).
+    public static func isMultilingual(_ skuID: String) -> Bool { !skuID.hasSuffix(".en") }
 
     public static func sku(_ id: String) -> SKU? { skus.first { $0.id == id } }
 

@@ -46,8 +46,12 @@ public final class WhisperRuntime {
         eval(model)
         self.model = model
 
+        // Multilingual checkpoints carry the 99 language tokens (vocab 51865+);
+        // the .en checkpoints are 51864.
+        let multilingual = cfg.nVocab >= 51865
         tokenizer = try WhisperTokenizer(
-            vocabURL: modelDir.appendingPathComponent("vocab.json"))
+            vocabURL: modelDir.appendingPathComponent("vocab.json"),
+            multilingual: multilingual)
     }
 
     /// Cast to float32 and, when the checkpoint uses the HuggingFace
@@ -106,17 +110,20 @@ public final class WhisperRuntime {
             .expandedDimensions(axis: 0)                   // [1, 3000, nMels]
         let audio = model.encoder(mel)                     // [1, nAudioCtx, D]
 
+        // Multilingual models need a language token; detect it from the audio.
+        let language = tokenizer.specials.languageBase != nil
+            ? detectLanguage(audio: audio) : nil
+        let promptTokens = tokenizer.promptTokens(language: language)
+
         let cache = model.newCache()
-        // Prefill the fixed English no-timestamp prompt.
-        let prompt = MLXArray(WhisperTokenizer.promptTokens.map { Int32($0) },
-                              [1, WhisperTokenizer.promptTokens.count])
+        let prompt = MLXArray(promptTokens.map { Int32($0) }, [1, promptTokens.count])
         var logits = model.decoder(prompt, audioFeatures: audio, cache: cache)
         var next = greedyText(logits[0, -1])
 
-        let limit = min(maxTokens, config.nTextCtx - WhisperTokenizer.promptTokens.count)
+        let limit = min(maxTokens, config.nTextCtx - promptTokens.count)
         var generated = [Int]()
         for _ in 0 ..< limit {
-            if next == WhisperTokenizer.endOfText { break }
+            if next == tokenizer.specials.endOfText { break }
             generated.append(next)
             let tok = MLXArray([Int32(next)], [1, 1])
             logits = model.decoder(tok, audioFeatures: audio, cache: cache)
@@ -127,9 +134,23 @@ public final class WhisperRuntime {
 
     /// Argmax over the text vocabulary only. Restricting to ids
     /// `[0, startOfTranscript)` suppresses every special and timestamp token
-    /// while keeping `<|endoftext|>` (50256) available as the stop signal.
+    /// while keeping `<|endoftext|>` available as the stop signal (it sits just
+    /// below `startOfTranscript` in both layouts).
     private func greedyText(_ logitsRow: MLXArray) -> Int {
-        let textLogits = logitsRow[0 ..< WhisperTokenizer.startOfTranscript]
+        let textLogits = logitsRow[0 ..< tokenizer.specials.startOfTranscript]
         return Int(MLX.argMax(textLogits).item(Int32.self))
+    }
+
+    /// Detect the spoken language by decoding a single step after the start
+    /// token and taking the argmax over the language-token range. Returns the
+    /// chosen language token id (multilingual models only).
+    private func detectLanguage(audio: MLXArray) -> Int? {
+        guard let base = tokenizer.specials.languageBase else { return nil }
+        let count = tokenizer.specials.languageCount
+        let cache = model.newCache()
+        let sot = MLXArray([Int32(tokenizer.specials.startOfTranscript)], [1, 1])
+        let logits = model.decoder(sot, audioFeatures: audio, cache: cache)
+        let langLogits = logits[0, 0][base ..< (base + count)]
+        return base + Int(MLX.argMax(langLogits).item(Int32.self))
     }
 }

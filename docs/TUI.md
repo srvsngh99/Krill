@@ -123,11 +123,17 @@ mode, toggled with `/voice`:
 
 - **`apple`** (default) - Apple's on-device speech-to-text. No download,
   instant, fully local, macOS-only.
-- **`whisper`** - KrillLM's own native MLX Whisper runtime (English). Higher
-  accuracy and fully local. On the first dictation it asks consent and
-  downloads an English model (default `base.en`, around 290 MB) into
-  `~/.krillm/models/whisper-<sku>`; decline and dictation falls back to the
-  Apple / model path. No Python or third-party ASR dependency.
+- **`whisper`** - KrillLM's own native MLX Whisper runtime. Higher accuracy and
+  fully local. On the first dictation it asks consent and downloads a model
+  (default `base.en`, around 290 MB) into `~/.krillm/models/whisper-<sku>`;
+  decline and dictation falls back to the Apple / model path. No Python or
+  third-party ASR dependency.
+
+  Pick the model with `/voice engine whisper <model>`:
+  - `tiny.en` / `base.en` / `small.en` - English-only (faster, slightly more
+    accurate on English).
+  - `tiny` / `base` / `small` - multilingual (~99 languages with automatic
+    language detection).
 
 `/mic` records a clip and attaches it (press Enter to stop) for an explicit send.
 
