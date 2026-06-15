@@ -261,6 +261,7 @@ app-bundle: release
 		'  <key>CFBundleVersion</key><string>$(VERSION)</string>' \
 		'  <key>LSMinimumSystemVersion</key><string>14.0</string>' \
 		'  <key>NSMicrophoneUsageDescription</key><string>KrillLM records microphone audio for local voice input to on-device speech and multimodal models.</string>' \
+		'  <key>NSSpeechRecognitionUsageDescription</key><string>KrillLM transcribes your voice input on-device using Apple Speech, for dictation in the chat.</string>' \
 		'</dict>' \
 		'</plist>' > "$(APP_DIR)/Contents/Info.plist"
 	@codesign --force --deep --sign "$(CODESIGN_ID)" --identifier "$(BUNDLE_ID)" "$(APP_DIR)" \

@@ -42,12 +42,13 @@ final class ChatTUI {
     private var picker: ModelPicker?          // active modal model picker, if any
     private var pendingModelLoad: String?     // model the picker chose; loaded by the run loop
     private var pendingVoiceCapture = false   // Space-to-talk armed; run loop records
-    // What hold-Space does with the recorded clip. `.send` (default) sends it as
-    // an audio turn the model answers (works with Gemma 4 audio); `.dictate`
-    // best-effort transcribes it into the composer (the model may answer rather
-    // than transcribe, so it is opt-in). Toggle with /voice.
-    private enum VoiceMode { case send, dictate }
-    private var voiceMode: VoiceMode = .send
+    // What hold-Space does with the recorded clip. `.dictate` (default)
+    // transcribes it into the composer for review - on-device via Apple Speech
+    // when available, else the multimodal model's best effort. `.send` sends it
+    // as an audio turn the model answers. Toggle with /voice.
+    private enum VoiceMode { case dictate, send }
+    private var voiceMode: VoiceMode = .dictate
+    private let speech = SpeechRecognizer()
     private var inputHistory: [String] = []
     private var historyIndex = 0
     private var scrollOffset = 0     // lines scrolled up from bottom
@@ -458,7 +459,9 @@ final class ChatTUI {
             }
             note(voiceMode == .send
                  ? "Voice: send as audio - the model answers your speech."
-                 : "Voice: dictate to the composer (best-effort; this model may answer instead of transcribe).")
+                 : (SpeechRecognizer.isAvailable
+                    ? "Voice: dictate to the composer (on-device speech-to-text)."
+                    : "Voice: dictate to the composer (best-effort; no on-device speech-to-text here, the model may answer instead)."))
         default:
             if let custom = customCommands.command(named: cmd) {
                 await generate(prompt: custom.expand(arguments: arg))
@@ -665,6 +668,18 @@ final class ChatTUI {
     private func transcribeVoice(_ wav: Data) async {
         lastStatus = "Transcribing..."
         render()
+        // Prefer Apple's on-device speech-to-text: accurate, fully local, no
+        // download. Falls through to the multimodal model only when the Speech
+        // framework is unavailable or yields nothing.
+        if SpeechRecognizer.isAvailable, await SpeechRecognizer.requestAuthorization() {
+            if let text = await speech.transcribe(wav: wav) {
+                lastStatus = ""
+                let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if clean.isEmpty { note("Didn't catch that - try again."); return }
+                setInput(clean)
+                return
+            }
+        }
         // Force verbatim transcription. Gemma 4's audio path will otherwise
         // ANSWER the speech (its default behaviour) rather than transcribe it;
         // a firm "you are a transcription tool, do not answer" framing biases it
