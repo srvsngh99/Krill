@@ -775,9 +775,11 @@ final class ChatTUI {
         // Defensive final pass: strip any residual reasoning markers a degenerate
         // think-loop may have leaked (e.g. a stray Gemma channel close token), and
         // surface an all-thinking / empty reply cleanly instead of as raw markers.
+        // The regex is scoped to the channel/think tokens ONLY so legitimate
+        // angle-bracket content in a reply (e.g. <html>, <div>) is left intact.
         let (cleanVisible, _) = ReasoningParser.strip(assistant)
         assistant = cleanVisible
-            .replacingOccurrences(of: #"<\|?[a-zA-Z_]+\|?>"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"</?\|?(?:channel|think|thinking)\|?>"#, with: "", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         view[aIdx].text = assistant.isEmpty ? "(no response)" : assistant
 

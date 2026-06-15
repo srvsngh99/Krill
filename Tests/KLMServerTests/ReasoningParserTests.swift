@@ -122,6 +122,19 @@ final class ReasoningParserTests: XCTestCase {
         XCTAssertEqual(f.finish(), "")
     }
 
+    func testStreamingFilterPassesNonReasoningAngleTokens() {
+        // The repeated-block fix widened scanning; ensure ordinary angle-bracket
+        // content (HTML, generics, etc.) still streams through untouched.
+        let f = StreamingReasoningFilter()
+        var out = ""
+        for chunk in ["Here is ", "<html>", "<body>", "hi", "</body>", "</html>"] {
+            out += f.consume(chunk)
+        }
+        out += f.finish()
+        XCTAssertEqual(out, "Here is <html><body>hi</body></html>",
+            "Non-reasoning angle-bracket content must pass through untouched")
+    }
+
     func testStreamingFilterStripsRepeatedGemmaChannelBlocks() {
         // A degenerate Gemma think-loop emits many channel blocks back to back;
         // the filter must strip every block, not dump everything after the first.
