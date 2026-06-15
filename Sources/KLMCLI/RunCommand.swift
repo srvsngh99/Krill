@@ -249,21 +249,38 @@ struct RunCommand: AsyncParsableCommand {
         return true
     }
 
-    /// Friendly guidance when `krillm run` is invoked with no model and no
-    /// configured default: list what is installed and how to set a default.
+    /// Guidance when `krillm run` is invoked with no model and no configured
+    /// default. On a fresh install (nothing installed) this is the branded
+    /// first-run welcome; otherwise it lists installed models and how to set a
+    /// default.
     private func printNoModelError(_ registry: Registry) {
-        print("No model specified, and no default is set.\n")
         let installed = registry.listModels().map { $0.name }.sorted()
-        if installed.isEmpty {
-            print("No models installed yet. Pull one, e.g.:")
-            print("  krillm pull llama-3.2-3b")
-        } else {
-            print("Installed models:")
-            for name in installed { print("  \(name)") }
-            print("\nRun one:        krillm run \(installed[0])")
-            print("Set a default:  echo 'default_model = \"\(installed[0])\"' >> ~/.krillm/config.toml")
-            print("            or:  export KRILL_DEFAULT_MODEL=\(installed[0])")
-        }
+        guard !installed.isEmpty else { printWelcome(); return }
+        print("No model specified, and no default is set.\n")
+        print("Installed models:")
+        for name in installed { print("  \(name)") }
+        print("\nRun one:        krillm run \(installed[0])")
+        print("Set a default:  echo 'default_model = \"\(installed[0])\"' >> ~/.krillm/config.toml")
+        print("            or:  export KRILL_DEFAULT_MODEL=\(installed[0])")
+    }
+
+    /// Branded first-run welcome (fresh install, no models yet), in the Sourav AI
+    /// Labs identity. Plain stdout (not the alt-screen TUI), styling auto-disabled
+    /// when not a TTY / under NO_COLOR.
+    private func printWelcome() {
+        print("")
+        print("  " + Ansi.bold(Brand.wordmark) + "  " + Ansi.dim(Brand.lab))
+        print("  " + Ansi.dim(Brand.tagline))
+        print("")
+        print("  Get started:")
+        print("    krillm pull gemma-4-e2b      " + Ansi.dim("# a small, fast model to begin"))
+        print("    krillm run gemma-4-e2b       " + Ansi.dim("# open the chat"))
+        print("")
+        print("  Browse models:   " + Ansi.dim("krillm catalog"))
+        print("  Set a default:   " + Ansi.dim("default_model in ~/.krillm/config.toml"))
+        print("")
+        print("  " + Ansi.bold(Brand.labMark) + "  " + Ansi.dim("\(Brand.labTagline)  \u{00B7}  \(Brand.site)"))
+        print("")
     }
 }
 

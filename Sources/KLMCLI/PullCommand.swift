@@ -34,8 +34,8 @@ struct PullCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        print("Pulling \(resolved.name) from \(resolved.repo)...")
-        print("Family: \(resolved.family.rawValue), Params: \(resolved.params), Quant: \(resolved.quant)")
+        print(Ansi.bold(">_ ") + "Pulling " + Ansi.bold(resolved.name) + Ansi.dim(" from \(resolved.repo)"))
+        print(Ansi.dim("   \(resolved.family.rawValue) \u{00B7} \(resolved.params) \u{00B7} \(resolved.quant)"))
         print()
 
         let puller = Puller(registry: registry)
@@ -47,7 +47,12 @@ struct PullCommand: AsyncParsableCommand {
                 print()
             } else {
                 let pct = total > 0 ? Int(Double(downloaded) / Double(total) * 100) : 0
-                print("\r[\(pct)%] Downloading \(file)...", terminator: "")
+                let barW = 24
+                let filled = max(0, min(barW, pct * barW / 100))
+                let bar = String(repeating: "=", count: filled)
+                    + String(repeating: " ", count: barW - filled)
+                let line = "  " + Ansi.dim("[\(bar)]") + String(format: " %3d%%  ", pct) + Ansi.dim(file)
+                print(Ansi.clearLine + line, terminator: "")
                 fflush(stdout)
             }
         }
@@ -55,10 +60,9 @@ struct PullCommand: AsyncParsableCommand {
         let elapsed = CFAbsoluteTimeGetCurrent() - startTime
         let sizeMB = Double(manifest.sizeBytes) / 1_048_576
 
-        print("Done! \(manifest.name) installed.")
-        print(String(format: "  Size: %.0f MB", sizeMB))
-        print(String(format: "  Time: %.1fs", elapsed))
-        print("  Path: \(registry.modelPath(manifest.name).path)")
-        print("\nRun with: krillm run \(manifest.name)")
+        print(Ansi.bold("Done.") + " \(manifest.name) installed.")
+        print(Ansi.dim(String(format: "   %.0f MB \u{00B7} %.1fs", sizeMB, elapsed)))
+        print(Ansi.dim("   \(registry.modelPath(manifest.name).path)"))
+        print("\nRun with: " + Ansi.bold("krillm run \(manifest.name)"))
     }
 }
