@@ -380,7 +380,7 @@ final class ChatTUI {
             lines.append("Good for")
             lines.append("  \(p.goodFor.joined(separator: ", "))")
         }
-        showOverlay(name, lines.joined(separator: "\n"))
+        showOverlay(m.name, lines.joined(separator: "\n"))
     }
 
     /// Build the picker entries: every chat-capable built-in alias plus any
