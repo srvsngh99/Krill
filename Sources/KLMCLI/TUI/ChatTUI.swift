@@ -42,6 +42,12 @@ final class ChatTUI {
     private var picker: ModelPicker?          // active modal model picker, if any
     private var pendingModelLoad: String?     // model the picker chose; loaded by the run loop
     private var pendingVoiceCapture = false   // Space-to-talk armed; run loop records
+    // What hold-Space does with the recorded clip. `.send` (default) sends it as
+    // an audio turn the model answers (works with Gemma 4 audio); `.dictate`
+    // best-effort transcribes it into the composer (the model may answer rather
+    // than transcribe, so it is opt-in). Toggle with /voice.
+    private enum VoiceMode { case send, dictate }
+    private var voiceMode: VoiceMode = .send
     private var inputHistory: [String] = []
     private var historyIndex = 0
     private var scrollOffset = 0     // lines scrolled up from bottom
@@ -443,6 +449,16 @@ final class ChatTUI {
             if arg.isEmpty { note("Usage: \(cmd) <path>") }
             else if attach(path: arg) { note(attachSummary()) }
         case "/mic": await recordMic()
+        case "/voice":
+            switch arg.lowercased() {
+            case "send": voiceMode = .send
+            case "dictate": voiceMode = .dictate
+            case "": voiceMode = (voiceMode == .send) ? .dictate : .send
+            default: note("Usage: /voice send|dictate"); return
+            }
+            note(voiceMode == .send
+                 ? "Voice: send as audio - the model answers your speech."
+                 : "Voice: dictate to the composer (best-effort; this model may answer instead of transcribe).")
         default:
             if let custom = customCommands.command(named: cmd) {
                 await generate(prompt: custom.expand(arguments: arg))
@@ -457,8 +473,13 @@ final class ChatTUI {
     // MARK: - Generation
 
     private func generate(prompt: String) async {
-        view.append(Msg(role: .user, text: prompt))
-        modelTurns.append((role: "user", content: prompt))
+        // An empty prompt with media (e.g. a sent voice clip) shows a placeholder
+        // bubble instead of a blank line.
+        let shown = !prompt.isEmpty ? prompt
+            : (pendingAudio != nil ? "[voice message]"
+               : (!pendingImages.isEmpty ? "[media]" : prompt))
+        view.append(Msg(role: .user, text: shown))
+        modelTurns.append((role: "user", content: shown))
         let usedImgs = pendingImages.count
         let usedAud = pendingAudio != nil
 
@@ -589,7 +610,10 @@ final class ChatTUI {
         }
         do {
             let wav = try rec.stop()
-            await transcribeVoice(wav)
+            switch voiceMode {
+            case .send: await sendVoice(wav)
+            case .dictate: await transcribeVoice(wav)
+            }
         } catch { note("\(error)") }
     }
 
@@ -626,6 +650,13 @@ final class ChatTUI {
         view.append(Msg(role: .note, text: "Conversation compacted into a summary."))
         view.append(Msg(role: .assistant, text: clean))
         scrollOffset = 0
+    }
+
+    /// Send a recorded clip as an audio turn the model answers directly - the
+    /// "talk to it" path (works with Gemma 4 audio, which answers spoken input).
+    private func sendVoice(_ wav: Data) async {
+        pendingAudio = makeAtt(.audio, wav, "voice")
+        await generate(prompt: "")   // audio-only turn; shown as "[voice message]"
     }
 
     /// Transcribe a recorded clip with the audio model and drop the text into the

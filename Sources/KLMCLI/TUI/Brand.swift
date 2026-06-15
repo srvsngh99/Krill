@@ -8,6 +8,8 @@ import KLMTUI
 enum Brand {
     static let product = "KrillLM"
     static let lab = "Sourav AI Labs"
+    static let labMark = "> SAI_"            // the SAI lockup device (matches the brand lockup)
+    static let labTagline = "INDEPENDENT AI LAB"
     static let tagline = "A fast, lean LLM runtime, built for Mac."
     static let site = "souravailabs.ai"
     static let chips = ["text \u{00B7} vision \u{00B7} audio", "agentic", "macOS-native"]
@@ -23,9 +25,12 @@ enum Brand {
     /// terminals so the line never overflows onto the rule row: drop the model
     /// (still shown in the footer) when there is no room, then clip the wordmark.
     static func header(width: Int, model: String) -> String {
-        let leftPlain = "  \(wordmark)  \(lab)"
+        // Product-only masthead: the `>_ KrillLM` wordmark on the left, the loaded
+        // model dim on the right. The full Sourav AI Labs lockup lives on the
+        // launch splash, not the persistent bar.
+        let leftPlain = "  \(wordmark)"
         let rightPlain = "\(model)  "
-        let styledLeft = "  " + Ansi.bold(wordmark) + "  " + Ansi.chrome(lab)
+        let styledLeft = "  " + Ansi.bold(wordmark)
         if width >= leftPlain.count + rightPlain.count + 1 {
             let pad = width - leftPlain.count - rightPlain.count
             return styledLeft + String(repeating: " ", count: pad) + Ansi.chrome(model) + "  "
@@ -95,7 +100,12 @@ enum Brand {
         let taglineLine = center(styledTagline, taglineVis)
 
         let chipRow = chips.map { " \($0) " }.joined(separator: "  ")
-        let labLine = "a \(lab) project \u{00B7} \(site)"
+        // The Sourav AI Labs lockup, rendered like the brand mark: the `> SAI_`
+        // device bold beside the lab name, with the "INDEPENDENT AI LAB" line
+        // and site beneath.
+        let lockupPlain = "\(labMark)  \(lab)"
+        let styledLockup = Ansi.bold(labMark) + "  " + Ansi.chrome(lab)
+        let tagPlain = "\(labTagline)  \u{00B7}  \(site)"
 
         var out: [String] = [""]
         out.append(contentsOf: heroRows)
@@ -104,7 +114,8 @@ enum Brand {
         out.append("")
         out.append(center(Ansi.inverse(chipRow), visibleCount(chipRow)))
         out.append("")
-        out.append(center(Ansi.chrome(labLine), visibleCount(labLine)))
+        out.append(center(styledLockup, lockupPlain.count))
+        out.append(center(Ansi.chrome(tagPlain), tagPlain.count))
         out.append("")
         return out
     }

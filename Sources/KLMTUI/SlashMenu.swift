@@ -20,6 +20,7 @@ public struct SlashMenu {
         Item(name: "/image", summary: "Attach an image to your next message"),
         Item(name: "/audio", summary: "Attach an audio clip"),
         Item(name: "/mic", summary: "Record from the microphone"),
+        Item(name: "/voice", summary: "Voice input mode: send audio or dictate"),
         Item(name: "/attach", summary: "List pending attachments"),
         Item(name: "/remove", summary: "Drop attachment number n"),
         Item(name: "/drop", summary: "Drop all pending attachments"),
