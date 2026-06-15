@@ -50,6 +50,38 @@ final class KeyDecoderTests: XCTestCase {
         XCTAssertEqual(KeyDecoder.decode(Array("\u{1b}[<0;5;7m".utf8)), [])
     }
 
+    func testSplitMouseSequenceBuffered() {
+        // A wheel report chopped across a read boundary must NOT decode to stray
+        // text; the incomplete tail comes back as the remainder.
+        let head = Array("\u{1b}[<65;66;1".utf8)            // no terminating M yet
+        let r1 = KeyDecoder.decodeStreaming(head)
+        XCTAssertEqual(r1.keys, [])
+        XCTAssertEqual(r1.remainder, head)                  // whole thing buffered
+        // Next read completes it (plus a real keystroke after).
+        let r2 = KeyDecoder.decodeStreaming(r1.remainder + Array("9M".utf8) + Array("x".utf8))
+        XCTAssertEqual(r2.keys, [.scrollDown, .char("x")])
+        XCTAssertTrue(r2.remainder.isEmpty)
+    }
+
+    func testCompleteKeysLeaveNoRemainder() {
+        let r = KeyDecoder.decodeStreaming(Array("hi".utf8) + [0x0d])
+        XCTAssertEqual(r.keys, [.char("h"), .char("i"), .enter])
+        XCTAssertTrue(r.remainder.isEmpty)
+    }
+
+    func testFocusEventConsumedNotLeaked() {
+        // Terminal focus in/out ( ESC [ I / ESC [ O ) must be consumed, not typed.
+        XCTAssertEqual(KeyDecoder.decode(Array("\u{1b}[I".utf8)), [])
+        XCTAssertEqual(KeyDecoder.decode(Array("\u{1b}[Ohello".utf8)), Array("hello").map { Key.char($0) })
+    }
+
+    func testTruncatedUTF8Buffered() {
+        let twoByte = Array("é".utf8)                       // 2 bytes
+        let r = KeyDecoder.decodeStreaming([twoByte[0]])    // first byte only
+        XCTAssertEqual(r.keys, [])
+        XCTAssertEqual(r.remainder, [twoByte[0]])
+    }
+
     func testMouseWheelScroll() {
         // SGR mouse reports: button 64 = wheel up, 65 = wheel down.
         XCTAssertEqual(KeyDecoder.decode(Array("\u{1b}[<64;10;5M".utf8)), [.scrollUp])

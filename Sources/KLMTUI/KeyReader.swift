@@ -19,70 +19,92 @@ public enum Key: Equatable {
 /// (e.g. Up = `ESC [ A`) as one atomic write, so decoding a read chunk is
 /// reliable in practice; a lone trailing `ESC` decodes to `.escape`.
 public enum KeyDecoder {
+    /// Decode a COMPLETE chunk (used by tests). Any trailing incomplete escape /
+    /// UTF-8 sequence is dropped.
     public static func decode(_ bytes: [UInt8]) -> [Key] {
+        decodeStreaming(bytes).keys
+    }
+
+    /// Decode a chunk that may end mid-sequence because a terminal write was
+    /// split across reads (common when a fast trackpad scroll emits a burst of
+    /// SGR mouse reports). Returns the decoded keys plus any trailing bytes that
+    /// form an INCOMPLETE escape or UTF-8 sequence; the caller prepends those to
+    /// the next read so a split sequence is never mis-decoded into stray text.
+    public static func decodeStreaming(_ bytes: [UInt8]) -> (keys: [Key], remainder: [UInt8]) {
         var keys: [Key] = []
         var i = 0
         while i < bytes.count {
             let b = bytes[i]
             if b == 0x1b {
-                // SGR mouse report ( ESC [ < ... M/m ) - we use it for the wheel.
-                if i + 2 < bytes.count, bytes[i + 1] == 0x5b, bytes[i + 2] == 0x3c {
-                    if let (key, consumed) = parseMouse(bytes, from: i) {
-                        if let key { keys.append(key) }
-                        i += consumed
-                        continue
-                    }
+                switch escapeAt(bytes, from: i) {
+                case .complete(let key, let consumed):
+                    if let key { keys.append(key) }
+                    i += consumed
+                case .incomplete:
+                    return (keys, Array(bytes[i...]))
                 }
-                // OSC ( ESC ] ... terminated by BEL or ST ) - e.g. a terminal
-                // color report from an OSC 11 background query. Consume and
-                // ignore so the report never leaks into the composer as text.
-                if i + 1 < bytes.count, bytes[i + 1] == 0x5d {
-                    i = skipOSC(bytes, from: i)
-                    continue
-                }
-                // CSI ( ESC [ ) or SS3 ( ESC O ) sequence?
-                if i + 1 < bytes.count, bytes[i + 1] == 0x5b || bytes[i + 1] == 0x4f {
-                    if let (key, consumed) = parseEscape(bytes, from: i) {
-                        if let key { keys.append(key) }
-                        i += consumed
-                        continue
-                    }
-                }
-                keys.append(.escape)
-                i += 1
             } else if b < 0x80 {
                 if let key = decodeControlOrAscii(b) { keys.append(key) }
                 i += 1
             } else {
-                // UTF-8 multibyte scalar.
+                // UTF-8 multibyte scalar; if truncated at the buffer end, buffer it.
                 var len = 1
                 if b & 0xE0 == 0xC0 { len = 2 }
                 else if b & 0xF0 == 0xE0 { len = 3 }
                 else if b & 0xF8 == 0xF0 { len = 4 }
-                let end = min(i + len, bytes.count)
-                if let s = String(bytes: bytes[i..<end], encoding: .utf8), let c = s.first {
+                if i + len > bytes.count { return (keys, Array(bytes[i...])) }
+                if let s = String(bytes: bytes[i..<i + len], encoding: .utf8), let c = s.first {
                     keys.append(.char(c))
                 }
-                i = end
+                i += len
             }
         }
-        return keys
+        return (keys, [])
     }
 
-    /// Consume an OSC sequence `ESC ] ... (BEL | ESC \)` starting at `start`
-    /// (where bytes[start] == ESC, bytes[start+1] == ']'). Returns the index
-    /// just past the terminator, or past the end if the terminator is not in
-    /// this chunk.
-    private static func skipOSC(_ bytes: [UInt8], from start: Int) -> Int {
+    private enum Esc { case complete(key: Key?, consumed: Int); case incomplete }
+
+    /// Dispatch an ESC-initiated sequence at `start`. Returns `.incomplete` when
+    /// a sequence has begun but its terminator is not yet in `bytes` (a split
+    /// read), so the caller can buffer and retry on the next read.
+    private static func escapeAt(_ bytes: [UInt8], from start: Int) -> Esc {
+        // Lone trailing ESC: treat as the Escape key (don't stall a real press).
+        guard start + 1 < bytes.count else { return .complete(key: .escape, consumed: 1) }
+        let intro = bytes[start + 1]
+        // OSC ( ESC ] ... BEL | ST ) - terminal reports (e.g. an OSC 11 color
+        // answer); consume and ignore so the report never leaks in as text.
+        if intro == 0x5d {
+            if let end = oscEnd(bytes, from: start) { return .complete(key: nil, consumed: end - start) }
+            return .incomplete
+        }
+        // CSI ( ESC [ ) or SS3 ( ESC O ).
+        if intro == 0x5b || intro == 0x4f {
+            // SGR mouse ( ESC [ < ... M/m ) - the wheel; clicks/motion ignored.
+            if intro == 0x5b, start + 2 < bytes.count, bytes[start + 2] == 0x3c {
+                if let (key, consumed) = parseMouse(bytes, from: start) {
+                    return .complete(key: key, consumed: consumed)
+                }
+                return .incomplete
+            }
+            return parseCSI(bytes, from: start)
+        }
+        // ESC + any other byte: treat the ESC itself as the Escape key.
+        return .complete(key: .escape, consumed: 1)
+    }
+
+    /// Index just past an OSC terminator (BEL or ST = `ESC \`), or nil if the
+    /// sequence is not yet terminated within `bytes`.
+    private static func oscEnd(_ bytes: [UInt8], from start: Int) -> Int? {
         var j = start + 2
         while j < bytes.count {
-            if bytes[j] == 0x07 { return j + 1 }                              // BEL
-            if bytes[j] == 0x1b, j + 1 < bytes.count, bytes[j + 1] == 0x5c {  // ST: ESC \
-                return j + 2
+            if bytes[j] == 0x07 { return j + 1 }
+            if bytes[j] == 0x1b {
+                guard j + 1 < bytes.count else { return nil }
+                if bytes[j + 1] == 0x5c { return j + 2 }
             }
             j += 1
         }
-        return j
+        return nil
     }
 
     private static func decodeControlOrAscii(_ b: UInt8) -> Key? {
@@ -103,32 +125,49 @@ public enum KeyDecoder {
         }
     }
 
-    /// Parse a CSI/SS3 sequence starting at `start` (where bytes[start] == ESC).
-    /// Returns the decoded key (nil if recognized-but-ignored) and the number of
-    /// bytes consumed, or nil if the sequence is unrecognized/incomplete.
-    private static func parseEscape(_ bytes: [UInt8], from start: Int) -> (key: Key?, consumed: Int)? {
-        guard start + 2 < bytes.count else { return nil }
-        let intro = bytes[start + 1]   // '[' or 'O'
-        let third = bytes[start + 2]
-        // Single-final-byte forms: ESC [ A  /  ESC O A
-        switch third {
-        case 0x41: return (.up, 3)
-        case 0x42: return (.down, 3)
-        case 0x43: return (.right, 3)
-        case 0x44: return (.left, 3)
-        case 0x48: return (.home, 3)
-        case 0x46: return (.end, 3)
-        default: break
+    /// Parse a non-mouse CSI/SS3 sequence at `start`. A CSI/SS3 sequence ends at
+    /// the first final byte (0x40..0x7e); parameter (0x30..0x3f) and intermediate
+    /// (0x20..0x2f) bytes may precede it. Returns `.incomplete` if no final byte
+    /// is in `bytes` yet, else `.complete` with the mapped key (nil = a valid but
+    /// unhandled sequence, e.g. a focus event, which is consumed and ignored).
+    private static func parseCSI(_ bytes: [UInt8], from start: Int) -> Esc {
+        var j = start + 2
+        while j < bytes.count {
+            let c = bytes[j]
+            if c >= 0x40, c <= 0x7e {
+                return .complete(key: mapCSI(bytes, start: start, finalIndex: j), consumed: j - start + 1)
+            }
+            if c >= 0x20, c <= 0x3f { j += 1; continue }   // parameter / intermediate
+            return .complete(key: nil, consumed: j - start)  // control byte: malformed, drop
         }
-        // Numeric forms: ESC [ 5 ~  etc.
-        if intro == 0x5b, third >= 0x30, third <= 0x39, start + 3 < bytes.count, bytes[start + 3] == 0x7e {
-            switch third {
-            case 0x31, 0x37: return (.home, 4)
-            case 0x34, 0x38: return (.end, 4)
-            case 0x33: return (.delete, 4)
-            case 0x35: return (.pageUp, 4)
-            case 0x36: return (.pageDown, 4)
-            default: return (nil, 4)
+        return .incomplete
+    }
+
+    /// Map a complete CSI/SS3 sequence to a key, or nil if it is recognized but
+    /// not one we handle.
+    private static func mapCSI(_ bytes: [UInt8], start: Int, finalIndex: Int) -> Key? {
+        let final = bytes[finalIndex]
+        // Single-final forms: ESC [ A  /  ESC O A  (arrows, home, end).
+        if finalIndex == start + 2 {
+            switch final {
+            case 0x41: return .up
+            case 0x42: return .down
+            case 0x43: return .right
+            case 0x44: return .left
+            case 0x48: return .home
+            case 0x46: return .end
+            default: return nil
+            }
+        }
+        // Numeric tilde forms: ESC [ <n> ~
+        if bytes[start + 1] == 0x5b, final == 0x7e, finalIndex == start + 3 {
+            switch bytes[start + 2] {
+            case 0x31, 0x37: return .home
+            case 0x34, 0x38: return .end
+            case 0x33: return .delete
+            case 0x35: return .pageUp
+            case 0x36: return .pageDown
+            default: return nil
             }
         }
         return nil
@@ -168,8 +207,12 @@ public enum KeyDecoder {
     }
 }
 
-/// Live reader: puts the terminal-derived bytes through `KeyDecoder`.
-public struct KeyReader {
+/// Live reader: puts the terminal-derived bytes through `KeyDecoder`, carrying a
+/// trailing incomplete escape sequence across reads so a split (e.g. a scroll
+/// burst chopped at the 4 KB read boundary) is reassembled rather than leaking
+/// its bytes into the input as text.
+public final class KeyReader {
+    private var pending: [UInt8] = []
     public init() {}
     /// Blocking read of the next batch of keys from `fd` (default stdin). Returns
     /// `nil` on EOF (the syscall read 0 bytes / errored) and a (possibly EMPTY)
@@ -178,9 +221,25 @@ public struct KeyReader {
     /// Callers MUST distinguish this from EOF: treating "decoded to no keys" as
     /// EOF makes the TUI quit on a stray mouse/terminal event.
     public func read(fd: Int32 = 0) -> [Key]? {
-        var buf = [UInt8](repeating: 0, count: 64)
+        var buf = [UInt8](repeating: 0, count: 4096)
         let n = Foundation.read(fd, &buf, buf.count)
-        guard n > 0 else { return nil }
-        return KeyDecoder.decode(Array(buf[0..<n]))
+        guard n > 0 else {
+            // True EOF. Surface any buffered partial bytes once, then signal EOF.
+            if pending.isEmpty { return nil }
+            let leftover = KeyDecoder.decode(pending); pending = []
+            return leftover
+        }
+        var chunk = pending
+        chunk.append(contentsOf: buf[0..<n])
+        pending = []
+        let (keys, remainder) = KeyDecoder.decodeStreaming(chunk)
+        // A well-formed split is at most a few bytes; if the remainder grows
+        // implausibly large it is malformed, so flush it rather than buffer
+        // forever (it would otherwise stall input).
+        if remainder.count > 64 {
+            return keys + KeyDecoder.decode(remainder)
+        }
+        pending = remainder
+        return keys
     }
 }
