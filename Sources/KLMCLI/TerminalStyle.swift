@@ -19,6 +19,8 @@ enum Ansi {
 
     static func bold(_ s: String) -> String { wrap(s, "1") }
     static func dim(_ s: String) -> String { wrap(s, "2") }
+    /// Faded + italic - for unobtrusive contextual hints.
+    static func hint(_ s: String) -> String { wrap(s, "2;3") }
     static func inverse(_ s: String) -> String { wrap(s, "7") }
     static func underline(_ s: String) -> String { wrap(s, "4") }
     static func white(_ s: String) -> String { wrap(s, "97") }

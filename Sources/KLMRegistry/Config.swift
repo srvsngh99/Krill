@@ -59,6 +59,10 @@ public struct KrillConfig: Sendable {
     /// Flash-attention toggle (advisory, WS-G / T3-2).
     public var flashAttention: Bool
 
+    /// Default voice posture for the interactive TUI: "off"/"text" (default),
+    /// "dictate", or "handsfree". Voice is opt-in; off keeps the chat text-only.
+    public var voiceMode: String
+
     public init() {
         self.defaultModel = nil
         self.defaultQuant = 4
@@ -77,6 +81,7 @@ public struct KrillConfig: Sendable {
         self.maxQueue = 512
         self.origins = ["http://localhost", "http://127.0.0.1", "https://localhost"]
         self.flashAttention = false
+        self.voiceMode = "off"
     }
 
     /// Load configuration with full precedence chain.
@@ -137,6 +142,8 @@ public struct KrillConfig: Sendable {
                 // the request's `model` field). Set to 2+ to keep e.g. an
                 // embedding model and a generation model both warm on one port.
                 if let v = Int(value) { maxLoadedModels = v }
+            case "voice_mode":
+                voiceMode = value
             case "keep_alive":
                 keepAlive = value
             case "num_parallel":
