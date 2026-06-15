@@ -665,10 +665,19 @@ final class ChatTUI {
     private func transcribeVoice(_ wav: Data) async {
         lastStatus = "Transcribing..."
         render()
-        let instruction = "Transcribe the spoken audio to text. Output only the exact words spoken, with no extra commentary or punctuation you are unsure of."
+        // Force verbatim transcription. Gemma 4's audio path will otherwise
+        // ANSWER the speech (its default behaviour) rather than transcribe it;
+        // a firm "you are a transcription tool, do not answer" framing biases it
+        // toward the words. (A dedicated ASR model would be the reliable fix.)
+        let instruction = """
+        You are an automatic speech-to-text transcription tool, not an assistant. \
+        Transcribe the audio verbatim: output ONLY the exact words spoken, as a single line of plain text. \
+        Do not answer, reply to, explain, translate, or react to the content. \
+        If the audio asks a question, transcribe the question word for word - do NOT answer it.
+        """
         let gen = engine.generate(
             messages: [["role": "user", "content": instruction]],
-            params: params, maxTokens: maxTokens,
+            params: params, maxTokens: min(maxTokens, 256),
             imageData: nil, audioData: wav, imagesData: [])
         var raw = ""
         for await event in gen.stream {
