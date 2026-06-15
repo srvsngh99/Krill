@@ -12,8 +12,8 @@ struct RunCommand: AsyncParsableCommand {
         abstract: "Load a model and run interactive chat or single-shot generation"
     )
 
-    @Argument(help: "Model name (from registry) or path to model directory")
-    var modelPath: String
+    @Argument(help: "Model name (from registry) or path to model directory. Optional: falls back to default_model in ~/.krillm/config.toml (or KRILL_DEFAULT_MODEL).")
+    var modelPath: String?
 
     @Argument(help: "Optional prompt for single-shot mode (omit for interactive REPL)")
     var prompt: String?
@@ -52,20 +52,32 @@ struct RunCommand: AsyncParsableCommand {
     var draftModel: String?
 
     func run() async throws {
-        let modelDir: URL
+        let registry = Registry()
+
+        // Resolve the model: explicit argument, else the configured default
+        // (config.toml default_model / KRILL_DEFAULT_MODEL). A blank value
+        // counts as unset.
+        func nonEmpty(_ s: String?) -> String? {
+            guard let s, !s.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+            return s
+        }
+        guard let model = nonEmpty(modelPath) ?? nonEmpty(KrillConfig.load().defaultModel) else {
+            printNoModelError(registry)
+            throw ExitCode.failure
+        }
 
         // Resolve: check registry first, then treat as file path
-        let registry = Registry()
-        if registry.hasModel(modelPath) {
-            modelDir = registry.modelPath(modelPath)
+        let modelDir: URL
+        if registry.hasModel(model) {
+            modelDir = registry.modelPath(model)
         } else {
-            modelDir = URL(fileURLWithPath: modelPath)
+            modelDir = URL(fileURLWithPath: model)
         }
 
         // Validate directory exists
         guard FileManager.default.fileExists(atPath: modelDir.path) else {
-            print("Error: model '\(modelPath)' not found.")
-            print("Install with: krillm pull \(modelPath)")
+            print("Error: model '\(model)' not found.")
+            print("Install with: krillm pull \(model)")
             print("Or provide a full path to a model directory.")
             throw ExitCode.failure
         }
@@ -103,19 +115,19 @@ struct RunCommand: AsyncParsableCommand {
         // in-process krillm run path below does not. Routing only
         // when both paths would produce identical behaviour keeps the
         // optimisation observability-free.
-        let aliasHasOverrides = registry.getModel(modelPath)?.overrides != nil
+        let aliasHasOverrides = registry.getModel(model)?.overrides != nil
         if let prompt,
            image == nil, audio == nil, draftModel == nil,
-           registry.hasModel(modelPath),
+           registry.hasModel(model),
            !aliasHasOverrides,
            ProcessInfo.processInfo.environment["KRILL_NO_AUTO_DAEMON"] != "1" {
-            if try await tryDaemonRoute(modelName: modelPath, prompt: prompt) {
+            if try await tryDaemonRoute(modelName: model, prompt: prompt) {
                 return
             }
         }
 
         // Load model (native Swift path for Llama, Qwen, Mistral, etc.)
-        print("Loading model from \(modelPath)...")
+        print("Loading model from \(model)...")
         let engine = InferenceEngine(modelDirectory: modelDir)
 
         let loadStart = CFAbsoluteTimeGetCurrent()
@@ -125,7 +137,7 @@ struct RunCommand: AsyncParsableCommand {
 
         if let draftSpec = draftModel {
             try DraftModelResolver.load(
-                draftSpec: draftSpec, target: modelPath,
+                draftSpec: draftSpec, target: model,
                 registry: registry, engine: engine)
         }
 
@@ -172,7 +184,7 @@ struct RunCommand: AsyncParsableCommand {
             // Up/Down cycling, status footer. Any media passed via
             // --image/--audio pre-attaches to the first turn.
             let tui = ChatTUI(
-                engine: engine, modelName: modelPath, system: system,
+                engine: engine, modelName: model, system: system,
                 params: params, maxTokens: maxTokens, registry: registry,
                 initialImage: imageData, initialAudio: audioData, theme: theme,
                 voiceModeSetting: KrillConfig.load().voiceMode)
@@ -182,7 +194,7 @@ struct RunCommand: AsyncParsableCommand {
             // not a TTY, e.g. piped/redirected): multi-turn memory, libedit
             // editing/history/tab-completion, streamed markdown, media attach.
             let session = InteractiveSession(
-                engine: engine, modelName: modelPath, system: system,
+                engine: engine, modelName: model, system: system,
                 params: params, maxTokens: maxTokens, registry: registry,
                 initialImage: imageData, initialAudio: audioData)
             do {
@@ -235,6 +247,23 @@ struct RunCommand: AsyncParsableCommand {
             port, result.contentChunkCount, result.wallTimeSec
         ))
         return true
+    }
+
+    /// Friendly guidance when `krillm run` is invoked with no model and no
+    /// configured default: list what is installed and how to set a default.
+    private func printNoModelError(_ registry: Registry) {
+        print("No model specified, and no default is set.\n")
+        let installed = registry.listModels().map { $0.name }.sorted()
+        if installed.isEmpty {
+            print("No models installed yet. Pull one, e.g.:")
+            print("  krillm pull llama-3.2-3b")
+        } else {
+            print("Installed models:")
+            for name in installed { print("  \(name)") }
+            print("\nRun one:        krillm run \(installed[0])")
+            print("Set a default:  echo 'default_model = \"\(installed[0])\"' >> ~/.krillm/config.toml")
+            print("            or:  export KRILL_DEFAULT_MODEL=\(installed[0])")
+        }
     }
 }
 
