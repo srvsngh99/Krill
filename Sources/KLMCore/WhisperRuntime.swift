@@ -40,7 +40,7 @@ public final class WhisperRuntime {
 
         let model = WhisperModel(cfg)
         var weights = try loadWeightArrays(from: modelDir)
-        weights = weights.mapValues { $0.asType(.float32) }
+        weights = Self.normalizeWeights(weights)
         let nested = ModuleParameters.unflattened(weights.map { ($0.key, $0.value) })
         try model.update(parameters: nested, verify: [.all])
         eval(model)
@@ -48,6 +48,55 @@ public final class WhisperRuntime {
 
         tokenizer = try WhisperTokenizer(
             vocabURL: modelDir.appendingPathComponent("vocab.json"))
+    }
+
+    /// Cast to float32 and, when the checkpoint uses the HuggingFace
+    /// `transformers` layout (`model.encoder.*` / `model.decoder.*`), remap to
+    /// the OpenAI/mlx key hierarchy the modules expect. This lets a raw HF
+    /// download load with no Python conversion step.
+    static func normalizeWeights(_ weights: [String: MLXArray]) -> [String: MLXArray] {
+        let isHF = weights.keys.contains { $0.hasPrefix("model.encoder.") || $0.hasPrefix("model.decoder.") }
+        var out = [String: MLXArray]()
+        for (k, v) in weights {
+            guard isHF else { out[k] = v.asType(.float32); continue }
+            guard let mapped = remapHFKey(k) else { continue }   // drop computed tensors
+            var t = v.asType(.float32)
+            // HF stores Conv1d weights as [out, in, kW]; MLX wants [out, kW, in].
+            if mapped.hasSuffix("conv1.weight") || mapped.hasSuffix("conv2.weight"), t.ndim == 3 {
+                t = t.transposed(0, 2, 1)
+            }
+            out[mapped] = t
+        }
+        return out
+    }
+
+    /// Rewrite one HF key to the OpenAI/mlx layout, or nil to drop it (the
+    /// encoder positions are computed sinusoids, not loaded).
+    private static func remapHFKey(_ key: String) -> String? {
+        var k = key
+        if k.hasPrefix("model.") { k.removeFirst("model.".count) }
+        if k == "encoder.embed_positions.weight" { return nil }
+        // Order matters: longer fragments first.
+        let subs: [(String, String)] = [
+            ("self_attn_layer_norm", "attn_ln"),
+            ("encoder_attn_layer_norm", "cross_attn_ln"),
+            ("encoder_attn", "cross_attn"),
+            ("self_attn", "attn"),
+            ("final_layer_norm", "mlp_ln"),
+            (".layers.", ".blocks."),
+            (".fc1.", ".mlp1."),
+            (".fc2.", ".mlp2."),
+            (".q_proj.", ".query."),
+            (".k_proj.", ".key."),
+            (".v_proj.", ".value."),
+            (".out_proj.", ".out."),
+            ("decoder.embed_tokens.weight", "decoder.token_embedding.weight"),
+            ("decoder.embed_positions.weight", "decoder.positional_embedding"),
+            ("encoder.layer_norm.", "encoder.ln_post."),
+            ("decoder.layer_norm.", "decoder.ln."),
+        ]
+        for (a, b) in subs { k = k.replacingOccurrences(of: a, with: b) }
+        return k
     }
 
     /// Transcribe a mono 16 kHz waveform. `maxTokens` caps the decode length

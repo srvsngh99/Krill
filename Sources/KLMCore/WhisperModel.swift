@@ -28,6 +28,7 @@ public struct WhisperConfig: Sendable {
 
     public init(from dict: [String: Any]?) {
         guard let d = dict else { return }
+        // OpenAI / mlx field names.
         if let v = d["n_mels"] as? Int { nMels = v }
         if let v = d["n_audio_ctx"] as? Int { nAudioCtx = v }
         if let v = d["n_audio_state"] as? Int { nAudioState = v }
@@ -38,6 +39,16 @@ public struct WhisperConfig: Sendable {
         if let v = d["n_text_state"] as? Int { nTextState = v }
         if let v = d["n_text_head"] as? Int { nTextHead = v }
         if let v = d["n_text_layer"] as? Int { nTextLayer = v }
+        // HuggingFace field names (so a raw HF download config loads too).
+        if let v = d["num_mel_bins"] as? Int { nMels = v }
+        if let v = d["max_source_positions"] as? Int { nAudioCtx = v }
+        if let v = d["d_model"] as? Int { nAudioState = v; nTextState = v }
+        if let v = d["encoder_attention_heads"] as? Int { nAudioHead = v }
+        if let v = d["encoder_layers"] as? Int { nAudioLayer = v }
+        if let v = d["vocab_size"] as? Int { nVocab = v }
+        if let v = d["max_target_positions"] as? Int { nTextCtx = v }
+        if let v = d["decoder_attention_heads"] as? Int { nTextHead = v }
+        if let v = d["decoder_layers"] as? Int { nTextLayer = v }
     }
 }
 

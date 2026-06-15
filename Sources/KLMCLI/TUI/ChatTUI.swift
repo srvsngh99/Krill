@@ -50,11 +50,13 @@ final class ChatTUI {
     private var voiceMode: VoiceMode = .dictate
     // Which speech-to-text engine dictation uses. `.apple` (default) is Apple's
     // on-device recognizer (no download). `.whisper` is KrillLM's native MLX
-    // Whisper runtime (best accuracy, downloaded model) - in development; until
-    // it ships, selecting it falls back to Apple.
+    // Whisper runtime (best accuracy; downloads an English model on first use).
     private enum VoiceEngine { case apple, whisper }
     private var voiceEngine: VoiceEngine = .apple
     private let speech = SpeechRecognizer()
+    // Lazily loaded native Whisper runtime + its SKU (English dictation).
+    private var whisper: WhisperRuntime?
+    private var whisperSKU = WhisperModelManager.defaultSKU
     private var inputHistory: [String] = []
     private var historyIndex = 0
     private var scrollOffset = 0     // lines scrolled up from bottom
@@ -494,11 +496,13 @@ final class ChatTUI {
     /// tradeoffs, so `/voice engine` lets the user pick with eyes open.
     private func voiceEngineInfo() -> String {
         func mark(_ e: VoiceEngine) -> String { voiceEngine == e ? ">" : " " }
+        let mb = WhisperModelManager.sku(whisperSKU)?.approxMB ?? 290
+        let have = WhisperModelManager.isInstalled(whisperSKU) ? " (installed)" : ""
         return """
         Dictation engine            /voice engine apple | whisper
         \(mark(.apple)) apple      Apple on-device speech. No download, instant, macOS-only.
-        \(mark(.whisper)) whisper    Native MLX Whisper. Best accuracy + 99 languages;
-                     downloads a small model (~40-460MB). In development.
+        \(mark(.whisper)) whisper    Native MLX Whisper (\(whisperSKU)). Higher accuracy, fully
+                     local; downloads ~\(mb)MB on first use\(have). English.
         """
     }
 
@@ -697,6 +701,18 @@ final class ChatTUI {
     private func transcribeVoice(_ wav: Data) async {
         lastStatus = "Transcribing..."
         render()
+        // Native MLX Whisper, when selected: highest accuracy, fully local.
+        if voiceEngine == .whisper {
+            if let text = await transcribeWithWhisper(wav) {
+                lastStatus = ""
+                let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if clean.isEmpty { note("Didn't catch that - try again."); return }
+                setInput(clean)
+                return
+            }
+            // Whisper unavailable (declined / download or load failed): fall
+            // through to the on-device / model paths so dictation still works.
+        }
         // Prefer Apple's on-device speech-to-text: accurate, fully local, no
         // download. Falls through to the multimodal model only when the Speech
         // framework is unavailable or yields nothing.
@@ -741,6 +757,65 @@ final class ChatTUI {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if clean.isEmpty { note("Didn't catch that - try again."); return }
         setInput(clean)   // populate the composer; user reviews and presses Enter
+    }
+
+    /// Transcribe with the native MLX Whisper runtime. On first use this asks
+    /// consent and downloads the model; returns nil (so the caller falls back)
+    /// if the user declines or anything fails.
+    private func transcribeWithWhisper(_ wav: Data) async -> String? {
+        if !WhisperModelManager.isInstalled(whisperSKU) {
+            let mb = WhisperModelManager.sku(whisperSKU)?.approxMB ?? 290
+            guard confirm("Whisper needs the \(whisperSKU) model (~\(mb)MB). Download now?") else {
+                note("Whisper download declined - using on-device dictation.")
+                return nil
+            }
+            lastStatus = "Downloading Whisper \(whisperSKU) (~\(mb)MB)..."
+            render()
+            do {
+                try await WhisperModelManager.download(whisperSKU)
+            } catch {
+                lastStatus = ""
+                note("Whisper download failed: \(error)")
+                return nil
+            }
+        }
+        if whisper == nil {
+            lastStatus = "Loading Whisper..."
+            render()
+            do {
+                whisper = try WhisperRuntime(modelDir: WhisperModelManager.modelDir(whisperSKU))
+            } catch {
+                lastStatus = ""
+                note("Whisper load failed: \(error)")
+                return nil
+            }
+        }
+        do {
+            let waveform = try AudioPreprocessor.monoWaveform(fromAudio: wav)
+            lastStatus = "Transcribing (Whisper)..."
+            render()
+            return whisper?.transcribe(waveform: waveform)
+        } catch {
+            lastStatus = ""
+            note("Whisper transcription failed: \(error)")
+            return nil
+        }
+    }
+
+    /// Blocking y/N confirmation in the full-screen TUI. Enter/Esc/n = no.
+    private func confirm(_ question: String) -> Bool {
+        note("\(question) [y/N]")
+        render()
+        while true {
+            guard raw.waitForInput(timeoutMs: 200) else { continue }
+            for k in reader.read() ?? [] {
+                switch k {
+                case .char("y"), .char("Y"): return true
+                case .char("n"), .char("N"), .enter, .escape, .ctrlC: return false
+                default: continue
+                }
+            }
+        }
     }
 
     private func recordMic() async {
