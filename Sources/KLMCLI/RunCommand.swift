@@ -61,7 +61,22 @@ struct RunCommand: AsyncParsableCommand {
             guard let s, !s.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
             return s
         }
-        guard let model = nonEmpty(modelPath) ?? nonEmpty(KrillConfig.load().defaultModel) else {
+        let defaultModel = nonEmpty(KrillConfig.load().defaultModel)
+
+        // Disambiguate the leading positional. `krillm run <model> [prompt]` is
+        // the canonical form, but with a default model set, `krillm run "<text>"`
+        // should run the default on that text rather than mistake the prompt for
+        // a model name. So when the sole positional is clearly NOT a model (not a
+        // known alias, installed model, or path) and a default exists, treat it
+        // as the prompt.
+        var resolvedModel = nonEmpty(modelPath)
+        var prompt = self.prompt
+        if let positional = resolvedModel, prompt == nil, let def = defaultModel,
+           !looksLikeModelRef(positional, registry) {
+            resolvedModel = def
+            prompt = positional
+        }
+        guard let model = resolvedModel ?? defaultModel else {
             printNoModelError(registry)
             throw ExitCode.failure
         }
@@ -247,6 +262,15 @@ struct RunCommand: AsyncParsableCommand {
             port, result.contentChunkCount, result.wallTimeSec
         ))
         return true
+    }
+
+    /// True when `s` denotes a model rather than a prompt: an installed model, a
+    /// known alias, an HF repo path (`org/model`), or an existing local path.
+    private func looksLikeModelRef(_ s: String, _ registry: Registry) -> Bool {
+        registry.hasModel(s)
+            || AliasMap.resolve(s) != nil
+            || s.contains("/")
+            || FileManager.default.fileExists(atPath: s)
     }
 
     /// Guidance when `krillm run` is invoked with no model and no configured

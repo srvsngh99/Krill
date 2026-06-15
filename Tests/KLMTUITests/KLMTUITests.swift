@@ -417,6 +417,44 @@ final class ModelPickerTests: XCTestCase {
     }
 }
 
+final class AgentPickerTests: XCTestCase {
+    private let entries = [
+        AgentPicker.Entry(id: "claude", displayName: "Claude Code", summary: "subagents", installed: false),
+        AgentPicker.Entry(id: "codex", displayName: "Codex", summary: "openai", installed: true),
+        AgentPicker.Entry(id: "opencode", displayName: "OpenCode", summary: "anomaly", installed: false),
+    ]
+
+    func testStartsOnFirstInstalled() {
+        let p = AgentPicker(entries: entries)
+        XCTAssertEqual(p.selected, 1)               // codex is the first installed
+        XCTAssertEqual(p.current?.id, "codex")
+    }
+
+    func testNoneInstalledDefaultsToFirst() {
+        let none = entries.map {
+            AgentPicker.Entry(id: $0.id, displayName: $0.displayName, summary: $0.summary, installed: false)
+        }
+        let p = AgentPicker(entries: none)
+        XCTAssertEqual(p.selected, 0)
+        XCTAssertEqual(p.current?.id, "claude")
+    }
+
+    func testCycleWraps() {
+        var p = AgentPicker(entries: entries)        // starts on codex (index 1)
+        p.selectNext(); XCTAssertEqual(p.selected, 2)
+        p.selectNext(); XCTAssertEqual(p.selected, 0)   // wrap forward
+        p.selectPrevious(); XCTAssertEqual(p.selected, 2) // wrap backward
+    }
+
+    func testEmptyPickerIsSafe() {
+        var p = AgentPicker(entries: [])
+        XCTAssertTrue(p.isEmpty)
+        XCTAssertNil(p.current)
+        p.selectNext(); p.selectPrevious()              // no crash, no move
+        XCTAssertEqual(p.selected, 0)
+    }
+}
+
 final class SlashMenuExtraTests: XCTestCase {
     func testExtraCommandsMatch() {
         var m = SlashMenu()

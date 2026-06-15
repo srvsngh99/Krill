@@ -11,7 +11,8 @@ struct Krillm: AsyncParsableCommand {
             locally with Metal acceleration - chat, a full-screen TUI with voice, \
             an Ollama/OpenAI-compatible server, and native multimodal.
 
-            Run `krillm` to start chatting. A Sourav AI Labs project.
+            Run `krillm run <model>` to chat, or set default_model in
+            ~/.krillm/config.toml and just run `krillm`. A Sourav AI Labs project.
             """,
         version: KrillLMVersion,
         subcommands: [
