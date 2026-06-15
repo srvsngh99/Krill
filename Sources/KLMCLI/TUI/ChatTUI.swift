@@ -334,20 +334,26 @@ final class ChatTUI {
         guard let m = AliasMap.resolve(name, catalog: store) else { note("No info for \(name)."); return }
         let caps = ModelCapabilities.capabilities(for: m.family)
         let profile = ModelProfiles.profile(for: m.family)
-        let onDisk = registry.hasModel(name) ? directorySize(registry.modelPath(name)) : 0
+        // Use the resolved canonical name for registry lookups (the arg may be an
+        // alias the registry does not key by).
+        let onDisk = registry.hasModel(m.name) ? directorySize(registry.modelPath(m.name)) : 0
         let sizeStr: String
         if onDisk > 0 { sizeStr = "\(formatSize(onDisk)) (installed)" }
         else if let est = estimatedSizeBytes(params: m.params, quant: m.quant) { sizeStr = "~\(formatSize(est)) (download)" }
         else { sizeStr = "unknown" }
-        var inputs = ["text"]
+        // Inputs reflect declared capabilities: text only for generative models;
+        // encoders (embeddings / reranker) are not chat inputs.
+        var inputs: [String] = []
+        if caps.contains(.textGeneration) { inputs.append("text") }
         if caps.contains(.visionInput) { inputs.append("image") }
         if caps.contains(.audioInput) { inputs.append("audio") }
+        if inputs.isEmpty { inputs.append(caps.contains(.embeddings) ? "text (embeddings)" : "n/a") }
         var feats: [String] = []
         if caps.contains(.tools) { feats.append("tools") }
-        if caps.contains(.structuredOutput) { feats.append("structured output") }
         if caps.contains(.moe) { feats.append("MoE") }
+        if caps.contains(.reranker) { feats.append("reranker") }
 
-        var lines = BlockFont.render(profile?.displayName ?? name.uppercased())
+        var lines = BlockFont.render(profile?.displayName ?? m.name.uppercased())
         lines.append("")
         if let p = profile {
             lines.append("  \(p.vendor)  \u{00B7}  released \(p.released)")
@@ -486,7 +492,11 @@ final class ChatTUI {
     /// hollow dot not-downloaded.
     private func renderPicker(_ p: ModelPicker, width: Int, height: Int) -> [String] {
         let margin = "  "
-        var out: [String] = [margin + Ansi.bold("Select a model"), ""]
+        var out: [String] = [
+            margin + Ansi.bold("Select a model"),
+            margin + Ansi.chrome("press i (or right-arrow) for a model deep-dive"),
+            "",
+        ]
         let total = p.entries.count
         // Column widths across the whole list so rows line up in both sections.
         func rpad(_ s: String, _ w: Int) -> String { s.padding(toLength: w, withPad: " ", startingAt: 0) }
@@ -497,7 +507,7 @@ final class ChatTUI {
         let sizeW  = max(5, p.entries.map { $0.size.count }.max() ?? 5)
         // Window the visible rows around the selection (headers/blanks are added
         // around them, so reserve a few lines of chrome).
-        let maxVisible = max(3, height - 7)
+        let maxVisible = max(3, height - 8)
         var winStart = 0
         if total > maxVisible { winStart = min(max(0, p.selected - maxVisible / 2), total - maxVisible) }
         let winEnd = min(winStart + maxVisible, total)

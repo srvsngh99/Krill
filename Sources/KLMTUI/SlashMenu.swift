@@ -27,6 +27,7 @@ public struct SlashMenu {
         Item(name: "/drop", summary: "Drop all pending attachments"),
         Item(name: "/system", summary: "Set the system prompt"),
         Item(name: "/model", summary: "Switch to another model"),
+        Item(name: "/model info", summary: "Model deep-dive: specs, profile, family logo"),
         Item(name: "/history", summary: "Show the conversation"),
         Item(name: "/compact", summary: "Summarize and shrink the conversation"),
         Item(name: "/save", summary: "Save the transcript"),
