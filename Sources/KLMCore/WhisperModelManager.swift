@@ -82,10 +82,11 @@ public enum WhisperModelManager {
         var req = URLRequest(url: url)
         req.setValue("krillm", forHTTPHeaderField: "User-Agent")
         let (tempURL, response) = try await URLSession.shared.download(for: req)
+        let fm = FileManager.default
         if let http = response as? HTTPURLResponse, !(200 ... 299).contains(http.statusCode) {
+            try? fm.removeItem(at: tempURL)   // don't leak the URLSession temp file
             throw DownloadError.httpStatus(label, http.statusCode)
         }
-        let fm = FileManager.default
         if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
         try fm.moveItem(at: tempURL, to: dest)
         progress("\(label): done")

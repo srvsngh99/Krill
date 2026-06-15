@@ -57,6 +57,7 @@ Tab to fill it and add arguments. `/help` lists everything.
 | `/drop` | Drop all pending attachments |
 | `/mic` | Record from the microphone (press Enter to stop) |
 | `/voice send\|dictate` | Switch what hold-Space does (see Voice) |
+| `/voice engine apple\|whisper` | Choose the dictation engine (see Voice) |
 | `/quit` | Exit (`/exit`, `/q` too) |
 
 ## Custom slash commands
@@ -114,6 +115,19 @@ mode, toggled with `/voice`:
 - **`/voice send`** - the clip is sent as an audio turn and the model answers
   your spoken input (shown as a `[voice message]` turn). Use this to "talk to"
   an audio-capable model rather than dictate.
+
+### Dictation engine
+
+`/voice engine` (no argument) prints a card showing the current choice;
+`/voice engine apple|whisper` switches it:
+
+- **`apple`** (default) - Apple's on-device speech-to-text. No download,
+  instant, fully local, macOS-only.
+- **`whisper`** - KrillLM's own native MLX Whisper runtime (English). Higher
+  accuracy and fully local. On the first dictation it asks consent and
+  downloads an English model (default `base.en`, around 290 MB) into
+  `~/.krillm/models/whisper-<sku>`; decline and dictation falls back to the
+  Apple / model path. No Python or third-party ASR dependency.
 
 `/mic` records a clip and attaches it (press Enter to stop) for an explicit send.
 

@@ -468,7 +468,10 @@ final class ChatTUI {
                 case "apple": voiceEngine = .apple
                     note("Voice engine: Apple on-device speech-to-text (no download).")
                 case "whisper": voiceEngine = .whisper
-                    note("Voice engine: Whisper - native MLX runtime is in development; dictation uses Apple on-device until it ships.")
+                    let mb = WhisperModelManager.sku(whisperSKU)?.approxMB ?? 290
+                    let installed = WhisperModelManager.isInstalled(whisperSKU)
+                    note("Voice engine: native MLX Whisper (\(whisperSKU), English). "
+                        + (installed ? "Model installed." : "Downloads ~\(mb)MB on first dictation."))
                 default: view.append(Msg(role: .pre, text: voiceEngineInfo()))
                 }
             case "": voiceMode = (voiceMode == .send) ? .dictate : .send; note(voiceModeNote())
