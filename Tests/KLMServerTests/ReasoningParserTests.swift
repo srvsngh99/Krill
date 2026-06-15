@@ -122,6 +122,21 @@ final class ReasoningParserTests: XCTestCase {
         XCTAssertEqual(f.finish(), "")
     }
 
+    func testStreamingFilterStripsRepeatedGemmaChannelBlocks() {
+        // A degenerate Gemma think-loop emits many channel blocks back to back;
+        // the filter must strip every block, not dump everything after the first.
+        let f = StreamingReasoningFilter()
+        var out = ""
+        for chunk in ["<|channel>", "thought", "<channel|>",
+                      "<|channel>", "thought", "<channel|>",
+                      "<|channel>", "thought", "<channel|>", "Answer"] {
+            out += f.consume(chunk)
+        }
+        out += f.finish()
+        XCTAssertEqual(out, "Answer",
+            "Every Gemma channel block must be stripped, even a long run of them")
+    }
+
     // MARK: - Streaming filter
 
     func testStreamingFilterEmitsOnlyPostReasoningTokens() {

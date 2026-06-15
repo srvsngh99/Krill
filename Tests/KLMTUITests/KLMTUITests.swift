@@ -10,6 +10,7 @@ final class KeyDecoderTests: XCTestCase {
         XCTAssertEqual(KeyDecoder.decode([0x03]), [.ctrlC])
         XCTAssertEqual(KeyDecoder.decode([0x04]), [.ctrlD])
         XCTAssertEqual(KeyDecoder.decode([0x15]), [.ctrlU])
+        XCTAssertEqual(KeyDecoder.decode([0x16]), [.ctrlV])   // cycle voice posture
     }
 
     func testArrowKeys() {

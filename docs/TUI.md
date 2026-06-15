@@ -32,6 +32,8 @@ If auto-detection ever misreads, pass `--theme light` or `--theme dark`.
 | `Up` / `Down` | Recall input history, or cycle the slash-command popup |
 | `Tab` | Accept the highlighted command (then add arguments) |
 | `Enter` | Send the message |
+| Hold `Space` | Push-to-talk (only when voice is on: dictate / handsfree / send) |
+| `Ctrl-V` | Turn voice on and cycle it: off -> dictate -> handsfree -> send -> off |
 | `PgUp` / `PgDn` | Scroll the conversation |
 | Mouse wheel / trackpad | Scroll the conversation (hold Option/Fn to select text) |
 | `Ctrl-C` | Cancel a streaming reply, or clear the input |
@@ -56,7 +58,8 @@ Tab to fill it and add arguments. `/help` lists everything.
 | `/remove <n>` | Drop attachment number n |
 | `/drop` | Drop all pending attachments |
 | `/mic` | Record from the microphone (press Enter to stop) |
-| `/voice send\|dictate` | Switch what hold-Space does (see Voice) |
+| `/voice-mode type\|dictate\|handsfree\|send` | Set the voice posture (Ctrl-V cycles; see Voice) |
+| `/voice` | Show the current voice state (posture + engine) |
 | `/voice engine apple\|whisper` | Choose the dictation engine (see Voice) |
 | `/quit` | Exit (`/exit`, `/q` too) |
 
@@ -104,17 +107,28 @@ multi-image models (mllama); single-image models use the first. `--image` /
 
 ## Voice
 
-On an audio-capable Gemma 4 model, hold **Space** on an empty composer to talk
-(push-to-talk); release to finish. What happens with the clip depends on the
-mode, toggled with `/voice`:
+**Voice is off by default** - KrillLM is a text chat first. In the default
+**`type`** posture Space is a typed space, Enter sends, and the footer shows no
+voice chrome. Turn voice on with **`Ctrl-V`** (which then cycles the postures) or
+set a default with the `voice_mode` config key (`off` / `dictate` / `handsfree`).
+On an audio-capable Gemma 4 model the active posture rides the footer's left side
+(a dot when on, an animated meter while recording). Bare `/voice` prints the
+current state without changing it.
 
-- **`/voice dictate`** (default) - transcribes your speech into the composer for
-  you to review and send. Uses **Apple's on-device speech-to-text** (fully local,
-  no download) when available; otherwise falls back to the multimodal model's
-  best effort (which tends to *answer* rather than transcribe).
-- **`/voice send`** - the clip is sent as an audio turn and the model answers
-  your spoken input (shown as a `[voice message]` turn). Use this to "talk to"
-  an audio-capable model rather than dictate.
+`Ctrl-V` cycles **off (text) -> dictate -> handsfree -> send -> off**.
+
+- **`type`** (default) - keyboard only. **Space is a typed space** and Enter
+  sends; there is no push-to-talk. The footer stays clean.
+- **`dictate`** - hold **Space** to talk; your speech is transcribed into the
+  composer for you to **review and send**. Uses the chosen engine (Apple or
+  Whisper; see below).
+- **`handsfree`** - hold Space to talk; the transcript is shown and then
+  **auto-sent** after a short grace window (press **Esc** to cancel, **Enter** to
+  send immediately). The reply is shown on screen; spoken replies (TTS) are a
+  planned follow-up.
+- **`send`** - the clip is sent as an audio turn and the model **answers your
+  spoken input** (shown as a `[voice message]` turn). Use this to "talk to" an
+  audio-capable model rather than dictate.
 
 ### Dictation engine
 
