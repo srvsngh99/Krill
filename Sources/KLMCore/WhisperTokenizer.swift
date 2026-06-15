@@ -12,16 +12,36 @@ public final class WhisperTokenizer {
     private let idToToken: [String?]
     /// Inverse of the GPT-2 `bytes_to_unicode` map: unicode scalar -> raw byte.
     private let byteDecoder: [Character: UInt8]
+    /// The control-token ids for this model (English vs multilingual layout).
+    public let specials: Specials
 
-    // Special token ids (whisper-small.en / English-only layout).
-    public static let endOfText = 50256          // <|endoftext|> (also stop)
-    public static let startOfTranscript = 50257  // <|startoftranscript|>
-    public static let transcribe = 50358         // <|transcribe|>
-    public static let noTimestamps = 50362       // <|notimestamps|>
-    public static let timestampBegin = 50363     // <|0.00|>
+    /// Whisper control-token ids. The English-only (`.en`) checkpoints and the
+    /// multilingual checkpoints place these at different offsets (multilingual
+    /// inserts 99 language tokens after `<|startoftranscript|>`), so the layout
+    /// is selected at load time.
+    public struct Specials: Sendable {
+        public let endOfText: Int          // <|endoftext|>, also the stop token
+        public let startOfTranscript: Int  // <|startoftranscript|>
+        public let transcribe: Int         // <|transcribe|>
+        public let noTimestamps: Int       // <|notimestamps|>
+        public let timestampBegin: Int     // <|0.00|>
+        /// First language token (`<|en|>`); nil for English-only models.
+        public let languageBase: Int?
+        /// Number of language tokens (`languageBase ..< languageBase+count`).
+        public let languageCount: Int
 
-    /// The decoder prompt for English, no-timestamp transcription.
-    public static let promptTokens = [startOfTranscript, transcribe, noTimestamps]
+        /// whisper-*.en layout.
+        public static let english = Specials(
+            endOfText: 50256, startOfTranscript: 50257, transcribe: 50358,
+            noTimestamps: 50362, timestampBegin: 50363,
+            languageBase: nil, languageCount: 0)
+
+        /// Multilingual whisper-* layout (tiny/base/small/medium/large v1-v2).
+        public static let multilingual = Specials(
+            endOfText: 50257, startOfTranscript: 50258, transcribe: 50359,
+            noTimestamps: 50363, timestampBegin: 50364,
+            languageBase: 50259, languageCount: 99)
+    }
 
     public enum TokenizerError: Error, CustomStringConvertible {
         case vocabNotFound(String)
@@ -33,7 +53,8 @@ public final class WhisperTokenizer {
     }
 
     /// Load from a converted model dir's `vocab.json` (`{token: id}`).
-    public init(vocabURL: URL) throws {
+    /// `multilingual` selects the control-token layout.
+    public init(vocabURL: URL, multilingual: Bool) throws {
         guard let data = try? Data(contentsOf: vocabURL) else {
             throw TokenizerError.vocabNotFound(vocabURL.path)
         }
@@ -44,6 +65,16 @@ public final class WhisperTokenizer {
         for (tok, id) in map { table[id] = tok }
         idToToken = table
         byteDecoder = Self.makeByteDecoder()
+        specials = multilingual ? .multilingual : .english
+    }
+
+    /// The decoder prompt for no-timestamp transcription. `language` (a
+    /// language token id, multilingual only) is inserted after the start token.
+    public func promptTokens(language: Int? = nil) -> [Int] {
+        var p = [specials.startOfTranscript]
+        if let lang = language { p.append(lang) }
+        p.append(contentsOf: [specials.transcribe, specials.noTimestamps])
+        return p
     }
 
     /// GPT-2 `bytes_to_unicode`, inverted to scalar -> byte.
@@ -72,8 +103,8 @@ public final class WhisperTokenizer {
     public func decode(_ ids: [Int]) -> String {
         var bytes = [UInt8]()
         for id in ids {
-            if id == Self.endOfText { break }
-            guard id >= 0, id < idToToken.count, id < Self.endOfText,
+            if id == specials.endOfText { break }
+            guard id >= 0, id < idToToken.count, id < specials.endOfText,
                   let tok = idToToken[id] else { continue }
             for ch in tok {
                 if let b = byteDecoder[ch] { bytes.append(b) }

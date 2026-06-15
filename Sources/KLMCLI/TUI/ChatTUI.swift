@@ -468,9 +468,21 @@ final class ChatTUI {
                 case "apple": voiceEngine = .apple
                     note("Voice engine: Apple on-device speech-to-text (no download).")
                 case "whisper": voiceEngine = .whisper
+                    // Optional SKU: /voice engine whisper <tiny|base|small|*.en>
+                    if parts.count > 2 {
+                        if let sku = WhisperModelManager.sku(parts[2]) {
+                            if sku.id != whisperSKU { whisper = nil }   // drop cached runtime
+                            whisperSKU = sku.id
+                        } else {
+                            note("Unknown Whisper model '\(parts[2])'. Options: "
+                                + WhisperModelManager.skus.map { $0.id }.joined(separator: ", "))
+                        }
+                    }
                     let mb = WhisperModelManager.sku(whisperSKU)?.approxMB ?? 290
                     let installed = WhisperModelManager.isInstalled(whisperSKU)
-                    note("Voice engine: native MLX Whisper (\(whisperSKU), English). "
+                    let lang = WhisperModelManager.isMultilingual(whisperSKU)
+                        ? "~99 languages, auto-detected" : "English"
+                    note("Voice engine: native MLX Whisper (\(whisperSKU), \(lang)). "
                         + (installed ? "Model installed." : "Downloads ~\(mb)MB on first dictation."))
                 default: view.append(Msg(role: .pre, text: voiceEngineInfo()))
                 }
@@ -501,11 +513,13 @@ final class ChatTUI {
         func mark(_ e: VoiceEngine) -> String { voiceEngine == e ? ">" : " " }
         let mb = WhisperModelManager.sku(whisperSKU)?.approxMB ?? 290
         let have = WhisperModelManager.isInstalled(whisperSKU) ? " (installed)" : ""
+        let lang = WhisperModelManager.isMultilingual(whisperSKU) ? "multilingual" : "English"
         return """
-        Dictation engine            /voice engine apple | whisper
+        Dictation engine            /voice engine apple | whisper [model]
         \(mark(.apple)) apple      Apple on-device speech. No download, instant, macOS-only.
-        \(mark(.whisper)) whisper    Native MLX Whisper (\(whisperSKU)). Higher accuracy, fully
-                     local; downloads ~\(mb)MB on first use\(have). English.
+        \(mark(.whisper)) whisper    Native MLX Whisper (\(whisperSKU), \(lang)). Higher accuracy,
+                     fully local; downloads ~\(mb)MB on first use\(have).
+                     Models: tiny|base|small (multilingual) or *.en (English).
         """
     }
 
