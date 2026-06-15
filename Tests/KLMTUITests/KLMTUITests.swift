@@ -33,6 +33,23 @@ final class KeyDecoderTests: XCTestCase {
                        [.char("h"), .char("i"), .enter])
     }
 
+    func testOSCColorReportIsIgnored() {
+        // An OSC 11 background-color report (BEL-terminated) must be consumed and
+        // dropped, not decoded as ESC + stray characters that leak into input.
+        XCTAssertEqual(KeyDecoder.decode(Array("\u{1b}]11;rgb:1c1c/1c1c/1c1c\u{07}".utf8)), [])
+        // ...and a real key after it still comes through.
+        XCTAssertEqual(KeyDecoder.decode(Array("\u{1b}]11;rgb:ffff/ffff/ffff\u{07}x".utf8)), [.char("x")])
+        // ST-terminated form ( ESC \ ).
+        XCTAssertEqual(KeyDecoder.decode(Array("\u{1b}]11;rgb:0/0/0\u{1b}\\y".utf8)), [.char("y")])
+    }
+
+    func testMouseClickDecodesToNoKeys() {
+        // A plain click (button 0 press/release) is recognized-but-ignored - it
+        // must NOT be conflated with EOF by the reader (see KeyReader.read docs).
+        XCTAssertEqual(KeyDecoder.decode(Array("\u{1b}[<0;5;7M".utf8)), [])
+        XCTAssertEqual(KeyDecoder.decode(Array("\u{1b}[<0;5;7m".utf8)), [])
+    }
+
     func testMouseWheelScroll() {
         // SGR mouse reports: button 64 = wheel up, 65 = wheel down.
         XCTAssertEqual(KeyDecoder.decode(Array("\u{1b}[<64;10;5M".utf8)), [.scrollUp])

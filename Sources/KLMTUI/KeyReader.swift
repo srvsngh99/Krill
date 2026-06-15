@@ -33,6 +33,13 @@ public enum KeyDecoder {
                         continue
                     }
                 }
+                // OSC ( ESC ] ... terminated by BEL or ST ) - e.g. a terminal
+                // color report from an OSC 11 background query. Consume and
+                // ignore so the report never leaks into the composer as text.
+                if i + 1 < bytes.count, bytes[i + 1] == 0x5d {
+                    i = skipOSC(bytes, from: i)
+                    continue
+                }
                 // CSI ( ESC [ ) or SS3 ( ESC O ) sequence?
                 if i + 1 < bytes.count, bytes[i + 1] == 0x5b || bytes[i + 1] == 0x4f {
                     if let (key, consumed) = parseEscape(bytes, from: i) {
@@ -60,6 +67,22 @@ public enum KeyDecoder {
             }
         }
         return keys
+    }
+
+    /// Consume an OSC sequence `ESC ] ... (BEL | ESC \)` starting at `start`
+    /// (where bytes[start] == ESC, bytes[start+1] == ']'). Returns the index
+    /// just past the terminator, or past the end if the terminator is not in
+    /// this chunk.
+    private static func skipOSC(_ bytes: [UInt8], from start: Int) -> Int {
+        var j = start + 2
+        while j < bytes.count {
+            if bytes[j] == 0x07 { return j + 1 }                              // BEL
+            if bytes[j] == 0x1b, j + 1 < bytes.count, bytes[j + 1] == 0x5c {  // ST: ESC \
+                return j + 2
+            }
+            j += 1
+        }
+        return j
     }
 
     private static func decodeControlOrAscii(_ b: UInt8) -> Key? {
@@ -149,11 +172,15 @@ public enum KeyDecoder {
 public struct KeyReader {
     public init() {}
     /// Blocking read of the next batch of keys from `fd` (default stdin). Returns
-    /// an empty array on EOF.
-    public func read(fd: Int32 = 0) -> [Key] {
+    /// `nil` on EOF (the syscall read 0 bytes / errored) and a (possibly EMPTY)
+    /// array otherwise. An empty array means bytes WERE read but decoded to no
+    /// actionable key - a mouse click, a focus event, a terminal color report.
+    /// Callers MUST distinguish this from EOF: treating "decoded to no keys" as
+    /// EOF makes the TUI quit on a stray mouse/terminal event.
+    public func read(fd: Int32 = 0) -> [Key]? {
         var buf = [UInt8](repeating: 0, count: 64)
         let n = Foundation.read(fd, &buf, buf.count)
-        guard n > 0 else { return [] }
+        guard n > 0 else { return nil }
         return KeyDecoder.decode(Array(buf[0..<n]))
     }
 }

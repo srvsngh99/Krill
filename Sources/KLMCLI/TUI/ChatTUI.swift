@@ -120,8 +120,8 @@ final class ChatTUI {
         while !shouldQuit {
             if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize(); render() }
             guard raw.waitForInput(timeoutMs: 250) else { continue }
-            let keys = reader.read()
-            if keys.isEmpty { break }   // EOF
+            guard let keys = reader.read() else { break }   // nil == EOF
+            // An empty (non-nil) batch is a stray mouse/terminal event - ignore it.
             var submit: String?
             for key in keys {
                 if let text = handleKey(key) { submit = text }
@@ -491,7 +491,7 @@ final class ChatTUI {
             }
             // Watch for Ctrl-C (raw mode delivers it as a byte) and resize.
             if raw.waitForInput(timeoutMs: 0) {
-                let keys = reader.read()
+                let keys = reader.read() ?? []
                 if keys.contains(.ctrlC) { cancelled = true; break }
                 if keys.contains(.pageUp) { scrollOffset += paneHeight() - 1; render() }
                 if keys.contains(.pageDown) { scrollOffset = max(0, scrollOffset - (paneHeight() - 1)); render() }
@@ -572,7 +572,7 @@ final class ChatTUI {
         var done = false
         while !done {
             if raw.waitForInput(timeoutMs: 100) {
-                for k in reader.read() {
+                for k in reader.read() ?? [] {
                     if k == .char(" ") { idle = 0 }                 // still held (auto-repeat)
                     else if k == .enter { done = true }             // explicit send
                     else if k == .escape || k == .ctrlC { cancelled = true; done = true }
@@ -639,15 +639,22 @@ final class ChatTUI {
             messages: [["role": "user", "content": instruction]],
             params: params, maxTokens: maxTokens,
             imageData: nil, audioData: wav, imagesData: [])
-        let filter = StreamingReasoningFilter()
-        var transcript = ""
+        var raw = ""
         for await event in gen.stream {
             if event.isEnd { break }
-            transcript += filter.consume(event.text)
+            raw += event.text
         }
-        transcript += filter.finish()
         lastStatus = ""
-        let clean = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The audio model can answer in its reasoning channel (a bare
+        // `<|channel>thought` with no close marker when it produces nothing
+        // else). Run the FULL transcript through the authoritative stripper -
+        // it removes complete and unclosed Gemma channels and generic think
+        // tags - then drop any residual special-token markers, so the composer
+        // never shows raw control text.
+        let (visible, _) = ReasoningParser.strip(raw)
+        let clean = visible
+            .replacingOccurrences(of: #"<\|?[a-zA-Z_]+\|?>"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if clean.isEmpty { note("Didn't catch that - try again."); return }
         setInput(clean)   // populate the composer; user reviews and presses Enter
     }
@@ -662,7 +669,7 @@ final class ChatTUI {
         note("Recording... press Enter to stop."); render()
         while true {
             guard raw.waitForInput(timeoutMs: 100) else { continue }
-            if reader.read().contains(where: { $0 == .enter }) { break }
+            if (reader.read() ?? []).contains(where: { $0 == .enter }) { break }
         }
         do {
             let wav = try rec.stop()
