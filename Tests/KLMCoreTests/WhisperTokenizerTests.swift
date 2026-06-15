@@ -8,12 +8,12 @@ import XCTest
 final class WhisperTokenizerTests: XCTestCase {
 
     /// Build a tokenizer from a temporary vocab file.
-    private func makeTokenizer(_ vocab: [String: Int]) throws -> WhisperTokenizer {
+    private func makeTokenizer(_ vocab: [String: Int], multilingual: Bool = false) throws -> WhisperTokenizer {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("whisper-vocab-\(UUID().uuidString).json")
         try JSONEncoder().encode(vocab).write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
-        return try WhisperTokenizer(vocabURL: url)
+        return try WhisperTokenizer(vocabURL: url, multilingual: multilingual)
     }
 
     func testDecodesByteLevelTokens() throws {
@@ -27,9 +27,24 @@ final class WhisperTokenizerTests: XCTestCase {
     func testStopsAtEndOfTextAndDropsSpecials() throws {
         let tok = try makeTokenizer(["the": 1169, "Ġfox": 21831])
         // endOfText (50256) halts; anything after is ignored.
-        XCTAssertEqual(tok.decode([1169, WhisperTokenizer.endOfText, 21831]), "the")
+        XCTAssertEqual(tok.decode([1169, tok.specials.endOfText, 21831]), "the")
         // A special/timestamp id with no text mapping is skipped, not crashed.
-        XCTAssertEqual(tok.decode([1169, WhisperTokenizer.transcribe, 21831]), "the fox")
+        XCTAssertEqual(tok.decode([1169, tok.specials.transcribe, 21831]), "the fox")
+    }
+
+    func testSpecialLayoutsDifferByModelType() throws {
+        let en = try makeTokenizer(["the": 1169])
+        XCTAssertEqual(en.specials.endOfText, 50256)
+        XCTAssertEqual(en.specials.startOfTranscript, 50257)
+        XCTAssertNil(en.specials.languageBase)
+        XCTAssertEqual(en.promptTokens(), [50257, 50358, 50362])
+
+        let ml = try makeTokenizer(["the": 1169], multilingual: true)
+        XCTAssertEqual(ml.specials.endOfText, 50257)
+        XCTAssertEqual(ml.specials.startOfTranscript, 50258)
+        XCTAssertEqual(ml.specials.languageBase, 50259)
+        // multilingual prompt inserts the detected language token.
+        XCTAssertEqual(ml.promptTokens(language: 50259), [50258, 50259, 50359, 50363])
     }
 
     func testReassemblesMultiByteUTF8() throws {
