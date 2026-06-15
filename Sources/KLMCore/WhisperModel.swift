@@ -77,25 +77,38 @@ final class WhisperAttention: Module {
         _out = ModuleInfo(wrappedValue: Linear(nState, nState, bias: true), key: "out")
     }
 
-    /// `x`: query source `[B, Lq, D]`. `xa`: key/value source (cross-attn);
-    /// nil for self-attn. `mask`: additive `[Lq, Lk]` or nil.
-    /// `kvCache`: optional precomputed `(k, v)` (cross-attn reuse).
-    func callAsFunction(_ x: MLXArray, xa: MLXArray? = nil,
-                        mask: MLXArray? = nil,
-                        kvCache: (MLXArray, MLXArray)? = nil)
+    /// Self-attention. Computes `k`/`v` from `x`; when `cache` is supplied
+    /// (decode), the new keys/values are appended to it. `mask` is an additive
+    /// causal mask `[Lq, Lk]` (nil for the unmasked encoder or single-step
+    /// decode). Returns the output and the updated `(k, v)` cache.
+    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil,
+                        cache: (MLXArray, MLXArray)? = nil)
+        -> (MLXArray, (MLXArray, MLXArray)) {
+        let q = query(x)
+        var k = key(x)
+        var v = value(x)
+        if let (pk, pv) = cache {
+            k = MLX.concatenated([pk, k], axis: 1)
+            v = MLX.concatenated([pv, v], axis: 1)
+        }
+        return (out(qkv(q, k, v, mask: mask)), (k, v))
+    }
+
+    /// Cross-attention to encoder features `xa`. The keys/values depend only on
+    /// the (fixed) audio features, so they are computed once and reused via
+    /// `cache` across decode steps.
+    func cross(_ x: MLXArray, xa: MLXArray, cache: (MLXArray, MLXArray)? = nil)
         -> (MLXArray, (MLXArray, MLXArray)) {
         let q = query(x)
         let k: MLXArray
         let v: MLXArray
-        if let kv = kvCache {
-            (k, v) = kv
+        if let (ck, cv) = cache {
+            (k, v) = (ck, cv)
         } else {
-            let src = xa ?? x
-            k = key(src)
-            v = value(src)
+            k = key(xa)
+            v = value(xa)
         }
-        let wv = qkv(q, k, v, mask: mask)
-        return (out(wv), (k, v))
+        return (out(qkv(q, k, v, mask: nil)), (k, v))
     }
 
     private func qkv(_ q: MLXArray, _ k: MLXArray, _ v: MLXArray, mask: MLXArray?) -> MLXArray {
@@ -149,11 +162,11 @@ final class WhisperResidualBlock: Module {
                         crossKV: (MLXArray, MLXArray)? = nil)
         -> (MLXArray, (MLXArray, MLXArray), (MLXArray, MLXArray)?) {
         var h = x
-        let (sa, newSelfKV) = attn(attnLn(h), mask: mask, kvCache: selfKV)
+        let (sa, newSelfKV) = attn(attnLn(h), mask: mask, cache: selfKV)
         h = h + sa
         var newCrossKV: (MLXArray, MLXArray)? = nil
-        if let ca = crossAttn, let caLn = crossAttnLn {
-            let (cross, ck) = ca(caLn(h), xa: xa, kvCache: crossKV)
+        if let ca = crossAttn, let caLn = crossAttnLn, let audio = xa {
+            let (cross, ck) = ca.cross(caLn(h), xa: audio, cache: crossKV)
             h = h + cross
             newCrossKV = ck
         }
@@ -208,4 +221,93 @@ public final class WhisperEncoder: Module {
         }
         return lnPost(x)
     }
+}
+
+/// Per-block decoder KV cache: self-attention keys/values grow with each step;
+/// cross-attention keys/values are computed once from the audio features and
+/// reused.
+public final class WhisperKVCache {
+    public var selfKV: [(MLXArray, MLXArray)?]
+    public var crossKV: [(MLXArray, MLXArray)?]
+    /// Number of tokens already in the self-attention cache (position offset).
+    public var offset = 0
+    public init(layers: Int) {
+        selfKV = Array(repeating: nil, count: layers)
+        crossKV = Array(repeating: nil, count: layers)
+    }
+}
+
+/// Whisper text decoder. Loaded under checkpoint key `decoder`.
+public final class WhisperDecoder: Module {
+    @ModuleInfo(key: "token_embedding") var tokenEmbedding: Embedding
+    @ParameterInfo(key: "positional_embedding") var positionalEmbedding: MLXArray
+    @ModuleInfo(key: "blocks") var blocks: [WhisperResidualBlock]
+    @ModuleInfo(key: "ln") var ln: LayerNorm
+    let config: WhisperConfig
+
+    public init(_ config: WhisperConfig) {
+        self.config = config
+        _tokenEmbedding = ModuleInfo(
+            wrappedValue: Embedding(embeddingCount: config.nVocab, dimensions: config.nTextState),
+            key: "token_embedding")
+        _positionalEmbedding = ParameterInfo(
+            wrappedValue: MLXArray.zeros([config.nTextCtx, config.nTextState]),
+            key: "positional_embedding")
+        _blocks = ModuleInfo(
+            wrappedValue: (0 ..< config.nTextLayer).map { _ in
+                WhisperResidualBlock(config.nTextState, config.nTextHead, crossAttention: true)
+            }, key: "blocks")
+        _ln = ModuleInfo(wrappedValue: LayerNorm(dimensions: config.nTextState), key: "ln")
+    }
+
+    /// Additive causal mask `[L, L]` (0 on/below the diagonal, -inf above).
+    private func causalMask(_ L: Int, _ dtype: DType) -> MLXArray {
+        let neg = Float(-1e9)
+        var data = [Float](repeating: 0, count: L * L)
+        for i in 0 ..< L {
+            for j in (i + 1) ..< L { data[i * L + j] = neg }
+        }
+        return MLXArray(data, [L, L]).asType(dtype)
+    }
+
+    /// `tokens`: `[B, L]` token ids. `audioFeatures`: encoder output
+    /// `[B, nAudioCtx, D]`. `cache` advances in place across calls (decode).
+    /// Returns vocabulary logits `[B, L, nVocab]`.
+    public func callAsFunction(_ tokens: MLXArray, audioFeatures: MLXArray,
+                               cache: WhisperKVCache) -> MLXArray {
+        let L = tokens.dim(1)
+        let offset = cache.offset
+        var x = tokenEmbedding(tokens)
+        x = x + positionalEmbedding[offset ..< (offset + L)].asType(x.dtype)
+
+        let mask: MLXArray? = L > 1 ? causalMask(L, x.dtype) : nil
+        for i in 0 ..< blocks.count {
+            let (h, newSelf, newCross) = blocks[i](
+                x, xa: audioFeatures, mask: mask,
+                selfKV: cache.selfKV[i], crossKV: cache.crossKV[i])
+            x = h
+            cache.selfKV[i] = newSelf
+            cache.crossKV[i] = newCross
+        }
+        cache.offset += L
+        x = ln(x)
+        return tokenEmbedding.asLinear(x)        // tied output projection
+    }
+}
+
+/// Native Whisper model: audio encoder + text decoder. Loaded from a converted
+/// KrillLM model dir (`tools/convert_whisper.py`) with top-level `encoder.*`
+/// and `decoder.*` keys.
+public final class WhisperModel: Module {
+    @ModuleInfo(key: "encoder") var encoder: WhisperEncoder
+    @ModuleInfo(key: "decoder") var decoder: WhisperDecoder
+    public let config: WhisperConfig
+
+    public init(_ config: WhisperConfig) {
+        self.config = config
+        _encoder = ModuleInfo(wrappedValue: WhisperEncoder(config), key: "encoder")
+        _decoder = ModuleInfo(wrappedValue: WhisperDecoder(config), key: "decoder")
+    }
+
+    public func newCache() -> WhisperKVCache { WhisperKVCache(layers: config.nTextLayer) }
 }
