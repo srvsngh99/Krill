@@ -42,12 +42,21 @@ final class ChatTUI {
     private var picker: ModelPicker?          // active modal model picker, if any
     private var pendingModelLoad: String?     // model the picker chose; loaded by the run loop
     private var pendingVoiceCapture = false   // Space-to-talk armed; run loop records
-    // What hold-Space does with the recorded clip. `.send` (default) sends it as
-    // an audio turn the model answers (works with Gemma 4 audio); `.dictate`
-    // best-effort transcribes it into the composer (the model may answer rather
-    // than transcribe, so it is opt-in). Toggle with /voice.
-    private enum VoiceMode { case send, dictate }
-    private var voiceMode: VoiceMode = .send
+    // What hold-Space does with the recorded clip. `.dictate` (default)
+    // transcribes it into the composer for review - on-device via Apple Speech
+    // when available, else the multimodal model's best effort. `.send` sends it
+    // as an audio turn the model answers. Toggle with /voice.
+    private enum VoiceMode { case dictate, send }
+    private var voiceMode: VoiceMode = .dictate
+    // Which speech-to-text engine dictation uses. `.apple` (default) is Apple's
+    // on-device recognizer (no download). `.whisper` is KrillLM's native MLX
+    // Whisper runtime (best accuracy; downloads an English model on first use).
+    private enum VoiceEngine { case apple, whisper }
+    private var voiceEngine: VoiceEngine = .apple
+    private let speech = SpeechRecognizer()
+    // Lazily loaded native Whisper runtime + its SKU (English dictation).
+    private var whisper: WhisperRuntime?
+    private var whisperSKU = WhisperModelManager.defaultSKU
     private var inputHistory: [String] = []
     private var historyIndex = 0
     private var scrollOffset = 0     // lines scrolled up from bottom
@@ -450,15 +459,24 @@ final class ChatTUI {
             else if attach(path: arg) { note(attachSummary()) }
         case "/mic": await recordMic()
         case "/voice":
-            switch arg.lowercased() {
-            case "send": voiceMode = .send
-            case "dictate": voiceMode = .dictate
-            case "": voiceMode = (voiceMode == .send) ? .dictate : .send
-            default: note("Usage: /voice send|dictate"); return
+            let parts = arg.lowercased().split(separator: " ").map(String.init)
+            switch parts.first ?? "" {
+            case "send": voiceMode = .send; note(voiceModeNote())
+            case "dictate": voiceMode = .dictate; note(voiceModeNote())
+            case "engine":
+                switch parts.count > 1 ? parts[1] : "" {
+                case "apple": voiceEngine = .apple
+                    note("Voice engine: Apple on-device speech-to-text (no download).")
+                case "whisper": voiceEngine = .whisper
+                    let mb = WhisperModelManager.sku(whisperSKU)?.approxMB ?? 290
+                    let installed = WhisperModelManager.isInstalled(whisperSKU)
+                    note("Voice engine: native MLX Whisper (\(whisperSKU), English). "
+                        + (installed ? "Model installed." : "Downloads ~\(mb)MB on first dictation."))
+                default: view.append(Msg(role: .pre, text: voiceEngineInfo()))
+                }
+            case "": voiceMode = (voiceMode == .send) ? .dictate : .send; note(voiceModeNote())
+            default: note("Usage: /voice send|dictate  |  /voice engine apple|whisper")
             }
-            note(voiceMode == .send
-                 ? "Voice: send as audio - the model answers your speech."
-                 : "Voice: dictate to the composer (best-effort; this model may answer instead of transcribe).")
         default:
             if let custom = customCommands.command(named: cmd) {
                 await generate(prompt: custom.expand(arguments: arg))
@@ -469,6 +487,27 @@ final class ChatTUI {
     }
 
     private func note(_ s: String) { view.append(Msg(role: .note, text: s)) }
+
+    private func voiceModeNote() -> String {
+        if voiceMode == .send { return "Voice: send as audio - the model answers your speech." }
+        let engine = voiceEngine == .apple && SpeechRecognizer.isAvailable
+            ? "on-device speech-to-text" : "best-effort (no on-device engine here)"
+        return "Voice: dictate to the composer (\(engine)). /voice engine to choose."
+    }
+
+    /// A small preformatted card showing the dictation engine choice and the
+    /// tradeoffs, so `/voice engine` lets the user pick with eyes open.
+    private func voiceEngineInfo() -> String {
+        func mark(_ e: VoiceEngine) -> String { voiceEngine == e ? ">" : " " }
+        let mb = WhisperModelManager.sku(whisperSKU)?.approxMB ?? 290
+        let have = WhisperModelManager.isInstalled(whisperSKU) ? " (installed)" : ""
+        return """
+        Dictation engine            /voice engine apple | whisper
+        \(mark(.apple)) apple      Apple on-device speech. No download, instant, macOS-only.
+        \(mark(.whisper)) whisper    Native MLX Whisper (\(whisperSKU)). Higher accuracy, fully
+                     local; downloads ~\(mb)MB on first use\(have). English.
+        """
+    }
 
     // MARK: - Generation
 
@@ -665,6 +704,30 @@ final class ChatTUI {
     private func transcribeVoice(_ wav: Data) async {
         lastStatus = "Transcribing..."
         render()
+        // Native MLX Whisper, when selected: highest accuracy, fully local.
+        if voiceEngine == .whisper {
+            if let text = await transcribeWithWhisper(wav) {
+                lastStatus = ""
+                let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if clean.isEmpty { note("Didn't catch that - try again."); return }
+                setInput(clean)
+                return
+            }
+            // Whisper unavailable (declined / download or load failed): fall
+            // through to the on-device / model paths so dictation still works.
+        }
+        // Prefer Apple's on-device speech-to-text: accurate, fully local, no
+        // download. Falls through to the multimodal model only when the Speech
+        // framework is unavailable or yields nothing.
+        if SpeechRecognizer.isAvailable, await SpeechRecognizer.requestAuthorization() {
+            if let text = await speech.transcribe(wav: wav) {
+                lastStatus = ""
+                let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if clean.isEmpty { note("Didn't catch that - try again."); return }
+                setInput(clean)
+                return
+            }
+        }
         // Force verbatim transcription. Gemma 4's audio path will otherwise
         // ANSWER the speech (its default behaviour) rather than transcribe it;
         // a firm "you are a transcription tool, do not answer" framing biases it
@@ -697,6 +760,65 @@ final class ChatTUI {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if clean.isEmpty { note("Didn't catch that - try again."); return }
         setInput(clean)   // populate the composer; user reviews and presses Enter
+    }
+
+    /// Transcribe with the native MLX Whisper runtime. On first use this asks
+    /// consent and downloads the model; returns nil (so the caller falls back)
+    /// if the user declines or anything fails.
+    private func transcribeWithWhisper(_ wav: Data) async -> String? {
+        if !WhisperModelManager.isInstalled(whisperSKU) {
+            let mb = WhisperModelManager.sku(whisperSKU)?.approxMB ?? 290
+            guard confirm("Whisper needs the \(whisperSKU) model (~\(mb)MB). Download now?") else {
+                note("Whisper download declined - using on-device dictation.")
+                return nil
+            }
+            lastStatus = "Downloading Whisper \(whisperSKU) (~\(mb)MB)..."
+            render()
+            do {
+                try await WhisperModelManager.download(whisperSKU)
+            } catch {
+                lastStatus = ""
+                note("Whisper download failed: \(error)")
+                return nil
+            }
+        }
+        if whisper == nil {
+            lastStatus = "Loading Whisper..."
+            render()
+            do {
+                whisper = try WhisperRuntime(modelDir: WhisperModelManager.modelDir(whisperSKU))
+            } catch {
+                lastStatus = ""
+                note("Whisper load failed: \(error)")
+                return nil
+            }
+        }
+        do {
+            let waveform = try AudioPreprocessor.monoWaveform(fromAudio: wav)
+            lastStatus = "Transcribing (Whisper)..."
+            render()
+            return whisper?.transcribe(waveform: waveform)
+        } catch {
+            lastStatus = ""
+            note("Whisper transcription failed: \(error)")
+            return nil
+        }
+    }
+
+    /// Blocking y/N confirmation in the full-screen TUI. Enter/Esc/n = no.
+    private func confirm(_ question: String) -> Bool {
+        note("\(question) [y/N]")
+        render()
+        while true {
+            guard raw.waitForInput(timeoutMs: 200) else { continue }
+            for k in reader.read() ?? [] {
+                switch k {
+                case .char("y"), .char("Y"): return true
+                case .char("n"), .char("N"), .enter, .escape, .ctrlC: return false
+                default: continue
+                }
+            }
+        }
     }
 
     private func recordMic() async {

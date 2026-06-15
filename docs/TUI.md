@@ -57,6 +57,7 @@ Tab to fill it and add arguments. `/help` lists everything.
 | `/drop` | Drop all pending attachments |
 | `/mic` | Record from the microphone (press Enter to stop) |
 | `/voice send\|dictate` | Switch what hold-Space does (see Voice) |
+| `/voice engine apple\|whisper` | Choose the dictation engine (see Voice) |
 | `/quit` | Exit (`/exit`, `/q` too) |
 
 ## Custom slash commands
@@ -107,13 +108,26 @@ On an audio-capable Gemma 4 model, hold **Space** on an empty composer to talk
 (push-to-talk); release to finish. What happens with the clip depends on the
 mode, toggled with `/voice`:
 
-- **`/voice send`** (default) - the clip is sent as an audio turn and the model
-  answers your spoken input (shown as a `[voice message]` turn). This is what
-  Gemma 4's audio path does well.
-- **`/voice dictate`** - best-effort transcription into the composer for you to
-  review and send. Note: Gemma 4's audio model tends to *answer* speech rather
-  than transcribe it, so dictation is unreliable until a dedicated speech-to-text
-  model is wired in. Use `send` for "talk to it".
+- **`/voice dictate`** (default) - transcribes your speech into the composer for
+  you to review and send. Uses **Apple's on-device speech-to-text** (fully local,
+  no download) when available; otherwise falls back to the multimodal model's
+  best effort (which tends to *answer* rather than transcribe).
+- **`/voice send`** - the clip is sent as an audio turn and the model answers
+  your spoken input (shown as a `[voice message]` turn). Use this to "talk to"
+  an audio-capable model rather than dictate.
+
+### Dictation engine
+
+`/voice engine` (no argument) prints a card showing the current choice;
+`/voice engine apple|whisper` switches it:
+
+- **`apple`** (default) - Apple's on-device speech-to-text. No download,
+  instant, fully local, macOS-only.
+- **`whisper`** - KrillLM's own native MLX Whisper runtime (English). Higher
+  accuracy and fully local. On the first dictation it asks consent and
+  downloads an English model (default `base.en`, around 290 MB) into
+  `~/.krillm/models/whisper-<sku>`; decline and dictation falls back to the
+  Apple / model path. No Python or third-party ASR dependency.
 
 `/mic` records a clip and attaches it (press Enter to stop) for an explicit send.
 
