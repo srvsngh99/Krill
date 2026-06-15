@@ -8,11 +8,16 @@ into `<out>/model.safetensors` with the OpenAI key layout preserved
 `WhisperEncoder`/`WhisperDecoder` module keys mirror that layout, so the
 result loads with no remapping.
 
+It also writes `vocab.json` (the GPT-2 byte-BPE id<->token map) so the runtime
+can detokenize without any tokenizer download; the byte-level decoder is
+reimplemented in Swift (`WhisperTokenizer`).
+
 Usage:
-    convert_whisper.py <src-npz-or-dir> <out-dir>
+    convert_whisper.py <src-npz-or-dir> <out-dir> [hf-tokenizer-id]
 
 `<src>` may be a `weights.npz`, a directory containing one (plus config.json),
-or an HF model id snapshot dir.
+or an HF model id snapshot dir. `hf-tokenizer-id` defaults to
+`openai/whisper-small.en`.
 """
 import sys, os, json, glob
 import numpy as np
@@ -30,9 +35,10 @@ def find_npz(src):
 
 
 def main():
-    if len(sys.argv) != 3:
+    if len(sys.argv) not in (3, 4):
         raise SystemExit(__doc__)
     src, out = sys.argv[1], sys.argv[2]
+    tok_id = sys.argv[3] if len(sys.argv) == 4 else "openai/whisper-small.en"
     npz_path, cfg_path = find_npz(src)
     os.makedirs(out, exist_ok=True)
 
@@ -56,6 +62,17 @@ def main():
         with open(os.path.join(out, "config.json"), "w") as f:
             json.dump(cfg, f, indent=2)
         print(f"wrote config.json (model_type={cfg.get('model_type')})")
+
+    # GPT-2 byte-BPE vocab (token string -> id) for the Swift detokenizer.
+    try:
+        from transformers import WhisperTokenizer
+        tok = WhisperTokenizer.from_pretrained(tok_id)
+        vocab = tok.get_vocab()
+        with open(os.path.join(out, "vocab.json"), "w") as f:
+            json.dump(vocab, f, ensure_ascii=False)
+        print(f"wrote vocab.json ({len(vocab)} tokens from {tok_id})")
+    except Exception as e:
+        print(f"WARNING: could not write vocab.json ({e}); detok will need it")
 
 
 if __name__ == "__main__":
