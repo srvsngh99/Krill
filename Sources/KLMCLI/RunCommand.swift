@@ -42,6 +42,9 @@ struct RunCommand: AsyncParsableCommand {
     @Flag(name: .long, help: "Use the classic line REPL instead of the full-screen TUI")
     var classic = false
 
+    @Option(name: .long, help: "TUI color theme: light, dark, or auto (default; detects via COLORFGBG / OSC 11). Also settable with KRILL_TUI_THEME.")
+    var theme: String?
+
     @Option(name: .long, help: "Tools JSON file for function calling (not yet supported)")
     var tools: String?
 
@@ -171,7 +174,7 @@ struct RunCommand: AsyncParsableCommand {
             let tui = ChatTUI(
                 engine: engine, modelName: modelPath, system: system,
                 params: params, maxTokens: maxTokens, registry: registry,
-                initialImage: imageData, initialAudio: audioData)
+                initialImage: imageData, initialAudio: audioData, theme: theme)
             await tui.run()
         } else {
             // Classic line REPL (forced with --classic, or auto when stdout is

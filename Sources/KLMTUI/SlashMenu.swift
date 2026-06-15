@@ -8,6 +8,10 @@ public struct SlashMenu {
     public struct Item: Equatable, Sendable {
         public let name: String
         public let summary: String
+        public init(name: String, summary: String) {
+            self.name = name
+            self.summary = summary
+        }
     }
 
     /// Canonical command list shown in the popup (and accepted by the TUI).
@@ -16,16 +20,29 @@ public struct SlashMenu {
         Item(name: "/image", summary: "Attach an image to your next message"),
         Item(name: "/audio", summary: "Attach an audio clip"),
         Item(name: "/mic", summary: "Record from the microphone"),
+        Item(name: "/voice", summary: "Voice input mode: send audio or dictate"),
         Item(name: "/attach", summary: "List pending attachments"),
         Item(name: "/remove", summary: "Drop attachment number n"),
-        Item(name: "/clear", summary: "Drop all pending attachments"),
+        Item(name: "/drop", summary: "Drop all pending attachments"),
         Item(name: "/system", summary: "Set the system prompt"),
         Item(name: "/model", summary: "Switch to another model"),
         Item(name: "/history", summary: "Show the conversation"),
+        Item(name: "/compact", summary: "Summarize and shrink the conversation"),
         Item(name: "/save", summary: "Save the transcript"),
-        Item(name: "/reset", summary: "Clear the conversation"),
+        Item(name: "/clear", summary: "Clear the conversation"),
         Item(name: "/quit", summary: "Exit"),
     ]
+
+    /// Extra commands registered at runtime (user-authored custom commands),
+    /// merged with `all` for matching. Built-ins win on a name clash.
+    public var extra: [Item] = []
+
+    /// All candidate commands: the built-ins followed by any registered extras
+    /// that do not shadow a built-in.
+    public var candidates: [Item] {
+        let builtinNames = Set(Self.all.map { $0.name })
+        return Self.all + extra.filter { !builtinNames.contains($0.name) }
+    }
 
     public private(set) var matches: [Item] = []
     public private(set) var selected = 0
@@ -45,7 +62,7 @@ public struct SlashMenu {
         }
         let q = input.lowercased()
         let previous = current?.name
-        matches = Self.all.filter { $0.name.hasPrefix(q) }
+        matches = candidates.filter { $0.name.hasPrefix(q) }
         // Keep the highlight on the same item across keystrokes when possible.
         if let previous, let idx = matches.firstIndex(where: { $0.name == previous }) {
             selected = idx

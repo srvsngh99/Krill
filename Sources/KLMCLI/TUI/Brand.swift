@@ -8,6 +8,8 @@ import KLMTUI
 enum Brand {
     static let product = "KrillLM"
     static let lab = "Sourav AI Labs"
+    static let labMark = "> SAI_"            // the SAI lockup device (matches the brand lockup)
+    static let labTagline = "INDEPENDENT AI LAB"
     static let tagline = "A fast, lean LLM runtime, built for Mac."
     static let site = "souravailabs.ai"
     static let chips = ["text \u{00B7} vision \u{00B7} audio", "agentic", "macOS-native"]
@@ -23,12 +25,15 @@ enum Brand {
     /// terminals so the line never overflows onto the rule row: drop the model
     /// (still shown in the footer) when there is no room, then clip the wordmark.
     static func header(width: Int, model: String) -> String {
-        let leftPlain = "  \(wordmark)  \(lab)"
+        // Product-only masthead: the `>_ KrillLM` wordmark on the left, the loaded
+        // model dim on the right. The full Sourav AI Labs lockup lives on the
+        // launch splash, not the persistent bar.
+        let leftPlain = "  \(wordmark)"
         let rightPlain = "\(model)  "
-        let styledLeft = "  " + Ansi.bold(wordmark) + "  " + Ansi.dim(lab)
+        let styledLeft = "  " + Ansi.bold(wordmark)
         if width >= leftPlain.count + rightPlain.count + 1 {
             let pad = width - leftPlain.count - rightPlain.count
-            return styledLeft + String(repeating: " ", count: pad) + Ansi.dim(model) + "  "
+            return styledLeft + String(repeating: " ", count: pad) + Ansi.chrome(model) + "  "
         }
         if width >= leftPlain.count { return styledLeft }
         return Ansi.bold(String(leftPlain.prefix(max(0, width))))
@@ -36,7 +41,7 @@ enum Brand {
 
     /// A dim full-width rule drawn under the masthead.
     static func headerRule(width: Int) -> String {
-        Ansi.dim(String(repeating: "\u{2500}", count: max(0, width)))
+        Ansi.chrome(String(repeating: "\u{2500}", count: max(0, width)))
     }
 
     /// A dim footer line: `left` status on the left, `right` session info on the
@@ -46,14 +51,14 @@ enum Brand {
         let r = "\(right)  "
         let pad = max(1, width - l.count - r.count)
         let line = l + String(repeating: " ", count: pad) + r
-        return Ansi.dim(clip(line, width: width))
+        return Ansi.chrome(clip(line, width: width))
     }
 
     // MARK: - Launch splash
 
-    /// The KrillLM wordmark as a dense ASCII block banner (figlet "colossal",
-    /// pure ASCII so it stays inside the house ASCII rule). The hero of the
-    /// splash, echoing the big wordmark on the social-preview brand asset.
+    /// The KrillLM wordmark as a scaled-up line-drawing ASCII banner (figlet
+    /// "big", pure ASCII so it stays inside the house ASCII rule). The hero of
+    /// the splash, echoing the wordmark on the social-preview brand asset.
     static let banner: [String] = Banner.krillm
 
     /// Centered launch splash in the brand identity: the block wordmark (or a
@@ -65,13 +70,23 @@ enum Brand {
         func center(_ s: String, _ vis: Int) -> String {
             String(repeating: " ", count: Chrome.centerPad(visibleWidth: vis, totalWidth: width)) + s
         }
-        // Fall back to the plain wordmark when the block banner would overflow.
+        // Hero = the krill mascot beside the block wordmark, centered as one
+        // unit. Falls back to the plain `>_ KrillLM` line on terminals too
+        // narrow to fit the pair.
+        let mascot = Banner.krillMascot
+        let mascotWidth = Banner.width(mascot)
         let bannerWidth = Banner.width(banner)
-        let heroRows: [String] = width >= bannerWidth
-            ? banner.map { row in
-                String(repeating: " ", count: Chrome.centerPad(visibleWidth: bannerWidth, totalWidth: width)) + Ansi.bold(row)
+        let gap = "   "
+        let combinedWidth = mascotWidth + gap.count + bannerWidth
+        let heroRows: [String]
+        if width >= combinedWidth {
+            let pad = String(repeating: " ", count: Chrome.centerPad(visibleWidth: combinedWidth, totalWidth: width))
+            heroRows = zip(mascot, banner).map { m, b in
+                pad + Ansi.bold(m.padding(toLength: mascotWidth, withPad: " ", startingAt: 0)) + gap + Ansi.bold(b)
             }
-            : [center(Ansi.bold(wordmark), visibleCount(wordmark))]
+        } else {
+            heroRows = [center(Ansi.bold(wordmark), visibleCount(wordmark))]
+        }
 
         // Tagline split on "Mac" so it can be reverse-highlighted like the brand
         // asset, with the `>_` device prefixed (the line reads as a terminal
@@ -80,12 +95,17 @@ enum Brand {
         let head = parts.first ?? tagline
         let tail = parts.count > 1 ? parts[1] : ""
         let taglineVis = 3 + head.count + (parts.count > 1 ? 3 : 0) + tail.count
-        var styledTagline = Ansi.dim(">_ ") + Ansi.dim(head)
-        if parts.count > 1 { styledTagline += Ansi.inverse(Ansi.bold("Mac")) + Ansi.dim(tail) }
+        var styledTagline = Ansi.chrome(">_ ") + Ansi.chrome(head)
+        if parts.count > 1 { styledTagline += Ansi.inverse(Ansi.bold("Mac")) + Ansi.chrome(tail) }
         let taglineLine = center(styledTagline, taglineVis)
 
         let chipRow = chips.map { " \($0) " }.joined(separator: "  ")
-        let labLine = "a \(lab) project \u{00B7} \(site)"
+        // The Sourav AI Labs lockup, rendered like the brand mark: the `> SAI_`
+        // device bold beside the lab name, with the "INDEPENDENT AI LAB" line
+        // and site beneath.
+        let lockupPlain = "\(labMark)  \(lab)"
+        let styledLockup = Ansi.bold(labMark) + "  " + Ansi.chrome(lab)
+        let tagPlain = "\(labTagline)  \u{00B7}  \(site)"
 
         var out: [String] = [""]
         out.append(contentsOf: heroRows)
@@ -94,7 +114,8 @@ enum Brand {
         out.append("")
         out.append(center(Ansi.inverse(chipRow), visibleCount(chipRow)))
         out.append("")
-        out.append(center(Ansi.dim(labLine), visibleCount(labLine)))
+        out.append(center(styledLockup, lockupPlain.count))
+        out.append(center(Ansi.chrome(tagPlain), tagPlain.count))
         out.append("")
         return out
     }

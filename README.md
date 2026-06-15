@@ -289,12 +289,17 @@ Labs identity: a branded masthead, a scrollable conversation pane, a bottom
 input box, and a status footer. It is a multi-turn conversation that remembers
 context. Type `/` and a **slash-command autosuggest popup** appears; cycle it
 with Up/Down and run with Enter (or Tab to fill it and add arguments). Replies
-stream with light markdown styling; PgUp/PgDn scroll the pane, Ctrl-C cancels a
-reply, Ctrl-D quits. Resize-aware.
+stream with light markdown styling; PgUp/PgDn or the mouse wheel scroll the pane,
+Ctrl-C cancels a reply, Ctrl-D quits. Resize-aware.
 
-Run `krillm run <model> --classic` for the lighter libedit line REPL instead
-(history, in-line editing, Tab completion). KrillLM auto-uses the line REPL when
-output is not a TTY (piped/redirected), and disables color under `NO_COLOR`.
+Shades **adapt to a light or dark terminal** automatically (override with
+`--theme light|dark` or `KRILL_TUI_THEME`). Run `krillm run <model> --classic`
+for the lighter libedit line REPL instead (history, in-line editing, Tab
+completion). KrillLM auto-uses the line REPL when output is not a TTY
+(piped/redirected), and disables color under `NO_COLOR`.
+
+See **[docs/TUI.md](docs/TUI.md)** for the full reference (themes, every command,
+custom slash commands, voice).
 
 Attach images and audio without leaving the session, three ways:
 
@@ -305,20 +310,28 @@ Attach images and audio without leaving the session, three ways:
 ```
 
 Attachments apply to your **next** message, then clear. `/attach` lists them
-with index, dimensions, and size; `/remove <n>` drops one; `/clear` drops all.
+with index, dimensions, and size; `/remove <n>` drops one; `/drop` drops all.
 Images accumulate for multi-image models (mllama); single-image models use the
 first. `--image` / `--audio` passed on the command line pre-attach to the first
 turn.
 
-Session commands: `/system <text>` sets the system prompt, `/model <name>`
-switches model in place (keeping the conversation), `/history` prints the turns
-so far, `/save [file]` writes the transcript, `/reset` clears it, and `/help`
-lists everything.
+Session commands: `/system <text>` sets the system prompt, `/model [name]` opens
+the model picker or switches in place (keeping the conversation), `/history`
+prints the turns so far, `/compact` summarizes and shrinks the conversation to
+free context, `/save [file]` writes the transcript, `/clear` clears the chat, and
+`/help` lists everything. **Custom slash commands**: drop a prompt template at
+`~/.krillm/commands/<name>.md` (with `$ARGUMENTS` / `$1`..`$9` placeholders) and
+it becomes `/<name>` - see [docs/TUI.md](docs/TUI.md).
 
 ### Live microphone voice input
 
-In interactive chat with an audio-capable Gemma 4 model, `/mic` records from the
-default input device and attaches the clip (press Enter to stop):
+In interactive chat with an audio-capable Gemma 4 model, hold **Space** on an
+empty composer to talk (push-to-talk), or use `/mic` to record until Enter. By
+default the clip is sent as an audio turn the model answers; `/voice dictate`
+switches to best-effort transcription into the composer for review. (Gemma 4's
+audio model tends to *answer* speech rather than transcribe it, so dictation is a
+stopgap until a dedicated speech-to-text model is wired in.) `/mic` attaches a
+clip for an explicit send:
 
 ```text
 > /mic

@@ -54,21 +54,33 @@ public enum Chrome {
     }
 }
 
-/// ASCII-art wordmark banners for the splash. Pure ASCII (figlet "colossal"
-/// font) so they sit inside the house ASCII rule and render in any terminal.
+/// ASCII-art wordmark banners for the splash. Pure ASCII (figlet "big" font, the
+/// line-drawing `_ | / \` style) so they sit inside the house ASCII rule and
+/// render in any terminal.
 public enum Banner {
-    /// The "KrillLM" wordmark, a dense filled block banner. All rows are the
-    /// same width; ~49 columns, so callers should fall back to a plain wordmark
-    /// on terminals too narrow to fit it.
+    /// The "KrillLM" wordmark in the classic line-drawing style, scaled up for
+    /// presence. All rows are the same width; ~31 columns, so callers should
+    /// fall back to a plain wordmark on terminals too narrow to fit it.
     public static let krillm: [String] = [
-        "888    d8P        d8b888888888     888b     d888 ",
-        "888   d8P         Y8P888888888     8888b   d8888 ",
-        "888  d8P             888888888     88888b.d88888 ",
-        "888d88K    888d888888888888888     888Y88888P888 ",
-        "8888888b   888P\"  888888888888     888 Y888P 888 ",
-        "888  Y88b  888    888888888888     888  Y8P  888 ",
-        "888   Y88b 888    888888888888     888   \"   888 ",
-        "888    Y88b888    88888888888888888888       888 ",
+        " _  __     _ _ _ _      __  __ ",
+        "| |/ /    (_) | | |    |  \\/  |",
+        "| ' / _ __ _| | | |    | \\  / |",
+        "|  < | '__| | | | |    | |\\/| |",
+        "| . \\| |  | | | | |____| |  | |",
+        "|_|\\_\\_|  |_|_|_|______|_|  |_|",
+    ]
+
+    /// A small pixel-art "krill" mascot (block glyphs, written as `\u{}` escapes
+    /// so the source bytes stay ASCII). Faces right toward the wordmark it sits
+    /// beside, with an eye, antenna, and little swimmeret legs. All rows padded
+    /// to the same width for clean side-by-side alignment.
+    public static let krillMascot: [String] = [
+        "            \u{2597}\u{2584}",
+        "  \u{2584}\u{2584}\u{2584}\u{2584}\u{2584}\u{2584}\u{2584}  \u{2597}\u{259B} ",
+        " \u{259F}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2599}",
+        " \u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{25CF}\u{258C}",
+        " \u{259C}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{259B}",
+        "  \u{2598} \u{2598} \u{2598} \u{2598} \u{2598} \u{2598} ",
     ]
 
     /// The pixel width of a banner (its widest row).

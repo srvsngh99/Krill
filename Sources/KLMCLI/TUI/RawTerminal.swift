@@ -1,4 +1,5 @@
 import Foundation
+import KLMTUI
 
 // Saved terminal state for restoration from an atexit / fatal-signal context
 // (where only async-signal-safe calls and a sig_atomic_t-style global are
@@ -10,7 +11,7 @@ private nonisolated(unsafe) var krillmTermiosValid = false
 
 private func krillmRestoreTerminal() {
     guard krillmTermiosValid else { return }
-    let seq = "\u{1B}[?25h\u{1B}[?1049l"
+    let seq = "\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?25h\u{1B}[?1049l"
     _ = seq.withCString { write(STDOUT_FILENO, $0, strlen($0)) }
     tcsetattr(STDIN_FILENO, TCSAFLUSH, &krillmSavedTermios)
     krillmTermiosValid = false
@@ -55,13 +56,16 @@ final class RawTerminal {
         atexit(krillmRestoreTerminal)
         for sig in [SIGTERM, SIGHUP, SIGQUIT] { signal(sig, krillmFatalSignal) }
 
-        Output.write("\u{1B}[?1049h\u{1B}[?25l\u{1B}[2J")  // alt screen, hide cursor, clear
+        // Alt screen, hide cursor, enable SGR mouse reporting (for wheel scroll),
+        // clear. (Hold Option/Fn to select text while mouse reporting is on.)
+        Output.write("\u{1B}[?1049h\u{1B}[?25l\u{1B}[?1000h\u{1B}[?1006h\u{1B}[2J")
         entered = true
     }
 
     func leave() {
         guard entered else { return }
-        Output.write("\u{1B}[?25h\u{1B}[?1049l")  // show cursor, leave alt screen
+        // Disable mouse reporting, show cursor, leave alt screen.
+        Output.write("\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?25h\u{1B}[?1049l")
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &original)
         krillmTermiosValid = false
         entered = false
@@ -80,6 +84,32 @@ final class RawTerminal {
     func waitForInput(timeoutMs: Int32) -> Bool {
         var fds = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
         return poll(&fds, 1, timeoutMs) > 0 && (fds.revents & Int16(POLLIN)) != 0
+    }
+
+    /// Best-effort query of the terminal's background color via OSC 11. Returns
+    /// the perceived luminance (0 dark .. 1 light) if the terminal answers
+    /// within a short budget, else nil. Must run in raw mode (so the reply is
+    /// not echoed / line-buffered) and before the key loop starts. Any terminal
+    /// that does not answer simply times out and yields nil.
+    func queryBackgroundLuminance() -> Double? {
+        guard RawTerminal.isInteractive, entered else { return nil }
+        Output.write("\u{1B}]11;?\u{07}")
+        var bytes = [UInt8]()
+        var waitedMs = 0
+        let budgetMs = 120
+        while waitedMs < budgetMs, bytes.count < 64 {
+            if waitForInput(timeoutMs: 20) {
+                var b: UInt8 = 0
+                if read(STDIN_FILENO, &b, 1) == 1 {
+                    bytes.append(b)
+                    if b == 0x07 || b == 0x5C { break }   // BEL or ST backslash
+                }
+            } else {
+                waitedMs += 20
+            }
+        }
+        guard let reply = String(bytes: bytes, encoding: .utf8) else { return nil }
+        return Theme.luminance(fromOSC11: reply)
     }
 }
 
