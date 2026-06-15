@@ -1,4 +1,5 @@
 import Foundation
+import KLMTUI
 
 // MARK: - ANSI styling
 
@@ -35,6 +36,35 @@ enum Ansi {
         guard enabled else { return s }
         let reEnter = "\u{1B}[0m\u{1B}[90m"
         return "\u{1B}[90m" + s.replacingOccurrences(of: "\u{1B}[0m", with: reEnter) + "\u{1B}[0m"
+    }
+
+    // MARK: - Background-adaptive shade roles
+
+    /// The resolved palette for the three speaker/chrome shade roles. Defaults to
+    /// the always-readable "unknown" palette and is set once at TUI startup after
+    /// the terminal background is detected (see `Theme`). Single-threaded: written
+    /// before the first render, read only from the render task.
+    nonisolated(unsafe) static var theme: Palette = Theme.palette(for: .unknown)
+
+    private static func roleWrap(_ s: String, _ code: String?) -> String {
+        guard enabled, let code else { return s }
+        return "\u{1B}[\(code)m\(s)\u{1B}[0m"
+    }
+
+    /// User-turn shade (bright-white on dark, bold default on light/unknown).
+    static func user(_ s: String) -> String { roleWrap(s, theme.userSGR) }
+
+    /// Secondary chrome shade (masthead, footer, rules, borders, notes).
+    static func chrome(_ s: String) -> String { roleWrap(s, theme.chromeSGR) }
+
+    /// Model-turn shade: tint plain text with the model color while preserving
+    /// embedded spans (re-enter the color after every inner reset), like
+    /// `dimStyled` but driven by the palette. When the palette has no model color
+    /// (unknown background), the terminal's own foreground is used unchanged.
+    static func model(_ s: String) -> String {
+        guard enabled, let code = theme.modelSGR else { return s }
+        let reEnter = "\u{1B}[0m\u{1B}[\(code)m"
+        return "\u{1B}[\(code)m" + s.replacingOccurrences(of: "\u{1B}[0m", with: reEnter) + "\u{1B}[0m"
     }
 
     /// Clear the current line and return the cursor to column 0.

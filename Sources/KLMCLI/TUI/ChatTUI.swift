@@ -25,7 +25,7 @@ final class ChatTUI {
     private let registry: Registry
 
     // Conversation
-    private struct Msg { enum Role { case user, assistant, note }; let role: Role; var text: String }
+    private struct Msg { enum Role { case user, assistant, note, pre }; let role: Role; var text: String }
     private var view: [Msg] = []
     private var modelTurns: [(role: String, content: String)] = []
 
@@ -38,6 +38,16 @@ final class ChatTUI {
     private var input = ""
     private var cursor = 0           // index into `input`
     private var menu = SlashMenu()
+    private let customCommands: CustomCommandStore
+    private var picker: ModelPicker?          // active modal model picker, if any
+    private var pendingModelLoad: String?     // model the picker chose; loaded by the run loop
+    private var pendingVoiceCapture = false   // Space-to-talk armed; run loop records
+    // What hold-Space does with the recorded clip. `.send` (default) sends it as
+    // an audio turn the model answers (works with Gemma 4 audio); `.dictate`
+    // best-effort transcribes it into the composer (the model may answer rather
+    // than transcribe, so it is opt-in). Toggle with /voice.
+    private enum VoiceMode { case send, dictate }
+    private var voiceMode: VoiceMode = .send
     private var inputHistory: [String] = []
     private var historyIndex = 0
     private var scrollOffset = 0     // lines scrolled up from bottom
@@ -58,24 +68,52 @@ final class ChatTUI {
     private let raw = RawTerminal()
     private let reader = KeyReader()
 
+    private let themeOverride: String?
+
     init(engine: InferenceEngine, modelName: String, system: String?,
          params: SamplingParams, maxTokens: Int, registry: Registry,
-         initialImage: Data?, initialAudio: Data?) {
+         initialImage: Data?, initialAudio: Data?, theme: String? = nil) {
         self.engine = engine
         self.modelName = modelName
         self.system = system
         self.params = params
         self.maxTokens = maxTokens
         self.registry = registry
+        self.themeOverride = theme
         self.contextWindow = AliasMap.resolve(modelName)?.context ?? 0
+        self.customCommands = CustomCommandStore.load(from: Self.commandsDir)
+        menu.extra = customCommands.commands.map {
+            SlashMenu.Item(name: "/\($0.name)", summary: $0.description)
+        }
         if let initialImage { pendingImages.append(makeAtt(.image, initialImage, "image")) }
         if let initialAudio { pendingAudio = makeAtt(.audio, initialAudio, "audio") }
+    }
+
+    /// Where user-authored slash commands live: `~/.krillm/commands/<name>.md`.
+    private static var commandsDir: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".krillm").appendingPathComponent("commands")
+    }
+
+    /// Pick the shade palette for the terminal background so turns stay readable
+    /// on light AND dark terminals. Order: explicit `--theme` / `KRILL_TUI_THEME`
+    /// override, then `COLORFGBG`, then a best-effort OSC 11 query, else the
+    /// always-safe palette. Runs once, after raw mode is on (OSC 11 needs it).
+    private func resolveTheme() {
+        let env = ProcessInfo.processInfo.environment
+        let override = themeOverride ?? env["KRILL_TUI_THEME"]
+        var bg = Theme.resolve(override: override, colorFGBG: env["COLORFGBG"])
+        if bg == .unknown, override == nil || override?.lowercased() == "auto" {
+            if let lum = raw.queryBackgroundLuminance() { bg = Theme.background(forLuminance: lum) }
+        }
+        Ansi.theme = Theme.palette(for: bg)
     }
 
     // MARK: - Run loop
 
     func run() async {
         raw.enter()
+        resolveTheme()
         installWinch()
         updateSize()
         defer { raw.leave() }
@@ -88,8 +126,8 @@ final class ChatTUI {
         while !shouldQuit {
             if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize(); render() }
             guard raw.waitForInput(timeoutMs: 250) else { continue }
-            let keys = reader.read()
-            if keys.isEmpty { break }   // EOF
+            guard let keys = reader.read() else { break }   // nil == EOF
+            // An empty (non-nil) batch is a stray mouse/terminal event - ignore it.
             var submit: String?
             for key in keys {
                 if let text = handleKey(key) { submit = text }
@@ -97,6 +135,18 @@ final class ChatTUI {
             }
             render()
             if let text = submit, !shouldQuit { await processSubmit(text) }
+            // The picker chose a model: load (or download then load) it now.
+            if let name = pendingModelLoad, !shouldQuit {
+                pendingModelLoad = nil
+                await switchOrDownload(name)
+                render()
+            }
+            // Push-to-talk: record while Space is held, send on release.
+            if pendingVoiceCapture, !shouldQuit {
+                pendingVoiceCapture = false
+                await holdToTalk()
+                render()
+            }
         }
     }
 
@@ -104,6 +154,8 @@ final class ChatTUI {
 
     /// Mutate UI state for a key; return non-nil text to submit on Enter.
     private func handleKey(_ key: Key) -> String? {
+        // The model picker is modal: while open it owns the keyboard.
+        if picker != nil { handlePickerKey(key); return nil }
         switch key {
         case .ctrlD:
             if input.isEmpty { shouldQuit = true }
@@ -119,6 +171,8 @@ final class ChatTUI {
         case .ctrlE, .end: cursor = input.count; return nil
         case .pageUp: scrollOffset += max(1, paneHeight() - 1); return nil
         case .pageDown: scrollOffset = max(0, scrollOffset - max(1, paneHeight() - 1)); return nil
+        case .scrollUp: scrollOffset += 3; return nil
+        case .scrollDown: scrollOffset = max(0, scrollOffset - 3); return nil
         case .escape: menu.close(); return nil
         case .left: if cursor > 0 { cursor -= 1 }; return nil
         case .right: if cursor < input.count { cursor += 1 }; return nil
@@ -154,6 +208,12 @@ final class ChatTUI {
             input = ""; cursor = 0; menu.close(); scrollOffset = 0
             return text.isEmpty ? nil : text
         case .char(let c):
+            // On a voice-capable model, Space on an empty composer is push-to-talk
+            // (hold to talk, release to send) rather than a typed space.
+            if c == " " && input.isEmpty && engine.canUseNativeAudio {
+                pendingVoiceCapture = true
+                return nil
+            }
             let idx = input.index(input.startIndex, offsetBy: cursor)
             input.insert(c, at: idx); cursor += 1; menu.update(for: input)
             return nil
@@ -169,6 +229,161 @@ final class ChatTUI {
         historyIndex = max(0, min(inputHistory.count, historyIndex + delta))
         setInput(historyIndex < inputHistory.count ? inputHistory[historyIndex] : "")
         menu.close()
+    }
+
+    // MARK: - Model picker
+
+    /// Key handling while the modal model picker is open: Up/Down to move, Enter
+    /// to choose (the run loop then loads or downloads it), Esc/Ctrl-C to cancel.
+    private func handlePickerKey(_ key: Key) {
+        switch key {
+        case .up, .scrollUp: picker?.selectPrevious()
+        case .down, .scrollDown: picker?.selectNext()
+        case .enter:
+            if let chosen = picker?.current?.name { pendingModelLoad = chosen }
+            picker = nil
+        case .escape, .ctrlC: picker = nil
+        default: break
+        }
+    }
+
+    /// Build the picker entries: every chat-capable built-in alias plus any
+    /// catalog models, each flagged as downloaded. Embedding/reranker models are
+    /// excluded - you cannot chat with them. Downloaded models sort first.
+    private func modelPickerEntries() -> [ModelPicker.Entry] {
+        var seen = Set<String>()
+        var entries: [ModelPicker.Entry] = []
+        func add(_ name: String, _ params: String, _ quant: String, _ family: ModelFamily) {
+            guard !seen.contains(name) else { return }
+            guard ModelCapabilities.capabilities(for: family).contains(.textGeneration) else { return }
+            seen.insert(name)
+            let downloaded = registry.hasModel(name)
+            // Real on-disk size when installed (the manifest's sizeBytes is often
+            // 0, so sum the files); otherwise an estimate from the parameter count
+            // and quantization so the download cost is visible up front.
+            let size: String
+            let onDisk = downloaded ? directorySize(registry.modelPath(name)) : 0
+            if onDisk > 0 {
+                size = formatSize(onDisk)
+            } else if let est = estimatedSizeBytes(params: params, quant: quant) {
+                size = "~" + formatSize(est)
+            } else {
+                size = ""
+            }
+            let detail = size.isEmpty ? "\(params) \u{00B7} \(quant)"
+                                      : "\(params) \u{00B7} \(quant) \u{00B7} \(size)"
+            entries.append(.init(name: name, detail: detail, downloaded: downloaded))
+        }
+        for (_, m) in AliasMap.allAliases { add(m.name, m.params, m.quant, m.family) }
+        if let catalog = ModelCatalogStore(baseDir: registry.baseDir).load() {
+            for e in catalog.models { add(e.alias, e.params, e.quant, e.family) }
+        }
+        return entries.sorted { a, b in
+            a.downloaded != b.downloaded ? a.downloaded : a.name < b.name
+        }
+    }
+
+    /// Total size of the regular files under `url` (the model's on-disk weight).
+    private func directorySize(_ url: URL) -> Int64 {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
+        guard let en = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys) else { return 0 }
+        var total: Int64 = 0
+        for case let f as URL in en {
+            if let v = try? f.resourceValues(forKeys: Set(keys)), v.isRegularFile == true {
+                total += Int64(v.fileSize ?? 0)
+            }
+        }
+        return total
+    }
+
+    /// Human-readable byte size (decimal units, matching how disk size is shown).
+    private func formatSize(_ bytes: Int64) -> String {
+        let gb = Double(bytes) / 1_000_000_000
+        if gb >= 1 { return String(format: "%.1f GB", gb) }
+        return String(format: "%.0f MB", Double(bytes) / 1_000_000)
+    }
+
+    /// Rough download size from the parameter count and quantization, for models
+    /// not yet on disk (so the picker can show "~6 GB" before you pull). Returns
+    /// nil if the parameter string has no number to work with.
+    private func estimatedSizeBytes(params: String, quant: String) -> Int64? {
+        let p = params.lowercased()
+        let nums = p.split { !"0123456789.".contains($0) }.compactMap { Double($0) }
+        guard !nums.isEmpty else { return nil }
+        // "8x7B" multiplies (mixture of experts); a range like "1B-7B" takes the max.
+        let billions = p.contains("x") ? nums.reduce(1, *) : (nums.max() ?? nums[0])
+        let q = quant.lowercased()
+        let bytesPerParam: Double
+        if q.contains("32") { bytesPerParam = 4.2 }
+        else if q.contains("16") { bytesPerParam = 2.1 }
+        else if q.contains("8bit") { bytesPerParam = 1.1 }
+        else { bytesPerParam = 0.6 }      // 4-bit family (incl. nvfp4/mxfp4)
+        return Int64(billions * 1_000_000_000 * bytesPerParam)
+    }
+
+    /// Switch to `name` if it is already downloaded, otherwise pull it (with a
+    /// live progress line) and then switch.
+    private func switchOrDownload(_ name: String) async {
+        if registry.hasModel(name) { await switchModel(name); return }
+        let store = ModelCatalogStore(baseDir: registry.baseDir)
+        guard let resolved = AliasMap.resolve(name, catalog: store) else {
+            note("Unknown model: \(name)"); return
+        }
+        note("Downloading \(name) ...")
+        render()
+        // The progress closure is @Sendable, so capture only value types (no
+        // self) and write the progress line straight to the footer row.
+        let footerRow = rows
+        let width = cols
+        let label = name
+        let puller = Puller(registry: registry)
+        do {
+            _ = try await puller.pull(resolved) { done, total, file in
+                guard file != "done" else { return }
+                let pct = total > 0 ? Int(Double(done) / Double(total) * 100.0) : 0
+                let line = "  Downloading \(label): \(pct)%  \(file)"
+                Output.write("\u{1B}[\(footerRow);1H\u{1B}[2K" + Ansi.chrome(String(line.prefix(max(0, width)))))
+            }
+            note("Downloaded \(name).")
+            await switchModel(name)
+        } catch {
+            note("Download failed for \(name): \(error)")
+        }
+    }
+
+    /// Render the modal picker list: downloaded models read bright (switch
+    /// instantly), not-yet-downloaded ones read dim with a "will download" hint;
+    /// the highlighted row is inverse-video. A filled dot marks downloaded, a
+    /// hollow dot not-downloaded.
+    private func renderPicker(_ p: ModelPicker, width: Int, height: Int) -> [String] {
+        let margin = "  "
+        var out: [String] = [
+            margin + Ansi.bold("Select a model"),
+            margin + Ansi.chrome("downloaded switch instantly \u{00B7} faded ones download first"),
+            "",
+        ]
+        let maxVisible = max(3, height - 5)
+        let total = p.entries.count
+        var winStart = 0
+        if total > maxVisible { winStart = min(max(0, p.selected - maxVisible / 2), total - maxVisible) }
+        let winEnd = min(winStart + maxVisible, total)
+        let nameW = min(20, p.entries.map { $0.name.count }.max() ?? 12)
+        if winStart > 0 { out.append(margin + Ansi.chrome("  ...")) }
+        for i in winStart..<winEnd {
+            let e = p.entries[i]
+            let dot = e.downloaded ? "\u{25CF}" : "\u{25CB}"
+            let name = e.name.padding(toLength: nameW, withPad: " ", startingAt: 0)
+            let hint = e.downloaded ? "" : "   will download"
+            let body = "\(dot) \(name)  \(e.detail)\(hint)"
+            let line = margin + "  " + String(body.prefix(max(0, width - 4)))
+            if i == p.selected { out.append(Ansi.inverse(line)) }
+            else if e.downloaded { out.append(Ansi.user(line)) }
+            else { out.append(Ansi.chrome(line)) }
+        }
+        if winEnd < total { out.append(margin + Ansi.chrome("  ...")) }
+        out.append("")
+        out.append(margin + Ansi.chrome("Up/Down select \u{00B7} Enter switch \u{00B7} Esc cancel"))
+        return out
     }
 
     // MARK: - Submit / commands
@@ -197,11 +412,13 @@ final class ChatTUI {
 
     /// Aliases accepted by handleCommand but kept out of the autosuggest list to
     /// avoid cluttering it.
-    private static let commandAliases: Set<String> = ["/img", "/exit", "/q"]
+    private static let commandAliases: Set<String> = ["/img", "/exit", "/q", "/reset"]
 
     private func isCommand(_ s: String) -> Bool {
         let first = String(s.split(separator: " ").first ?? "")
-        return SlashMenu.all.contains { $0.name == first } || Self.commandAliases.contains(first)
+        return SlashMenu.all.contains { $0.name == first }
+            || Self.commandAliases.contains(first)
+            || customCommands.command(named: first) != nil
     }
 
     private func handleCommand(_ s: String) async {
@@ -210,19 +427,21 @@ final class ChatTUI {
         let arg = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : ""
         switch cmd {
         case "/quit", "/exit", "/q": shouldQuit = true
-        case "/help": view.append(Msg(role: .note, text: helpText()))
-        case "/clear": pendingImages.removeAll(); pendingAudio = nil; note("Cleared pending attachments.")
-        case "/reset":
+        case "/help": view.append(Msg(role: .pre, text: helpText()))
+        case "/drop": pendingImages.removeAll(); pendingAudio = nil; note("Dropped pending attachments.")
+        case "/clear", "/reset":   // /reset kept as an alias for clearing the chat
             modelTurns.removeAll(); view.removeAll(); pendingImages.removeAll(); pendingAudio = nil
-            note("Conversation reset.")
+            note("Conversation cleared.")
         case "/history":
             note(modelTurns.isEmpty ? "No conversation yet."
                  : modelTurns.map { "\($0.role): \($0.content)" }.joined(separator: "\n"))
+        case "/compact": await compactConversation()
         case "/system":
             if arg.isEmpty { note(system.map { "System: \($0)" } ?? "No system prompt. Usage: /system <text>") }
             else { system = arg; note("System prompt updated.") }
         case "/model":
-            if arg.isEmpty { note("Current model: \(modelName)") } else { await switchModel(arg) }
+            if arg.isEmpty { picker = ModelPicker(entries: modelPickerEntries(), current: modelName) }
+            else { await switchOrDownload(arg) }
         case "/save": saveTranscript(arg)
         case "/attach": note(attachSummary())
         case "/remove": removeAttachment(arg)
@@ -230,7 +449,22 @@ final class ChatTUI {
             if arg.isEmpty { note("Usage: \(cmd) <path>") }
             else if attach(path: arg) { note(attachSummary()) }
         case "/mic": await recordMic()
-        default: note("Unknown command \(cmd).")
+        case "/voice":
+            switch arg.lowercased() {
+            case "send": voiceMode = .send
+            case "dictate": voiceMode = .dictate
+            case "": voiceMode = (voiceMode == .send) ? .dictate : .send
+            default: note("Usage: /voice send|dictate"); return
+            }
+            note(voiceMode == .send
+                 ? "Voice: send as audio - the model answers your speech."
+                 : "Voice: dictate to the composer (best-effort; this model may answer instead of transcribe).")
+        default:
+            if let custom = customCommands.command(named: cmd) {
+                await generate(prompt: custom.expand(arguments: arg))
+            } else {
+                note("Unknown command \(cmd).")
+            }
         }
     }
 
@@ -239,8 +473,13 @@ final class ChatTUI {
     // MARK: - Generation
 
     private func generate(prompt: String) async {
-        view.append(Msg(role: .user, text: prompt))
-        modelTurns.append((role: "user", content: prompt))
+        // An empty prompt with media (e.g. a sent voice clip) shows a placeholder
+        // bubble instead of a blank line.
+        let shown = !prompt.isEmpty ? prompt
+            : (pendingAudio != nil ? "[voice message]"
+               : (!pendingImages.isEmpty ? "[media]" : prompt))
+        view.append(Msg(role: .user, text: shown))
+        modelTurns.append((role: "user", content: shown))
         let usedImgs = pendingImages.count
         let usedAud = pendingAudio != nil
 
@@ -273,10 +512,12 @@ final class ChatTUI {
             }
             // Watch for Ctrl-C (raw mode delivers it as a byte) and resize.
             if raw.waitForInput(timeoutMs: 0) {
-                let keys = reader.read()
+                let keys = reader.read() ?? []
                 if keys.contains(.ctrlC) { cancelled = true; break }
                 if keys.contains(.pageUp) { scrollOffset += paneHeight() - 1; render() }
                 if keys.contains(.pageDown) { scrollOffset = max(0, scrollOffset - (paneHeight() - 1)); render() }
+                if keys.contains(.scrollUp) { scrollOffset += 3; render() }
+                if keys.contains(.scrollDown) { scrollOffset = max(0, scrollOffset - 3); render() }
             }
             if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize() }
         }
@@ -303,11 +544,18 @@ final class ChatTUI {
         let ctx = st.promptTokens + st.generatedTokens
         if contextWindow > 0 {
             let pct = min(100, Int((Double(ctx) / Double(contextWindow)) * 100.0))
-            parts.append("ctx \(ctx) (\(pct)%)")
+            parts.append("ctx \(ctx) / \(formatContext(contextWindow)) (\(pct)%)")
         } else {
             parts.append("ctx \(ctx)")
         }
         return parts.joined(separator: " \u{00B7} ")
+    }
+
+    /// Compact context-window size, e.g. 131072 -> "128K", 8192 -> "8K".
+    private func formatContext(_ n: Int) -> String {
+        guard n >= 1024 else { return "\(n)" }
+        let k = Double(n) / 1024
+        return k == k.rounded() ? "\(Int(k))K" : String(format: "%.0fK", k)
     }
 
     private func switchModel(_ name: String) async {
@@ -326,6 +574,131 @@ final class ChatTUI {
         } catch { note("Failed to load \(name): \(error)") }
     }
 
+    /// Push-to-talk: record while Space is held, send the clip when released.
+    /// Terminals report no key-release, so we use the OS key-repeat stream as the
+    /// "still held" signal and treat a short gap with no Space as the release.
+    private func holdToTalk() async {
+        guard engine.canUseNativeAudio else { return }
+        guard await MicrophoneRecorder.requestAccess() else {
+            note(MicrophoneCaptureError.permissionDenied.description); return
+        }
+        let rec = MicrophoneRecorder()
+        do { try rec.start() } catch { note("\(error)"); return }
+        lastStatus = "Listening... (release Space to send, Esc to cancel)"
+        render()
+
+        let releaseTicks = 8       // ~800ms with no Space repeat => released
+        var idle = 0
+        var cancelled = false
+        var done = false
+        while !done {
+            if raw.waitForInput(timeoutMs: 100) {
+                for k in reader.read() ?? [] {
+                    if k == .char(" ") { idle = 0 }                 // still held (auto-repeat)
+                    else if k == .enter { done = true }             // explicit send
+                    else if k == .escape || k == .ctrlC { cancelled = true; done = true }
+                }
+            } else {
+                idle += 1
+                if idle >= releaseTicks { done = true }             // released
+            }
+            if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize(); render() }
+        }
+
+        if cancelled {
+            _ = try? rec.stop(); lastStatus = ""; note("Voice cancelled."); return
+        }
+        do {
+            let wav = try rec.stop()
+            switch voiceMode {
+            case .send: await sendVoice(wav)
+            case .dictate: await transcribeVoice(wav)
+            }
+        } catch { note("\(error)") }
+    }
+
+    /// Summarize the conversation so far into a concise briefing and replace the
+    /// history with it, freeing context while preserving continuity (like Claude
+    /// Code's /compact). The on-screen view is reset to show the summary.
+    private func compactConversation() async {
+        guard !modelTurns.isEmpty else { note("Nothing to compact yet."); return }
+        lastStatus = "Compacting..."
+        render()
+        var messages: [[String: String]] = []
+        if let system, !system.isEmpty { messages.append(["role": "system", "content": system]) }
+        for t in modelTurns { messages.append(["role": t.role, "content": t.content]) }
+        messages.append(["role": "user", "content":
+            "Summarize our conversation so far as a concise briefing that preserves all key facts, decisions, code, names, numbers, and open threads, so we can continue seamlessly. Output only the summary."])
+        let gen = engine.generate(
+            messages: messages, params: params, maxTokens: maxTokens,
+            imageData: nil, audioData: nil, imagesData: [])
+        let filter = StreamingReasoningFilter()
+        var summary = ""
+        for await event in gen.stream {
+            if event.isEnd { break }
+            summary += filter.consume(event.text)
+        }
+        summary += filter.finish()
+        lastStatus = ""
+        let clean = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { note("Compaction failed; conversation unchanged."); return }
+        modelTurns = [
+            ("user", "Summary of our earlier conversation (for context):\n\(clean)"),
+            ("assistant", "Understood. Let's continue."),
+        ]
+        view.removeAll()
+        view.append(Msg(role: .note, text: "Conversation compacted into a summary."))
+        view.append(Msg(role: .assistant, text: clean))
+        scrollOffset = 0
+    }
+
+    /// Send a recorded clip as an audio turn the model answers directly - the
+    /// "talk to it" path (works with Gemma 4 audio, which answers spoken input).
+    private func sendVoice(_ wav: Data) async {
+        pendingAudio = makeAtt(.audio, wav, "voice")
+        await generate(prompt: "")   // audio-only turn; shown as "[voice message]"
+    }
+
+    /// Transcribe a recorded clip with the audio model and drop the text into the
+    /// composer for the user to review, edit, and send (dictation) - we do NOT
+    /// auto-send. The audio itself is discarded; the sent turn is plain text.
+    private func transcribeVoice(_ wav: Data) async {
+        lastStatus = "Transcribing..."
+        render()
+        // Force verbatim transcription. Gemma 4's audio path will otherwise
+        // ANSWER the speech (its default behaviour) rather than transcribe it;
+        // a firm "you are a transcription tool, do not answer" framing biases it
+        // toward the words. (A dedicated ASR model would be the reliable fix.)
+        let instruction = """
+        You are an automatic speech-to-text transcription tool, not an assistant. \
+        Transcribe the audio verbatim: output ONLY the exact words spoken, as a single line of plain text. \
+        Do not answer, reply to, explain, translate, or react to the content. \
+        If the audio asks a question, transcribe the question word for word - do NOT answer it.
+        """
+        let gen = engine.generate(
+            messages: [["role": "user", "content": instruction]],
+            params: params, maxTokens: min(maxTokens, 256),
+            imageData: nil, audioData: wav, imagesData: [])
+        var raw = ""
+        for await event in gen.stream {
+            if event.isEnd { break }
+            raw += event.text
+        }
+        lastStatus = ""
+        // The audio model can answer in its reasoning channel (a bare
+        // `<|channel>thought` with no close marker when it produces nothing
+        // else). Run the FULL transcript through the authoritative stripper -
+        // it removes complete and unclosed Gemma channels and generic think
+        // tags - then drop any residual special-token markers, so the composer
+        // never shows raw control text.
+        let (visible, _) = ReasoningParser.strip(raw)
+        let clean = visible
+            .replacingOccurrences(of: #"<\|?[a-zA-Z_]+\|?>"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.isEmpty { note("Didn't catch that - try again."); return }
+        setInput(clean)   // populate the composer; user reviews and presses Enter
+    }
+
     private func recordMic() async {
         guard engine.canUseNativeAudio else { note("This model cannot process audio; /mic is unavailable."); return }
         guard await MicrophoneRecorder.requestAccess() else {
@@ -336,7 +709,7 @@ final class ChatTUI {
         note("Recording... press Enter to stop."); render()
         while true {
             guard raw.waitForInput(timeoutMs: 100) else { continue }
-            if reader.read().contains(where: { $0 == .enter }) { break }
+            if (reader.read() ?? []).contains(where: { $0 == .enter }) { break }
         }
         do {
             let wav = try rec.stop()
@@ -368,14 +741,18 @@ final class ChatTUI {
         let box = inputBox(width: width)             // 3 lines: top / field / bottom
         let boxTop = max(paneTop + 1, rows - box.count)
         let footerRow = max(rows, boxTop + box.count)
-        let pane = paneLines(width: width)
         let menuLines = menu.isActive ? renderMenu(width: width) : []
         let availRows = max(0, boxTop - paneTop)     // rows paneTop .. boxTop-1
         let convHeight = max(0, availRows - menuLines.count)
 
-        // Bottom-anchor the conversation against the input box (new messages
-        // appear where you type); the splash stays vertically centered.
-        let blankTop = Chrome.anchorBlankTop(paneCount: pane.count, convHeight: convHeight, centered: view.isEmpty)
+        // The modal model picker replaces the conversation pane (top-anchored);
+        // otherwise the conversation bottom-anchors against the input box and the
+        // splash stays vertically centered.
+        let pane = picker.map { renderPicker($0, width: width, height: convHeight) }
+            ?? paneLines(width: width)
+        let blankTop = picker != nil
+            ? 0
+            : Chrome.anchorBlankTop(paneCount: pane.count, convHeight: convHeight, centered: view.isEmpty)
         let maxStart = max(0, pane.count - convHeight)
         scrollOffset = min(scrollOffset, maxStart)   // clamp: cannot scroll past the top
         let start = max(0, maxStart - scrollOffset)
@@ -418,7 +795,7 @@ final class ChatTUI {
         guard !view.isEmpty else { return Brand.splash(width: width) }
         let margin = "  "
         let w = max(10, width - 4)                       // 2-space margin both sides
-        let rule = Ansi.dim(margin + String(repeating: "\u{2500}", count: min(w, 48)))
+        let rule = Ansi.chrome(margin + String(repeating: "\u{2500}", count: min(w, 48)))
         var lines: [String] = []
         var sawTurn = false
         for msg in view {
@@ -426,13 +803,25 @@ final class ChatTUI {
             case .user:
                 if sawTurn { lines.append(rule); lines.append("") }
                 sawTurn = true
-                for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.white(l)) }
+                for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.user(l)) }
             case .assistant:
                 sawTurn = true
                 lines.append("")
-                for l in TUIMarkdown.render(msg.text, width: w) { lines.append(margin + Ansi.dimStyled(l)) }
+                for l in TUIMarkdown.render(msg.text, width: w) { lines.append(margin + Ansi.model(l)) }
             case .note:
-                for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.dim(l)) }
+                for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.chrome(l)) }
+            case .pre:
+                // Preformatted (help / transcript): keep spacing verbatim - no
+                // word-wrap that would collapse aligned columns. A non-indented,
+                // non-empty line is a section header (rendered bright).
+                for raw in msg.text.split(separator: "\n", omittingEmptySubsequences: false) {
+                    let clipped = String(String(raw).prefix(w))
+                    if !clipped.isEmpty && !clipped.hasPrefix(" ") {
+                        lines.append(margin + Ansi.bold(clipped))
+                    } else {
+                        lines.append(margin + Ansi.chrome(clipped))
+                    }
+                }
             }
             lines.append("")
         }
@@ -450,16 +839,16 @@ final class ChatTUI {
         }
         let winEnd = min(winStart + maxVisible, total)
         var out: [String] = []
-        if winStart > 0 { out.append(Ansi.dim("    ...")) }
+        if winStart > 0 { out.append(Ansi.chrome("    ...")) }
         for i in winStart..<winEnd {
             let item = menu.matches[i]
             let marker = i == menu.selected ? ">" : " "
             let name = item.name.padding(toLength: 9, withPad: " ", startingAt: 0)
             let label = "  \(marker) \(name)  \(item.summary)"
             let clipped = String(label.prefix(width))
-            out.append(i == menu.selected ? Ansi.inverse(clipped) : Ansi.dim(clipped))
+            out.append(i == menu.selected ? Ansi.inverse(clipped) : Ansi.chrome(clipped))
         }
-        if winEnd < total { out.append(Ansi.dim("    ...")) }
+        if winEnd < total { out.append(Ansi.chrome("    ...")) }
         return out
     }
 
@@ -473,8 +862,8 @@ final class ChatTUI {
         let h = "\u{2500}", v = "\u{2502}"     // light horizontal / vertical
         let tl = "\u{256D}", tr = "\u{256E}"   // rounded corners
         let bl = "\u{2570}", br = "\u{256F}"
-        let top = Ansi.dim(Chrome.border(width: w, left: tl, fill: h, right: tr))
-        let bottom = Ansi.dim(Chrome.border(width: w, left: bl, fill: h, right: br))
+        let top = Ansi.chrome(Chrome.border(width: w, left: tl, fill: h, right: tr))
+        let bottom = Ansi.chrome(Chrome.border(width: w, left: bl, fill: h, right: br))
 
         let fieldWidth = max(2, w - 4)         // inner span minus one pad space each side
         let promptStr = "> "
@@ -484,10 +873,12 @@ final class ChatTUI {
         var body: String
         if chars.isEmpty {
             // Block cursor then a dim placeholder, clipped/padded to the field.
-            let placeholder = "type a message   /help for commands"
+            let placeholder = engine.canUseNativeAudio
+                ? "hold Space to talk, or type a message"
+                : "type a message   /help for commands"
             let clipped = String(placeholder.prefix(max(0, textWidth - 1)))
             let pad = String(repeating: " ", count: max(0, textWidth - 1 - clipped.count))
-            body = Ansi.bold(promptStr) + Ansi.inverse(" ") + Ansi.dim(clipped) + pad
+            body = Ansi.bold(promptStr) + Ansi.inverse(" ") + Ansi.chrome(clipped) + pad
         } else {
             // Pure geometry windows the text and locates the cursor; we only
             // apply the inverse-video block cursor to that one cell.
@@ -499,7 +890,7 @@ final class ChatTUI {
             }
             body = Ansi.bold(promptStr) + rendered
         }
-        let field = Ansi.dim(v) + " " + body + " " + Ansi.dim(v)
+        let field = Ansi.chrome(v) + " " + body + " " + Ansi.chrome(v)
         return [top, field, bottom]
     }
 
@@ -597,14 +988,41 @@ final class ChatTUI {
 
     // MARK: - Help / transcript
 
+    /// A document-style help screen: section headers with one item per line and
+    /// aligned descriptions (rendered preformatted as a `.pre` message so the
+    /// columns are not collapsed by word-wrap). Commands come from the canonical
+    /// `SlashMenu.all` so they never drift from the autosuggest list.
     private func helpText() -> String {
-        """
-        Keys: Up/Down history (or cycle slash menu) \u{00B7} Tab accept \u{00B7} Enter send
-              PgUp/PgDn scroll \u{00B7} Ctrl-C cancel reply / clear \u{00B7} Ctrl-D quit
-        Commands: /image /audio /mic /attach /remove /clear /system /model
-                  /history /save /reset /help /quit
-        Attach by dragging a file in or typing @path in your message.
-        """
+        let pad = (SlashMenu.all.map { $0.name.count }.max() ?? 8) + 2
+        var lines = ["Commands"]
+        for item in SlashMenu.all {
+            lines.append("  " + item.name.padding(toLength: pad, withPad: " ", startingAt: 0) + item.summary)
+        }
+        if !customCommands.isEmpty {
+            let cpad = (customCommands.commands.map { $0.name.count + 1 }.max() ?? 8) + 2
+            lines.append("")
+            lines.append("Custom commands  (~/.krillm/commands/*.md)")
+            for c in customCommands.commands {
+                lines.append("  " + "/\(c.name)".padding(toLength: cpad, withPad: " ", startingAt: 0) + c.description)
+            }
+        }
+        lines.append("")
+        lines.append("Keys")
+        let keys: [(String, String)] = [
+            ("Up / Down", "History, or cycle the slash menu"),
+            ("Tab", "Accept the highlighted command"),
+            ("Enter", "Send the message"),
+            ("PgUp / PgDn", "Scroll the conversation"),
+            ("Ctrl-C", "Cancel the reply, or clear the input"),
+            ("Ctrl-D", "Quit"),
+        ]
+        for (k, desc) in keys {
+            lines.append("  " + k.padding(toLength: 14, withPad: " ", startingAt: 0) + desc)
+        }
+        lines.append("")
+        lines.append("Attachments")
+        lines.append("  Drag a file into the window, or type @path in your message.")
+        return lines.joined(separator: "\n")
     }
 
     private func saveTranscript(_ arg: String) {
