@@ -239,14 +239,19 @@ public final class StreamingReasoningFilter {
                 // Drop leading whitespace from the joined buffer
                 // (which may span the chunk that closed the block
                 // AND subsequent chunks) until a non-whitespace
-                // character appears; then promote to .afterBlock.
+                // character appears; then resume scanning for the
+                // NEXT reasoning block. Gemma 4 can emit a run of
+                // channel blocks (a degenerate think loop produces
+                // `<|channel>thought<channel|>` over and over); going
+                // back to `.preamble` strips them all instead of
+                // dumping everything after the first block as raw text.
                 let trimmed = buffer.drop(while: { $0.isWhitespace })
                 if trimmed.isEmpty {
                     buffer.removeAll(keepingCapacity: true)
                     return emit
                 }
                 buffer = String(trimmed)
-                state = .afterBlock
+                state = .preamble
             }
         }
         return emit

@@ -6,12 +6,23 @@ import Foundation
 public struct ModelPicker {
     public struct Entry: Equatable, Sendable {
         public let name: String
-        public let detail: String        // e.g. "12B . 4bit"
+        public let params: String        // e.g. "12B"
+        public let quant: String         // e.g. "nvfp4"
+        public let size: String          // e.g. "7.2 GB" / "~8.0 GB"
         public let downloaded: Bool
+        /// Legacy combined detail (params . quant . size), kept for callers/tests.
+        public var detail: String {
+            [params, quant, size].filter { !$0.isEmpty }.joined(separator: " \u{00B7} ")
+        }
+        public init(name: String, params: String = "", quant: String = "",
+                    size: String = "", downloaded: Bool) {
+            self.name = name; self.params = params; self.quant = quant
+            self.size = size; self.downloaded = downloaded
+        }
+        /// Legacy init: a pre-joined detail string (used by tests).
         public init(name: String, detail: String, downloaded: Bool) {
-            self.name = name
-            self.detail = detail
-            self.downloaded = downloaded
+            self.name = name; self.params = detail; self.quant = ""
+            self.size = ""; self.downloaded = downloaded
         }
     }
 

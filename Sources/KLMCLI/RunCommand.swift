@@ -174,7 +174,8 @@ struct RunCommand: AsyncParsableCommand {
             let tui = ChatTUI(
                 engine: engine, modelName: modelPath, system: system,
                 params: params, maxTokens: maxTokens, registry: registry,
-                initialImage: imageData, initialAudio: audioData, theme: theme)
+                initialImage: imageData, initialAudio: audioData, theme: theme,
+                voiceModeSetting: KrillConfig.load().voiceMode)
             await tui.run()
         } else {
             // Classic line REPL (forced with --classic, or auto when stdout is
