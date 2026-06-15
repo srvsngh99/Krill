@@ -12,8 +12,8 @@ struct RunCommand: AsyncParsableCommand {
         abstract: "Load a model and run interactive chat or single-shot generation"
     )
 
-    @Argument(help: "Model name (from registry) or path to model directory")
-    var modelPath: String
+    @Argument(help: "Model name (from registry) or path to model directory. Optional: falls back to default_model in ~/.krillm/config.toml (or KRILL_DEFAULT_MODEL).")
+    var modelPath: String?
 
     @Argument(help: "Optional prompt for single-shot mode (omit for interactive REPL)")
     var prompt: String?
@@ -52,20 +52,47 @@ struct RunCommand: AsyncParsableCommand {
     var draftModel: String?
 
     func run() async throws {
-        let modelDir: URL
+        let registry = Registry()
+
+        // Resolve the model: explicit argument, else the configured default
+        // (config.toml default_model / KRILL_DEFAULT_MODEL). A blank value
+        // counts as unset.
+        func nonEmpty(_ s: String?) -> String? {
+            guard let s, !s.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+            return s
+        }
+        let defaultModel = nonEmpty(KrillConfig.load().defaultModel)
+
+        // Disambiguate the leading positional. `krillm run <model> [prompt]` is
+        // the canonical form, but with a default model set, `krillm run "<text>"`
+        // should run the default on that text rather than mistake the prompt for
+        // a model name. So when the sole positional is clearly NOT a model (not a
+        // known alias, installed model, or path) and a default exists, treat it
+        // as the prompt.
+        var resolvedModel = nonEmpty(modelPath)
+        var prompt = self.prompt
+        if let positional = resolvedModel, prompt == nil, let def = defaultModel,
+           !looksLikeModelRef(positional, registry) {
+            resolvedModel = def
+            prompt = positional
+        }
+        guard let model = resolvedModel ?? defaultModel else {
+            printNoModelError(registry)
+            throw ExitCode.failure
+        }
 
         // Resolve: check registry first, then treat as file path
-        let registry = Registry()
-        if registry.hasModel(modelPath) {
-            modelDir = registry.modelPath(modelPath)
+        let modelDir: URL
+        if registry.hasModel(model) {
+            modelDir = registry.modelPath(model)
         } else {
-            modelDir = URL(fileURLWithPath: modelPath)
+            modelDir = URL(fileURLWithPath: model)
         }
 
         // Validate directory exists
         guard FileManager.default.fileExists(atPath: modelDir.path) else {
-            print("Error: model '\(modelPath)' not found.")
-            print("Install with: krillm pull \(modelPath)")
+            print("Error: model '\(model)' not found.")
+            print("Install with: krillm pull \(model)")
             print("Or provide a full path to a model directory.")
             throw ExitCode.failure
         }
@@ -103,19 +130,19 @@ struct RunCommand: AsyncParsableCommand {
         // in-process krillm run path below does not. Routing only
         // when both paths would produce identical behaviour keeps the
         // optimisation observability-free.
-        let aliasHasOverrides = registry.getModel(modelPath)?.overrides != nil
+        let aliasHasOverrides = registry.getModel(model)?.overrides != nil
         if let prompt,
            image == nil, audio == nil, draftModel == nil,
-           registry.hasModel(modelPath),
+           registry.hasModel(model),
            !aliasHasOverrides,
            ProcessInfo.processInfo.environment["KRILL_NO_AUTO_DAEMON"] != "1" {
-            if try await tryDaemonRoute(modelName: modelPath, prompt: prompt) {
+            if try await tryDaemonRoute(modelName: model, prompt: prompt) {
                 return
             }
         }
 
         // Load model (native Swift path for Llama, Qwen, Mistral, etc.)
-        print("Loading model from \(modelPath)...")
+        print("Loading model from \(model)...")
         let engine = InferenceEngine(modelDirectory: modelDir)
 
         let loadStart = CFAbsoluteTimeGetCurrent()
@@ -125,7 +152,7 @@ struct RunCommand: AsyncParsableCommand {
 
         if let draftSpec = draftModel {
             try DraftModelResolver.load(
-                draftSpec: draftSpec, target: modelPath,
+                draftSpec: draftSpec, target: model,
                 registry: registry, engine: engine)
         }
 
@@ -172,7 +199,7 @@ struct RunCommand: AsyncParsableCommand {
             // Up/Down cycling, status footer. Any media passed via
             // --image/--audio pre-attaches to the first turn.
             let tui = ChatTUI(
-                engine: engine, modelName: modelPath, system: system,
+                engine: engine, modelName: model, system: system,
                 params: params, maxTokens: maxTokens, registry: registry,
                 initialImage: imageData, initialAudio: audioData, theme: theme,
                 voiceModeSetting: KrillConfig.load().voiceMode)
@@ -182,7 +209,7 @@ struct RunCommand: AsyncParsableCommand {
             // not a TTY, e.g. piped/redirected): multi-turn memory, libedit
             // editing/history/tab-completion, streamed markdown, media attach.
             let session = InteractiveSession(
-                engine: engine, modelName: modelPath, system: system,
+                engine: engine, modelName: model, system: system,
                 params: params, maxTokens: maxTokens, registry: registry,
                 initialImage: imageData, initialAudio: audioData)
             do {
@@ -235,6 +262,49 @@ struct RunCommand: AsyncParsableCommand {
             port, result.contentChunkCount, result.wallTimeSec
         ))
         return true
+    }
+
+    /// True when `s` denotes a model rather than a prompt: an installed model, a
+    /// known alias, an HF repo path (`org/model`), or an existing local path.
+    private func looksLikeModelRef(_ s: String, _ registry: Registry) -> Bool {
+        registry.hasModel(s)
+            || AliasMap.resolve(s) != nil
+            || s.contains("/")
+            || FileManager.default.fileExists(atPath: s)
+    }
+
+    /// Guidance when `krillm run` is invoked with no model and no configured
+    /// default. On a fresh install (nothing installed) this is the branded
+    /// first-run welcome; otherwise it lists installed models and how to set a
+    /// default.
+    private func printNoModelError(_ registry: Registry) {
+        let installed = registry.listModels().map { $0.name }.sorted()
+        guard !installed.isEmpty else { printWelcome(); return }
+        print("No model specified, and no default is set.\n")
+        print("Installed models:")
+        for name in installed { print("  \(name)") }
+        print("\nRun one:        krillm run \(installed[0])")
+        print("Set a default:  echo 'default_model = \"\(installed[0])\"' >> ~/.krillm/config.toml")
+        print("            or:  export KRILL_DEFAULT_MODEL=\(installed[0])")
+    }
+
+    /// Branded first-run welcome (fresh install, no models yet), in the Sourav AI
+    /// Labs identity. Plain stdout (not the alt-screen TUI), styling auto-disabled
+    /// when not a TTY / under NO_COLOR.
+    private func printWelcome() {
+        print("")
+        print("  " + Ansi.bold(Brand.wordmark) + "  " + Ansi.dim(Brand.lab))
+        print("  " + Ansi.dim(Brand.tagline))
+        print("")
+        print("  Get started:")
+        print("    krillm pull gemma-4-e2b      " + Ansi.dim("# a small, fast model to begin"))
+        print("    krillm run gemma-4-e2b       " + Ansi.dim("# open the chat"))
+        print("")
+        print("  Browse models:   " + Ansi.dim("krillm catalog"))
+        print("  Set a default:   " + Ansi.dim("default_model in ~/.krillm/config.toml"))
+        print("")
+        print("  " + Ansi.bold(Brand.labMark) + "  " + Ansi.dim("\(Brand.labTagline)  \u{00B7}  \(Brand.site)"))
+        print("")
     }
 }
 

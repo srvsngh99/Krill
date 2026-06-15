@@ -42,14 +42,20 @@ struct LaunchCommand: AsyncParsableCommand {
     var keepAlive: String?
 
     func run() async throws {
-        // No agent -> print the roster (like the Ollama launcher screen).
-        guard let agentId = agent else {
-            printRoster()
+        // No agent -> show the branded roster. On a TTY this arrow-selects an
+        // agent to launch; on a pipe it prints the static list and returns nil
+        // (we just exit, like the old `krillm launch` listing screen).
+        let agentId: String
+        if let a = agent {
+            agentId = a
+        } else if let chosen = AgentRosterPrompt.choose(profiles: AgentProfiles.all) {
+            agentId = chosen
+        } else {
             return
         }
         guard let profile = AgentProfiles.find(agentId) else {
-            print("Unknown agent: \(agentId)\n")
-            printRoster()
+            print(Ansi.yellow("Unknown agent: \(agentId)") + "\n")
+            AgentRosterPrompt.printStatic(AgentRosterPrompt.entries(from: AgentProfiles.all))
             throw ExitCode.failure
         }
 
@@ -66,7 +72,8 @@ struct LaunchCommand: AsyncParsableCommand {
 
         // Pick the model: explicit flag, else first installed.
         guard let modelName = model ?? registry.listModels().first?.name else {
-            print("No models installed. Pull one first, e.g.:  krillm pull gemma-4-e2b")
+            print(Ansi.yellow("No models installed.") + " "
+                  + Ansi.chrome("Pull one first, e.g.:  krillm pull gemma-4-e2b"))
             throw ExitCode.failure
         }
 
@@ -92,35 +99,17 @@ struct LaunchCommand: AsyncParsableCommand {
         runPreExec(profile.preExec(baseURL, modelName))
         let agentArgv = [profile.binary] + profile.args(modelName) + agentArgs
 
-        print("""
-
-            Launching \(profile.displayName) -> \(baseURL) (\(profile.wire.rawValue), model \(modelName))
-            """)
+        print("")
+        print("  " + Ansi.bold(">_ Launching \(profile.displayName)"))
+        print("  " + Ansi.chrome("\(baseURL)  (\(profile.wire.rawValue), model \(modelName))"))
         if profile.wire == .openAIResponses || profile.wire == .anthropic {
-            print("Tip: coding agents want a large context window; prefer a model/serve context >= 64k.")
+            print("  " + Ansi.hint("Tip: coding agents want a large context window; prefer a model/serve context >= 64k."))
         }
         print("")
 
         // Export env, then replace this process with the agent so it owns the TTY.
         for (k, v) in env { setenv(k, expandTilde(v), 1) }
         try execAgent(profile, argv: agentArgv)
-    }
-
-    // MARK: - Roster
-
-    private func printRoster() {
-        print("Launch a coding agent wired to your local KrillLM server.\n")
-        let idW = AgentProfiles.all.map { $0.id.count }.max() ?? 8
-        let nameW = AgentProfiles.all.map { $0.displayName.count }.max() ?? 12
-        for a in AgentProfiles.all {
-            let id = a.id.padding(toLength: idW, withPad: " ", startingAt: 0)
-            let name = a.displayName.padding(toLength: nameW, withPad: " ", startingAt: 0)
-            print("  \(id)  \(name)  \(a.summary)")
-        }
-        print("""
-
-            Usage:  krillm launch <agent> [--model <name>] [--port <port>] [-- <agent args>]
-            """)
     }
 
     // MARK: - Server lifecycle
@@ -136,15 +125,19 @@ struct LaunchCommand: AsyncParsableCommand {
             let loaded = (health["model_loaded"] as? Bool) ?? false
             let active = health["model"] as? String
             if !loaded || active != model {
-                print("Loading '\(model)' into the running server...")
+                let spinner = Spinner("Loading '\(model)' into the running server")
+                spinner.start()
                 // Fail loud (like the auto-start branch) so we never exec the
                 // agent against the wrong model on a failed load.
-                guard await loadModel(baseURL: baseURL, model: model,
-                                      keepAlive: keepAliveSecs) else {
-                    print("Error: server could not load '\(model)'. "
+                let ok = await loadModel(baseURL: baseURL, model: model,
+                                         keepAlive: keepAliveSecs)
+                await spinner.stop()
+                guard ok else {
+                    print(Ansi.yellow("Error: server could not load '\(model)'. ")
                           + "Check `krillm list` and the server log.")
                     throw ExitCode.failure
                 }
+                print("  " + Ansi.chrome("Loaded '\(model)'."))
             } else {
                 // Already active: pin it (best-effort — a stale keep-alive
                 // shouldn't abort an otherwise-ready session).
@@ -155,15 +148,13 @@ struct LaunchCommand: AsyncParsableCommand {
         }
 
         guard !noServe else {
-            print("""
-                No KrillLM server reachable at \(baseURL).
-                Start one in another terminal:  krillm serve --model \(model) --port \(port)
-                """)
+            print(Ansi.yellow("No KrillLM server reachable at \(baseURL)."))
+            print("  " + Ansi.chrome("Start one in another terminal:  krillm serve --model \(model) --port \(port)"))
             throw ExitCode.failure
         }
 
         // Auto-start a detached server, then wait for it to become healthy.
-        print("Starting KrillLM server at \(baseURL) with '\(model)'...")
+        print("  " + Ansi.chrome("Starting KrillLM server at \(baseURL) with '\(model)'."))
         let logPath = expandTilde("~/.krillm/agents/\(model.replacingOccurrences(of: "/", with: "_"))-serve.log")
         try? FileManager.default.createDirectory(
             atPath: (logPath as NSString).deletingLastPathComponent,
@@ -198,17 +189,25 @@ struct LaunchCommand: AsyncParsableCommand {
 
         // Poll health. The server only listens after the model is loaded and
         // warmed, so a healthy response means the model is ready.
+        let spinner = Spinner("Warming up '\(model)' (first load can take a moment)")
+        spinner.start()
         for _ in 0..<120 {
-            if await getHealth(baseURL: baseURL) != nil { print("Server ready."); return }
+            if await getHealth(baseURL: baseURL) != nil {
+                await spinner.stop()
+                print("  " + Ansi.chrome("Server ready."))
+                return
+            }
             if !proc.isRunning {
+                await spinner.stop()
                 let log = (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? ""
-                print("Server exited before becoming ready. Last log lines:\n"
+                print(Ansi.yellow("Server exited before becoming ready. Last log lines:") + "\n"
                       + log.split(separator: "\n").suffix(8).joined(separator: "\n"))
                 throw ExitCode.failure
             }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
-        print("Server did not become ready in time; see \(logPath).")
+        await spinner.stop()
+        print(Ansi.yellow("Server did not become ready in time; see \(logPath)."))
         throw ExitCode.failure
     }
 
@@ -251,7 +250,7 @@ struct LaunchCommand: AsyncParsableCommand {
             case .mergeJSON:
                 try mergeJSON(rendered, into: path)
             }
-            print("Wrote \(path)")
+            print("  " + Ansi.chrome("Wrote \(path)"))
         }
     }
 
@@ -340,10 +339,10 @@ struct LaunchCommand: AsyncParsableCommand {
         // Only reached if exec failed.
         let err = errno
         if err == ENOENT {
-            print("\(profile.displayName) is not installed or not on PATH.")
-            print(profile.notInstalledHint)
+            print(Ansi.yellow("\(profile.displayName) is not installed or not on PATH."))
+            print("  " + Ansi.chrome(profile.notInstalledHint))
         } else {
-            print("Failed to launch \(profile.binary): \(String(cString: strerror(err)))")
+            print(Ansi.yellow("Failed to launch \(profile.binary): \(String(cString: strerror(err)))"))
         }
         throw ExitCode.failure
     }

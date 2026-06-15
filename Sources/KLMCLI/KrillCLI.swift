@@ -5,10 +5,14 @@ import KLMRegistry
 struct Krillm: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "krillm",
-        abstract: "KrillLM - Fast local LLM inference for Apple Silicon",
+        abstract: "KrillLM - a fast, lean LLM runtime, built for Mac.",
         discussion: """
-            A Mac-native LLM inference engine built on Apple's MLX framework.
-            Runs open-source models locally with optimized Metal GPU acceleration.
+            A Mac-native LLM runtime on Apple's MLX framework: run open models \
+            locally with Metal acceleration - chat, a full-screen TUI with voice, \
+            an Ollama/OpenAI-compatible server, and native multimodal.
+
+            Run `krillm run <model>` to chat, or set default_model in
+            ~/.krillm/config.toml and just run `krillm`. A Sourav AI Labs project.
             """,
         version: KrillLMVersion,
         subcommands: [

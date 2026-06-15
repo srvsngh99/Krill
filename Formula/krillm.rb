@@ -30,17 +30,18 @@ class Krillm < Formula
 
   def caveats
     <<~EOS
-      KrillLM requires Apple Silicon (M1 or newer).
+      >_ KrillLM - a fast, lean LLM runtime, built for Mac.  (Apple Silicon, M1+)
 
-      Quick start:
-        krillm pull llama-3.2-3b
-        krillm run llama-3.2-3b
+      Get started:
+        krillm pull gemma-4-e2b      # a small, fast model to begin
+        krillm run gemma-4-e2b       # open the chat
 
-      Start the API server (Ollama/OpenAI compatible):
-        krillm serve --model llama-3.2-3b
+      Serve an Ollama/OpenAI-compatible API:
+        krillm serve --model gemma-4-e2b
 
-      Configuration: ~/.krillm/config.toml
-      Models stored: ~/.krillm/models/
+      Config: ~/.krillm/config.toml    Models: ~/.krillm/models/
+
+      a Sourav AI Labs project - souravailabs.ai
     EOS
   end
 
