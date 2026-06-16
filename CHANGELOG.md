@@ -6,6 +6,28 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-17
+
+### Added
+
+- **Native MLX support for the Gemma-4-12B coder fine-tune** (`gemma-4-12b-coder`).
+  Runs `gemma-4-12B-coder-fable5-composer2.5` natively on the existing
+  `gemma4_unified` runtime, ingested GGUF-free from the upstream NVFP4
+  safetensors (GGUF k-quants are lossy). New `tools/convert_gemma4_compressed_nvfp4_to_bf16.py`
+  decompresses compressed-tensors NVFP4 to bf16 (pure numpy: byte-level
+  safetensors reader, FP4-E2M1 + FP8-E4M3 + global-scale dequant, HF-to-MLX key
+  remap, `--self-check`), then `tools/requant_gemma4_nvfp4.py --src-bf16-dir`
+  applies the proven mixed-nvfp4 recipe. See `docs/GEMMA4_12B_CODER_FINETUNE.md`.
+- **`enable_thinking` for Gemma-4 channel reasoning models.** These fine-tunes
+  gate chain-of-thought on their chat template; with it off they answer without
+  reasoning. The engine now renders the `<|turn>` / `<|channel>thought` channel
+  prompt faithfully for both modes and exposes a `KRILL_ENABLE_THINKING` toggle
+  (and a per-call flag) so `krillm run gemma-4-12b-coder` can reason. Stock
+  Gemma-4 prompting is unchanged.
+- **Standalone capability-eval harnesses** (no Ollama): `tools/coding_eval_standalone.py`
+  (HumanEval pass@1, optional `--think`) and `tools/agentic_eval_standalone.py`
+  (multi-step tool use).
+
 ## [0.7.1] - 2026-06-17
 
 ### Added
