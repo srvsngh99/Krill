@@ -41,6 +41,8 @@ final class SpokenTextTests: XCTestCase {
         // treated as an emphasis span.
         XCTAssertEqual(SpokenText.clean("a*b and c*d"), "a*b and c*d")
         XCTAssertEqual(SpokenText.clean("1*2*3*4"), "1*2*3*4")
+        // Power operators (`**`) must survive too.
+        XCTAssertEqual(SpokenText.clean("x**2 and y**3"), "x**2 and y**3")
         // Real emphasis still strips (markers flanked by non-word chars).
         XCTAssertEqual(SpokenText.clean("This is *italic* and **bold** done."),
                        "This is italic and bold done.")

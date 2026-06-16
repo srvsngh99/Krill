@@ -106,10 +106,13 @@ public enum SpokenText {
         // non-word boundaries, so we do NOT swallow arithmetic (`2 * 3`) or
         // identifier underscores (`my_func_name`). Bold markers run before italic
         // so the doubled form is consumed first.
-        out = replace(out, #"(?<![A-Za-z0-9])\*\*(\S(?:.*?\S)?)\*\*(?![A-Za-z0-9])"#, with: "$1")  // **bold**
-        out = replace(out, #"(?<![A-Za-z0-9_])__(\S(?:.*?\S)?)__(?![A-Za-z0-9_])"#, with: "$1")    // __bold__
-        out = replace(out, #"(?<![A-Za-z0-9])\*(\S(?:.*?\S)?)\*(?![A-Za-z0-9])"#, with: "$1")      // *italic*
-        out = replace(out, #"(?<![A-Za-z0-9_])_(\S(?:.*?\S)?)_(?![A-Za-z0-9_])"#, with: "$1")      // _italic_
+        // The `*` flanking classes include `*` itself so a marker adjacent to
+        // another asterisk (the `**` power operator, e.g. `x**2 and y**3`) is not
+        // treated as an emphasis delimiter.
+        out = replace(out, #"(?<![A-Za-z0-9*])\*\*(\S(?:.*?\S)?)\*\*(?![A-Za-z0-9*])"#, with: "$1")  // **bold**
+        out = replace(out, #"(?<![A-Za-z0-9_])__(\S(?:.*?\S)?)__(?![A-Za-z0-9_])"#, with: "$1")      // __bold__
+        out = replace(out, #"(?<![A-Za-z0-9*])\*(\S(?:.*?\S)?)\*(?![A-Za-z0-9*])"#, with: "$1")      // *italic*
+        out = replace(out, #"(?<![A-Za-z0-9_])_(\S(?:.*?\S)?)_(?![A-Za-z0-9_])"#, with: "$1")        // _italic_
         // Heading hashes and list bullets at the start of a line.
         out = replace(out, #"(?m)^\s{0,3}#{1,6}\s*"#, with: "")
         out = replace(out, #"(?m)^\s*[-*+]\s+"#, with: "")
