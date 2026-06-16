@@ -23,10 +23,22 @@ final class SpokenTextTests: XCTestCase {
         XCTAssertEqual(SpokenText.clean("Call `run()` to start."), "Call run() to start.")
     }
 
-    func testStripsEmphasis() {
-        XCTAssertEqual(SpokenText.clean("This is **bold** and *italic* and _under_."),
-                       "This is bold and italic and under.")
-        XCTAssertEqual(SpokenText.clean("Mark __strong__ here."), "Mark strong here.")
+    func testStripsAsteriskEmphasis() {
+        XCTAssertEqual(SpokenText.clean("This is **bold** and *italic* done."),
+                       "This is bold and italic done.")
+    }
+
+    func testPreservesUnderscoreIdentifiersAndDunders() {
+        // Underscore emphasis is NOT stripped: it is indistinguishable from the
+        // identifiers a coding model emits constantly. Dunders (including two with
+        // text between them), snake_case, and leading underscores must survive
+        // verbatim.
+        XCTAssertEqual(SpokenText.clean("Python has __init__ and __main__ methods."),
+                       "Python has __init__ and __main__ methods.")
+        XCTAssertEqual(SpokenText.clean("Override __repr__ and use __slots__."),
+                       "Override __repr__ and use __slots__.")
+        XCTAssertEqual(SpokenText.clean("Set _private and call my_func_name now."),
+                       "Set _private and call my_func_name now.")
     }
 
     func testEmphasisDoesNotEatArithmeticOrIdentifiers() {

@@ -106,13 +106,19 @@ public enum SpokenText {
         // non-word boundaries, so we do NOT swallow arithmetic (`2 * 3`) or
         // identifier underscores (`my_func_name`). Bold markers run before italic
         // so the doubled form is consumed first.
-        // The `*` flanking classes include `*` itself so a marker adjacent to
-        // another asterisk (the `**` power operator, e.g. `x**2 and y**3`) is not
-        // treated as an emphasis delimiter.
+        // Strip ASTERISK emphasis only. The flanking classes include `*` itself,
+        // so a marker adjacent to another asterisk (the `**` power operator, e.g.
+        // `x**2 and y**3`) and arithmetic (`a*b`, `2 * 3`) are left intact.
         out = replace(out, #"(?<![A-Za-z0-9*])\*\*(\S(?:.*?\S)?)\*\*(?![A-Za-z0-9*])"#, with: "$1")  // **bold**
-        out = replace(out, #"(?<![A-Za-z0-9_])__(\S(?:.*?\S)?)__(?![A-Za-z0-9_])"#, with: "$1")      // __bold__
         out = replace(out, #"(?<![A-Za-z0-9*])\*(\S(?:.*?\S)?)\*(?![A-Za-z0-9*])"#, with: "$1")      // *italic*
-        out = replace(out, #"(?<![A-Za-z0-9_])_(\S(?:.*?\S)?)_(?![A-Za-z0-9_])"#, with: "$1")        // _italic_
+        // UNDERSCORE emphasis (`_x_`, `__x__`) is deliberately NOT stripped: it is
+        // structurally identical to the identifiers a coding model emits
+        // constantly (snake_case, leading-underscore, and dunders like `__init__`
+        // / `__main__` - including two dunders with text between them, which a
+        // multi-word heuristic would wrongly span). No regex separates `__bold__`
+        // from `__init__`, and underscore emphasis is rare in assistant prose
+        // (everyone uses `*`/`**`), so we preserve identifiers and leave the rare
+        // `_italic_` markers in place rather than corrupt code references.
         // Heading hashes and list bullets at the start of a line.
         out = replace(out, #"(?m)^\s{0,3}#{1,6}\s*"#, with: "")
         out = replace(out, #"(?m)^\s*[-*+]\s+"#, with: "")
