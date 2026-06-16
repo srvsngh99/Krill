@@ -192,6 +192,16 @@ private let aliases: [String: ResolvedModel] = [
         repo: "mlx-community/gemma-4-12B-it-4bit",
         name: "gemma-4-12b", family: .gemma4Unified, params: "12B", quant: "4bit",
         context: 131072),
+    // Community coding/reasoning fine-tune of gemma-4-12B-it, served natively in
+    // MLX. Converted GGUF-free from the upstream NVFP4 safetensors
+    // (compressed-tensors) via tools/convert_gemma4_compressed_nvfp4_to_bf16.py
+    // + tools/requant_gemma4_nvfp4.py (the proven mixed-nvfp4 recipe: 8-bit
+    // o_proj + vision/audio projectors). Same `gemma4_unified` backbone as
+    // gemma-4-12b - see docs/GEMMA4_12B_CODER_FINETUNE.md.
+    "gemma-4-12b-coder": ResolvedModel(
+        repo: "srv-sngh/gemma-4-12B-coder-fable5-composer2.5-nvfp4",
+        name: "gemma-4-12b-coder", family: .gemma4Unified, params: "12B",
+        quant: "nvfp4", context: 131072),
     // Google's Gemma 4 lineup is E2B / E4B / 12B (unified) / 26B-A4B / 31B.
     // 26B-A4B and 31B are not aliased here yet (the `Gemma4Model` loader is
     // currently e2b-shape-specific) - see docs/FOLLOWUPS_AGENT_DOGFOOD.md §1.

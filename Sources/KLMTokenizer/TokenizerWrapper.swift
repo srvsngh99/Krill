@@ -507,6 +507,31 @@ public final class KLMTokenizer: @unchecked Sendable {
         return nil
     }
 
+    /// Build the Gemma-4 "channel" prompt with the reasoning block OPENED, for
+    /// reasoning fine-tunes (e.g. the coder) whose `chat_template.jinja` gates
+    /// chain-of-thought on `enable_thinking`. With thinking off the template
+    /// injects an EMPTY `<|channel>thought` and the model answers without
+    /// reasoning; with it on it emits a leading `<|turn>system\n<|think|>` block
+    /// and lets the model reason. We reproduce the `enable_thinking=true` render
+    /// directly as a string (the Swift Jinja port cannot parse this template's
+    /// macros) and re-encode - the marker strings (`<|turn>`, `<|think|>`,
+    /// `<turn|>`) tokenize to their special-token ids. Structure verified against
+    /// the upstream template render.
+    public func gemma4ThinkingPrompt(messages: [[String: String]]) -> String {
+        let bos = decode(token: bosTokenId)
+        var out = bos + "<|turn>system\n<|think|>\n"
+        for m in messages where (m["role"] ?? "") == "system" {
+            out += (m["content"] ?? "")
+        }
+        out += "<turn|>\n"
+        for m in messages where (m["role"] ?? "") != "system" {
+            let role = (m["role"] ?? "user") == "assistant" ? "model" : (m["role"] ?? "user")
+            out += "<|turn>\(role)\n\(m["content"] ?? "")<turn|>\n"
+        }
+        out += "<|turn>model\n"
+        return out
+    }
+
     public func applyChatTemplate(messages: [[String: String]]) -> String {
         // First preference: the tokenizer's embedded `chat_template`
         // (whatever shipped in `tokenizer_config.json`).
