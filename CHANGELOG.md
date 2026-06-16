@@ -6,6 +6,8 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-17
+
 ### Added
 
 - **Full-screen chat TUI (default for `krillm run`).** An opencode-style
