@@ -11,7 +11,7 @@
 
 ## Release Status
 
-**Current release: v0.6.0 — the long-context release** (`brew tap srvsngh99/krillm && brew install krillm`).
+**Current release: v0.7.0 — the voice & TUI release** (`brew tap srvsngh99/krillm && brew install krillm`).
 
 The headline of this release is **long context that stays fast**: Gemma 4 12B now
 decodes near-flat (~17-23 tok/s) from 0 to ~99k tokens of context on a 24GB Mac, and
