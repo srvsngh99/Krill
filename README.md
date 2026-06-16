@@ -11,15 +11,20 @@
 
 ## Release Status
 
-**Current release: v0.6.0 — the long-context release** (`brew tap srvsngh99/krillm && brew install krillm`).
+**Current release: v0.7.0 - the voice & TUI release** (`brew tap srvsngh99/krillm && brew install krillm`).
 
-The headline of this release is **long context that stays fast**: Gemma 4 12B now
-decodes near-flat (~17-23 tok/s) from 0 to ~99k tokens of context on a 24GB Mac, and
-long prompts no longer OOM (chunked prefill). It builds on **Gemma 4 12B running
-natively** - an encoder-free "unified" multimodal runtime (text + vision + audio on one
-dense backbone, no separate vision encoder) in 4-bit-float nvfp4 - plus **one-command
-coding-agent launch**: `krillm launch <agent>` wires Claude Code, Codex, OpenCode,
-GitHub Copilot, Droid, Hermes, or Pi to your local server with no manual config (see
+The headline of this release is the **full-screen chat TUI and on-device voice**:
+`krillm run` now opens an opencode-style alternate-screen chat interface (branded
+masthead, scrollable conversation, slash-command autosuggest, streaming markdown,
+resize-aware; `--classic` for the line REPL, auto-fallback when stdout is not a TTY),
+with interactive image/audio/mic attach. Voice input is fully on-device:
+push-to-dictate via Apple Speech plus a native MLX Whisper runtime with automatic
+language detection. It builds on **Gemma 4 12B running natively** - an encoder-free
+"unified" multimodal runtime (text + vision + audio on one dense backbone, no separate
+vision encoder) in 4-bit-float nvfp4, near-flat long-context decode (~17-23 tok/s to
+~99k on a 24GB Mac) - plus **one-command coding-agent launch**: `krillm launch <agent>`
+wires Claude Code, Codex, OpenCode, GitHub Copilot, Droid, Hermes, or Pi to your local
+server with no manual config (see
 [`docs/CONNECT_CODING_AGENTS.md`](docs/CONNECT_CODING_AGENTS.md)).
 
 Everything runs on the native Swift+MLX engine with **no Python dependency**. The
