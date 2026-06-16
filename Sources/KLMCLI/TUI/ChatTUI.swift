@@ -150,7 +150,11 @@ final class ChatTUI {
         resolveTheme()
         installWinch()
         updateSize()
-        defer { raw.leave() }
+        // Silence any in-flight spoken reply on EVERY exit path, including
+        // `/quit`/`/exit`/`/q` and Ctrl-D (which only set `shouldQuit`); Ctrl-C
+        // and new turns already stop it inline. Without this a reply still being
+        // read aloud would keep talking after the session ends.
+        defer { synth.stop(); raw.leave() }
 
         if !pendingImages.isEmpty || pendingAudio != nil {
             view.append(Msg(role: .note, text: attachSummary()))

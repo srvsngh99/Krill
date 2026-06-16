@@ -26,6 +26,17 @@ final class SpokenTextTests: XCTestCase {
     func testStripsEmphasis() {
         XCTAssertEqual(SpokenText.clean("This is **bold** and *italic* and _under_."),
                        "This is bold and italic and under.")
+        XCTAssertEqual(SpokenText.clean("Mark __strong__ here."), "Mark strong here.")
+    }
+
+    func testEmphasisDoesNotEatArithmeticOrIdentifiers() {
+        // The emphasis pass must not swallow multiplication operators or the
+        // underscores inside identifiers (a coding model emits both constantly).
+        XCTAssertEqual(SpokenText.clean("Compute 2 * 3 and 4 * 5."),
+                       "Compute 2 * 3 and 4 * 5.")
+        XCTAssertEqual(SpokenText.clean("Call my_func_name and other_var soon."),
+                       "Call my_func_name and other_var soon.")
+        XCTAssertEqual(SpokenText.clean("area = w * h * 2"), "area = w * h * 2")
     }
 
     func testLinksKeepVisibleText() {

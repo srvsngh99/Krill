@@ -10,7 +10,14 @@ import Foundation
 /// ``SpeechRecognizer`` (the dictation side).
 public final class SpeechSynthesizer: @unchecked Sendable {
 #if canImport(AVFoundation)
-    private let synth = AVSpeechSynthesizer()
+    // AVSpeechSynthesizer is main-thread-affine: it (and its utterances) must be
+    // created and driven on the main thread, but the chat TUI run loop runs on a
+    // cooperative-pool thread. So the synthesizer is created lazily on first use
+    // inside `onMain` and every AVFoundation call hops to the main thread. It is
+    // only ever read/written inside `onMain`, so the `@unchecked Sendable` mutable
+    // state has no data race (the single serial caller is also serialized onto
+    // main).
+    private var synth: AVSpeechSynthesizer?
 #endif
     public init() {}
 
@@ -31,29 +38,54 @@ public final class SpeechSynthesizer: @unchecked Sendable {
 #if canImport(AVFoundation)
         let clean = SpokenText.clean(text)
         guard !clean.isEmpty else { return }
-        synth.stopSpeaking(at: .immediate)
-        let utterance = AVSpeechUtterance(string: clean)
-        if let rate { utterance.rate = rate }
-        synth.speak(utterance)
+        onMain {
+            let synth = self.synthesizer()
+            synth.stopSpeaking(at: .immediate)
+            let utterance = AVSpeechUtterance(string: clean)
+            if let rate { utterance.rate = rate }
+            synth.speak(utterance)
+        }
 #endif
     }
 
     /// True while an utterance is being spoken.
     public var isSpeaking: Bool {
 #if canImport(AVFoundation)
-        return synth.isSpeaking
+        return synth?.isSpeaking ?? false
 #else
         return false
 #endif
     }
 
-    /// Stop speaking immediately (e.g. the user cancelled the reply or started a
-    /// new turn). Safe to call when nothing is speaking.
+    /// Stop speaking immediately (e.g. the user cancelled the reply, started a
+    /// new turn, or quit). Safe to call when nothing is speaking.
     public func stop() {
 #if canImport(AVFoundation)
-        synth.stopSpeaking(at: .immediate)
+        onMain { self.synth?.stopSpeaking(at: .immediate) }
 #endif
     }
+
+#if canImport(AVFoundation)
+    /// Lazily create the synthesizer. MUST be called on the main thread (only
+    /// invoked from inside `onMain`), satisfying AVSpeechSynthesizer's main-thread
+    /// affinity.
+    private func synthesizer() -> AVSpeechSynthesizer {
+        if let synth { return synth }
+        let created = AVSpeechSynthesizer()
+        synth = created
+        return created
+    }
+
+    /// Run an AVFoundation interaction on the main thread (synchronously if
+    /// already there, else async-dispatched).
+    private func onMain(_ body: @escaping @Sendable () -> Void) {
+        if Thread.isMainThread {
+            body()
+        } else {
+            DispatchQueue.main.async(execute: body)
+        }
+    }
+#endif
 }
 
 /// Pure markdown-to-speech cleanup: strips the formatting that sounds wrong when
@@ -69,8 +101,15 @@ public enum SpokenText {
         out = replace(out, #"\[([^\]]+)\]\([^)]*\)"#, with: "$1")
         // Inline code: keep the contents, drop the backticks.
         out = replace(out, "`([^`]+)`", with: "$1")
-        // Emphasis: **bold**, *italic*, __bold__, _italic_ -> the inner text.
-        out = replace(out, #"(\*\*|\*|__|_)(.+?)\1"#, with: "$2")
+        // Emphasis -> inner text. Each marker requires the content to start AND
+        // end with a non-space char, and the `_` forms additionally require
+        // non-word boundaries, so we do NOT swallow arithmetic (`2 * 3`) or
+        // identifier underscores (`my_func_name`). Bold markers run before italic
+        // so the doubled form is consumed first.
+        out = replace(out, #"\*\*(\S(?:.*?\S)?)\*\*"#, with: "$1")            // **bold**
+        out = replace(out, #"(?<![A-Za-z0-9_])__(\S(?:.*?\S)?)__(?![A-Za-z0-9_])"#, with: "$1")  // __bold__
+        out = replace(out, #"\*(\S(?:.*?\S)?)\*"#, with: "$1")                // *italic*
+        out = replace(out, #"(?<![A-Za-z0-9_])_(\S(?:.*?\S)?)_(?![A-Za-z0-9_])"#, with: "$1")    // _italic_
         // Heading hashes and list bullets at the start of a line.
         out = replace(out, #"(?m)^\s{0,3}#{1,6}\s*"#, with: "")
         out = replace(out, #"(?m)^\s*[-*+]\s+"#, with: "")
