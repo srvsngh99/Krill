@@ -17,9 +17,11 @@ The headline of this release is the **full-screen chat TUI and on-device voice**
 `krillm run` now opens an opencode-style alternate-screen chat interface (branded
 masthead, scrollable conversation, slash-command autosuggest, streaming markdown,
 resize-aware; `--classic` for the line REPL, auto-fallback when stdout is not a TTY),
-with interactive image/audio/mic attach. Voice input is fully on-device:
+with interactive image/audio/mic attach. Voice is fully on-device, both ways:
 push-to-dictate via Apple Speech plus a native MLX Whisper runtime with automatic
-language detection. It builds on **Gemma 4 12B running natively** - an encoder-free
+language detection, and an opt-in `/speak` that reads replies back aloud
+(text-to-speech) to complete the hands-free loop. It builds on **Gemma 4 12B
+running natively** - an encoder-free
 "unified" multimodal runtime (text + vision + audio on one dense backbone, no separate
 vision encoder) in 4-bit-float nvfp4, near-flat long-context decode (~17-23 tok/s to
 ~99k on a 24GB Mac) - plus **one-command coding-agent launch**: `krillm launch <agent>`
