@@ -6,6 +6,8 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-17
+
 ### Added
 
 - **Full-screen chat TUI (default for `krillm run`).** An opencode-style
@@ -39,6 +41,20 @@ reverse chronological order. Versioning follows
   (Enter to stop) and attaches the clip to the next message, on audio-capable
   Gemma 4 models. Capture is native AVAudioEngine -> WAV, reusing the existing
   16 kHz resample pipeline.
+- **On-device dictation (speech-to-text).** Talk to the model instead of typing:
+  push-to-dictate transcribes your speech locally via Apple's Speech framework,
+  with a native MLX Whisper runtime as the on-device fallback. No audio leaves
+  the machine.
+- **Multilingual Whisper with automatic language detection.** The native MLX
+  Whisper path detects the spoken language automatically and transcribes a wide
+  range of languages, not just English.
+- **Model deep-dive screen.** A dedicated TUI screen for a model with family
+  wordmarks and details, reachable from the model picker.
+- **Voice-UX and TUI polish.** Opt-in voice postures, modal screens, a bigger
+  brand splash wordmark, lighter masthead, and a richer status footer
+  (model, tok/s, context use, cwd:branch, version).
+- **Branded onboarding.** First-run welcome, pull, caveats, and help screens,
+  plus a default-model fallback so `krillm run` with no argument is friendly.
 - **`make app-bundle` / `make dist-app`.** Builds a code-signed `krillm.app`
   with `NSMicrophoneUsageDescription` so macOS attributes `/mic` permission to
   KrillLM rather than the parent terminal. The metallib ships as a signed
