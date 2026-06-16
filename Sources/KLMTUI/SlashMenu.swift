@@ -22,6 +22,7 @@ public struct SlashMenu {
         Item(name: "/mic", summary: "Record from the microphone"),
         Item(name: "/voice", summary: "Show voice state; set the engine (Apple/Whisper)"),
         Item(name: "/voice-mode", summary: "Voice posture: type/dictate/handsfree/send (Ctrl-V cycles)"),
+        Item(name: "/speak", summary: "Read model replies aloud (text-to-speech): on/off"),
         Item(name: "/attach", summary: "List pending attachments"),
         Item(name: "/remove", summary: "Drop attachment number n"),
         Item(name: "/drop", summary: "Drop all pending attachments"),
