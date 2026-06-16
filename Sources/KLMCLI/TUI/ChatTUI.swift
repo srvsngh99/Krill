@@ -73,6 +73,12 @@ final class ChatTUI {
     // Lazily loaded native Whisper runtime + its SKU (English dictation).
     private var whisper: WhisperRuntime?
     private var whisperSKU = WhisperModelManager.defaultSKU
+    // Text-to-speech: read model replies aloud (voice phase 2). Opt-in, default
+    // off; toggled with `/speak` or the `speak_replies` config key. Pairs with
+    // the hands-free posture for a full talk/listen loop. The synthesizer is
+    // created lazily so it costs nothing until the user turns speaking on.
+    private var speakReplies = false
+    private lazy var synth = SpeechSynthesizer()
     private var inputHistory: [String] = []
     private var historyIndex = 0
     private var scrollOffset = 0     // lines scrolled up from bottom
@@ -98,7 +104,7 @@ final class ChatTUI {
     init(engine: InferenceEngine, modelName: String, system: String?,
          params: SamplingParams, maxTokens: Int, registry: Registry,
          initialImage: Data?, initialAudio: Data?, theme: String? = nil,
-         voiceModeSetting: String = "off") {
+         voiceModeSetting: String = "off", speakRepliesSetting: Bool = false) {
         self.engine = engine
         self.modelName = modelName
         self.system = system
@@ -107,6 +113,7 @@ final class ChatTUI {
         self.registry = registry
         self.themeOverride = theme
         self.voiceMode = Self.parseVoiceMode(voiceModeSetting)
+        self.speakReplies = speakRepliesSetting
         self.contextWindow = AliasMap.resolve(modelName)?.context ?? 0
         self.customCommands = CustomCommandStore.load(from: Self.commandsDir)
         menu.extra = customCommands.commands.map {
@@ -189,6 +196,7 @@ final class ChatTUI {
             if input.isEmpty { shouldQuit = true }
             return nil
         case .ctrlC:
+            synth.stop()   // also silence a spoken reply that is still playing
             if input.isEmpty { shouldQuit = true } else { input = ""; cursor = 0; menu.close() }
             return nil
         case .ctrlU:
@@ -610,6 +618,13 @@ final class ChatTUI {
             case "", "next", "cycle": cycleVoiceMode()
             default: note("Usage: /voice-mode type|dictate|handsfree|send  (or Ctrl-V to cycle)")
             }
+        case "/speak", "/tts":
+            switch arg.lowercased().trimmingCharacters(in: .whitespaces) {
+            case "on": setSpeakReplies(true)
+            case "off": setSpeakReplies(false)
+            case "", "toggle": setSpeakReplies(!speakReplies)
+            default: note("Usage: /speak on|off  (read model replies aloud)")
+            }
         case "/voice":
             let parts = arg.lowercased().split(separator: " ").map(String.init)
             switch parts.first ?? "" {
@@ -670,6 +685,21 @@ final class ChatTUI {
     /// Set the voice posture and confirm it on screen.
     private func setVoiceMode(_ m: VoiceMode) { voiceMode = m; note(voiceModeNote()) }
 
+    /// Turn spoken replies (TTS) on or off and confirm it on screen. Stops any
+    /// in-flight speech when turning off.
+    private func setSpeakReplies(_ on: Bool) {
+        speakReplies = on
+        if !on { synth.stop() }
+        if on, !SpeechSynthesizer.isAvailable {
+            note("Spoken replies aren't available on this system.")
+            speakReplies = false
+            return
+        }
+        note(on
+            ? "Spoken replies: ON. Replies are read aloud (pairs with hands-free voice). /speak off to stop."
+            : "Spoken replies: OFF.")
+    }
+
     /// Advance to the next posture, the Ctrl-V action. The cycle starts and ends
     /// at `.type` (voice off) so one key both enables voice and turns it back off:
     /// off -> dictate -> handsfree -> send -> off.
@@ -699,9 +729,12 @@ final class ChatTUI {
     /// voice state into the footer keeps it persistent without a second status row.
     private func footerContent() -> (left: String, right: String) {
         let sep = " \u{00B7} "
-        let cleanRight = "\(cwdLabel)\(sep)\(KrillLMVersionTag)"
+        // Spoken-replies (TTS) indicator: independent of the mic, so it shows even
+        // on text-only models. Leads the right half when on.
+        let speakTag = speakReplies ? "\u{25CF} speak\(sep)" : ""
+        let cleanRight = "\(speakTag)\(cwdLabel)\(sep)\(KrillLMVersionTag)"
         // Voice OFF (text mode) or a non-audio model: no voice chrome at all - the
-        // footer is just the generation status and cwd/version.
+        // footer is just the generation status and cwd/version (plus speak tag).
         guard engine.canUseNativeAudio, voiceMode != .type || !voiceActivity.isEmpty else {
             return (lastStatus.isEmpty ? "ready" : lastStatus, cleanRight)
         }
@@ -717,7 +750,7 @@ final class ChatTUI {
             case .type:      left = ""   // unreachable (guarded above)
             }
         }
-        let right = lastStatus.isEmpty ? cleanRight : "\(lastStatus)\(sep)\(KrillLMVersionTag)"
+        let right = lastStatus.isEmpty ? cleanRight : "\(speakTag)\(lastStatus)\(sep)\(KrillLMVersionTag)"
         return (left, right)
     }
 
@@ -785,6 +818,7 @@ final class ChatTUI {
     // MARK: - Generation
 
     private func generate(prompt: String, displayAs: String? = nil) async {
+        synth.stop()   // a new turn hushes any still-speaking previous reply
         // `displayAs` is the on-screen bubble; the model always receives `prompt`.
         // They differ for a sent voice clip: the user sees "[voice message]" but
         // the model gets a plain instruction to answer the audio. Feeding the
@@ -852,10 +886,14 @@ final class ChatTUI {
         view[aIdx].text = assistant.isEmpty ? "(no response)" : assistant
 
         if cancelled {
+            synth.stop()                       // hush any in-flight speech
             view.append(Msg(role: .note, text: "(cancelled)"))
         } else {
             modelTurns.append((role: "assistant", content: assistant))
             if let st = gen.stats() { lastStatus = statusText(st, images: usedImgs, audio: usedAud) }
+            // Read the reply aloud when speaking is on (voice phase 2). Cleaned of
+            // markdown that reads badly; a new reply interrupts the previous one.
+            if speakReplies, !assistant.isEmpty { synth.speak(assistant) }
         }
         pendingImages.removeAll(); pendingAudio = nil
         render()

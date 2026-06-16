@@ -198,11 +198,13 @@ struct RunCommand: AsyncParsableCommand {
             // branded masthead, scrollable pane, slash-command autosuggest with
             // Up/Down cycling, status footer. Any media passed via
             // --image/--audio pre-attaches to the first turn.
+            let tuiConfig = KrillConfig.load()
             let tui = ChatTUI(
                 engine: engine, modelName: model, system: system,
                 params: params, maxTokens: maxTokens, registry: registry,
                 initialImage: imageData, initialAudio: audioData, theme: theme,
-                voiceModeSetting: KrillConfig.load().voiceMode)
+                voiceModeSetting: tuiConfig.voiceMode,
+                speakRepliesSetting: tuiConfig.speakReplies)
             await tui.run()
         } else {
             // Classic line REPL (forced with --classic, or auto when stdout is
