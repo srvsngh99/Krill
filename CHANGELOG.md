@@ -6,6 +6,21 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-17
+
+### Added
+
+- **Spoken replies (text-to-speech) in the chat TUI.** Opt-in `/speak` toggle
+  (off by default) reads each model reply aloud via Apple's on-device
+  `AVSpeechSynthesizer` (local system voices, no download, no cloud),
+  completing the hands-free loop with v0.7.0's dictation. Replies are cleaned
+  of markdown that reads badly aloud (fenced code, inline backticks, asterisk
+  emphasis, headings, list markers, link URLs) by a pure, unit-tested
+  `SpokenText.clean`; underscore-delimited text is left intact so code
+  identifiers and Python dunders (`__init__`) are never corrupted. A new reply
+  interrupts any in-flight utterance, and speech is silenced on cancel, new
+  turn, and quit.
+
 ## [0.7.0] - 2026-06-17
 
 ### Added
