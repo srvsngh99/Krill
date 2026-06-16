@@ -37,6 +37,13 @@ final class SpokenTextTests: XCTestCase {
         XCTAssertEqual(SpokenText.clean("Call my_func_name and other_var soon."),
                        "Call my_func_name and other_var soon.")
         XCTAssertEqual(SpokenText.clean("area = w * h * 2"), "area = w * h * 2")
+        // Two bare `*` operators on one line (no surrounding spaces) must NOT be
+        // treated as an emphasis span.
+        XCTAssertEqual(SpokenText.clean("a*b and c*d"), "a*b and c*d")
+        XCTAssertEqual(SpokenText.clean("1*2*3*4"), "1*2*3*4")
+        // Real emphasis still strips (markers flanked by non-word chars).
+        XCTAssertEqual(SpokenText.clean("This is *italic* and **bold** done."),
+                       "This is italic and bold done.")
     }
 
     func testLinksKeepVisibleText() {
