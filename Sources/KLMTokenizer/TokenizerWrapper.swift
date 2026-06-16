@@ -507,28 +507,51 @@ public final class KLMTokenizer: @unchecked Sendable {
         return nil
     }
 
-    /// Build the Gemma-4 "channel" prompt with the reasoning block OPENED, for
-    /// reasoning fine-tunes (e.g. the coder) whose `chat_template.jinja` gates
-    /// chain-of-thought on `enable_thinking`. With thinking off the template
-    /// injects an EMPTY `<|channel>thought` and the model answers without
-    /// reasoning; with it on it emits a leading `<|turn>system\n<|think|>` block
-    /// and lets the model reason. We reproduce the `enable_thinking=true` render
-    /// directly as a string (the Swift Jinja port cannot parse this template's
-    /// macros) and re-encode - the marker strings (`<|turn>`, `<|think|>`,
-    /// `<turn|>`) tokenize to their special-token ids. Structure verified against
-    /// the upstream template render.
-    public func gemma4ThinkingPrompt(messages: [[String: String]]) -> String {
-        let bos = decode(token: bosTokenId)
-        var out = bos + "<|turn>system\n<|think|>\n"
-        for m in messages where (m["role"] ?? "") == "system" {
-            out += (m["content"] ?? "")
+    /// True when the model ships the Gemma-4 "channel" chat template (the
+    /// `<|turn>` / `<|channel>thought` reasoning format used by the coder
+    /// fine-tune), as opposed to the stock Gemma-4 `<start_of_turn>` format. The
+    /// Swift Jinja port cannot parse this template's macros, so the engine builds
+    /// the prompt directly via ``gemma4ChannelPrompt(messages:enableThinking:)``
+    /// for these models instead of the stock direct-id builder.
+    public var usesGemmaChannelTemplate: Bool {
+        guard let t = externalChatTemplate else { return false }
+        return t.contains("<|channel>") || t.contains("<|turn>")
+    }
+
+    /// Build the Gemma-4 "channel" prompt for reasoning fine-tunes (e.g. the
+    /// coder) whose `chat_template.jinja` gates chain-of-thought on
+    /// `enable_thinking`. We reproduce BOTH renders directly as a string (the
+    /// Swift Jinja port cannot parse this template) and re-encode - the marker
+    /// strings (`<|turn>`, `<|think|>`, `<|channel>`, `<turn|>`) tokenize to their
+    /// special-token ids. Both forms verified against the upstream template:
+    ///   - `enableThinking`: a leading `<|turn>system\n<|think|>` block, then the
+    ///     turns, then `<|turn>model\n` (the model reasons freely).
+    ///   - else: the turns, then `<|turn>model\n<|channel>thought\n<channel|>` -
+    ///     the empty thought channel the template appends so the model answers
+    ///     WITHOUT reasoning (matching the SKU's training distribution; the stock
+    ///     direct-id builder omits it).
+    /// A system block is also emitted (without `<|think|>`) when a system message
+    /// is present, mirroring the template's `messages[0] is system` branch.
+    public func gemma4ChannelPrompt(messages: [[String: String]],
+                                    enableThinking: Bool) -> String {
+        var out = decode(token: bosTokenId)
+        let systemContent = messages
+            .filter { ($0["role"] ?? "") == "system" }
+            .map { ($0["content"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        if enableThinking || !systemContent.isEmpty {
+            out += "<|turn>system\n"
+            if enableThinking { out += "<|think|>\n" }
+            out += systemContent
+            out += "<turn|>\n"
         }
-        out += "<turn|>\n"
         for m in messages where (m["role"] ?? "") != "system" {
             let role = (m["role"] ?? "user") == "assistant" ? "model" : (m["role"] ?? "user")
             out += "<|turn>\(role)\n\(m["content"] ?? "")<turn|>\n"
         }
         out += "<|turn>model\n"
+        if !enableThinking { out += "<|channel>thought\n<channel|>" }
         return out
     }
 

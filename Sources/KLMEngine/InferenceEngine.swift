@@ -872,15 +872,18 @@ public final class InferenceEngine: @unchecked Sendable {
                         tokenizer.applyChatTemplate(messages: preparedMessages))
                 }
             case .gemma4DirectIds:
-                // Reasoning fine-tunes (e.g. the Gemma-4 coder) gate their
-                // chain-of-thought on the template's `enable_thinking`: when off,
-                // the model answers with no reasoning. The hardcoded direct-id
-                // builder can't express that, so when thinking is requested we
-                // build the channel prompt with the thought block opened and
-                // re-encode. Otherwise keep the standard direct-id construction.
-                if effectiveThinking {
+                // The Gemma-4 "channel" reasoning fine-tunes (coder) ship a
+                // `<|turn>` / `<|channel>thought` template the stock direct-id
+                // builder can't express - and its non-thinking form needs the
+                // empty `<|channel>thought` suffix to stay on-distribution. For
+                // those models, render the channel prompt faithfully for BOTH
+                // modes (thought block opened when thinking is on, empty thought
+                // channel when off) and re-encode. Stock Gemma-4 (no channel
+                // template) keeps the standard direct-id construction.
+                if tokenizer.usesGemmaChannelTemplate {
                     promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(
-                        tokenizer.gemma4ThinkingPrompt(messages: preparedMessages))
+                        tokenizer.gemma4ChannelPrompt(
+                            messages: preparedMessages, enableThinking: effectiveThinking))
                 } else {
                     promptTokensBuilt = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
                 }

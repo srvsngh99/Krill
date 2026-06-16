@@ -279,9 +279,16 @@ def dequant_nvfp4(packed_u8, packed_shape, scale_u8, scale_shape, global_scale,
 def self_check(st: SafeTensorsFile):
     """Validate the decoder against the actual stored bytes on one module:
       (a) max decoded fp8 group-scale of a tensor must equal FP8_E4M3_MAX (the
-          global-amax block saturates fp8 by construction) -> e4m3 decode ok;
+          global-amax block saturates fp8 by construction) -> the e4m3 decode and
+          the global/group scale relationship are correct;
       (b) re-quantizing the dequantized weight reproduces the stored
-          weight_packed bytes exactly -> LUT + nibble order + scale formula ok.
+          weight_packed bytes (modulo signed-zero) -> the E2M1 LUT and the
+          two-level scale formula are self-consistent.
+    NOTE: (b) re-uses the same nibble interleave as the decoder, so it does NOT
+    independently prove nibble order - that is taken verbatim from the upstream
+    vllm-project/compressed-tensors `pack_fp4_to_uint8` (even index -> low nibble,
+    odd -> high) and is confirmed end to end by the converted model generating
+    coherently (a flipped order would produce garbage weights and a failed eval).
     """
     # pick the first quantized module
     mod = None
