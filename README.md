@@ -11,7 +11,7 @@
 
 ## Release Status
 
-**Current release: v0.7.0 — the voice & TUI release** (`brew tap srvsngh99/krillm && brew install krillm`).
+**Current release: v0.7.0 - the voice & TUI release** (`brew tap srvsngh99/krillm && brew install krillm`).
 
 The headline of this release is the **full-screen chat TUI and on-device voice**:
 `krillm run` now opens an opencode-style alternate-screen chat interface (branded
