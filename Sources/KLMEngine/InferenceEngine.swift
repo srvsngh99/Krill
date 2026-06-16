@@ -666,7 +666,8 @@ public final class InferenceEngine: @unchecked Sendable {
         promptTemplateOverride: String? = nil,
         format: OutputFormat? = nil,
         useNgramSpeculative: Bool? = nil,
-        imagesData: [Data] = []
+        imagesData: [Data] = [],
+        enableThinking: Bool = false
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
@@ -682,7 +683,8 @@ public final class InferenceEngine: @unchecked Sendable {
                         promptTemplateOverride: promptTemplateOverride,
                         format: format,
                         useNgramSpeculative: useNgramSpeculative,
-                        imagesData: imagesData)
+                        imagesData: imagesData,
+                        enableThinking: enableThinking)
     }
 
     /// Generate tokens from a full conversation history, streaming results.
@@ -710,7 +712,8 @@ public final class InferenceEngine: @unchecked Sendable {
         promptTemplateOverride: String? = nil,
         format: OutputFormat? = nil,
         useNgramSpeculative: Bool? = nil,
-        imagesData: [Data] = []
+        imagesData: [Data] = [],
+        enableThinking: Bool = false
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         guard let loadedModel, let tokenizer else {
             let emptyStream = AsyncStream<TokenEvent> { $0.finish() }
@@ -820,6 +823,16 @@ public final class InferenceEngine: @unchecked Sendable {
                 audioTokenCount: unifiedAudioTokens ?? nativeAudio?.numTokens ?? 1,
                 wrapGemma4Markers: isUnifiedModel)
 
+        // Reasoning models (e.g. the Gemma-4 coder fine-tune) gate their
+        // chain-of-thought on `enable_thinking` in the chat template; with it off
+        // the template injects an EMPTY thought channel and the model answers
+        // without reasoning. Honor the per-request flag OR a serve-wide
+        // `KRILL_ENABLE_THINKING` env (the latter avoids threading the flag
+        // through every server call site for a model that should always reason).
+        let effectiveThinking = enableThinking
+            || (ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"]
+                .map { ["1", "true", "yes", "on"].contains($0.lowercased()) } ?? false)
+
         // Use direct token ID path for Gemma4 to avoid decode→re-encode
         // round-trip that loses special tokens (105, 106, 107).
         var promptTokensBuilt: [Int]
@@ -859,7 +872,21 @@ public final class InferenceEngine: @unchecked Sendable {
                         tokenizer.applyChatTemplate(messages: preparedMessages))
                 }
             case .gemma4DirectIds:
-                promptTokensBuilt = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
+                // The Gemma-4 "channel" reasoning fine-tunes (coder) ship a
+                // `<|turn>` / `<|channel>thought` template the stock direct-id
+                // builder can't express - and its non-thinking form needs the
+                // empty `<|channel>thought` suffix to stay on-distribution. For
+                // those models, render the channel prompt faithfully for BOTH
+                // modes (thought block opened when thinking is on, empty thought
+                // channel when off) and re-encode. Stock Gemma-4 (no channel
+                // template) keeps the standard direct-id construction.
+                if tokenizer.usesGemmaChannelTemplate {
+                    promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(
+                        tokenizer.gemma4ChannelPrompt(
+                            messages: preparedMessages, enableThinking: effectiveThinking))
+                } else {
+                    promptTokensBuilt = tokenizer.formatGemma4TokenIds(messages: preparedMessages)
+                }
             case .phiRenderReencode:
                 // Phi-4-mini's tokenizer is the o200k (GPT-4o / tiktoken) BPE.
                 // ROOT CAUSE: swift-transformers' direct `applyChatTemplateTokens`

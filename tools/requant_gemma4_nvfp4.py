@@ -52,6 +52,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--src-bf16", default="models--mlx-community--gemma-4-12B-it-bf16")
+    ap.add_argument("--src-bf16-dir", default=None,
+                    help="direct path to a bf16 checkpoint dir (bypasses the HF-cache "
+                         "snapshot lookup; use for converted fine-tunes, e.g. the output "
+                         "of tools/convert_gemma4_compressed_nvfp4_to_bf16.py)")
     ap.add_argument("--oracle-4bit", default="models--mlx-community--gemma-4-12B-it-4bit")
     ap.add_argument("--protect", action="append", default=[],
                     help="substring of module path to protect (repeatable), e.g. down_proj")
@@ -80,7 +84,7 @@ def main():
         print(f"[requant] auto-protecting vision/audio projectors @ "
               f"{args.protect_bits}b {args.protect_mode} (--no-protect-vision to disable)")
 
-    SRC = snap(args.src_bf16)
+    SRC = os.path.expanduser(args.src_bf16_dir) if args.src_bf16_dir else snap(args.src_bf16)
     ORC = snap(args.oracle_4bit)
     DST = os.path.expanduser(args.out)
     os.makedirs(DST, exist_ok=True)
