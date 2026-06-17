@@ -6,6 +6,8 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-17
+
 ### Added
 
 - **`enable_thinking` for every reasoning model, not just the Gemma-4 coder.**
