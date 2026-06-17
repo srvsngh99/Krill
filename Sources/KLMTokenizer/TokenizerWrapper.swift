@@ -548,17 +548,10 @@ public final class KLMTokenizer: @unchecked Sendable {
         return effective?.contains("enable_thinking") ?? false
     }
 
-    /// True when the model's chat template can render a reasoning channel the
-    /// engine can turn ON. Gates ``thinkingPrompt(messages:)``.
-    public var supportsThinking: Bool {
-        Self.templateSupportsThinking(externalTemplate: externalChatTemplate,
-                                      embeddedTemplate: embeddedChatTemplate)
-    }
-
     /// Tokens for a prompt with the `enable_thinking` template variable pinned to
-    /// `on` (BOTH directions), or nil when the template has no such variable (the
-    /// caller then handles it: the Gemma-4 channel template via
-    /// `gemma4ChannelPrompt`, everything else via the normal path).
+    /// `on` (BOTH directions), or nil when this isn't applicable (the caller then
+    /// handles it: the Gemma-4 channel template via `gemma4ChannelPrompt`,
+    /// everything else via the normal path).
     ///
     /// Pinning matters because a model's template may DEFAULT thinking on (Qwen 3
     /// does): turning it off then requires rendering with `enable_thinking=false`
@@ -566,10 +559,11 @@ public final class KLMTokenizer: @unchecked Sendable {
     /// disable. We render a FRESH string and encode it with the special-token-aware
     /// `tokenizer.encode` (NOT by decoding existing ids), the same render+encode
     /// swift-transformers' own direct path does, so ChatML special tokens stay
-    /// intact. Returns nil for the Gemma-4 channel template too (Swift Jinja cannot
-    /// parse it), so that path falls through to `gemma4ChannelPrompt`.
+    /// intact. The Gemma-4 channel template is EXCLUDED explicitly (not left to a
+    /// Jinja parse failure) so that path deterministically uses `gemma4ChannelPrompt`.
     public func enableThinkingPrompt(messages: [[String: String]], on: Bool) -> [Int]? {
-        guard chatTemplateString?.contains("enable_thinking") == true,
+        guard !usesGemmaChannelTemplate,
+              chatTemplateString?.contains("enable_thinking") == true,
               let rendered = renderTemplate(
                   messages: messages, extraContext: ["enable_thinking": on]) else {
             return nil
