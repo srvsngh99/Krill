@@ -653,6 +653,18 @@ public final class InferenceEngine: @unchecked Sendable {
         return mask
     }
 
+    /// Resolve whether to enable the reasoning channel for a generation. An
+    /// explicit per-call flag wins; else `KRILL_ENABLE_THINKING` (1/true/yes/on
+    /// => on, anything else => off); else OFF. Pure + static so the precedence is
+    /// unit-testable without an engine. Interactive callers pass their config
+    /// `thinking` value as `explicit`, so chat is on by default while the server
+    /// and single-shot (which pass nil) keep their prior off-unless-env behavior.
+    public static func resolveThinking(explicit: Bool?, env: String?) -> Bool {
+        if let explicit { return explicit }
+        if let env { return ["1", "true", "yes", "on"].contains(env.lowercased()) }
+        return false
+    }
+
     public func generate(
         prompt: String,
         systemPrompt: String? = nil,
@@ -667,7 +679,7 @@ public final class InferenceEngine: @unchecked Sendable {
         format: OutputFormat? = nil,
         useNgramSpeculative: Bool? = nil,
         imagesData: [Data] = [],
-        enableThinking: Bool = false
+        enableThinking: Bool? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
@@ -713,7 +725,7 @@ public final class InferenceEngine: @unchecked Sendable {
         format: OutputFormat? = nil,
         useNgramSpeculative: Bool? = nil,
         imagesData: [Data] = [],
-        enableThinking: Bool = false
+        enableThinking: Bool? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         guard let loadedModel, let tokenizer else {
             let emptyStream = AsyncStream<TokenEvent> { $0.finish() }
@@ -823,15 +835,16 @@ public final class InferenceEngine: @unchecked Sendable {
                 audioTokenCount: unifiedAudioTokens ?? nativeAudio?.numTokens ?? 1,
                 wrapGemma4Markers: isUnifiedModel)
 
-        // Reasoning models (e.g. the Gemma-4 coder fine-tune) gate their
-        // chain-of-thought on `enable_thinking` in the chat template; with it off
-        // the template injects an EMPTY thought channel and the model answers
-        // without reasoning. Honor the per-request flag OR a serve-wide
-        // `KRILL_ENABLE_THINKING` env (the latter avoids threading the flag
-        // through every server call site for a model that should always reason).
-        let effectiveThinking = enableThinking
-            || (ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"]
-                .map { ["1", "true", "yes", "on"].contains($0.lowercased()) } ?? false)
+        // Reasoning models gate their chain-of-thought on `enable_thinking` in
+        // the chat template. Resolution: an explicit per-call flag wins, else the
+        // `KRILL_ENABLE_THINKING` env, else OFF. Interactive callers (the chat
+        // TUI / classic REPL) pass their `thinking` config value here, so chat is
+        // on by default; the server and single-shot pass nil, preserving prior
+        // behavior (off unless the env opts in). Always a no-op for models with no
+        // thinking channel, since `thinkingPrompt` returns nil there.
+        let effectiveThinking = Self.resolveThinking(
+            explicit: enableThinking,
+            env: ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"])
 
         // Use direct token ID path for Gemma4 to avoid decode→re-encode
         // round-trip that loses special tokens (105, 106, 107).

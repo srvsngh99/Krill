@@ -68,6 +68,13 @@ public struct KrillConfig: Sendable {
     /// talk/listen loop. `speak_replies` in config; `KRILL_SPEAK_REPLIES` env.
     public var speakReplies: Bool
 
+    /// Default reasoning ("thinking") state for new sessions: when true and the
+    /// model has a thinking channel, the engine turns it on so the model reasons
+    /// before answering. ON by default (it is a no-op for models with no thinking
+    /// channel). `thinking` in config; `KRILL_ENABLE_THINKING` env. The TUI can
+    /// toggle it per session; this is the starting value.
+    public var thinking: Bool
+
     public init() {
         self.defaultModel = nil
         self.defaultQuant = 4
@@ -88,6 +95,7 @@ public struct KrillConfig: Sendable {
         self.flashAttention = false
         self.voiceMode = "off"
         self.speakReplies = false
+        self.thinking = true
     }
 
     /// Load configuration with full precedence chain.
@@ -152,6 +160,8 @@ public struct KrillConfig: Sendable {
                 voiceMode = value
             case "speak_replies":
                 speakReplies = value == "true" || value == "1"
+            case "thinking", "enable_thinking":
+                thinking = value == "true" || value == "1" || value == "on" || value == "yes"
             case "keep_alive":
                 keepAlive = value
             case "num_parallel":
@@ -212,6 +222,10 @@ public struct KrillConfig: Sendable {
         }
         if let v = env["KRILL_SPEAK_REPLIES"] {
             speakReplies = v == "1" || v.lowercased() == "true"
+        }
+        if let v = env["KRILL_ENABLE_THINKING"] {
+            let s = v.lowercased()
+            thinking = s == "1" || s == "true" || s == "yes" || s == "on"
         }
 
         if let v = ProcessInfo.processInfo.environment["KRILL_DEFAULT_MODEL"] {

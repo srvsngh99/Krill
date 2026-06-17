@@ -78,6 +78,11 @@ final class ChatTUI {
     // the hands-free posture for a full talk/listen loop. The synthesizer is
     // created lazily so it costs nothing until the user turns speaking on.
     private var speakReplies = false
+    // Reasoning ("thinking") channel for models that have one. ON by default
+    // (no-op for models without a thinking channel); toggled with `/think` or
+    // Ctrl-T, seeded from the `thinking` config key. Passed to each generate()
+    // so the model reasons before answering when on.
+    private var thinkingOn = true
     private lazy var synth = SpeechSynthesizer()
     private var inputHistory: [String] = []
     private var historyIndex = 0
@@ -104,7 +109,8 @@ final class ChatTUI {
     init(engine: InferenceEngine, modelName: String, system: String?,
          params: SamplingParams, maxTokens: Int, registry: Registry,
          initialImage: Data?, initialAudio: Data?, theme: String? = nil,
-         voiceModeSetting: String = "off", speakRepliesSetting: Bool = false) {
+         voiceModeSetting: String = "off", speakRepliesSetting: Bool = false,
+         thinkingSetting: Bool = true) {
         self.engine = engine
         self.modelName = modelName
         self.system = system
@@ -114,6 +120,7 @@ final class ChatTUI {
         self.themeOverride = theme
         self.voiceMode = Self.parseVoiceMode(voiceModeSetting)
         self.speakReplies = speakRepliesSetting
+        self.thinkingOn = thinkingSetting
         self.contextWindow = AliasMap.resolve(modelName)?.context ?? 0
         self.customCommands = CustomCommandStore.load(from: Self.commandsDir)
         menu.extra = customCommands.commands.map {
@@ -207,6 +214,9 @@ final class ChatTUI {
             input = ""; cursor = 0; menu.update(for: input); return nil
         case .ctrlV:
             if engine.canUseNativeAudio { cycleVoiceMode() }   // Ctrl-V: cycle voice posture
+            return nil
+        case .ctrlT:
+            setThinking(!thinkingOn)   // Ctrl-T: toggle the reasoning channel
             return nil
         case .ctrlL:
             return nil   // render() runs after each batch
@@ -629,6 +639,13 @@ final class ChatTUI {
             case "", "toggle": setSpeakReplies(!speakReplies)
             default: note("Usage: /speak on|off  (read model replies aloud)")
             }
+        case "/think", "/thinking":
+            switch arg.lowercased().trimmingCharacters(in: .whitespaces) {
+            case "on": setThinking(true)
+            case "off": setThinking(false)
+            case "", "toggle": setThinking(!thinkingOn)
+            default: note("Usage: /think on|off  (reason before answering; Ctrl-T to toggle)")
+            }
         case "/voice":
             let parts = arg.lowercased().split(separator: " ").map(String.init)
             switch parts.first ?? "" {
@@ -704,6 +721,16 @@ final class ChatTUI {
             : "Spoken replies: OFF.")
     }
 
+    /// Turn the reasoning ("thinking") channel on or off for the rest of the
+    /// session and confirm it on screen. A no-op for models without a thinking
+    /// channel. Toggled with `/think` or Ctrl-T.
+    private func setThinking(_ on: Bool) {
+        thinkingOn = on
+        note(on
+            ? "Thinking: ON. The model reasons before answering (no-op if the model has no thinking channel). /think off or Ctrl-T to stop."
+            : "Thinking: OFF. The model answers directly.")
+    }
+
     /// Advance to the next posture, the Ctrl-V action. The cycle starts and ends
     /// at `.type` (voice off) so one key both enables voice and turns it back off:
     /// off -> dictate -> handsfree -> send -> off.
@@ -736,7 +763,9 @@ final class ChatTUI {
         // Spoken-replies (TTS) indicator: independent of the mic, so it shows even
         // on text-only models. Leads the right half when on.
         let speakTag = speakReplies ? "\u{25CF} speak\(sep)" : ""
-        let cleanRight = "\(speakTag)\(cwdLabel)\(sep)\(KrillLMVersionTag)"
+        // Reasoning indicator: a mono dot when the thinking channel is on.
+        let thinkTag = thinkingOn ? "\u{25CF} think\(sep)" : ""
+        let cleanRight = "\(thinkTag)\(speakTag)\(cwdLabel)\(sep)\(KrillLMVersionTag)"
         // Voice OFF (text mode) or a non-audio model: no voice chrome at all - the
         // footer is just the generation status and cwd/version (plus speak tag).
         guard engine.canUseNativeAudio, voiceMode != .type || !voiceActivity.isEmpty else {
@@ -850,7 +879,8 @@ final class ChatTUI {
 
         let gen = engine.generate(
             messages: messages, params: params, maxTokens: maxTokens,
-            imageData: imgs.first, audioData: pendingAudio?.data, imagesData: imgs)
+            imageData: imgs.first, audioData: pendingAudio?.data, imagesData: imgs,
+            enableThinking: thinkingOn)
         var stream: AsyncStream<TokenEvent>? = gen.stream
         let filter = StreamingReasoningFilter()
         var assistant = ""
@@ -1041,7 +1071,7 @@ final class ChatTUI {
             "Summarize our conversation so far as a concise briefing that preserves all key facts, decisions, code, names, numbers, and open threads, so we can continue seamlessly. Output only the summary."])
         let gen = engine.generate(
             messages: messages, params: params, maxTokens: maxTokens,
-            imageData: nil, audioData: nil, imagesData: [])
+            imageData: nil, audioData: nil, imagesData: [], enableThinking: thinkingOn)
         let filter = StreamingReasoningFilter()
         var summary = ""
         for await event in gen.stream {
@@ -1155,7 +1185,7 @@ final class ChatTUI {
         let gen = engine.generate(
             messages: [["role": "user", "content": instruction]],
             params: params, maxTokens: min(maxTokens, 256),
-            imageData: nil, audioData: wav, imagesData: [])
+            imageData: nil, audioData: wav, imagesData: [], enableThinking: thinkingOn)
         var raw = ""
         for await event in gen.stream {
             if event.isEnd { break }
