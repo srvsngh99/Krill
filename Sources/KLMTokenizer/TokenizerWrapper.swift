@@ -1,5 +1,6 @@
 import Foundation
 import Tokenizers
+import Jinja
 
 /// Wrapper around HuggingFace swift-transformers tokenizer.
 ///
@@ -29,6 +30,12 @@ public final class KLMTokenizer: @unchecked Sendable {
     /// embedded path is empty. Nil for checkpoints that don't ship
     /// the file (the older embedded-template repos work unchanged).
     private let externalChatTemplate: String?
+    /// The chat template embedded in `tokenizer_config.json` (`chat_template`),
+    /// when it is a plain string. Captured so the engine can render the template
+    /// itself with extra context like `enable_thinking` (which the upstream
+    /// `applyChatTemplate` cannot pass through). `nil` when absent or a named-list
+    /// form. `chatTemplateString` prefers the external `.jinja` file over this.
+    private let embeddedChatTemplate: String?
     /// Special-token wrap applied manually for tokenizers whose
     /// `RobertaProcessing`/`BertProcessing` post-processor was stripped at load
     /// (swift-transformers fatal-errors parsing its sep/cls shape). `encode`
@@ -102,6 +109,7 @@ public final class KLMTokenizer: @unchecked Sendable {
         // Capture a separate `chat_template.jinja` if the checkpoint
         // ships one. Best-effort, no-op when absent.
         self.externalChatTemplate = Self.readExternalChatTemplate(directory: directory)
+        self.embeddedChatTemplate = Self.readEmbeddedChatTemplate(directory: directory)
 
         // Model vocab size (for sizing the grammar logit mask). Best-effort.
         self.vocabSize = Self.readVocabSize(directory: directory)
@@ -241,6 +249,21 @@ public final class KLMTokenizer: @unchecked Sendable {
             return nil
         }
         return text
+    }
+
+    /// Read the chat template embedded in `tokenizer_config.json` (`chat_template`),
+    /// when it is a plain string (the common Qwen/Llama/etc. form). Returns nil for
+    /// the named-list form or when absent. Used so the engine can render the
+    /// template with `enable_thinking`.
+    internal static func readEmbeddedChatTemplate(directory: URL) -> String? {
+        let url = directory.appendingPathComponent("tokenizer_config.json")
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let template = obj["chat_template"] as? String,
+              !template.isEmpty else {
+            return nil
+        }
+        return template
     }
 
     private static func readModelKind(directory: URL) -> String {
@@ -505,6 +528,73 @@ public final class KLMTokenizer: @unchecked Sendable {
             return tokenIds
         }
         return nil
+    }
+
+    /// The effective chat template string (external `.jinja` file preferred over
+    /// the `tokenizer_config.json` embedded one), or nil if neither is available.
+    public var chatTemplateString: String? { externalChatTemplate ?? embeddedChatTemplate }
+
+    /// Pure detection of whether a chat template exposes a reasoning ("thinking")
+    /// channel the engine can turn on: the Gemma-4 channel markers, or any
+    /// template that branches on `enable_thinking` (Qwen 3, other reasoning
+    /// fine-tunes). Static + side-effect-free so it is unit-testable without a
+    /// loaded tokenizer.
+    public static func templateSupportsThinking(externalTemplate: String?,
+                                                embeddedTemplate: String?) -> Bool {
+        if let ext = externalTemplate, ext.contains("<|channel>") || ext.contains("<|turn>") {
+            return true  // Gemma-4 channel template
+        }
+        let effective = externalTemplate ?? embeddedTemplate
+        return effective?.contains("enable_thinking") ?? false
+    }
+
+    /// True when the model's chat template can render a reasoning channel the
+    /// engine can turn ON. Gates ``thinkingPrompt(messages:)``.
+    public var supportsThinking: Bool {
+        Self.templateSupportsThinking(externalTemplate: externalChatTemplate,
+                                      embeddedTemplate: embeddedChatTemplate)
+    }
+
+    /// Tokens for a thinking-ENABLED prompt, or nil when the model has no
+    /// thinking channel (caller then uses the normal prompt). For the Gemma-4
+    /// channel template we build the string directly (Swift Jinja cannot parse
+    /// it); for every other thinking template we render it ourselves through the
+    /// same Jinja engine with `enable_thinking: true` in the context - the one
+    /// thing upstream `applyChatTemplate` will not pass through. We render a FRESH
+    /// string and encode it with the special-token-aware `tokenizer.encode`
+    /// (NOT by decoding existing ids), so this is the same render+encode that
+    /// swift-transformers' own direct path does - it keeps ChatML / channel
+    /// special tokens intact, and is distinct from the lossy decode->reencode
+    /// round-trip the engine routes around elsewhere.
+    public func thinkingPrompt(messages: [[String: String]]) -> [Int]? {
+        guard supportsThinking else { return nil }
+        if usesGemmaChannelTemplate {
+            return encodeWithoutExtraBOS(
+                gemma4ChannelPrompt(messages: messages, enableThinking: true))
+        }
+        guard let rendered = renderTemplate(
+                  messages: messages, extraContext: ["enable_thinking": true]) else {
+            return nil
+        }
+        return encodeWithoutExtraBOS(rendered)
+    }
+
+    /// Render the effective chat template through Jinja with extra context merged
+    /// over the standard (`messages`, `add_generation_prompt`, bos/eos) context.
+    /// Returns nil when there is no template or it fails to parse/render (the
+    /// caller then falls back to the normal prompt - never a hard failure).
+    public func renderTemplate(messages: [[String: String]],
+                               extraContext: [String: Any?]) -> String? {
+        guard let template = chatTemplateString,
+              let compiled = try? Template(template) else { return nil }
+        var context: [String: Any?] = [
+            "messages": messages,
+            "add_generation_prompt": true,
+            "bos_token": decode(token: bosTokenId),
+            "eos_token": decode(token: eosTokenId),
+        ]
+        for (k, v) in extraContext { context[k] = v }
+        return try? compiled.render(context)
     }
 
     /// True when the model ships the Gemma-4 "channel" chat template (the

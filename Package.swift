@@ -13,6 +13,12 @@ let package = Package(
         // nvfp4 (4-bit-float) checkpoints. See finding_gemma4_12b_unified.
         .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.31.4"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "0.1.12"),
+        // Jinja is swift-transformers' chat-template engine (transitive). We depend
+        // on it directly so KLMTokenizer can render a chat template with extra
+        // context (`enable_thinking`) that swift-transformers' fixed-context
+        // applyChatTemplate does not expose - this is what lets the engine turn on
+        // a reasoning model's thinking channel. Pinned to the major it resolves.
+        .package(url: "https://github.com/johnmai-dev/Jinja", from: "1.1.0"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.6.0"),
         .package(url: "https://github.com/apple/swift-nio", from: "2.70.0"),
@@ -51,6 +57,7 @@ let package = Package(
             name: "KLMTokenizer",
             dependencies: [
                 .product(name: "Transformers", package: "swift-transformers"),
+                .product(name: "Jinja", package: "Jinja"),
             ]
         ),
         .target(
@@ -187,6 +194,12 @@ let package = Package(
             dependencies: [
                 "KLMGrammar",
                 .product(name: "MLX", package: "mlx-swift"),
+            ]
+        ),
+        .testTarget(
+            name: "KLMTokenizerTests",
+            dependencies: [
+                "KLMTokenizer",
             ]
         ),
     ]

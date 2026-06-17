@@ -6,6 +6,18 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+### Added
+
+- **`enable_thinking` for every reasoning model, not just the Gemma-4 coder.**
+  `KRILL_ENABLE_THINKING=1` (or the per-call flag) now turns on the reasoning
+  channel for any model whose chat template supports it - Qwen 3, the Gemma-4
+  channel fine-tunes, and any template that branches on `enable_thinking`. The
+  engine renders the model's own template with `enable_thinking` set (via the
+  same Jinja engine, then re-encodes so special tokens stay intact); the
+  Gemma-4 channel template, which the Swift Jinja port cannot parse, keeps its
+  direct string builder. The flag is a no-op for models with no thinking
+  channel, and behavior with thinking off is unchanged.
+
 ## [0.8.0] - 2026-06-17
 
 ### Added
