@@ -214,7 +214,8 @@ struct RunCommand: AsyncParsableCommand {
             let session = InteractiveSession(
                 engine: engine, modelName: model, system: system,
                 params: params, maxTokens: maxTokens, registry: registry,
-                initialImage: imageData, initialAudio: audioData)
+                initialImage: imageData, initialAudio: audioData,
+                thinking: KrillConfig.load().thinking)
             do {
                 try await session.run()
             } catch is CleanExit {

@@ -653,6 +653,18 @@ public final class InferenceEngine: @unchecked Sendable {
         return mask
     }
 
+    /// Resolve whether to enable the reasoning channel for a generation. An
+    /// explicit per-call flag wins; else `KRILL_ENABLE_THINKING` (1/true/yes/on
+    /// => on, anything else => off); else OFF. Pure + static so the precedence is
+    /// unit-testable without an engine. Interactive callers pass their config
+    /// `thinking` value as `explicit`, so chat is on by default while the server
+    /// and single-shot (which pass nil) keep their prior off-unless-env behavior.
+    public static func resolveThinking(explicit: Bool?, env: String?) -> Bool {
+        if let explicit { return explicit }
+        if let env { return ["1", "true", "yes", "on"].contains(env.lowercased()) }
+        return false
+    }
+
     public func generate(
         prompt: String,
         systemPrompt: String? = nil,
@@ -824,19 +836,15 @@ public final class InferenceEngine: @unchecked Sendable {
                 wrapGemma4Markers: isUnifiedModel)
 
         // Reasoning models gate their chain-of-thought on `enable_thinking` in
-        // the chat template. Thinking is ON by default (a safe no-op for models
-        // with no thinking channel, since `thinkingPrompt` returns nil there).
-        // Resolution order: an explicit per-call flag (TUI toggle / API request
-        // field) wins; else `KRILL_ENABLE_THINKING` can force it on or off; else
-        // default ON.
-        let effectiveThinking: Bool
-        if let enableThinking {
-            effectiveThinking = enableThinking
-        } else if let envVal = ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"] {
-            effectiveThinking = ["1", "true", "yes", "on"].contains(envVal.lowercased())
-        } else {
-            effectiveThinking = true
-        }
+        // the chat template. Resolution: an explicit per-call flag wins, else the
+        // `KRILL_ENABLE_THINKING` env, else OFF. Interactive callers (the chat
+        // TUI / classic REPL) pass their `thinking` config value here, so chat is
+        // on by default; the server and single-shot pass nil, preserving prior
+        // behavior (off unless the env opts in). Always a no-op for models with no
+        // thinking channel, since `thinkingPrompt` returns nil there.
+        let effectiveThinking = Self.resolveThinking(
+            explicit: enableThinking,
+            env: ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"])
 
         // Use direct token ID path for Gemma4 to avoid decode→re-encode
         // round-trip that loses special tokens (105, 106, 107).
