@@ -848,6 +848,14 @@ public final class InferenceEngine: @unchecked Sendable {
             // parse/eval failure, falling through to the built-in path so
             // an exotic Modelfile never hard-fails a request.
             promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(rendered)
+        } else if effectiveThinking,
+                  let thinking = tokenizer.thinkingPrompt(messages: preparedMessages) {
+            // Thinking requested AND the model has a reasoning channel: render the
+            // template with `enable_thinking` on (Gemma-4 channel, Qwen 3, and any
+            // template that branches on it) and encode. Returns nil for models
+            // with no thinking channel, which fall through to the normal path - so
+            // the flag is a safe no-op there.
+            promptTokensBuilt = thinking
         } else {
             // Family-specific prompt tokenization, selected by the declarative
             // `ModelAdapter.tokenizerPrompt` policy (WS3) rather than a chain of
