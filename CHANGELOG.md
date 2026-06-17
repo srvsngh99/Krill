@@ -6,6 +6,8 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-06-17
+
 ### Added
 
 - **Thinking on by default in interactive chat, with a toggle and a config
