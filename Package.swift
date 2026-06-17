@@ -196,5 +196,11 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
             ]
         ),
+        .testTarget(
+            name: "KLMTokenizerTests",
+            dependencies: [
+                "KLMTokenizer",
+            ]
+        ),
     ]
 )

@@ -534,13 +534,25 @@ public final class KLMTokenizer: @unchecked Sendable {
     /// the `tokenizer_config.json` embedded one), or nil if neither is available.
     public var chatTemplateString: String? { externalChatTemplate ?? embeddedChatTemplate }
 
-    /// True when the model's chat template can render a reasoning ("thinking")
-    /// channel that the engine can turn ON. Covers both the Gemma-4 channel
-    /// template and any template that branches on `enable_thinking` (Qwen 3,
-    /// other reasoning fine-tunes). Used to gate ``thinkingPrompt(messages:)``.
+    /// Pure detection of whether a chat template exposes a reasoning ("thinking")
+    /// channel the engine can turn on: the Gemma-4 channel markers, or any
+    /// template that branches on `enable_thinking` (Qwen 3, other reasoning
+    /// fine-tunes). Static + side-effect-free so it is unit-testable without a
+    /// loaded tokenizer.
+    public static func templateSupportsThinking(externalTemplate: String?,
+                                                embeddedTemplate: String?) -> Bool {
+        if let ext = externalTemplate, ext.contains("<|channel>") || ext.contains("<|turn>") {
+            return true  // Gemma-4 channel template
+        }
+        let effective = externalTemplate ?? embeddedTemplate
+        return effective?.contains("enable_thinking") ?? false
+    }
+
+    /// True when the model's chat template can render a reasoning channel the
+    /// engine can turn ON. Gates ``thinkingPrompt(messages:)``.
     public var supportsThinking: Bool {
-        if usesGemmaChannelTemplate { return true }
-        return chatTemplateString?.contains("enable_thinking") ?? false
+        Self.templateSupportsThinking(externalTemplate: externalChatTemplate,
+                                      embeddedTemplate: embeddedChatTemplate)
     }
 
     /// Tokens for a thinking-ENABLED prompt, or nil when the model has no
@@ -548,16 +560,19 @@ public final class KLMTokenizer: @unchecked Sendable {
     /// channel template we build the string directly (Swift Jinja cannot parse
     /// it); for every other thinking template we render it ourselves through the
     /// same Jinja engine with `enable_thinking: true` in the context - the one
-    /// thing upstream `applyChatTemplate` will not pass through - then encode.
-    /// Rendering to a string and encoding (not decoding existing ids) keeps the
-    /// special tokens intact, the same way the `/v1/completions` path does.
+    /// thing upstream `applyChatTemplate` will not pass through. We render a FRESH
+    /// string and encode it with the special-token-aware `tokenizer.encode`
+    /// (NOT by decoding existing ids), so this is the same render+encode that
+    /// swift-transformers' own direct path does - it keeps ChatML / channel
+    /// special tokens intact, and is distinct from the lossy decode->reencode
+    /// round-trip the engine routes around elsewhere.
     public func thinkingPrompt(messages: [[String: String]]) -> [Int]? {
+        guard supportsThinking else { return nil }
         if usesGemmaChannelTemplate {
             return encodeWithoutExtraBOS(
                 gemma4ChannelPrompt(messages: messages, enableThinking: true))
         }
-        guard chatTemplateString?.contains("enable_thinking") == true,
-              let rendered = renderTemplate(
+        guard let rendered = renderTemplate(
                   messages: messages, extraContext: ["enable_thinking": true]) else {
             return nil
         }
