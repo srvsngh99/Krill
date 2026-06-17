@@ -21,6 +21,18 @@ final class KLMRegistryTests: XCTestCase {
         XCTAssertEqual(cfg.maxQueue, 256)
     }
 
+    func testThinkingConfigDefaultsOnAndParses() {
+        // Reasoning channel is ON by default (no-op for models without one), and
+        // the `thinking` config key sets the per-session default.
+        var cfg = KrillConfig()
+        XCTAssertTrue(cfg.thinking)            // default ON
+        cfg.mergeFromTOML("thinking = false")
+        XCTAssertFalse(cfg.thinking)
+        var cfg2 = KrillConfig()
+        cfg2.mergeFromTOML("enable_thinking = true")  // alias accepted
+        XCTAssertTrue(cfg2.thinking)
+    }
+
     func testModelNameValidationRejectsTraversal() {
         XCTAssertTrue(Registry.isValidModelName("llama-3.2-1b"))
         XCTAssertTrue(Registry.isValidModelName("my_model.v2"))

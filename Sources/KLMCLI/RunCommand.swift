@@ -204,7 +204,8 @@ struct RunCommand: AsyncParsableCommand {
                 params: params, maxTokens: maxTokens, registry: registry,
                 initialImage: imageData, initialAudio: audioData, theme: theme,
                 voiceModeSetting: tuiConfig.voiceMode,
-                speakRepliesSetting: tuiConfig.speakReplies)
+                speakRepliesSetting: tuiConfig.speakReplies,
+                thinkingSetting: tuiConfig.thinking)
             await tui.run()
         } else {
             // Classic line REPL (forced with --classic, or auto when stdout is

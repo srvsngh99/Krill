@@ -10,7 +10,7 @@ public enum Key: Equatable {
     case up, down, left, right
     case home, end, pageUp, pageDown, delete
     case scrollUp, scrollDown
-    case ctrlC, ctrlD, ctrlU, ctrlA, ctrlE, ctrlW, ctrlK, ctrlL, ctrlV
+    case ctrlC, ctrlD, ctrlU, ctrlA, ctrlE, ctrlW, ctrlK, ctrlL, ctrlV, ctrlT
 }
 
 /// Decodes raw terminal input bytes into `Key` events. The decoder is pure (a
@@ -119,6 +119,7 @@ public enum KeyDecoder {
         case 0x0b: return .ctrlK
         case 0x0c: return .ctrlL
         case 0x15: return .ctrlU
+        case 0x14: return .ctrlT
         case 0x16: return .ctrlV
         case 0x17: return .ctrlW
         default:

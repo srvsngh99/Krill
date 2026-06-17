@@ -6,6 +6,16 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+### Added
+
+- **Thinking on by default, with a toggle and a config default.** The reasoning
+  channel is now ON by default for any model that has one (still a no-op for
+  models without one). In the chat TUI, toggle it per session with `/think
+  on|off` or **Ctrl-T**; a `think` indicator shows in the footer when it is on.
+  Set the default for new sessions with `thinking = true|false` in
+  `~/.krillm/config.toml` (or `KRILL_ENABLE_THINKING`). Resolution order:
+  per-call/toggle > `KRILL_ENABLE_THINKING` env > config default (ON).
+
 ## [0.9.0] - 2026-06-17
 
 ### Added
