@@ -204,7 +204,8 @@ struct RunCommand: AsyncParsableCommand {
                 params: params, maxTokens: maxTokens, registry: registry,
                 initialImage: imageData, initialAudio: audioData, theme: theme,
                 voiceModeSetting: tuiConfig.voiceMode,
-                speakRepliesSetting: tuiConfig.speakReplies)
+                speakRepliesSetting: tuiConfig.speakReplies,
+                thinkingSetting: tuiConfig.thinking)
             await tui.run()
         } else {
             // Classic line REPL (forced with --classic, or auto when stdout is
@@ -213,7 +214,8 @@ struct RunCommand: AsyncParsableCommand {
             let session = InteractiveSession(
                 engine: engine, modelName: model, system: system,
                 params: params, maxTokens: maxTokens, registry: registry,
-                initialImage: imageData, initialAudio: audioData)
+                initialImage: imageData, initialAudio: audioData,
+                thinking: KrillConfig.load().thinking)
             do {
                 try await session.run()
             } catch is CleanExit {

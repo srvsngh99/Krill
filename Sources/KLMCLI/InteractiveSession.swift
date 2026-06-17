@@ -52,6 +52,9 @@ final class InteractiveSession {
     private let params: SamplingParams
     private let maxTokens: Int
     private let registry: Registry
+    // Reasoning channel default for this REPL session (from the `thinking` config
+    // key; on by default). No-op for models without a thinking channel.
+    private let thinking: Bool
 
     private var history: [(role: String, content: String)] = []
     private var pendingImages: [Attachment] = []
@@ -67,7 +70,8 @@ final class InteractiveSession {
         maxTokens: Int,
         registry: Registry,
         initialImage: Data? = nil,
-        initialAudio: Data? = nil
+        initialAudio: Data? = nil,
+        thinking: Bool = true
     ) {
         self.engine = engine
         self.modelName = modelName
@@ -75,6 +79,7 @@ final class InteractiveSession {
         self.params = params
         self.maxTokens = maxTokens
         self.registry = registry
+        self.thinking = thinking
         if let initialImage { pendingImages.append(makeAttachment(.image, initialImage, name: "image")) }
         if let initialAudio { pendingAudio = makeAttachment(.audio, initialAudio, name: "audio") }
     }
@@ -215,7 +220,8 @@ final class InteractiveSession {
         spinner.start()
         let generation = engine.generate(
             messages: messages, params: params, maxTokens: maxTokens,
-            imageData: imgs.first, audioData: pendingAudio?.data, imagesData: imgs)
+            imageData: imgs.first, audioData: pendingAudio?.data, imagesData: imgs,
+            enableThinking: thinking)
         var stream: AsyncStream<TokenEvent>? = generation.stream
         let getStats = generation.stats
 
