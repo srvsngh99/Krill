@@ -17,9 +17,18 @@ reverse chronological order. Versioning follows
   **Ctrl-T**; a `think` indicator shows in the TUI footer when on. Set the
   default with `thinking = true|false` in `~/.krillm/config.toml` (or
   `KRILL_ENABLE_THINKING`). The **server/API and single-shot generation are
-  unchanged** (off unless `KRILL_ENABLE_THINKING` or a per-call flag), so no API
-  behavior changes silently. Resolution order: per-call/toggle >
-  `KRILL_ENABLE_THINKING` > off.
+  unchanged** (they make no explicit decision, so the template default is kept),
+  so no API behavior changes silently. Resolution order: per-call/toggle >
+  `KRILL_ENABLE_THINKING` > template default.
+- **Toggle works both ways across every thinking family.** When thinking is
+  explicitly decided (toggle/flag/env), the engine pins the template's
+  `enable_thinking` to that value, so a model whose template defaults thinking ON
+  (e.g. Qwen 3) can genuinely be turned OFF, not just on. Verified across the
+  families we ship: Qwen 3 (`enable_thinking`, both directions), the Gemma-4
+  channel templates incl. stock Gemma-4 and the coder fine-tune (both
+  directions), and DeepSeek-R1 distills (always reason - their template has no
+  off switch, so the toggle is a no-op there). Non-reasoning models (Llama,
+  Mistral, Phi, Qwen2.5, Gemma 2, etc.) are unaffected.
 
 ## [0.9.0] - 2026-06-17
 

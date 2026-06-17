@@ -555,25 +555,23 @@ public final class KLMTokenizer: @unchecked Sendable {
                                       embeddedTemplate: embeddedChatTemplate)
     }
 
-    /// Tokens for a thinking-ENABLED prompt, or nil when the model has no
-    /// thinking channel (caller then uses the normal prompt). For the Gemma-4
-    /// channel template we build the string directly (Swift Jinja cannot parse
-    /// it); for every other thinking template we render it ourselves through the
-    /// same Jinja engine with `enable_thinking: true` in the context - the one
-    /// thing upstream `applyChatTemplate` will not pass through. We render a FRESH
-    /// string and encode it with the special-token-aware `tokenizer.encode`
-    /// (NOT by decoding existing ids), so this is the same render+encode that
-    /// swift-transformers' own direct path does - it keeps ChatML / channel
-    /// special tokens intact, and is distinct from the lossy decode->reencode
-    /// round-trip the engine routes around elsewhere.
-    public func thinkingPrompt(messages: [[String: String]]) -> [Int]? {
-        guard supportsThinking else { return nil }
-        if usesGemmaChannelTemplate {
-            return encodeWithoutExtraBOS(
-                gemma4ChannelPrompt(messages: messages, enableThinking: true))
-        }
-        guard let rendered = renderTemplate(
-                  messages: messages, extraContext: ["enable_thinking": true]) else {
+    /// Tokens for a prompt with the `enable_thinking` template variable pinned to
+    /// `on` (BOTH directions), or nil when the template has no such variable (the
+    /// caller then handles it: the Gemma-4 channel template via
+    /// `gemma4ChannelPrompt`, everything else via the normal path).
+    ///
+    /// Pinning matters because a model's template may DEFAULT thinking on (Qwen 3
+    /// does): turning it off then requires rendering with `enable_thinking=false`
+    /// explicitly - the normal path would inherit the on-by-default and never
+    /// disable. We render a FRESH string and encode it with the special-token-aware
+    /// `tokenizer.encode` (NOT by decoding existing ids), the same render+encode
+    /// swift-transformers' own direct path does, so ChatML special tokens stay
+    /// intact. Returns nil for the Gemma-4 channel template too (Swift Jinja cannot
+    /// parse it), so that path falls through to `gemma4ChannelPrompt`.
+    public func enableThinkingPrompt(messages: [[String: String]], on: Bool) -> [Int]? {
+        guard chatTemplateString?.contains("enable_thinking") == true,
+              let rendered = renderTemplate(
+                  messages: messages, extraContext: ["enable_thinking": on]) else {
             return nil
         }
         return encodeWithoutExtraBOS(rendered)

@@ -839,12 +839,15 @@ public final class InferenceEngine: @unchecked Sendable {
         // the chat template. Resolution: an explicit per-call flag wins, else the
         // `KRILL_ENABLE_THINKING` env, else OFF. Interactive callers (the chat
         // TUI / classic REPL) pass their `thinking` config value here, so chat is
-        // on by default; the server and single-shot pass nil, preserving prior
-        // behavior (off unless the env opts in). Always a no-op for models with no
-        // thinking channel, since `thinkingPrompt` returns nil there.
-        let effectiveThinking = Self.resolveThinking(
-            explicit: enableThinking,
-            env: ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"])
+        // on by default; the server and single-shot pass nil. `thinkingExplicit`
+        // tracks whether thinking was DECIDED (flag or env) vs unset: only an
+        // explicit decision pins `enable_thinking` in the template (both ways), so
+        // a model that defaults thinking ON (Qwen 3) can actually be turned OFF
+        // while the server's no-decision requests keep the template default
+        // unchanged. A no-op for models with no thinking channel.
+        let thinkingEnv = ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"]
+        let thinkingExplicit = enableThinking != nil || thinkingEnv != nil
+        let effectiveThinking = Self.resolveThinking(explicit: enableThinking, env: thinkingEnv)
 
         // Use direct token ID path for Gemma4 to avoid decode→re-encode
         // round-trip that loses special tokens (105, 106, 107).
@@ -861,13 +864,15 @@ public final class InferenceEngine: @unchecked Sendable {
             // parse/eval failure, falling through to the built-in path so
             // an exotic Modelfile never hard-fails a request.
             promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(rendered)
-        } else if effectiveThinking,
-                  let thinking = tokenizer.thinkingPrompt(messages: preparedMessages) {
-            // Thinking requested AND the model has a reasoning channel: render the
-            // template with `enable_thinking` on (Gemma-4 channel, Qwen 3, and any
-            // template that branches on it) and encode. Returns nil for models
-            // with no thinking channel, which fall through to the normal path - so
-            // the flag is a safe no-op there.
+        } else if thinkingExplicit,
+                  let thinking = tokenizer.enableThinkingPrompt(
+                      messages: preparedMessages, on: effectiveThinking) {
+            // Thinking was explicitly decided (flag or env) AND the template has an
+            // `enable_thinking` variable: pin it to the decision (ON or OFF) and
+            // encode. This is what lets a default-on template (Qwen 3) be turned
+            // OFF. Returns nil for the Gemma-4 channel template (handled in the
+            // switch below via gemma4ChannelPrompt) and for models with no thinking
+            // variable (fall through to the normal path).
             promptTokensBuilt = thinking
         } else {
             // Family-specific prompt tokenization, selected by the declarative
