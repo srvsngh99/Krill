@@ -6,12 +6,13 @@ import MLX
 /// loader reads back, with no Python / mlx-lm shell-out.
 ///
 /// It quantizes every 2-D `*.weight` (the `Linear`/`Embedding` leaves), emitting
-/// the packed `weight` + `scales` (+ `biases`) triple `MLX.quantized` produces,
-/// and passes every other tensor (norms, 1-D biases) through unchanged. This is
-/// the same set `mlx_lm.convert` quantizes for a dense model, so the produced
-/// tensors are byte-identical to an mlx-community build (same MLX op, same
-/// group/bits/mode/dtype, same layer set) - verified 1007/1007 on GLM-4-9B-0414
-/// affine 4-bit (`tools/verify_native_quantize_parity.sh`).
+/// the packed `weight` + `scales` (+ `biases` for affine) `MLX.quantized`
+/// produces, and passes every other tensor (norms, 1-D biases) through unchanged.
+/// This is the same set `mlx_lm.convert` quantizes for a dense model, so the
+/// produced tensors are byte-identical to the canonical MLX op - verified
+/// 1007/1007 on GLM-4-9B-0414 affine 4-bit vs the mlx-community build
+/// (`tools/verify_native_quantize_parity.sh`) and 765/765 for nvfp4 vs
+/// `mx.quantize(mode:"nvfp4")` (`tools/verify_native_quantize_nvfp4.sh`).
 ///
 /// IMPORTANT vs the loader: KrillLM's loader reconstructs quantized layers with
 /// mlx-swift `quantize(model:)`, which quantizes EVERY `Linear`/`Embedding` leaf
@@ -24,8 +25,9 @@ import MLX
 ///
 /// MoE (stacked 3-D experts), vision/multimodal (towers kept fp + Conv2d layouts),
 /// and Gemma (PLE / tied-head specifics) checkpoints need per-family handling
-/// this shape-driven pass does not do, so they are rejected up front. Only affine
-/// is gated end-to-end today; nvfp4/mxfp4 are plumbed through but unverified.
+/// this shape-driven pass does not do, so they are rejected up front. affine,
+/// nvfp4, and mxfp4 are gated end-to-end (byte-identical to the canonical op);
+/// mxfp8 shares the same path (auto group 32 / 8-bit) but is not separately gated.
 public enum CheckpointQuantizer {
 
     public enum QuantizeError: Error, CustomStringConvertible {
@@ -52,14 +54,29 @@ public enum CheckpointQuantizer {
         }
     }
 
-    /// Map a storage dtype name to an MLX float type. Non-quantized tensors and
-    /// the scales/biases are stored at this precision (mlx_lm.convert defaults to
-    /// fp16, which is the mlx-community convention; bf16 preserves source range).
+    /// Map a storage dtype name to an MLX float type. Non-quantized tensors are
+    /// stored at this precision (mlx_lm.convert defaults to fp16, the
+    /// mlx-community convention; bf16 preserves source range).
     private static func storageDType(_ name: String) -> DType {
         switch name.lowercased() {
         case "bf16", "bfloat16": return .bfloat16
         case "fp32", "float32", "f32": return .float32
         default: return .float16
+        }
+    }
+
+    /// The MLX-required (bits, groupSize) for the float quantization formats, so
+    /// `--mode nvfp4` works without the caller also knowing it needs group 16. The
+    /// micro-scaled formats only support one shape each (nvfp4: 4-bit / group 16;
+    /// mxfp4: 4-bit / group 32; mxfp8: 8-bit / group 32). `affine` is flexible, so
+    /// the caller's bits/groupSize are honored as-is.
+    private static func effectiveParams(mode: String, bits: Int, groupSize: Int)
+        -> (bits: Int, groupSize: Int) {
+        switch mode.lowercased() {
+        case "nvfp4": return (4, 16)
+        case "mxfp4": return (4, 32)
+        case "mxfp8": return (8, 32)
+        default: return (bits, groupSize)
         }
     }
 
@@ -94,6 +111,12 @@ public enum CheckpointQuantizer {
         //    quantized) at once.
         let qmode = mlxQuantizationMode(mode)
         let storeDType = storageDType(dtype)
+        // Float formats (nvfp4/mxfp4/mxfp8) only support one (bits, groupSize) each;
+        // honor that regardless of the passed flags so `--mode nvfp4` just works.
+        let (qBits, qGroup) = effectiveParams(mode: mode, bits: bits, groupSize: groupSize)
+        if qBits != bits || qGroup != groupSize {
+            log("mode \(mode) requires \(qBits)-bit / group \(qGroup); overriding the passed bits/group")
+        }
         var out: [String: MLXArray] = [:]
         var quantizedCount = 0
         for name in weights.keys.sorted() {
@@ -101,18 +124,19 @@ public enum CheckpointQuantizer {
             // A 2-D `.weight` is a Linear/Embedding the loader WILL quantize; if its
             // inner dim is not group-divisible we cannot produce a uniformly-loadable
             // checkpoint, so fail loudly instead of silently leaving it dense.
-            if name.hasSuffix(".weight"), w.ndim == 2, w.dim(1) % groupSize != 0 {
+            if name.hasSuffix(".weight"), w.ndim == 2, w.dim(1) % qGroup != 0 {
                 throw QuantizeError.nonDivisibleWeight(
-                    name: name, dim: w.dim(1), groupSize: groupSize)
+                    name: name, dim: w.dim(1), groupSize: qGroup)
             }
-            if name.hasSuffix(".weight"), w.ndim == 2, w.dim(1) % groupSize == 0 {
-                // Quantize AT the storage precision (mlx_lm.convert casts the model
-                // to the target dtype first), so the derived scales/biases are
-                // byte-identical to an mlx-community build rather than off by a
-                // post-hoc-cast fp16 ULP.
-                let wq0 = w.asType(storeDType)
+            if name.hasSuffix(".weight"), w.ndim == 2, w.dim(1) % qGroup == 0 {
+                // affine: quantize AT the storage precision (mlx_lm.convert casts the
+                // model to fp16 first) so scales/biases are byte-identical to an
+                // mlx-community build. Float formats (nvfp4/...) quantize from the
+                // SOURCE dtype, matching tools/requant_gemma4_nvfp4.py, and carry
+                // their own scale encoding (e.g. uint8 block scales, no biases).
+                let wIn = qmode == .affine ? w.asType(storeDType) : w
                 let (wq, scales, biases) = MLX.quantized(
-                    wq0, groupSize: groupSize, bits: bits, mode: qmode)
+                    wIn, groupSize: qGroup, bits: qBits, mode: qmode)
                 let stem = String(name.dropLast("weight".count))   // keeps trailing "."
                 out[name] = wq
                 out[stem + "scales"] = scales
@@ -131,7 +155,7 @@ public enum CheckpointQuantizer {
             }
             weights[name] = nil           // release the source reference
         }
-        log("quantized \(quantizedCount) tensors (\(bits)-bit, group \(groupSize), \(mode), \(dtype))")
+        log("quantized \(quantizedCount) tensors (\(qBits)-bit, group \(qGroup), \(mode), \(dtype))")
 
         // 4. Write a single safetensors shard (the loader globs *.safetensors; an
         //    index.json is not required and not read).
@@ -141,7 +165,7 @@ public enum CheckpointQuantizer {
 
         // 5. Emit config.json with the quantization block the loader reads
         //    (`quantization`), plus `quantization_config` for HF-tool parity.
-        var qblock: [String: Any] = ["group_size": groupSize, "bits": bits]
+        var qblock: [String: Any] = ["group_size": qGroup, "bits": qBits]
         if qmode != .affine { qblock["mode"] = mode.lowercased() }
         config["quantization"] = qblock
         config["quantization_config"] = qblock

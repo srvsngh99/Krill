@@ -204,12 +204,16 @@ bigger box.
 **Status:** DONE. `krillm quantize` is now pure Swift+MLX
 (`Sources/KLMCore/CheckpointQuantizer.swift`) - the python3/mlx_lm.convert
 shell-out is gone, so the shipped binary has no Python anywhere. Output is
-**byte-identical to mlx_lm.convert** (verified 1007/1007 tensors on
-GLM-4-9B-0414 vs the mlx-community 4-bit; `tools/verify_native_quantize_parity.sh`).
+**byte-identical to the canonical MLX op** (affine: 1007/1007 vs mlx-community
+4-bit, `tools/verify_native_quantize_parity.sh`; nvfp4: 765/765 vs
+`mx.quantize(mode:"nvfp4")`, `tools/verify_native_quantize_nvfp4.sh`).
 Supports dense text families (Llama/Qwen/Mistral/Phi/GLM/Glm4); MoE / vision /
 Gemma are rejected up front (they need per-family handling the shape-driven pass
-does not do - a natural follow-up). `--dtype` (default fp16, mlx-community
-convention), `--mode` (affine/nvfp4/...). Original write-up kept below for context.
+does not do - a natural follow-up). `--mode` affine/nvfp4/mxfp4/mxfp8 (the float
+formats auto-pick their required group size; affine + nvfp4 + mxfp4 gated
+end-to-end byte-identical, mxfp8 shares the path but not separately gated);
+`--dtype` default fp16.
+Original write-up kept below for context.
 
 **Original write-up (deferred):** The only Python touchpoint left in the
 *shipped binary*. Everything in the inference / serving / model-load /
