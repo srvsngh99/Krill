@@ -2,10 +2,10 @@
 import PackageDescription
 
 let package = Package(
-    name: "KrillLM",
+    name: "Krill",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "krillm", targets: ["KLMCLI"]),
+        .executable(name: "krill", targets: ["KrillCLI"]),
     ],
     dependencies: [
         // 0.31.4+ required: earlier revisions' QuantizedLinear.init drops the
@@ -14,7 +14,7 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.31.4"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "0.1.12"),
         // Jinja is swift-transformers' chat-template engine (transitive). We depend
-        // on it directly so KLMTokenizer can render a chat template with extra
+        // on it directly so KrillTokenizer can render a chat template with extra
         // context (`enable_thinking`) that swift-transformers' fixed-context
         // applyChatTemplate does not expose - this is what lets the engine turn on
         // a reasoning model's thinking channel. Pinned to the major it resolves.
@@ -30,17 +30,17 @@ let package = Package(
         .systemLibrary(name: "CEditLine", path: "Sources/CEditLine"),
         // Pure, dependency-free TUI logic (key decoding, text wrap, slash menu)
         // split out so it is unit-testable without a terminal.
-        .target(name: "KLMTUI", dependencies: []),
+        .target(name: "KrillTUI", dependencies: []),
         .target(
-            name: "KLMRuntime",
+            name: "KrillRuntime",
             dependencies: []
         ),
         .target(
-            name: "KLMCore",
+            name: "KrillCore",
             dependencies: [
-                "KLMRuntime",
-                "KLMCache",
-                "KLMKernels",
+                "KrillRuntime",
+                "KrillCache",
+                "KrillKernels",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXFast", package: "mlx-swift"),
@@ -48,33 +48,33 @@ let package = Package(
             ]
         ),
         .target(
-            name: "KLMCache",
+            name: "KrillCache",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
             ]
         ),
         .target(
-            name: "KLMTokenizer",
+            name: "KrillTokenizer",
             dependencies: [
                 .product(name: "Transformers", package: "swift-transformers"),
                 .product(name: "Jinja", package: "Jinja"),
             ]
         ),
         .target(
-            name: "KLMSampler",
+            name: "KrillSampler",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXRandom", package: "mlx-swift"),
             ]
         ),
         .target(
-            name: "KLMGrammar",
+            name: "KrillGrammar",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
             ]
         ),
         .target(
-            name: "KLMKernels",
+            name: "KrillKernels",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
@@ -83,19 +83,19 @@ let package = Package(
             exclude: ["FusedSwiGLU.metal"]
         ),
         .target(
-            name: "KLMRegistry",
+            name: "KrillRegistry",
             dependencies: [
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),
         .target(
-            name: "KLMServer",
+            name: "KrillServer",
             dependencies: [
-                "KLMEngine",
-                "KLMCache",
-                "KLMRegistry",
-                "KLMSampler",
+                "KrillEngine",
+                "KrillCache",
+                "KrillRegistry",
+                "KrillSampler",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -103,103 +103,103 @@ let package = Package(
             ]
         ),
         .target(
-            name: "KLMEngine",
+            name: "KrillEngine",
             dependencies: [
-                "KLMCore",
-                "KLMCache",
-                "KLMTokenizer",
-                "KLMSampler",
-                "KLMGrammar",
-                "KLMRegistry",
+                "KrillCore",
+                "KrillCache",
+                "KrillTokenizer",
+                "KrillSampler",
+                "KrillGrammar",
+                "KrillRegistry",
                 .product(name: "MLX", package: "mlx-swift"),
             ]
         ),
         .target(
-            name: "KLMAgent",
+            name: "KrillAgent",
             dependencies: [
-                "KLMRegistry",
+                "KrillRegistry",
             ]
         ),
         .executableTarget(
-            name: "KLMCLI",
+            name: "KrillCLI",
             dependencies: [
-                "KLMEngine",
-                "KLMCore",
-                "KLMCache",
-                "KLMSampler",
-                "KLMRegistry",
-                "KLMServer",
+                "KrillEngine",
+                "KrillCore",
+                "KrillCache",
+                "KrillSampler",
+                "KrillRegistry",
+                "KrillServer",
                 "CEditLine",
-                "KLMTUI",
+                "KrillTUI",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
             ]
         ),
         .testTarget(
-            name: "KLMCoreTests",
+            name: "KrillCoreTests",
             dependencies: [
-                "KLMCore",
-                "KLMCache",
-                "KLMRuntime",
-                "KLMRegistry",
-                "KLMKernels",
+                "KrillCore",
+                "KrillCache",
+                "KrillRuntime",
+                "KrillRegistry",
+                "KrillKernels",
                 .product(name: "MLX", package: "mlx-swift"),
             ]
         ),
         .testTarget(
-            name: "KLMEngineTests",
+            name: "KrillEngineTests",
             dependencies: [
-                "KLMEngine",
-                "KLMCore",
-                "KLMCache",
-                "KLMSampler",
-                "KLMRuntime",
-                "KLMTokenizer",
+                "KrillEngine",
+                "KrillCore",
+                "KrillCache",
+                "KrillSampler",
+                "KrillRuntime",
+                "KrillTokenizer",
                 .product(name: "MLX", package: "mlx-swift"),
             ]
         ),
         .testTarget(
-            name: "KLMServerTests",
+            name: "KrillServerTests",
             dependencies: [
-                "KLMServer",
-                "KLMEngine",
-                "KLMRegistry",
-                "KLMSampler",
+                "KrillServer",
+                "KrillEngine",
+                "KrillRegistry",
+                "KrillSampler",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ]
         ),
         .testTarget(
-            name: "KLMTUITests",
-            dependencies: ["KLMTUI"]
+            name: "KrillTUITests",
+            dependencies: ["KrillTUI"]
         ),
         .testTarget(
-            name: "KLMRegistryTests",
+            name: "KrillRegistryTests",
             dependencies: [
-                "KLMRegistry",
+                "KrillRegistry",
                 .product(name: "Crypto", package: "swift-crypto"),
             ]
         ),
         .testTarget(
-            name: "KLMAgentTests",
+            name: "KrillAgentTests",
             dependencies: [
-                "KLMAgent",
-                "KLMRegistry",
+                "KrillAgent",
+                "KrillRegistry",
             ]
         ),
         .testTarget(
-            name: "KLMGrammarTests",
+            name: "KrillGrammarTests",
             dependencies: [
-                "KLMGrammar",
+                "KrillGrammar",
                 .product(name: "MLX", package: "mlx-swift"),
             ]
         ),
         .testTarget(
-            name: "KLMTokenizerTests",
+            name: "KrillTokenizerTests",
             dependencies: [
-                "KLMTokenizer",
+                "KrillTokenizer",
             ]
         ),
     ]

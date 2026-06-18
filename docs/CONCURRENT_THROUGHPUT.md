@@ -1,6 +1,6 @@
-# Concurrent throughput: KrillLM vs Ollama
+# Concurrent throughput: Krill vs Ollama
 
-Tool: `tools/krillm_concurrent_benchmark.py` (`make bench-concurrent`). Drives N
+Tool: `tools/krill_concurrent_benchmark.py` (`make bench-concurrent`). Drives N
 simultaneous `/api/generate` streams against each engine and reports AGGREGATE
 decode tok/s — the axis where the continuous batcher wins. Single-stream decode
 is memory-bandwidth bound, so neither engine out-decodes the other on one
@@ -15,17 +15,17 @@ request; concurrency is the lever (one weight read serves many decode rows).
 > N) as the durable signal — those hold across re-runs even when the absolute
 > numbers drift. Re-run `make bench-concurrent` on your own host before quoting.
 
-**KrillLM batched (`KRILL_NUM_PARALLEL=16`, `KRILL_NGRAM_SPEC=1`) vs Ollama 0.24:**
+**Krill batched (`KRILL_NUM_PARALLEL=16`, `KRILL_NGRAM_SPEC=1`) vs Ollama 0.24:**
 
-| N | KrillLM agg tok/s | Ollama agg tok/s | ratio | KrillLM p99 TTFT | Ollama p99 TTFT |
+| N | Krill agg tok/s | Ollama agg tok/s | ratio | Krill p99 TTFT | Ollama p99 TTFT |
 |---|------------------:|-----------------:|------:|-----------------:|----------------:|
 | 1 | 85.2  | 36.4 | 2.34x | 160 ms | 1545 ms |
 | 4 | 158.0 | 85.2 | 1.86x | 324 ms | 3449 ms |
 | 8 | 172.6 | 85.7 | 2.01x | 541 ms | 7903 ms |
 
-**KrillLM serial arm (`KRILL_NUM_PARALLEL=1`, baseline) — same sweep:**
+**Krill serial arm (`KRILL_NUM_PARALLEL=1`, baseline) — same sweep:**
 
-| N | KrillLM agg tok/s | p99 TTFT |
+| N | Krill agg tok/s | p99 TTFT |
 |---|------------------:|---------:|
 | 1 | 97.3  | 86 ms |
 | 4 | 101.3 | 2899 ms |
@@ -39,8 +39,8 @@ request; concurrency is the lever (one weight read serves many decode rows).
   serial-aggregate as soon as two requests overlap. This justifies the
   load-adaptive default `KRILL_SPEC_CONCURRENCY_MAX = 1` (n-gram spec only when
   solo; batch at N >= 2).
-- **KrillLM beats Ollama on every concurrency level** (1.9–2.3x aggregate) and
-  dramatically on tail latency: at N=8 KrillLM p99 TTFT is 541 ms vs Ollama's
+- **Krill beats Ollama on every concurrency level** (1.9–2.3x aggregate) and
+  dramatically on tail latency: at N=8 Krill p99 TTFT is 541 ms vs Ollama's
   7.9 s (~14x). Ollama's aggregate throughput is flat (~85 tok/s) — it does not
   amortize weights across concurrent generates the way the continuous batcher
   does.
@@ -72,7 +72,7 @@ scheduling artifact. It is not. Two things explain it:
    is still rising, just much more slowly). That marginal flattening is the opposite
    of compute-bound: MLX's batched matmul does not fill the GPU until ~R=16, so each
    added row is costly at R=4-8 and much cheaper at R=16. This is an MLX/hardware
-   occupancy curve, **not** a KrillLM batcher scheduling bug — admission + epochs are
+   occupancy curve, **not** a Krill batcher scheduling bug — admission + epochs are
    correct and rolling. Aggregate grows monotonically (174 -> 255 from R=8 -> 16, a
    1.47x step, not linear) and beats Ollama at every N.
 
@@ -85,7 +85,7 @@ scheduling artifact. It is not. Two things explain it:
      (one scatter at the end), so per-step overhead is negligible. A ragged workload
      (rows finishing at different times -> frequent epoch breaks) would add real
      scatter/re-stack cost that this run does not show.
-   - The steady-state GEMM step time has no KrillLM-side lever (it is MLX's kernel
+   - The steady-state GEMM step time has no Krill-side lever (it is MLX's kernel
      occupancy). `KRILL_BATCH_WINDOW_MS` and `KRILL_NUM_PARALLEL` are real levers for
      *coalescing* and the *row cap*, but they do not change the per-step GEMM cost.
 
@@ -119,7 +119,7 @@ The spec round is now integrated into `ContinuousBatcher`: when `KRILL_NGRAM_SPE
 one `[R, W]` verify -> ragged per-row accept committed straight into each row's own
 cache, no `scatterBack`). The load-adaptive gate already routes concurrency >= 2 to the
 batcher, so concurrent server requests get it; the non-spec path is byte-for-byte
-unchanged (gated behind `specEnabled`). End-to-end on a live server (`krillm serve
+unchanged (gated behind `specEnabled`). End-to-end on a live server (`krill serve
 --ngram-spec`, qwen2.5-3b, echo-heavy concurrent prompts, max_tokens=128):
 
 | N | plain batched | spec batched | speedup |
@@ -139,13 +139,13 @@ Enable n-gram with the `--ngram-spec` serve flag (equivalent to `KRILL_NGRAM_SPE
 
 ```bash
 # batched arm
-KRILL_NUM_PARALLEL=16 krillm serve --ngram-spec --model qwen2.5-3b --port 11500 &
-make bench-concurrent KRILLM_URL=http://127.0.0.1:11500 KRILL_MODEL=qwen2.5-3b \
+KRILL_NUM_PARALLEL=16 krill serve --ngram-spec --model qwen2.5-3b --port 11500 &
+make bench-concurrent KRILL_URL=http://127.0.0.1:11500 KRILL_MODEL=qwen2.5-3b \
      OLLAMA_HOST=http://127.0.0.1:11434 OLLAMA_MODEL=qwen2.5:3b \
      CONCURRENCY_SWEEP=1,2,4,8,16 SERVER_ARM=batched BENCH_RUNS=3 BENCH_WARMUP=1
 
 # serial baseline (find the crossover)
-KRILL_NUM_PARALLEL=1 krillm serve --model qwen2.5-3b --port 11500 &
-make bench-concurrent KRILLM_URL=http://127.0.0.1:11500 KRILL_MODEL=qwen2.5-3b \
+KRILL_NUM_PARALLEL=1 krill serve --model qwen2.5-3b --port 11500 &
+make bench-concurrent KRILL_URL=http://127.0.0.1:11500 KRILL_MODEL=qwen2.5-3b \
      CONCURRENCY_SWEEP=1,2,4,8,16 SERVER_ARM=serial BENCH_RUNS=3
 ```

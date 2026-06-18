@@ -16,7 +16,7 @@ families (Mixtral, Qwen2-MoE, OLMoE, DeepSeek-V3) keep the
 
 ## What landed in the native Qwen 3 MoE PR
 
-- `Sources/KLMCore/Qwen3MoEModel.swift`: native Swift+MLX Qwen 3
+- `Sources/KrillCore/Qwen3MoEModel.swift`: native Swift+MLX Qwen 3
   MoE. `Qwen3MoEConfig` parses `num_experts`, `num_experts_per_tok`,
   `moe_intermediate_size`, `decoder_sparse_step`, `mlp_only_layers`,
   `norm_topk_prob` from `config.json` with defaults that match the
@@ -28,16 +28,16 @@ families (Mixtral, Qwen2-MoE, OLMoE, DeepSeek-V3) keep the
   uses `QwenAttention` (no QKV bias, per-head q_norm/k_norm before
   RoPE; identical to dense Qwen 3) and chooses sparse or dense MLP
   per-layer based on `mlpOnlyLayers` and `decoderSparseStep`.
-- `Sources/KLMCore/ModelLoader.swift`: new `loadQwen3MoE` arm
+- `Sources/KrillCore/ModelLoader.swift`: new `loadQwen3MoE` arm
   matched BEFORE the generic MoE rejection. The rejection arm now
   only catches Mixtral / Qwen2-MoE / OLMoE / DeepSeek-V3 — Qwen 3
   MoE routes natively.
-- `Sources/KLMRegistry/ModelCapabilities.swift`:
+- `Sources/KrillRegistry/ModelCapabilities.swift`:
   `nativeMoEDispatchSupported(at:)` inspects a model directory's
   `config.json` and returns true for `qwen3_moe`. The server uses
   this at request time to decide whether to dispatch through the
   native `InferenceEngine` or the `MoEEngine` Python sidecar.
-- `Sources/KLMServer/Server.swift`: both MoE dispatch sites
+- `Sources/KrillServer/Server.swift`: both MoE dispatch sites
   (OpenAI `/v1/chat/completions` and Ollama `/api/chat`) now
   short-circuit the bridge for natively-supported MoE
   manifests and fall through to the standard dense engine flow.
@@ -183,7 +183,7 @@ The native runtime work. Each is its own follow-up PR:
 
 The runtime PR moves the MoE family from `experimental` to
 `compatibleFallback` by adding a Python sidecar bridge to
-mlx-lm (`Sources/KLMEngine/MoEEngine.swift` +
+mlx-lm (`Sources/KrillEngine/MoEEngine.swift` +
 `tools/moe_bridge.py`). Same protocol shape as WS5's
 `Qwen25VLEngine`: long-lived process per server instance, JSON
 request frames over stdin, lazy load on first MoE request,
@@ -205,16 +205,16 @@ qwen2.5-vl-3b (MoE is text-only).
 
 Tests: bridge protocol smoke against Qwen3-1.7B-4bit through
 the same mlx-lm load path (output is the model's expected
-text); live MoEEngine tests gated on `KLM_MOE_MODEL_PATH`
+text); live MoEEngine tests gated on `KRILL_MOE_MODEL_PATH`
 verify text-only generation and that the bridge preserves the
 system prompt through mlx-lm's `apply_chat_template`.
 
 Benchmark vs Ollama: omitted by design. On Mac, Ollama itself
-calls into mlx-lm for MoE inference; the KrillLM bridge calls
+calls into mlx-lm for MoE inference; the Krill bridge calls
 into the same mlx-lm. Per-token throughput and output quality
 are at parity by construction (same Python, same model, same
 MLX kernels). The cold-start cost of the sidecar (~1-3 s
-depending on model size) is the only KrillLM-specific addition,
+depending on model size) is the only Krill-specific addition,
 and it amortizes over the server lifetime.
 
 ## Acceptance status
@@ -242,7 +242,7 @@ From the workstream's acceptance bar:
 
 ## Goal
 
-Support mixture-of-experts LLMs without giving up KrillLM's Mac-native
+Support mixture-of-experts LLMs without giving up Krill's Mac-native
 memory and latency goals.
 
 MoE is not just another alias. It requires router, expert, memory, and
@@ -278,13 +278,13 @@ benchmark and quality gates
 ## Key Files
 
 ```text
-Sources/KLMCore/FeedForward.swift
-Sources/KLMCore/TransformerBlock.swift
-Sources/KLMCore/ModelConfig.swift
-Sources/KLMCore/ModelLoader.swift
-Sources/KLMCore/GLMModel.swift
-Sources/KLMRegistry/ModelManifest.swift
-Sources/KLMRegistry/AliasMap.swift
+Sources/KrillCore/FeedForward.swift
+Sources/KrillCore/TransformerBlock.swift
+Sources/KrillCore/ModelConfig.swift
+Sources/KrillCore/ModelLoader.swift
+Sources/KrillCore/GLMModel.swift
+Sources/KrillRegistry/ModelManifest.swift
+Sources/KrillRegistry/AliasMap.swift
 ```
 
 ## Performance Requirements

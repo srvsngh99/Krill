@@ -1,6 +1,6 @@
 # Gemma-4-12B — Open Issues
 
-Defects found during the full benchmark run on 2026-06-09 (KrillLM main `c5387b0`,
+Defects found during the full benchmark run on 2026-06-09 (Krill main `c5387b0`,
 release build, registered canonical `gemma-4-12b` = nvfp4-oproj8 requant). Both are in
 the **shipped nvfp4 model**, not the engine. Full scorecard:
 `~/.claude/plans/gemma12b-full-bench-2026-06-09.md`.
@@ -31,7 +31,7 @@ GREEN (0,255,0) -> 'Green'    ok
 ### Repro
 ```bash
 # serve the registered model
-KRILL_NO_AUTO_DAEMON=1 .build/release/krillm serve --model gemma-4-12b --port 57455
+KRILL_NO_AUTO_DAEMON=1 .build/release/krill serve --model gemma-4-12b --port 57455
 # POST a solid-red PNG (base64) in the `images` array of /api/generate, prompt
 # "What color is this image? Reply with only the color name." -> 'Brown'
 ```
@@ -71,8 +71,8 @@ text MMLU unchanged (~77.6%); vision parity gate green on the requant ckpt.
 existed on the tool-call path (`ToolCalling.extractGemma4`) was promoted to a
 shared `ReasoningParser.stripGemmaChannels`, wired into `ReasoningParser.strip`
 and `StreamingReasoningFilter` (so it applies to every server response, stream
-and non-stream) and into the in-process CLI (`krillm run`). Verified: plain
-`/api/generate` (non-stream + stream) and `krillm run` outputs are free of
+and non-stream) and into the in-process CLI (`krill run`). Verified: plain
+`/api/generate` (non-stream + stream) and `krill run` outputs are free of
 `<|channel>`/`<channel|>`/`<|think|>` markers. Detail retained below.
 
 **Severity:** medium (UX/formatting; affects every response).
@@ -83,7 +83,7 @@ paths**:
 
 ```
 '<|channel>thought\n<channel|>Blue'                       # image prompt
-'<|channel>thought <channel|>The ocean is the lifeblood…' # text prompt (cold krillm run)
+'<|channel>thought <channel|>The ocean is the lifeblood…' # text prompt (cold krill run)
 ```
 
 The actual answer follows the markers, but the markers themselves should never reach the
@@ -91,7 +91,7 @@ user.
 
 ### Context
 Gemma-4-12B opens a CoT/thinking channel (known: mlx-swift 0.31.4 makes it open long CoT
-on hard prompts). Ollama suppresses this by default and exposes `think:false`. KrillLM
+on hard prompts). Ollama suppresses this by default and exposes `think:false`. Krill
 emits the thinking-channel markers inline in the user-visible `response`.
 
 ### Fix direction
@@ -99,7 +99,7 @@ emits the thinking-channel markers inline in the user-visible `response`.
   user-visible response before returning it, OR
 - Default thinking off for this model (with an opt-in to surface it), matching Ollama's
   `think:false` default behavior.
-- Apply on both the server (`/api/generate`, `/v1/chat/completions`) and the `krillm run`
+- Apply on both the server (`/api/generate`, `/v1/chat/completions`) and the `krill run`
   CLI path (the cold-run output showed the leak too).
 
 ### Acceptance
@@ -111,6 +111,6 @@ not inlined into `response`.
 
 ## Notes
 - Neither blocks the benchmark conclusions: single-stream decode parity, prefill 1.40x,
-  cold 1.7-1.9x, concurrency 1.50x@N16, tools 4/4 parity, multimodal KrillLM-only.
+  cold 1.7-1.9x, concurrency 1.50x@N16, tools 4/4 parity, multimodal Krill-only.
 - Fixing both makes the capability lead clean (correct vision + clean output), which is
   the genuine "miles ahead" axis vs Ollama's text-only MLX gemma tag.

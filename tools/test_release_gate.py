@@ -35,7 +35,7 @@ def make_report(
     text_memory: tuple[float, float] | None = None,
     quant_class_equal: bool | None = None,
 ) -> dict:
-    """Build a minimal multimodal report. Each pair is (krillm, ollama).
+    """Build a minimal multimodal report. Each pair is (krill, ollama).
 
     `text_memory`, if given, adds `peak_memory_gb_median` to the text task so
     the gate can evaluate `memory_ratio`. `quant_class_equal`, if not None,
@@ -63,7 +63,7 @@ def make_report(
         if memory is not None:
             ks["peak_memory_gb_median"] = memory[0]
             os_["peak_memory_gb_median"] = memory[1]
-        return {"krillm": {"summary": ks}, "ollama": {"summary": os_}}
+        return {"krill": {"summary": ks}, "ollama": {"summary": os_}}
 
     report: dict = {
         "status": "ok",
@@ -225,7 +225,7 @@ class ReleaseCandidateProfileTests(unittest.TestCase):
         # release cannot rest on unmeasured decode (guarantee preserved,
         # relocated from the demoted metric to its floor).
         report = self._baseline_report()
-        for engine in ("krillm", "ollama"):
+        for engine in ("krill", "ollama"):
             report["results"]["text"][engine]["summary"].pop("decode_tokens_per_second_median", None)
 
         code, gate = run_gate(report, "--profile", "release_candidate", "--allow-dtype-mismatch")
@@ -305,7 +305,7 @@ class MemoryMetricTests(unittest.TestCase):
 class DecodeAdvisoryFloorTests(unittest.TestCase):
     """`text_decode_ratio` is advisory at the >= 1.5x target in BOTH
     profiles, carrying a synthetic HARD `text_decode_ratio_floor` (>= 1.0x):
-    KrillLM must never decode slower than Ollama. The demotion was accepted
+    Krill must never decode slower than Ollama. The demotion was accepted
     for `release_candidate` (2026-05-16) and extended to `strict`
     (2026-05-22) because the >= 1.5x decode ratio is structurally
     unreachable on M-series. See docs/RELEASE_GATE_DECODE_PROPOSAL.md and
@@ -334,7 +334,7 @@ class DecodeAdvisoryFloorTests(unittest.TestCase):
         )
 
     def test_rc_decode_regression_fails_via_hard_floor(self):
-        # 0.90x: KrillLM slower than Ollama -> hard floor breaks the gate.
+        # 0.90x: Krill slower than Ollama -> hard floor breaks the gate.
         report = baseline_report(text_decode=(90.0, 100.0))
         code, gate = run_gate(report, "--profile", "release_candidate")
         self.assertEqual(code, 1, "decode regression must hard-fail via floor")
@@ -364,7 +364,7 @@ class DecodeAdvisoryFloorTests(unittest.TestCase):
         )
 
     def test_strict_decode_regression_fails_via_hard_floor(self):
-        # 0.90x under strict: KrillLM slower than Ollama -> the hard floor
+        # 0.90x under strict: Krill slower than Ollama -> the hard floor
         # breaks the gate even though the >= 1.5 target itself is advisory.
         report = strict_passing_report(text_decode=(90.0, 100.0))
         code, gate = run_gate(report)  # default profile = strict

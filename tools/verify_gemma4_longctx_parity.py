@@ -5,7 +5,7 @@ Writes `reference_logits.json` into the gemma-4-e2b model dir: the exact prompt
 token ids (a >1024-token VARIED RAG context, well past 2x the 512 sliding
 window), the prefill last-token logits/argmax, and a 32-step greedy
 continuation. `Gemma4LongCtxParityTests` then replays those EXACT ids through
-the native KrillLM runtime and asserts the long-context decode tracks this
+the native Krill runtime and asserts the long-context decode tracks this
 reference - the regression gate for the KV-shared decode RoPE-offset bug
 (shared-layer Q must rotate at the donor's true position, not 0).
 
@@ -20,8 +20,8 @@ points, both load-bearing:
 Usage:
   python3 -m venv /tmp/gemma4ref && /tmp/gemma4ref/bin/pip install mlx-vlm
   /tmp/gemma4ref/bin/python tools/verify_gemma4_longctx_parity.py \
-      --model ~/.krillm/models/blobs/gemma-4-e2b
-  KLM_GEMMA4_PARITY_DIR=~/.krillm/models/blobs/gemma-4-e2b \
+      --model ~/.krill/models/blobs/gemma-4-e2b
+  KRILL_GEMMA4_PARITY_DIR=~/.krill/models/blobs/gemma-4-e2b \
       swift test --filter Gemma4LongCtxParityTests
 """
 import argparse
@@ -38,11 +38,11 @@ nn.Module.load_weights = lambda self, w, strict=True: _orig(self, w, strict=Fals
 from mlx_vlm import load  # noqa: E402
 
 CONTEXT_SENTENCES = [
-    "KrillLM is a native Swift and MLX inference engine for Apple Silicon.",
+    "Krill is a native Swift and MLX inference engine for Apple Silicon.",
     "It serves text, vision, audio, embeddings, rerankers, and tool calling.",
     "One structured-output feature it provides is grammar-constrained JSON decoding.",
     "Its continuous batcher serves many concurrent decode rows from a single weight read.",
-    "KrillLM shares prefix KV cache across requests to avoid re-prefilling shared context.",
+    "Krill shares prefix KV cache across requests to avoid re-prefilling shared context.",
     "The project aims to be a drop-in Ollama replacement on macOS.",
     "It runs entirely on Apple Silicon using the MLX array framework and Metal.",
     "Cold model load and total request latency are among its measured wins over Ollama.",
@@ -56,7 +56,7 @@ CONTEXT_SENTENCES = [
 def build_prompt(units=60):
     ctx = " ".join(CONTEXT_SENTENCES[i % len(CONTEXT_SENTENCES)] for i in range(units)) + " "
     return (f'{ctx}\n\nUsing the context above, answer as JSON {{"answer": string}}.\n'
-            f'Question: What hardware does KrillLM target?\nJSON:')
+            f'Question: What hardware does Krill target?\nJSON:')
 
 
 def main():

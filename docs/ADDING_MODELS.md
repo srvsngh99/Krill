@@ -1,7 +1,7 @@
 # Adding New Model Families
 
 > Adding a model of an **existing** family needs no code change at all:
-> put it in the model catalog (`krillm catalog`, see
+> put it in the model catalog (`krill catalog`, see
 > [MODEL_CATALOG.md](MODEL_CATALOG.md)). The steps below are for adding
 > a new model *architecture* / `ModelFamily`.
 
@@ -9,7 +9,7 @@
 
 ### 1. Create the model file
 
-Add `Sources/KLMCore/NewModel.swift` with:
+Add `Sources/KrillCore/NewModel.swift` with:
 
 ```swift
 // Config struct conforming to ModelConfig

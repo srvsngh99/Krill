@@ -13,7 +13,7 @@ decode.
 
 The blocker named in the backlog was that `KVCache` was not MLX `Updatable`, so
 it could not be passed to `MLX.compile(inputs:outputs:)`. That part is now
-fixed (`KVCache: Updatable` in `Sources/KLMCache/KVCache.swift`).
+fixed (`KVCache: Updatable` in `Sources/KrillCache/KVCache.swift`).
 
 ## Why it is hard
 
@@ -30,8 +30,8 @@ padded `capacity` every step instead of the actual length.
 
 ## The probe
 
-`Tests/KLMCoreTests/CompiledDecodeProbeTests.swift` (gated on
-`KLM_DECODE_PROBE`) builds Llama-3.2-3B-dim transformer blocks (GQA attention +
+`Tests/KrillCoreTests/CompiledDecodeProbeTests.swift` (gated on
+`KRILL_DECODE_PROBE`) builds Llama-3.2-3B-dim transformer blocks (GQA attention +
 SwiGLU MLP + two RMSNorms, random weights) and:
 
 1. **Correctness** -- asserts the compiled fixed-buffer path is numerically

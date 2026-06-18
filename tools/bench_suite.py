@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""KrillLM vs Ollama capability+latency benchmark suite (text / vision / voice /
+"""Krill vs Ollama capability+latency benchmark suite (text / vision / voice /
 tools, hot + cold). Sequential by design — it hits ONE engine at a time so the
 GPU/RAM is never contended, which keeps the numbers honest.
 
 It reads each engine's own Ollama-compatible timing block (`prompt_eval_*`,
-`eval_*`, `load_duration`) so the comparison is apples-to-apples. KrillLM cold
-numbers come from the native one-shot CLI (`krillm run`), which loads the model
+`eval_*`, `load_duration`) so the comparison is apples-to-apples. Krill cold
+numbers come from the native one-shot CLI (`krill run`), which loads the model
 fresh and prints its own load/prefill/decode/TTFT; Ollama cold comes from
 `ollama stop <model>` followed by a timed request (its `load_duration`).
 
 This is a companion to:
-  - tools/krillm_concurrent_benchmark.py  (the N-stream concurrency sweep)
+  - tools/krill_concurrent_benchmark.py  (the N-stream concurrency sweep)
   - tools/gemma4_multimodal_benchmark.py  (the release-gate multimodal harness)
 Unlike those, this one is the quick "show me the head-to-head numbers" driver
 used to refresh docs/BENCHMARKS.md.
 
 Prereqs:
-  - KrillLM server up:  krillm serve --model <m>   (default port 57455; hot numbers)
+  - Krill server up:  krill serve --model <m>   (default port 57455; hot numbers)
   - Ollama up on 11434 with the matching GGUF model pulled
-  - .build/release/krillm built (make release)            (KrillLM cold)
+  - .build/release/krill built (make release)            (Krill cold)
   - Pillow in the active venv ONLY if you let it auto-generate the image asset
 
 Usage:
@@ -28,9 +28,9 @@ Usage:
 """
 import argparse, base64, json, os, re, statistics, subprocess, sys, time, urllib.request
 
-KRILL_URL = "http://127.0.0.1:57455"   # KrillLM default ("KRILL" on a keypad)
+KRILL_URL = "http://127.0.0.1:57455"   # Krill default ("KRILL" on a keypad)
 OLLAMA_URL = "http://127.0.0.1:11434"  # Ollama default
-KRILL_BIN = ".build/release/krillm"
+KRILL_BIN = ".build/release/krill"
 
 
 def post(url, path, payload, timeout=600):
@@ -75,7 +75,7 @@ def krill_cli_cold(model, prompt, np_, image=None, audio=None, cwd="."):
     """One-shot CLI = cold load + first inference; parse its printed metrics.
 
     `KRILL_NO_AUTO_DAEMON=1` is REQUIRED: with a server running for the hot
-    numbers, `krillm run` otherwise auto-routes the prompt through that warm
+    numbers, `krill run` otherwise auto-routes the prompt through that warm
     daemon (printing `--- (via daemon @ :PORT) N chunks ...`) instead of doing a
     real cold in-process load, so the cold metrics never appear and every field
     parses to None. The flag forces the in-process load + the
@@ -90,7 +90,7 @@ def krill_cli_cold(model, prompt, np_, image=None, audio=None, cwd="."):
     p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=300, env=env)
     out = p.stdout + p.stderr
     if "(via daemon @" in out:
-        print("  [cold] WARNING: krillm run routed through the daemon despite "
+        print("  [cold] WARNING: krill run routed through the daemon despite "
               "KRILL_NO_AUTO_DAEMON=1 - cold metrics will be missing.")
     g = lambda rx: (re.search(rx, out) or [None, None])
     load = re.search(r"Ready \(([\d.]+)s load time\)", out)
@@ -128,19 +128,19 @@ def b64file(p):
 # ---- axes ----------------------------------------------------------------
 
 def bench_text(a):
-    print(f"\n=== TEXT  KrillLM {a.krill_model} vs Ollama {a.ollama_model} (np={a.text_tokens}) ===")
+    print(f"\n=== TEXT  Krill {a.krill_model} vs Ollama {a.ollama_model} (np={a.text_tokens}) ===")
     prompt = "Write a detailed paragraph about the ocean and its importance to life on Earth."
     kp = {"model": a.krill_model, "prompt": prompt, "stream": False,
           "options": {"temperature": 0, "num_predict": a.text_tokens, "seed": 0}}
     op = dict(kp, model=a.ollama_model)
     kh, oh = hot(KRILL_URL, "/api/generate", kp), hot(OLLAMA_URL, "/api/generate", op)
-    print(f"  HOT  KrillLM: decode {kh['decode_tps']} tok/s | total {kh['total_ms']} ms")
+    print(f"  HOT  Krill: decode {kh['decode_tps']} tok/s | total {kh['total_ms']} ms")
     print(f"       Ollama : decode {oh['decode_tps']} tok/s | total {oh['total_ms']} ms")
     if kh['decode_tps'] and oh['decode_tps']:
         print(f"       >> decode {kh['decode_tps']/oh['decode_tps']:.2f}x | total {oh['total_ms']/kh['total_ms']:.2f}x faster")
     kc = krill_cli_cold(a.krill_model, prompt, a.text_tokens, cwd=a.repo)
     oc = ollama_cold(a.ollama_model, "/api/generate", op)
-    print(f"  COLD KrillLM: load {kc['load_ms']} ms | total {kc['total_ms']} ms")
+    print(f"  COLD Krill: load {kc['load_ms']} ms | total {kc['total_ms']} ms")
     print(f"       Ollama : load {oc['load_ms']} ms | total {oc['total_ms']} ms")
 
 
@@ -163,7 +163,7 @@ def bench_vision(a):
     def ans(b):
         t = (b.get("response") or "").strip()
         return repr(t[:60]) if t else "EMPTY OUTPUT (processed image, produced no text)"
-    print(f"  HOT  KrillLM: total {kh['total_ms']} ms | answer {ans(ka)}")
+    print(f"  HOT  Krill: total {kh['total_ms']} ms | answer {ans(ka)}")
     print(f"       Ollama : total {oh['total_ms']} ms | answer {ans(oa)}")
     if not (oa.get("response") or "").strip():
         print("       >> NOTE: Ollama returned empty for this model; the latency "
@@ -174,7 +174,7 @@ def bench_vision(a):
         print(f"       >> total {oh['total_ms']/kh['total_ms']:.2f}x faster")
     kc = krill_cli_cold(a.krill_model, prompt, a.image_tokens, image=a.image, cwd=a.repo)
     oc = ollama_cold(a.ollama_model, "/api/generate", op)
-    print(f"  COLD KrillLM: load {kc['load_ms']} ms | total {kc['total_ms']} ms")
+    print(f"  COLD Krill: load {kc['load_ms']} ms | total {kc['total_ms']} ms")
     print(f"       Ollama : load {oc['load_ms']} ms | total {oc['total_ms']} ms")
 
 
@@ -182,7 +182,7 @@ def bench_voice(a):
     print(f"\n=== VOICE  {a.krill_model} vs {a.ollama_model} (audio={a.audio}) ===")
     prompt = "Transcribe or describe what is said in this audio."
     kc = krill_cli_cold(a.krill_model, prompt, a.audio_tokens, audio=a.audio, cwd=a.repo)
-    print(f"  KrillLM (native CLI): decode {kc['decode_tps']} tok/s | TTFT {kc['ttft_ms']} ms")
+    print(f"  Krill (native CLI): decode {kc['decode_tps']} tok/s | TTFT {kc['ttft_ms']} ms")
     print(f"    transcript: {repr(kc['answer'])}")
     # Ollama: feed audio via the media field; record whether it returns text.
     op = {"model": a.ollama_model, "prompt": prompt, "images": [b64file(a.audio)],
@@ -225,12 +225,12 @@ def bench_tools(a):
         return valid, round(statistics.median(lats))
     kv, kl = score(KRILL_URL, a.krill_model)
     ov, ol = score(OLLAMA_URL, a.ollama_model)
-    print(f"  KrillLM: valid_tool_call {kv}/{len(CASES)} | median latency {kl} ms")
+    print(f"  Krill: valid_tool_call {kv}/{len(CASES)} | median latency {kl} ms")
     print(f"  Ollama : valid_tool_call {ov}/{len(CASES)} | median latency {ol} ms")
 
 
 def main():
-    p = argparse.ArgumentParser(description="KrillLM vs Ollama text/vision/voice/tools bench.")
+    p = argparse.ArgumentParser(description="Krill vs Ollama text/vision/voice/tools bench.")
     p.add_argument("--axis", choices=["text", "vision", "voice", "tools", "all"], default="all")
     p.add_argument("--krill-model", default="gemma-4-e2b")
     p.add_argument("--ollama-model", default="gemma4:e2b")
@@ -239,11 +239,11 @@ def main():
     p.add_argument("--text-tokens", type=int, default=64)
     p.add_argument("--image-tokens", type=int, default=48)
     p.add_argument("--audio-tokens", type=int, default=50)
-    p.add_argument("--repo", default=".", help="KrillLM repo dir (for the CLI cold path).")
+    p.add_argument("--repo", default=".", help="Krill repo dir (for the CLI cold path).")
     a = p.parse_args()
-    print(f"KrillLM {KRILL_URL} ({a.krill_model})  vs  Ollama {OLLAMA_URL} ({a.ollama_model})")
+    print(f"Krill {KRILL_URL} ({a.krill_model})  vs  Ollama {OLLAMA_URL} ({a.ollama_model})")
     print("Sequential: one engine at a time. Hot = warm server median-of-3; "
-          "cold = fresh model load (KrillLM CLI / `ollama stop`).")
+          "cold = fresh model load (Krill CLI / `ollama stop`).")
     axes = ["text", "vision", "voice", "tools"] if a.axis == "all" else [a.axis]
     for ax in axes:
         try:
@@ -251,7 +251,7 @@ def main():
         except Exception as e:  # noqa: BLE001 — one axis failing shouldn't abort the rest
             print(f"  [{ax}] skipped: {e}")
     print("\nFor the concurrency sweep (the 'scales under load' axis), run:\n"
-          "  make bench-concurrent  (or tools/krillm_concurrent_benchmark.py)")
+          "  make bench-concurrent  (or tools/krill_concurrent_benchmark.py)")
 
 
 if __name__ == "__main__":

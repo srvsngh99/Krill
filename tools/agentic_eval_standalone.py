@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone agentic tool-use eval for a KrillLM-served model. No Ollama, no
+"""Standalone agentic tool-use eval for a Krill-served model. No Ollama, no
 comparison - single-engine capability numbers.
 
 Runs a real agent loop over /v1/chat/completions: the model is given tool

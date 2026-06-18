@@ -13,14 +13,14 @@ This build is a release-readiness baseline, not a production release. The HTTP s
 ## Starting the Server
 
 ```bash
-krillm serve --model llama-3.2-1b --port 57455
+krill serve --model llama-3.2-1b --port 57455
 ```
 
 Default: `127.0.0.1:57455`
 
 ### Compat mode and the Ollama port
 
-`krillm serve` accepts `--compat ollama|openai|both` (default `both`):
+`krill serve` accepts `--compat ollama|openai|both` (default `both`):
 
 - `both` — `/api/*` and `/v1/*` are both served (default).
 - `ollama` — only `/api/*` + `/healthz` + `/metrics`.
@@ -31,10 +31,10 @@ Endpoints disabled by the compat mode return `404` with an explanatory
 does not speak that protocol.
 
 **Default port and Ollama drop-in:** the default port is `57455`
-(unique — it spells "KRILL" on a phone keypad — so KrillLM coexists with
+(unique — it spells "KRILL" on a phone keypad — so Krill coexists with
 Ollama, which stays on `11434`). For a drop-in Ollama replacement, run
 with `--port 11434` (or set `KRILL_PORT=11434`) and Ollama clients need
-no configuration to talk to KrillLM. The drop-in path is gated on the
+no configuration to talk to Krill. The drop-in path is gated on the
 `mac_parity` gate going green (18/18) — see
 [`OLLAMA_MAC_PARITY_PLAN.md`](OLLAMA_MAC_PARITY_PLAN.md) §4 WS-A1. Verify
 parity with `make parity-gate`.
@@ -151,7 +151,7 @@ Returns installed models in Ollama format.
 
 ### GET /api/version
 
-Returns `{"version": "<ollama-compat>", "krillm_version": "<krillm>"}`. The
+Returns `{"version": "<ollama-compat>", "krill_version": "<krill>"}`. The
 advertised Ollama-compat version is spoofable via the
 `KRILL_OLLAMA_COMPAT_VERSION` env var so version-gated clients proceed.
 
@@ -172,7 +172,7 @@ Body: `{"model": "<name>", "verbose": false}`. Returns `modelfile`,
 Body: `{"model": "<alias-or-hf-repo>", "stream": true}`. Streams NDJSON
 progress (`pulling manifest` → `downloading …` → `success`); set
 `stream: false` for a single terminal JSON. Names resolve through the same
-alias map as `krillm pull`.
+alias map as `krill pull`.
 
 ### DELETE /api/delete
 
@@ -195,9 +195,9 @@ OpenAI single-model lookup. Returns the model object or `404`.
 
 ## Embeddings
 
-KrillLM serves embeddings from a **dedicated sentence-embedding model**
+Krill serves embeddings from a **dedicated sentence-embedding model**
 (BERT/RoBERTa/MiniLM/BGE/E5 — `bert` family), independent of any loaded
-chat model. Pull one first, e.g. `krillm pull all-minilm` (also
+chat model. Pull one first, e.g. `krill pull all-minilm` (also
 `bge-small-en`, `bge-base-en`). Vectors are mean-pooled (override with
 `KRILL_EMBED_POOLING=cls`) and L2-normalized.
 
@@ -218,7 +218,7 @@ Returns `{"object":"list","data":[{"object":"embedding","index":0,
 "embedding":[...]}],"model","usage"}`.
 
 Requesting embeddings against a non-embedding (chat) model returns `400`;
-an uninstalled model returns `404` with a `krillm pull` hint.
+an uninstalled model returns `404` with a `krill pull` hint.
 
 ## Anthropic Messages API
 
@@ -236,7 +236,7 @@ content block), non-streaming and a valid streaming event sequence
 
 `POST /v1/responses` implements the OpenAI Responses shape so OpenAI Codex
 (`wire_api = "responses"`, which dropped Chat Completions) and other
-Responses clients work against KrillLM. Accepts `instructions` (system
+Responses clients work against Krill. Accepts `instructions` (system
 prompt), `input` (a string or an array of `message` / `function_call` /
 `function_call_output` items), `tools` (flat `{type:"function", name,
 parameters}`, mapped onto the shared tool-call convention), and
@@ -245,7 +245,7 @@ output:[{type:"message"|"function_call"}], usage}`; streaming emits the
 Responses event sequence (`response.created` → `response.output_item.added`
 → `response.output_text.delta` / `response.function_call_arguments.delta` →
 … → `response.completed`). The easiest way to use it is
-`krillm launch codex` (see [CONNECT_CODING_AGENTS.md](CONNECT_CODING_AGENTS.md)).
+`krill launch codex` (see [CONNECT_CODING_AGENTS.md](CONNECT_CODING_AGENTS.md)).
 
 ## CORS & Environment Aliases
 
@@ -287,7 +287,7 @@ integer (seconds), `0` (unload right after this request), or a negative
 value (keep loaded indefinitely). The server default is `KRILL_KEEP_ALIVE`
 / `OLLAMA_KEEP_ALIVE` (default `5m`). A background evictor unloads the
 model once the deadline passes; `GET /api/ps` reports the live
-`expires_at`. `krillm stop` (or `POST /v1/models/unload`) unloads now.
+`expires_at`. `krill stop` (or `POST /v1/models/unload`) unloads now.
 
 Concurrency: requests are serialized through a queue
 (`KRILL_NUM_PARALLEL`/`OLLAMA_NUM_PARALLEL` slots, default 1) so
@@ -298,13 +298,13 @@ the server returns `503`. True KV-batched multi-slot decode and
 
 ## Modelfile & Customization
 
-`krillm create <name> -f Modelfile` and `POST /api/create` build a
+`krill create <name> -f Modelfile` and `POST /api/create` build a
 customized model from a Modelfile (`FROM`, `PARAMETER`, `SYSTEM`,
 `TEMPLATE`, `LICENSE`, `MESSAGE`; `ADAPTER` is parse-and-warn). Base
 weights are **referenced via symlink** (no duplication); the Modelfile
-overrides are stored on the manifest. `krillm show <name>`
+overrides are stored on the manifest. `krill show <name>`
 (`--modelfile/--parameters/--template/--system`) and `POST /api/show`
-surface them; `krillm cp <src> <dst>` clones by reference. The `SYSTEM`
+surface them; `krill cp <src> <dst>` clones by reference. The `SYSTEM`
 override is injected at serve time when the request has no system
 message; Modelfile `PARAMETER`s are applied at serve time as defaults
 (an explicit client value still wins). Base weights are referenced via
@@ -316,7 +316,7 @@ re-rendering it at decode is a tracked follow-up.)
 Ollama `format:"json"` or a JSON-schema object (on `/api/chat` and
 `/api/generate`), and OpenAI `response_format` (`{"type":"json_object"}`
 or `{"type":"json_schema","json_schema":{"schema":{…}}}`) on
-`/v1/chat/completions`, are honored. KrillLM both injects a guiding system
+`/v1/chat/completions`, are honored. Krill both injects a guiding system
 instruction (plus the schema, if given) **and** applies **token-level
 grammar-constrained decoding**: every emitted token is masked so the output
 stays a valid prefix of the requested format. For the JSON formats it then
@@ -324,7 +324,7 @@ extracts the first balanced JSON value from the output (stripping
 prose/fences); if the model produces no JSON, the raw text is returned so a
 refusal stays visible.
 
-Two non-JSON formats extend this (KrillLM extensions, not standard
+Two non-JSON formats extend this (Krill extensions, not standard
 OpenAI/Ollama):
 
 - **Regex (Stage C):** constrain the output to a full match of a regular
@@ -354,7 +354,7 @@ guidance.
 ## Tool / Function Calling
 
 `tools: [{type:"function", function:{name, description, parameters}}]` is
-accepted on `POST /v1/chat/completions` and `POST /api/chat`. KrillLM
+accepted on `POST /v1/chat/completions` and `POST /api/chat`. Krill
 injects the tool schemas as a system turn and instructs the model to emit
 `<tool_call>{"name":...,"arguments":{...}}</tool_call>`; extraction is
 tolerant of a missing close tag, backticks, fenced blocks, and bare JSON.
@@ -405,10 +405,10 @@ curl http://127.0.0.1:57455/v1/chat/completions -d '{
 
 Prometheus text format:
 ```
-krillm_up 1
-krillm_model_loaded 1
-krillm_resident_memory_mb 1234.5
-krillm_uptime_seconds 3600
+krill_up 1
+krill_model_loaded 1
+krill_resident_memory_mb 1234.5
+krill_uptime_seconds 3600
 ```
 
 ## Request Validation

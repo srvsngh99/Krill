@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""KrillLM Telegram Manager — control your local LLM from Telegram."""
+"""Krill Telegram Manager — control your local LLM from Telegram."""
 
 from __future__ import annotations
 
@@ -20,15 +20,15 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 
 from config import BOT_TOKEN, ALLOWED_USERS
-from krillm_client import KrillLMClient
+from krill_client import KrillClient
 
 logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     level=logging.INFO,
 )
-log = logging.getLogger("krillm-tg")
+log = logging.getLogger("krill-tg")
 
-client = KrillLMClient()
+client = KrillClient()
 
 # ── Auth decorator ───────────────────────────────────────────────────
 
@@ -39,7 +39,7 @@ def authorized(func):
         user = update.effective_user
         if not ALLOWED_USERS:
             await update.message.reply_text(
-                "Bot not configured. Set KRILLM_TG_USERS to your Telegram user ID."
+                "Bot not configured. Set KRILL_TG_USERS to your Telegram user ID."
             )
             return
         if user is None or user.id not in ALLOWED_USERS:
@@ -57,7 +57,7 @@ def authorized(func):
 async def cmd_start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         textwrap.dedent("""\
-        <b>KrillLM Manager</b>
+        <b>Krill Manager</b>
 
         <b>Model management</b>
         /models — list installed models
@@ -270,7 +270,7 @@ async def cmd_status(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     lines = [
-        f"<b>KrillLM Status</b>",
+        f"<b>Krill Status</b>",
         f"State: <code>{s.get('status', '?')}</code>",
         f"Version: <code>{s.get('version', '?')}</code>",
         f"Memory: <code>{s.get('memory_mb', '?')} MB</code>",
@@ -363,7 +363,7 @@ async def handle_text(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main() -> None:
     if not BOT_TOKEN:
-        print("Set KRILLM_TG_TOKEN environment variable to your Telegram bot token.")
+        print("Set KRILL_TG_TOKEN environment variable to your Telegram bot token.")
         print("Get one from @BotFather on Telegram.")
         sys.exit(1)
 
@@ -394,11 +394,11 @@ def main() -> None:
         await client.close()
     app.post_shutdown = shutdown
 
-    log.info("KrillLM Telegram Manager starting...")
+    log.info("Krill Telegram Manager starting...")
     if ALLOWED_USERS:
         log.info("Authorized users: %s", ALLOWED_USERS)
     else:
-        log.warning("No KRILLM_TG_USERS set — bot will deny all users!")
+        log.warning("No KRILL_TG_USERS set — bot will deny all users!")
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

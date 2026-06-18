@@ -1,16 +1,16 @@
 name: swift-tests
 
 # Build + test the Swift package on every PR and on main. The
-# project's core (KLMCore, KLMEngine, KLMRegistry, etc.) is
+# project's core (KrillCore, KrillEngine, KrillRegistry, etc.) is
 # Swift+MLX and lives outside the existing `tools-tests.yml`
 # workflow, which only covers the Python helpers. Without this
 # job nothing automatically catches a build break or test
 # regression on the Swift surface.
 #
 # Runs on macOS (mlx-swift is Apple-only). Gated tests that
-# require local model checkpoints (KLM_QWEN25VL_MODEL_PATH,
-# KLM_GEMMA4_MODEL_PATH, KLM_MOE_MODEL_PATH,
-# KLM_RERANKER_MODEL_PATH) skip with XCTSkip when their env
+# require local model checkpoints (KRILL_QWEN25VL_MODEL_PATH,
+# KRILL_GEMMA4_MODEL_PATH, KRILL_MOE_MODEL_PATH,
+# KRILL_RERANKER_MODEL_PATH) skip with XCTSkip when their env
 # variables are not set, so CI runs with ~22 skips out of the
 # 415-ish test suite, exercising every code path that does not
 # need a multi-GB checkpoint download.
@@ -80,7 +80,7 @@ jobs:
       # `--build-tests` compiles the xctest bundle so the metallib
       # post-process step has something to copy resources into.
       # `-Xswiftc -enable-testing` is needed because the test
-      # suite uses `@testable import KLMRegistry` (and other
+      # suite uses `@testable import KrillRegistry` (and other
       # `@testable` imports). `swift test` enables testability
       # automatically, but `swift build --build-tests` does not
       # unless we pass it through, and we need build separate
@@ -99,4 +99,4 @@ jobs:
         run: swift test -c release --skip-build
 
       - name: Print version
-        run: .build/release/krillm --version
+        run: .build/release/krill --version

@@ -1,4 +1,4 @@
-# KrillLM Ollama Speedup Execution Plan
+# Krill Ollama Speedup Execution Plan
 
 Local handoff for the next agent/session.
 
@@ -11,17 +11,17 @@ Machine target: Apple Silicon M4 Pro, 24 GB RAM
 
 Four follow-up PRs have shipped on top of the PR #9 release-readiness baseline.
 PR #16 (a) closed the hard `memory_ratio` miss — root-caused the v5 ~9.6 GB
-KrillLM phys_footprint to an *unbounded* MLX Metal buffer pool plus a
-contaminated (non-`--krillm-server-pid`) measurement, added a default 256 MB
+Krill phys_footprint to an *unbounded* MLX Metal buffer pool plus a
+contaminated (non-`--krill-server-pid`) measurement, added a default 256 MB
 cap (`KRILL_MLX_CACHE_LIMIT_MB`), re-measured at ~2.85–3.0 GB (`memory_ratio`
 0.32–0.84 across 5 fresh runs, always `<= 1.0`, no decode regression); and
 (b) per an owner-accepted gate proposal (2026-05-16), demoted
 `text_decode_ratio` to **advisory** at the `>= 1.5x` target under
 `release_candidate` only, while adding a new **hard
-`text_decode_ratio_floor >= 1.0x`** (KrillLM must never decode slower than
+`text_decode_ratio_floor >= 1.0x`** (Krill must never decode slower than
 Ollama; missing decode also hard-fails). **`release_candidate` now exits `0`
 (GATE: PASS)** on `.build/benchmarks/v6-mm.json`; **`strict` still exits `1`**
-(unchanged — decode/prefill/audio). The decode gap is structural (KrillLM
+(unchanged — decode/prefill/audio). The decode gap is structural (Krill
 ~103–106 vs Ollama ~88–95 tok/s on tiny 4-bit Gemma 4 e2b, not variance); the
 `>= 1.5x` aspiration stays tracked and re-promotable (Workstream 2). No
 release language claims faster raw decode. Workstreams 1–3 below remain before
@@ -32,12 +32,12 @@ release language claims faster raw decode. Workstreams 1–3 below remain before
 
 - **PR #16 (`feat: cap MLX Metal buffer cache; close memory_ratio`,
   branch `feat/mlx-cache-cap-memory-gate`).** Added
-  `Sources/KLMCore/MLXMemoryConfig.swift` — a pure env resolver
+  `Sources/KrillCore/MLXMemoryConfig.swift` — a pure env resolver
   (`resolveCacheLimitMB`) plus `apply()` that sets `MLX.Memory.cacheLimit`,
   wired into `loadModel(from:)` at the single native-load chokepoint.
   Default cap 256 MB; `KRILL_MLX_CACHE_LIMIT_MB` overrides (`0` = legacy
   unbounded). Root-caused the v5 9.6 GB reading to (1) an uncapped MLX
-  recycling pool and (2) a contaminated, non-`--krillm-server-pid`
+  recycling pool and (2) a contaminated, non-`--krill-server-pid`
   measurement. Re-measured at ~2.85–3.0 GB; `memory_ratio` 0.32–0.84
   across 5 fresh `native_server` runs (always `<= 1.0`), no decode
   regression. 5 new unit tests; Swift suite 128/9 → 133/9, 0 failures.
@@ -48,7 +48,7 @@ release language claims faster raw decode. Workstreams 1–3 below remain before
   memory from a daemon thread (50 ms poll). On macOS the per-PID number
   is `phys_footprint` from `proc_pid_rusage(RUSAGE_INFO_V2)` — the same
   figure Activity Monitor reports, which counts resident mmap'd pages
-  (KrillLM's safetensors weights). Other platforms fall back to RSS.
+  (Krill's safetensors weights). Other platforms fall back to RSS.
   Each measured run records `peak_memory_gb` and `peak_memory_basis`.
   `release_gate.py` promotes `memory_ratio` to `hard` under
   `release_candidate`, with an automatic downgrade to advisory whenever
@@ -57,7 +57,7 @@ release language claims faster raw decode. Workstreams 1–3 below remain before
   dimension. New unit tests: `tools/test_memory_sampling.py` (17) and
   six new gate tests covering the conditional downgrade. The fresh
   `.build/benchmarks/v5-mm.json` shows the canonical comparison is
-  actually class-equal (KrillLM affine 4-bit MLX vs Ollama Q4_K_M
+  actually class-equal (Krill affine 4-bit MLX vs Ollama Q4_K_M
   GGUF) — v4's "bf16-vs-Q4" framing was a metadata bug from invoking
   the bench with a registry name instead of the local model path.
 - **PR #11 (`perf: compose int8 KV cache with prefix cache`).** int8 KV cache
@@ -132,7 +132,7 @@ SKIP  audio_prefill_ratio       N/A     target >= 1.5   out_of_scope
 
 geometric mean speedup          1.223x  (memory_ratio excluded)
 
-KrillLM phys_footprint:    text/image ~2.85–3.0 GB  (was contaminated 9.6 GB)
+Krill phys_footprint:    text/image ~2.85–3.0 GB  (was contaminated 9.6 GB)
 Ollama  phys_footprint:    text ~8.2–8.4 GB
 ```
 
@@ -141,13 +141,13 @@ Ollama  phys_footprint:    text ~8.2–8.4 GB
 hard `>= 1.0x` floor `release_candidate` uses (see
 `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`). The `release_candidate`
 pass rests on user-visible latency + class-equal memory hard-passing,
-plus the hard non-regression floor - it does **not** assert KrillLM hit
+plus the hard non-regression floor - it does **not** assert Krill hit
 1.5x decode (printed as advisory WARN).
 Notes on interpreting the history:
 
 - **The v5 9.6 GB memory reading was an artifact.** Two compounding
   causes (PR #16): an uncapped MLX buffer-recycling pool, and a
-  measurement taken without the prescribed `--krillm-server-pid` clean
+  measurement taken without the prescribed `--krill-server-pid` clean
   per-process override. Both fixed; memory is genuinely hard-gateable and
   now passes.
 - Two notes on the earlier v4→v5 decode interpretation:
@@ -160,7 +160,7 @@ Notes on interpreting the history:
   path the model is correctly identified as 4-bit affine MLX, the
   comparison is class-equal with Ollama Q4_K_M, and `memory_ratio`
   is genuinely hard-gateable.
-- **KrillLM's text decode is unchanged.** v4 measured 110.30 tok/s; v5
+- **Krill's text decode is unchanged.** v4 measured 110.30 tok/s; v5
   measures 110.36 tok/s. The ratio dropped from 1.50x → 1.17x because
   Ollama happened to run faster (73 → 94 tok/s) on v5's daemon. Both
   numbers are honest; the gate is sensitive to Ollama variance.
@@ -183,7 +183,7 @@ release-candidate gate. The next implementation PR should:
 1. **Workstream 2 (now top priority):** add Gemma 4-compatible
    self-speculative decoding so `text_decode_ratio` consistently exceeds
    1.5x with margin and greedy parity preserved. The gap is structural
-   (~1.15x, KrillLM ~103–106 tok/s vs Ollama ~88–95 tok/s on tiny 4-bit
+   (~1.15x, Krill ~103–106 tok/s vs Ollama ~88–95 tok/s on tiny 4-bit
    e2b), not variance — micro-optimization will not close it. Larger scope;
    requires a draft path that does not break greedy parity. Track accepted/
    rejected tokens and effective tok/s; benchmark with cache mode + draft
@@ -197,7 +197,7 @@ release-candidate gate. The next implementation PR should:
 
 Memory (formerly item 1) is **done** — see "What landed since PR #9" PR #16.
 
-The product claim remains: KrillLM should beat Ollama by 1.5x to 3x on the
+The product claim remains: Krill should beat Ollama by 1.5x to 3x on the
 accepted benchmark matrix, with equivalent inputs and honest metadata.
 
 ## Main Workstreams
@@ -235,21 +235,21 @@ Acceptance:
 Key files:
 
 ```text
-Sources/KLMCore/AudioEncoder.swift
-Sources/KLMCore/Gemma4Model.swift
-Sources/KLMCore/ModelLoader.swift
-Sources/KLMEngine/InferenceEngine.swift
-Sources/KLMEngine/PythonFallback.swift
-Sources/KLMServer/Server.swift
-Tests/KLMEngineTests/Gemma4SmokeTests.swift
-Tests/KLMServerTests/MultimodalEndpointsTests.swift
+Sources/KrillCore/AudioEncoder.swift
+Sources/KrillCore/Gemma4Model.swift
+Sources/KrillCore/ModelLoader.swift
+Sources/KrillEngine/InferenceEngine.swift
+Sources/KrillEngine/PythonFallback.swift
+Sources/KrillServer/Server.swift
+Tests/KrillEngineTests/Gemma4SmokeTests.swift
+Tests/KrillServerTests/MultimodalEndpointsTests.swift
 tools/gemma4_multimodal_benchmark.py
 ```
 
 ### 2. Gemma 4 Speculative Decoding
 
 Text decode currently fails the refreshed release-candidate gate
-(`text_decode_ratio = 1.1738x`, target `>= 1.5x`). KrillLM's absolute decode
+(`text_decode_ratio = 1.1738x`, target `>= 1.5x`). Krill's absolute decode
 rate was stable across v4/v5; the ratio dropped because the warm Ollama daemon
 ran faster in v5. To consistently reach 1.5x to 3x, we need a Gemma
 4-compatible drafting strategy or another decode-throughput improvement with
@@ -280,12 +280,12 @@ Acceptance:
 Key files:
 
 ```text
-Sources/KLMEngine/SpeculativeDecoder.swift
-Sources/KLMEngine/InferenceEngine.swift
-Sources/KLMCache/KVCache.swift
-Sources/KLMCore/Gemma4Model.swift
-Tests/KLMEngineTests/SpeculativeDecodingTests.swift
-tools/krillm_vs_ollama_benchmark.py
+Sources/KrillEngine/SpeculativeDecoder.swift
+Sources/KrillEngine/InferenceEngine.swift
+Sources/KrillCache/KVCache.swift
+Sources/KrillCore/Gemma4Model.swift
+Tests/KrillEngineTests/SpeculativeDecodingTests.swift
+tools/krill_vs_ollama_benchmark.py
 tools/gemma4_multimodal_benchmark.py
 ```
 
@@ -328,12 +328,12 @@ Acceptance:
 Key files:
 
 ```text
-Sources/KLMCore/Gemma4Model.swift
-Sources/KLMCore/VisionEncoder.swift
-Sources/KLMEngine/InferenceEngine.swift
-Sources/KLMSampler/Sampler.swift
-Sources/KLMCache/KVCache.swift
-Sources/KLMCache/QuantizedKVCache.swift
+Sources/KrillCore/Gemma4Model.swift
+Sources/KrillCore/VisionEncoder.swift
+Sources/KrillEngine/InferenceEngine.swift
+Sources/KrillSampler/Sampler.swift
+Sources/KrillCache/KVCache.swift
+Sources/KrillCache/QuantizedKVCache.swift
 tools/release_gate.py
 tools/gemma4_multimodal_benchmark.py
 docs/BENCHMARKING.md
@@ -355,7 +355,7 @@ Done:
 - **`text_decode_ratio` (owner-accepted: `release_candidate` 2026-05-16,
   `strict` 2026-05-22):** demoted to **advisory** at the `>= 1.5x`
   target, with a synthetic **hard `text_decode_ratio_floor >= 1.0x`**
-  (`release_gate.py:ADVISORY_HARD_FLOORS`). KrillLM must never decode
+  (`release_gate.py:ADVISORY_HARD_FLOORS`). Krill must never decode
   slower than Ollama; a missing decode value also hard-fails the floor.
   Demotion + floor recorded in `scope.text_decode_ratio` and `caveats`;
   the summary still prints decode as an advisory WARN (no 1.5x claim).
@@ -389,7 +389,7 @@ Done:
   without measuring it.
 - `memory_ratio` is **hard** under `release_candidate` (PR #14). It
   auto-downgrades to advisory whenever quantization classes differ
-  (KrillLM bf16 vs Ollama Q4_K_M today), via
+  (Krill bf16 vs Ollama Q4_K_M today), via
   `release_gate.py:resolve_metric_kinds`; the downgrade is recorded in
   `scope.memory_ratio` and added to `caveats`. `strict` keeps it hard
   regardless of dtype. Re-promotion to a fully hard verdict happens
@@ -441,10 +441,10 @@ Done:
 - `InferenceEngine` removes the `&& !useInt8KV` block on prefix cache and
   dispatches to the quantized snapshot/restore path when int8 is active.
   Truncate-and-re-forward keeps the prompt length stable on a full hit.
-- Unit coverage: `Tests/KLMCoreTests/QuantizedPrefixCacheTests.swift`
+- Unit coverage: `Tests/KrillCoreTests/QuantizedPrefixCacheTests.swift`
   (round-trip; cross-dtype isolation in both directions; truncate+update).
 - Live coverage:
-  `Tests/KLMEngineTests/QuantizedPrefixCacheLiveTests.swift`
+  `Tests/KrillEngineTests/QuantizedPrefixCacheLiveTests.swift`
   runs the same prompt twice with `kvCacheDtype: "int8"` and a shared
   prefix cache, asserting cold/warm greedy tokens match.
 
@@ -462,9 +462,9 @@ Required benchmark metadata:
 
 - Git commit.
 - Machine and OS.
-- KrillLM binary path.
+- Krill binary path.
 - Ollama version and model.
-- Exact KrillLM model path.
+- Exact Krill model path.
 - Quantization/dtype metadata.
 - Prompt and media SHA256.
 - Runs and warmups.
@@ -486,9 +486,9 @@ auto-downgrade) misfire. v4-mm.json's `quantization.comparison.class_equal:
 false` was an artifact of this; v5-mm.json shows the actual
 class-equal 4-bit-vs-4-bit comparison.
 
-Pass `--krillm-server-pid <pid>` when sampling memory under
-`--krillm-image-mode native_server` if the auto-detected `pgrep -f
-'krillm.*serve'` would also match a wrapper shell (Claude harness, tmux,
+Pass `--krill-server-pid <pid>` when sampling memory under
+`--krill-image-mode native_server` if the auto-detected `pgrep -f
+'krill.*serve'` would also match a wrapper shell (Claude harness, tmux,
 etc.). The override gives a clean per-process number; the auto-detect
 is a few-MB shell wrapper away from clean.
 
@@ -498,11 +498,11 @@ Useful commands:
 make test
 make release
 
-KLM_GEMMA4_MODEL_PATH=/Users/sourav/.krillm/models/blobs/gemma-4-e2b \
+KRILL_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b \
 CLANG_MODULE_CACHE_PATH=.build/clang-module-cache \
 swift test --filter QuantizedKVCacheIntegrationTests/testInt8AndFp16ProduceSimilarGreedyPrefix --skip-build
 
-KLM_GEMMA4_MODEL_PATH=/Users/sourav/.krillm/models/blobs/gemma-4-e2b \
+KRILL_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b \
 CLANG_MODULE_CACHE_PATH=.build/clang-module-cache \
 swift test --filter MultimodalEndpointsTests/testTwoDifferentImagesProduceDifferentOutputs --skip-build
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build a tiny *quantized* DeepSeek checkpoint with mlx-lm and record its
-reference logits, to check the native KrillLM `DeepSeekForCausalLM` runtime
+reference logits, to check the native Krill `DeepSeekForCausalLM` runtime
 for logit parity against mlx-lm on identical weights.
 
 Two variants exercise both gating paths and both MLA Q paths:
@@ -15,10 +15,10 @@ synthetic V3 stands in for its gating numerics. Both runtimes are MLX, so
 parity is ~bit-exact.
 
 Usage:
-    python3 tools/verify_deepseek_parity.py /tmp/krillm-deepseek-v2 v2
-    python3 tools/verify_deepseek_parity.py /tmp/krillm-deepseek-v3 v3
-    KLM_DEEPSEEK_V2_PARITY_DIR=/tmp/krillm-deepseek-v2 \\
-        KLM_DEEPSEEK_V3_PARITY_DIR=/tmp/krillm-deepseek-v3 \\
+    python3 tools/verify_deepseek_parity.py /tmp/krill-deepseek-v2 v2
+    python3 tools/verify_deepseek_parity.py /tmp/krill-deepseek-v3 v3
+    KRILL_DEEPSEEK_V2_PARITY_DIR=/tmp/krill-deepseek-v2 \\
+        KRILL_DEEPSEEK_V3_PARITY_DIR=/tmp/krill-deepseek-v3 \\
         swift test -c release --filter DeepSeekParityTests
 """
 import json

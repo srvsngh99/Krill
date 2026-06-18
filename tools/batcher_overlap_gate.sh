@@ -8,7 +8,7 @@ start_serve() {  # $1 = extra env assignment (e.g. KRILL_DECODE_PIPELINE=0)
   # Pin n-gram spec OFF so this gate isolates the overlap-pipeline toggle (spec
   # is on by default and would otherwise mask KRILL_DECODE_PIPELINE). The
   # spec-on concurrent byte-exact gate is tools/batcher_ngram_gate.sh.
-  env KRILL_NGRAM_SPEC=0 $1 KRILL_NUM_PARALLEL=4 .build/release/krillm serve --model "$MODEL" --port $PORT >/tmp/serve_$2.log 2>&1 &
+  env KRILL_NGRAM_SPEC=0 $1 KRILL_NUM_PARALLEL=4 .build/release/krill serve --model "$MODEL" --port $PORT >/tmp/serve_$2.log 2>&1 &
   echo $!
 }
 wait_ready() {
@@ -30,12 +30,12 @@ fire() {  # $1 = tag
 echo "=== overlap ON (default) ==="
 PID=$(start_serve "" on); wait_ready || { echo "serve(on) not ready"; kill $PID 2>/dev/null; exit 1; }
 sleep 1; fire on
-kill $PID 2>/dev/null; sleep 3; pkill -f "krillm serve" 2>/dev/null; sleep 2
+kill $PID 2>/dev/null; sleep 3; pkill -f "krill serve" 2>/dev/null; sleep 2
 
 echo "=== overlap OFF (KRILL_DECODE_PIPELINE=0) ==="
 PID=$(start_serve "KRILL_DECODE_PIPELINE=0" off); wait_ready || { echo "serve(off) not ready"; kill $PID 2>/dev/null; exit 1; }
 sleep 1; fire off
-kill $PID 2>/dev/null; sleep 3; pkill -f "krillm serve" 2>/dev/null
+kill $PID 2>/dev/null; sleep 3; pkill -f "krill serve" 2>/dev/null
 
 echo "=== byte-exact on-vs-off per request ==="
 ok=1

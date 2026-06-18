@@ -1,4 +1,4 @@
-# KrillLM ↔ Ollama macOS Parity Plan
+# Krill ↔ Ollama macOS Parity Plan
 
 Local handoff for the next agent/session.
 
@@ -59,7 +59,7 @@ Also shipped (2026-05-17, same branch):
 
 - WS-C Modelfile (T1-2, T2-1/4/5): `Modelfile.swift` parser
   (FROM/PARAMETER/SYSTEM/TEMPLATE/LICENSE/MESSAGE; ADAPTER parse-warn;
-  triple-quoted blocks). `krillm create`/`show`/`cp` CLI;
+  triple-quoted blocks). `krill create`/`show`/`cp` CLI;
   `POST /api/create` (NDJSON). `Registry.createModel` references base
   weights via symlink (no copy) + `ModelOverrides` on the manifest.
   `SYSTEM` override applied at serve time; `show`/`/api/show` reflect
@@ -67,7 +67,7 @@ Also shipped (2026-05-17, same branch):
 
 - WS-E keep-alive (T1-4, T2-3): per-request `keep_alive` (duration
   string / int / `0` / negative), `KRILL_KEEP_ALIVE` default,
-  background auto-unload evictor (`KeepAlive.swift` actor), `krillm
+  background auto-unload evictor (`KeepAlive.swift` actor), `krill
   stop` CLI, `/api/ps` `expires_at` from the live deadline.
 
 - WS-F Anthropic compat (T2-9, advisory): `POST /v1/messages`
@@ -139,9 +139,9 @@ every plan row is done.
 
 ## 1. Goal
 
-Make KrillLM a **drop-in replacement for Ollama on macOS / Apple Silicon**:
+Make Krill a **drop-in replacement for Ollama on macOS / Apple Silicon**:
 any tool, GUI, SDK, or agent that today points at a local Ollama server
-should work unchanged when pointed at `krillm serve`, while KrillLM keeps its
+should work unchanged when pointed at `krill serve`, while Krill keeps its
 existing wins (native MLX/Metal, lower resident memory, faster TTFT,
 persistent prefix cache, speculative decoding).
 
@@ -158,14 +158,14 @@ configuration* parity. They share the same release-gate philosophy
 
 ## 2. Current Position (parity baseline, 2026-05-16)
 
-KrillLM today exposes `/v1/chat/completions`, `/v1/completions`,
+Krill today exposes `/v1/chat/completions`, `/v1/completions`,
 `/v1/models`, `/v1/models/load`, `/v1/models/unload`, `/v1/status`,
 `/api/chat`, `/api/generate`, `/api/tags`, `/healthz`, `/metrics`; CLI
 `run` / `pull` / `list` / `rm` / `serve` / `bench` / `quantize` / `version`;
-config via `~/.krillm/config.toml` + `KRILL_*` env vars; MLX-safetensors
+config via `~/.krill/config.toml` + `KRILL_*` env vars; MLX-safetensors
 models pulled from HuggingFace.
 
-Where KrillLM already **leads** Ollama (do not regress these):
+Where Krill already **leads** Ollama (do not regress these):
 
 - Persistent on-disk prefix cache (Ollama does not expose this).
 - Native speculative decoding (adaptive K 2–6).
@@ -180,7 +180,7 @@ Tiers reflect "how badly this breaks a drop-in Ollama replacement on Mac."
 
 ### Tier 0 — Breaks drop-in compatibility immediately
 
-| ID | Gap | Ollama | KrillLM today | Gate |
+| ID | Gap | Ollama | Krill today | Gate |
 |----|-----|--------|---------------|------|
 | T0-1 | Default port | `11434` | `11434` (flipped in 0.4.0; `11435` honored one release) | H ✓ |
 | T0-2 | Embeddings | `/api/embed`, `/api/embeddings`, `/v1/embeddings` | none | H |
@@ -189,7 +189,7 @@ Tiers reflect "how badly this breaks a drop-in Ollama replacement on Mac."
 
 ### Tier 1 — Major feature gaps
 
-| ID | Gap | Ollama | KrillLM today | Gate |
+| ID | Gap | Ollama | Krill today | Gate |
 |----|-----|--------|---------------|------|
 | T1-1 | Structured output | `format:"json"` / JSON-schema | none | H |
 | T1-2 | Modelfile + `create` | full directive set + `ollama create` | global `config.toml` only | H |
@@ -202,7 +202,7 @@ Tiers reflect "how badly this breaks a drop-in Ollama replacement on Mac."
 
 ### Tier 2 — CLI / API surface gaps
 
-| ID | Gap | Ollama | KrillLM today | Gate |
+| ID | Gap | Ollama | Krill today | Gate |
 |----|-----|--------|---------------|------|
 | T2-1 | CLI: `show` | yes | none | H |
 | T2-2 | CLI: `ps` | yes | none | H |
@@ -217,7 +217,7 @@ Tiers reflect "how badly this breaks a drop-in Ollama replacement on Mac."
 
 ### Tier 3 — Config & Mac platform gaps
 
-| ID | Gap | Ollama | KrillLM today | Gate |
+| ID | Gap | Ollama | Krill today | Gate |
 |----|-----|--------|---------------|------|
 | T3-1 | CORS origins | `OLLAMA_ORIGINS` | none | H |
 | T3-2 | Flash Attention toggle | `OLLAMA_FLASH_ATTENTION` | standard MLX attention | A |
@@ -236,10 +236,10 @@ File paths are current as of `c17356d` — verify before editing.
 
 **Owner decision (2026-05-16): the default port stays `11435` until full
 Mac parity is reached.** Flipping the default to `11434` early would make
-stock Ollama clients auto-discover KrillLM and then hit missing endpoints —
+stock Ollama clients auto-discover Krill and then hit missing endpoints —
 a half-working "Ollama impostor" is worse than a clean opt-in. So:
 
-- *Now / Phase 1:* keep default `11435`. `krillm serve --port 11434` must
+- *Now / Phase 1:* keep default `11435`. `krill serve --port 11434` must
   work so early adopters can opt in and we can run the parity gate against
   `:11434`. Document in `README.md`/`docs/SERVER_API.md` that the default
   flip is intentionally deferred and tracked here (T0-1).
@@ -251,32 +251,32 @@ a half-working "Ollama impostor" is worse than a clean opt-in. So:
 
 Also add `--compat ollama|openai|both` (default `both`) now — this is
 independent of the port and safe to ship in Phase 1.
-Touch (Phase 1): `Sources/KLMCLI/ServeCommand.swift` (`--compat`, accept
+Touch (Phase 1): `Sources/KrillCLI/ServeCommand.swift` (`--compat`, accept
 `--port 11434`), `docs/SERVER_API.md`, `README.md` (deferral note).
-Touch (final activation): `Sources/KLMRegistry/Config.swift`
-(`server_port` default), `Sources/KLMCLI/ServeCommand.swift`,
+Touch (final activation): `Sources/KrillRegistry/Config.swift`
+(`server_port` default), `Sources/KrillCLI/ServeCommand.swift`,
 release notes.
 
 **A2. Discovery endpoints.**
-Implement `GET /api/version` (return KrillLM version + a spoofable
+Implement `GET /api/version` (return Krill version + a spoofable
 `ollama_compat_version` so version-gated clients proceed), `GET /api/ps`
 (loaded model, size, context, `expires_at`/`UNTIL`, processor=GPU),
 `POST /api/show` (`modelfile`, `parameters`, `template`, `details`,
 `model_info`, `capabilities`). These are read-mostly and unblock the
 majority of Ollama GUIs/integrations.
-Touch: `Sources/KLMServer/Server.swift`, new
-`Sources/KLMServer/OllamaCompat.swift`, `Sources/KLMRegistry/Registry.swift`
+Touch: `Sources/KrillServer/Server.swift`, new
+`Sources/KrillServer/OllamaCompat.swift`, `Sources/KrillRegistry/Registry.swift`
 (model metadata for `show`).
 
 **A3. Model lifecycle HTTP.**
 `POST /api/pull` (stream NDJSON progress), `DELETE /api/delete`,
 `POST /api/copy`, `HEAD|POST /api/blobs/:digest`. `/api/create` is paired
 with WS-C (Modelfile).
-Touch: `Sources/KLMServer/Server.swift`, `Sources/KLMRegistry/Puller.swift`
+Touch: `Sources/KrillServer/Server.swift`, `Sources/KrillRegistry/Puller.swift`
 (emit progress events).
 
 **Acceptance (WS-A):** a stock Ollama GUI (e.g. an Ollama-targeting chat
-client) connects to `krillm serve` with no config change, lists models,
+client) connects to `krill serve` with no config change, lists models,
 shows model info, pulls a model with a progress bar, and chats.
 
 ### WS-B — Embeddings (Tier 0)
@@ -288,9 +288,9 @@ shows model info, pulls a model with a progress bar, and chats.
 embedding model family loader or mean/last-token pooling over an existing
 decoder's hidden states. Decide model support list (start: a small
 sentence-embedding MLX model from mlx-community).
-Touch: new `Sources/KLMEngine/EmbeddingEngine.swift`,
-`Sources/KLMCore/ModelLoader.swift` (pooling head),
-`Sources/KLMServer/Server.swift`, `Sources/KLMRegistry/AliasMap.swift`
+Touch: new `Sources/KrillEngine/EmbeddingEngine.swift`,
+`Sources/KrillCore/ModelLoader.swift` (pooling head),
+`Sources/KrillServer/Server.swift`, `Sources/KrillRegistry/AliasMap.swift`
 (embedding aliases).
 **Acceptance:** `curl /api/embed` and the OpenAI Python SDK
 `client.embeddings.create(...)` return correctly-shaped, L2-normalized
@@ -299,21 +299,21 @@ indexes and queries successfully.
 
 ### WS-C — Modelfile & model customization (Tier 1/2)
 
-Define a KrillLM Modelfile (accept Ollama's syntax verbatim where feasible:
+Define a Krill Modelfile (accept Ollama's syntax verbatim where feasible:
 `FROM`, `PARAMETER`, `TEMPLATE`, `SYSTEM`, `MESSAGE`, `LICENSE`;
 `ADAPTER` for LoRA is OOS for v1, parse-and-warn). Implement:
 
-- `krillm create <name> -f <Modelfile>` + `POST /api/create`.
-- `krillm show <name>` (+ `--modelfile/--parameters/--template/--system`)
+- `krill create <name> -f <Modelfile>` + `POST /api/create`.
+- `krill show <name>` (+ `--modelfile/--parameters/--template/--system`)
   and `POST /api/show` from WS-A2 share one metadata serializer.
-- `krillm cp <src> <dst>` + `POST /api/copy`.
+- `krill cp <src> <dst>` + `POST /api/copy`.
 - Persist custom models as manifests referencing base blobs (no weight
   copy) plus an overrides blob (system/template/params).
 
-Touch: new `Sources/KLMRegistry/Modelfile.swift`,
-`Sources/KLMRegistry/ModelManifest.swift` (overrides field),
-`Sources/KLMCLI/{CreateCommand,ShowCommand,CpCommand}.swift`,
-`Sources/KLMTokenizer/TokenizerWrapper.swift` (template override resolution).
+Touch: new `Sources/KrillRegistry/Modelfile.swift`,
+`Sources/KrillRegistry/ModelManifest.swift` (overrides field),
+`Sources/KrillCLI/{CreateCommand,ShowCommand,CpCommand}.swift`,
+`Sources/KrillTokenizer/TokenizerWrapper.swift` (template override resolution).
 **Acceptance:** a Modelfile that sets `SYSTEM` + `PARAMETER temperature` +
 `TEMPLATE` round-trips through `create` → `show` → `run`/`/api/chat` with
 the overrides applied; `ollama show`-shaped JSON validates against clients.
@@ -322,7 +322,7 @@ the overrides applied; `ollama show`-shaped JSON validates against clients.
 
 **D1. Tool/function calling.** Implement `tools[]` + `tool_calls` +
 `role:"tool"` on `/api/chat`, `/v1/chat/completions`, and (WS-F)
-`/v1/messages`. Replace the stub in `Sources/KLMCore/ToolParser.swift`
+`/v1/messages`. Replace the stub in `Sources/KrillCore/ToolParser.swift`
 with model-family-aware tool-call extraction (chat-template
 `tools` injection + structured parse of the model's tool-call syntax).
 Streaming tool-call deltas required for agent clients.
@@ -330,7 +330,7 @@ Streaming tool-call deltas required for agent clients.
 **D2. Structured output.** `format:"json"` (constrained/guided JSON) and
 `format:<JSON schema>` on `/api/generate` & `/api/chat`; map OpenAI
 `response_format` → same path. Implement via grammar/logit-mask sampling in
-`Sources/KLMSampler/Sampler.swift` (new constrained-decoding module).
+`Sources/KrillSampler/Sampler.swift` (new constrained-decoding module).
 
 **D3. Sampler params (T2-10).** Add `mirostat`, `mirostat_tau`,
 `mirostat_eta`, `min_p`, `typical_p`, `tfs_z`, `repeat_last_n`,
@@ -342,10 +342,10 @@ request decoders.
 `KRILL_CONTEXT_LENGTH` / `OLLAMA_CONTEXT_LENGTH`; clamp to model max with a
 warning rather than fixed silent cap.
 
-Touch: `Sources/KLMCore/ToolParser.swift`,
-`Sources/KLMSampler/Sampler.swift` (+ new `ConstrainedSampler.swift`),
-`Sources/KLMEngine/InferenceEngine.swift`,
-`Sources/KLMServer/Server.swift`.
+Touch: `Sources/KrillCore/ToolParser.swift`,
+`Sources/KrillSampler/Sampler.swift` (+ new `ConstrainedSampler.swift`),
+`Sources/KrillEngine/InferenceEngine.swift`,
+`Sources/KrillServer/Server.swift`.
 **Acceptance:** an agent loop (e.g. an OpenAI-SDK function-calling sample)
 completes a multi-turn tool call against `/v1/chat/completions`; a
 JSON-schema request returns schema-valid output; `num_ctx` and the new
@@ -356,16 +356,16 @@ sampler params measurably change behavior in tests.
 - Per-request `keep_alive` (duration string / int seconds / `0` / negative)
   overriding a `KRILL_KEEP_ALIVE` (default `5m`) with auto-eviction timer
   in serve mode; empty-prompt request preloads.
-- `krillm stop <model>` + reuse `/v1/models/unload`; `/api/ps` reflects
+- `krill stop <model>` + reuse `/v1/models/unload`; `/api/ps` reflects
   `expires_at`.
 - `KRILL_NUM_PARALLEL` (per-model in-flight, default 1),
   `KRILL_MAX_LOADED_MODELS`, `KRILL_MAX_QUEUE` (503 when exceeded). Start
   with a request queue + serialized execution; true batching can be a
   follow-up (cross-link to speedup plan).
 
-Touch: `Sources/KLMServer/Server.swift` (scheduler/queue),
-new `Sources/KLMServer/ModelScheduler.swift`,
-`Sources/KLMCLI/StopCommand.swift`, `Sources/KLMRegistry/Config.swift`.
+Touch: `Sources/KrillServer/Server.swift` (scheduler/queue),
+new `Sources/KrillServer/ModelScheduler.swift`,
+`Sources/KrillCLI/StopCommand.swift`, `Sources/KrillRegistry/Config.swift`.
 **Acceptance:** model auto-unloads after `keep_alive`; `/api/ps` shows
 countdown; N concurrent clients are queued not dropped (until
 `MAX_QUEUE`), and a load test does not corrupt KV/prefix cache.
@@ -376,8 +376,8 @@ countdown; N concurrent clients are queued not dropped (until
 `tool_result`, streaming, `thinking`) so Claude Code / Anthropic-SDK
 clients work via `ANTHROPIC_BASE_URL`. Add `think` / `reasoning_effort`
 plumbing for reasoning-capable models, returning `message.thinking`.
-Touch: new `Sources/KLMServer/AnthropicCompat.swift`,
-`Sources/KLMEngine/InferenceEngine.swift` (thinking segmentation).
+Touch: new `Sources/KrillServer/AnthropicCompat.swift`,
+`Sources/KrillEngine/InferenceEngine.swift` (thinking segmentation).
 **Acceptance:** Claude Code configured with
 `ANTHROPIC_BASE_URL=http://localhost:11434` completes a tool-using session.
 
@@ -392,9 +392,9 @@ Touch: new `Sources/KLMServer/AnthropicCompat.swift`,
   existing user environments and `launchctl setenv` setups work unchanged.
 - Flash Attention path in MLX (advisory; cross-links speedup plan).
 
-Touch: `Sources/KLMRegistry/Config.swift` (env alias table),
-`Sources/KLMServer/Server.swift` (CORS), `docs/SERVER_API.md`.
-**Acceptance:** an `OLLAMA_HOST`/`OLLAMA_MODELS` environment drives KrillLM
+Touch: `Sources/KrillRegistry/Config.swift` (env alias table),
+`Sources/KrillServer/Server.swift` (CORS), `docs/SERVER_API.md`.
+**Acceptance:** an `OLLAMA_HOST`/`OLLAMA_MODELS` environment drives Krill
 identically; a browser-extension client passes CORS preflight.
 
 ## 5. Phased Delivery
@@ -423,7 +423,7 @@ Each phase = one or more PRs, gated and documented like the speedup plan.
 
 Add `tools/parity_gate.py` (sibling to `tools/release_gate.py`) plus a
 `make parity-gate` target that runs a fixture suite of real Ollama-client
-request shapes against `krillm serve` and asserts response-shape parity.
+request shapes against `krill serve` and asserts response-shape parity.
 Profiles mirror the speedup gate:
 
 - `mac_parity` (defensible release profile): all `H` rows in §3 pass;
@@ -437,9 +437,9 @@ alongside the speed gates. A production tag requires *both* the speedup
 ## 7. Non-Goals (explicit OOS)
 
 - `ollama.com` registry, `push`, `signin/signout`, cloud models, web search.
-- GGUF / llama.cpp backend; KrillLM stays MLX-safetensors (T1-8). We may add
+- GGUF / llama.cpp backend; Krill stays MLX-safetensors (T1-8). We may add
   GGUF *import-by-conversion* later, tracked separately.
-- Electron GUI app, menubar, auto-updater, login-item (T3-4). KrillLM stays
+- Electron GUI app, menubar, auto-updater, login-item (T3-4). Krill stays
   a CLI/server single binary; a thin menubar wrapper is a separate product
   decision, not parity.
 - Linux/Windows, Vulkan, multi-GPU scheduling (`OLLAMA_SCHED_SPREAD`,
@@ -457,7 +457,7 @@ alongside the speed gates. A production tag requires *both* the speedup
 - **Concurrency vs prefix/KV cache**: the persistent prefix cache and int8
   KV path assume single-flight today; WS-E must add isolation or a per-slot
   cache, coordinated with the speedup plan owner.
-- **Port change is breaking** for current KrillLM users — *resolved by
+- **Port change is breaking** for current Krill users — *resolved by
   deferral*: default stays `11435` until the `mac_parity` gate is green,
   then flips to `11434` in Phase 4 with a release note + one-release
   `11435` deprecation (WS-A1).
@@ -466,9 +466,9 @@ alongside the speed gates. A production tag requires *both* the speedup
 
 ## 9. Definition of Done (Mac Parity)
 
-A user can: install the `krillm` binary, `krillm serve`, and point any
+A user can: install the `krill` binary, `krill serve`, and point any
 Ollama-targeting Mac tool (CLI, GUI, OpenAI SDK, Anthropic SDK / Claude
 Code, LangChain/LlamaIndex Ollama providers) at it **without changing the
 client's host, port, or request code**, getting correct chat, tool-calling,
 JSON, embeddings, model management, and lifecycle behavior — with the
-`mac_parity` gate green and KrillLM's performance/memory wins intact.
+`mac_parity` gate green and Krill's performance/memory wins intact.

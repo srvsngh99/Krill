@@ -1,4 +1,4 @@
-# KrillLM Repo Observations
+# Krill Repo Observations
 
 Date: 2026-05-06
 
@@ -13,7 +13,7 @@ This document captures review observations for follow-up implementation. The rep
 
 ## Summary
 
-KrillLM has a strong foundation:
+Krill has a strong foundation:
 
 - Clear SwiftPM module boundaries for core models, inference engine, cache, registry, server, CLI, tokenizer, sampler, and kernels.
 - Sensible model-family abstraction through `LoadedModel`.
@@ -38,9 +38,9 @@ Verification performed:
 
 Evidence:
 
-- `Sources/KLMEngine/InferenceEngine.swift:192-203` stores prefix cache entries with `keys: []` and `values: []`.
-- `Sources/KLMCache/KVCache.swift:8-9` keeps `_keys` and `_values` private and exposes no snapshot API.
-- `Sources/KLMEngine/InferenceEngine.swift:158-173` treats any prefix-cache hit as valid and sets `prefillStartIdx = hit.prefixLength`.
+- `Sources/KrillEngine/InferenceEngine.swift:192-203` stores prefix cache entries with `keys: []` and `values: []`.
+- `Sources/KrillCache/KVCache.swift:8-9` keeps `_keys` and `_values` private and exposes no snapshot API.
+- `Sources/KrillEngine/InferenceEngine.swift:158-173` treats any prefix-cache hit as valid and sets `prefillStartIdx = hit.prefixLength`.
 
 Impact:
 
@@ -59,8 +59,8 @@ Recommendation:
 
 Evidence:
 
-- `Sources/KLMEngine/SpeculativeDecoder.swift:84-86` verifies draft tokens by forwarding through `targetCaches`.
-- `Sources/KLMEngine/SpeculativeDecoder.swift:92-105` may reject partway through the proposed draft sequence.
+- `Sources/KrillEngine/SpeculativeDecoder.swift:84-86` verifies draft tokens by forwarding through `targetCaches`.
+- `Sources/KrillEngine/SpeculativeDecoder.swift:92-105` may reject partway through the proposed draft sequence.
 - There is no rollback/truncation of `targetCaches` after rejection.
 
 Impact:
@@ -77,7 +77,7 @@ Recommendation:
 
 Evidence:
 
-- `Sources/KLMEngine/InferenceEngine.swift:180-183` force unwraps `promptTokens.last!` on full cache hit.
+- `Sources/KrillEngine/InferenceEngine.swift:180-183` force unwraps `promptTokens.last!` on full cache hit.
 
 Impact:
 
@@ -94,9 +94,9 @@ Recommendation:
 
 Evidence:
 
-- `Sources/KLMServer/Server.swift:214-245`
-- `Sources/KLMServer/Server.swift:254-285`
-- `Sources/KLMServer/Server.swift:301-315`
+- `Sources/KrillServer/Server.swift:214-245`
+- `Sources/KrillServer/Server.swift:254-285`
+- `Sources/KrillServer/Server.swift:301-315`
 - Several captures use `nonisolated(unsafe)`.
 
 Impact:
@@ -113,7 +113,7 @@ Recommendation:
 
 Evidence:
 
-- `Sources/KLMServer/Server.swift:422-436` writes body chunks for `/api/chat` streaming but does not send an HTTP response head first.
+- `Sources/KrillServer/Server.swift:422-436` writes body chunks for `/api/chat` streaming but does not send an HTTP response head first.
 
 Impact:
 
@@ -128,7 +128,7 @@ Recommendation:
 
 Evidence:
 
-- `Sources/KLMServer/Server.swift:83-94` accumulates body chunks into `body` without a maximum.
+- `Sources/KrillServer/Server.swift:83-94` accumulates body chunks into `body` without a maximum.
 
 Impact:
 
@@ -143,7 +143,7 @@ Recommendation:
 
 Evidence:
 
-- `Sources/KLMServer/Server.swift:173-188` extracts only the last user message and last system message.
+- `Sources/KrillServer/Server.swift:173-188` extracts only the last user message and last system message.
 - Sampling only maps `temperature`; fields like `top_p`, `top_k`, `stop`, `seed`, penalties, and model selection are ignored.
 
 Impact:
@@ -152,7 +152,7 @@ OpenAI/Ollama clients expecting multi-turn history, stops, tool calls, or model 
 
 Recommendation:
 
-- Preserve full message history in `KLMTokenizer.applyChatTemplate`.
+- Preserve full message history in `KrillTokenizer.applyChatTemplate`.
 - Parse and apply common generation parameters.
 - Return clear errors for unsupported features instead of silently ignoring them.
 
@@ -162,8 +162,8 @@ Recommendation:
 
 Evidence:
 
-- `Sources/KLMRegistry/Puller.swift:50-92` downloads each selected file sequentially.
-- `Sources/KLMRegistry/Puller.swift:178-195` downloads to a temp file, moves it, then reads the full file into memory to hash it.
+- `Sources/KrillRegistry/Puller.swift:50-92` downloads each selected file sequentially.
+- `Sources/KrillRegistry/Puller.swift:178-195` downloads to a temp file, moves it, then reads the full file into memory to hash it.
 
 Impact:
 
@@ -181,7 +181,7 @@ Recommendation:
 
 Evidence:
 
-- `Sources/KLMRegistry/Registry.swift` docs describe content-addressed blobs.
+- `Sources/KrillRegistry/Registry.swift` docs describe content-addressed blobs.
 - `Registry.modelPath(_:)` returns `blobs/<name>`.
 
 Impact:
@@ -198,8 +198,8 @@ Recommendation:
 
 Evidence:
 
-- `Sources/KLMCore/VisionEncoder.swift:218-228` returns a zero image tensor.
-- `Sources/KLMCore/AudioEncoder.swift:224-228` returns a zero mel spectrogram.
+- `Sources/KrillCore/VisionEncoder.swift:218-228` returns a zero image tensor.
+- `Sources/KrillCore/AudioEncoder.swift:224-228` returns a zero mel spectrogram.
 
 Impact:
 
@@ -216,7 +216,7 @@ Recommendation:
 
 Evidence:
 
-- `Sources/KLMCLI/RunCommand.swift:35-42` defines `--image`, `--audio`, and `--tools`.
+- `Sources/KrillCLI/RunCommand.swift:35-42` defines `--image`, `--audio`, and `--tools`.
 - Native generation path does not use `tools`; image/audio only route through the Gemma 4 Python fallback path.
 
 Impact:
@@ -260,7 +260,7 @@ Recommendation:
 
 Evidence:
 
-- `dist/krillm-0.2.0-arm64-apple-macos.tar.gz` is tracked.
+- `dist/krill-0.2.0-arm64-apple-macos.tar.gz` is tracked.
 
 Impact:
 
