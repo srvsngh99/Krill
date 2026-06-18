@@ -71,7 +71,7 @@ public final class InferenceEngine: @unchecked Sendable {
     private var autoUseSpec: Bool = false
 
     /// When true, greedy requests default to **n-gram (prompt-lookup)**
-    /// speculative decode (no draft model — the draft is matched from the
+    /// speculative decode (no draft model - the draft is matched from the
     /// context). **Default ON**, and it now governs BOTH paths:
     /// - Single stream: a per-generation stall monitor (`NgramProposer.stalled`)
     ///   hands off to the plain pipeline decode loop the moment the lookup stops

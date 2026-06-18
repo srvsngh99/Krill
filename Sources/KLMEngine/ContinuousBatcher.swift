@@ -528,7 +528,7 @@ final class ContinuousBatcher: @unchecked Sendable {
             // non-echo ramp before the epoch falls back to overlap costs more per
             // round than on the single stream. Bail fast: 6 consecutive pure-miss
             // rounds (pure non-echo) latch `stalled` immediately, and a shorter
-            // 16-round window catches the low-but-nonzero case — keeping the
+            // 16-round window catches the low-but-nonzero case - keeping the
             // non-echo concurrent tax small while dense echo (which resets the
             // miss run every match) keeps its win.
             let prop = NgramProposer(
@@ -590,7 +590,7 @@ final class ContinuousBatcher: @unchecked Sendable {
     /// Decide whether THIS epoch runs the n-gram spec round or the plain
     /// overlap/serial decode. Spec requires all three:
     ///   1. it is enabled at all (`deps.specEnabled`, fp16 only);
-    ///   2. EVERY live row is greedy + non-penalty — the verify is
+    ///   2. EVERY live row is greedy + non-penalty - the verify is
     ///      greedy-argmax-gated, so a temperature/penalty row must NOT be
     ///      silently greedy-ified; a mixed batch falls to the per-row-correct
     ///      overlap/serial path;
