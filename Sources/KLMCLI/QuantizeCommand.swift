@@ -24,6 +24,24 @@ struct QuantizeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Storage dtype for scales/biases/norms: fp16 (default, mlx-community convention), bf16, fp32")
     var dtype: String = "fp16"
 
+    @Option(name: .long, help: "A 4-bit build of this model (local dir or HF repo id) to learn the per-module quantized set from. Required for MoE / vision / Gemma; reproduces that build's coverage exactly.")
+    var reference: String?
+
+    @Option(name: .long, parsing: .singleValue, help: "Module-path substring to quantize at the protect precision (repeatable), e.g. --protect down_proj --protect o_proj.")
+    var protect: [String] = []
+
+    @Option(name: .long, help: "Protect precision bits (default 8)")
+    var protectBits: Int = 8
+
+    @Option(name: .long, help: "Protect precision group size (default 64)")
+    var protectGroupSize: Int = 64
+
+    @Option(name: .long, help: "Protect precision mode: affine (default), mxfp8")
+    var protectMode: String = "affine"
+
+    @Flag(name: .long, inversion: .prefixedNo, help: "Auto-protect the vision/audio projectors at the protect precision in reference mode (default on).")
+    var protectVision: Bool = true
+
     @Option(name: .long, help: "Output name for the quantized model in registry")
     var name: String?
 
@@ -35,12 +53,22 @@ struct QuantizeCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        var referenceDir: URL?
+        if let reference {
+            guard let r = resolveSource(reference) else {
+                print("Error: could not find --reference model '\(reference)'.")
+                throw ExitCode.failure
+            }
+            referenceDir = r
+        }
+
         let outputName = name ?? inferName(from: source, bits: bits)
         let registry = Registry()
         let outputDir = registry.modelPath(outputName)
 
         print("Quantizing \(sourceDir.lastPathComponent)")
         print("  Bits: \(bits), Group size: \(groupSize), Mode: \(mode)")
+        if let referenceDir { print("  Reference: \(referenceDir.lastPathComponent)") }
         print("  Output: \(outputName)")
         print("Converting (this may take a few minutes)...")
 
@@ -48,6 +76,10 @@ struct QuantizeCommand: AsyncParsableCommand {
             let n = try CheckpointQuantizer.quantize(
                 sourceDir: sourceDir, outputDir: outputDir,
                 bits: bits, groupSize: groupSize, mode: mode, dtype: dtype,
+                referenceDir: referenceDir,
+                protect: protect,
+                protectBits: protectBits, protectGroupSize: protectGroupSize,
+                protectMode: protectMode, autoProtectVision: protectVision,
                 log: { print("  \($0)") })
             print("  wrote \(n) quantized tensors")
         } catch {
