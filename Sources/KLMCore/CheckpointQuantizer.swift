@@ -27,7 +27,8 @@ import MLX
 ///    auto-protected at 8-bit affine, matching the recipe) and is recorded as
 ///    per-module overrides in `config.quantization` - the exact `q.effective(path)`
 ///    keys KrillLM's loader resolves. Stacked 3-D expert weights are always
-///    quantized affine (the MoE runtime's `gatherQuantizedMM` is affine-only).
+///    quantized affine at the config's TOP-LEVEL group (the MoE runtime
+///    reconstructs them affine from the top-level group and reads no override).
 ///
 /// IMPORTANT vs the loader: KrillLM's loader reconstructs quantized layers with
 /// mlx-swift `quantize(model:)`, which only turns `Linear`/`Embedding` leaves into
@@ -46,6 +47,7 @@ public enum CheckpointQuantizer {
         case noWeights(URL)
         case noReferenceScales(URL)
         case nonDivisibleWeight(name: String, dim: Int, groupSize: Int)
+        case expertGroupUnsupported(group: Int)
 
         public var description: String {
             switch self {
@@ -64,6 +66,12 @@ public enum CheckpointQuantizer {
                     + "\(groupSize); KrillLM's loader quantizes every Linear uniformly, so "
                     + "it cannot load a checkpoint with this layer left dense. Use a group "
                     + "size that divides \(dim)."
+            case .expertGroupUnsupported(let group):
+                return "this checkpoint has Mixture-of-Experts (stacked 3-D experts), which the "
+                    + "MoE runtime reconstructs as AFFINE at the top-level group \(group); affine "
+                    + "only supports group 32/64/128, so a float top-level whose group is \(group) "
+                    + "(e.g. nvfp4 = group 16) cannot produce a loadable MoE checkpoint. Quantize "
+                    + "MoE with --mode affine (group 64), or --mode mxfp4/mxfp8 (group 32)."
             }
         }
     }
@@ -181,17 +189,26 @@ public enum CheckpointQuantizer {
         }
 
         // Resolve per-module precision: protected modules win; stacked 3-D experts
-        // are forced affine (the MoE runtime's gatherQuantizedMM is affine-only).
+        // mirror the MoE runtime exactly.
         func perModule(_ module: String, ndim: Int) -> PerModule {
             if protectList.contains(where: { module.contains($0) }) {
-                return PerModule(bits: protectBits, groupSize: protectGroupSize, mode: protectMode.lowercased())
+                // Normalize the protect format the same way the top level is: the
+                // float formats only support one (bits, groupSize) each, so
+                // `--protect-mode mxfp8` works without the caller also passing
+                // group 32.
+                let (pb, pg) = effectiveParams(
+                    mode: protectMode, bits: protectBits, groupSize: protectGroupSize)
+                return PerModule(bits: pb, groupSize: pg, mode: protectMode.lowercased())
             }
             if ndim == 3 {
-                // Experts: affine only. Reuse the top-level shape when it is already
-                // affine; otherwise fall back to a sane 4-bit / group-64 affine.
-                return topMode == "affine"
-                    ? PerModule(bits: topBits, groupSize: topGroup, mode: "affine")
-                    : PerModule(bits: 4, groupSize: 64, mode: "affine")
+                // Stacked experts are born-quantized in the MoE runtime
+                // (MoEQuantizedSwitchedLinear): it reconstructs them as AFFINE at
+                // the config's TOP-LEVEL (bits, groupSize) and never consults a
+                // per-module override. Mirror that exactly so the emitted scales
+                // shape [E, O, I/topGroup] matches what the loader pre-allocates -
+                // including under a float top-level (nvfp4 => affine group 16),
+                // where the experts cannot be a float format anyway.
+                return PerModule(bits: topBits, groupSize: topGroup, mode: "affine")
             }
             return PerModule(bits: topBits, groupSize: topGroup, mode: topMode)
         }
@@ -216,6 +233,12 @@ public enum CheckpointQuantizer {
             let module = isWeight ? String(name.dropLast(".weight".count)) : name
 
             if isWeight, shouldQuantize(module: module, ndim: w.ndim) {
+                // Stacked experts are reconstructed affine at the top-level group;
+                // affine supports only 32/64/128, so a float top-level whose group
+                // is smaller (nvfp4 = 16) cannot yield a loadable MoE checkpoint.
+                if w.ndim == 3, ![32, 64, 128].contains(topGroup) {
+                    throw QuantizeError.expertGroupUnsupported(group: topGroup)
+                }
                 let pm = perModule(module, ndim: w.ndim)
                 // Inner (last) dim must be group-divisible or the uniform load cannot
                 // honor it; fail loudly instead of emitting a mis-loadable checkpoint.
@@ -240,10 +263,15 @@ public enum CheckpointQuantizer {
                 }
                 MLX.eval(realized)        // realize now so the source input can be freed
 
-                // Record a per-module override whenever this module's precision
-                // differs from the top-level block (protected modules, or experts
-                // forced affine under a float top-level).
-                if pm.bits != topBits || pm.groupSize != topGroup || pm.mode != topMode {
+                // Record a per-module override whenever a regular (2-D) module's
+                // precision differs from the top-level block - these the loader
+                // resolves via QuantizationConfig.effective(for:) (protected
+                // projectors, an 8-bit router gate, ...). Stacked 3-D experts are
+                // born-quantized affine at the top-level group and the loader does
+                // NOT read an override for them, so emitting one would be dead
+                // config; skip it.
+                if w.ndim != 3,
+                   pm.bits != topBits || pm.groupSize != topGroup || pm.mode != topMode {
                     overrides[module] = ["group_size": pm.groupSize, "bits": pm.bits, "mode": pm.mode]
                 }
                 quantizedCount += 1

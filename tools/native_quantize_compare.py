@@ -79,6 +79,11 @@ def main() -> int:
         stem = k[: -len(".weight")] if k.endswith(".weight") else None
         if stem is not None and (stem + ".scales") in mine:
             gs, bits, mode = effective(stem)
+            # Stacked 3-D experts are born-quantized affine at the TOP-LEVEL group
+            # (the MoE runtime ignores per-module overrides for them); mirror the
+            # loader/quantizer so the recomputed reference matches.
+            if w.ndim == 3:
+                gs, bits, mode = top_gs, top_bits, "affine"
             win = w.astype(mx.float16) if mode == "affine" else w
             r = mx.quantize(win, group_size=gs, bits=bits, mode=mode)
             check(k, r[0])

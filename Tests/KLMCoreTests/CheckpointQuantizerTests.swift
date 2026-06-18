@@ -215,9 +215,11 @@ final class CheckpointQuantizerTests: XCTestCase {
         XCTAssertEqual(ov?["group_size"] as? Int, 64)
     }
 
-    func test3DExpertForcedAffineUnderFloatTopLevel() throws {
-        // Stacked 3-D experts must be quantized affine (the MoE runtime is
-        // affine-only) even when the top-level format is nvfp4.
+    func test3DExpertAffineAtTopLevelGroupUnderFloatTopLevel() throws {
+        // Stacked 3-D experts are reconstructed affine at the TOP-LEVEL group by
+        // the MoE runtime, so they must be quantized affine at that group - even
+        // when the dense top-level format is a float one (mxfp4, group 32 here,
+        // which affine supports).
         let src = try makeSource([
             "model.layers.0.mlp.switch_mlp.gate_proj.weight": MLXRandom.normal([4, 64, 128]),
             "model.layers.0.self_attn.q_proj.weight": MLXRandom.normal([128, 128]),
@@ -233,22 +235,45 @@ final class CheckpointQuantizerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: out) }
 
         try CheckpointQuantizer.quantize(
-            sourceDir: src, outputDir: out, bits: 4, groupSize: 64, mode: "nvfp4",
+            sourceDir: src, outputDir: out, bits: 4, groupSize: 32, mode: "mxfp4",
             referenceDir: ref)
         let w = try loadArrays(url: out.appendingPathComponent("model.safetensors"))
 
-        // Expert: 3-D packed weight + 3-D scales + biases (affine).
-        let eg = "model.layers.0.mlp.switch_mlp.gate_proj"
+        // Expert: 3-D affine. The loadable invariant is scales at the top-level
+        // group (32 for mxfp4); an expert at any other group would not load.
+        let eg = "model.layers.0.mlp.switch_mlp.gate_proj"   // [E=4, O=64, I=128]
         XCTAssertEqual(w["\(eg).weight"]?.ndim, 3, "experts stay 3-D")
         XCTAssertNotNil(w["\(eg).biases"], "expert is affine -> has biases")
-        // Attn q_proj follows the top-level nvfp4 (no biases).
-        XCTAssertNil(w["model.layers.0.self_attn.q_proj.biases"], "nvfp4: no biases")
+        XCTAssertEqual(w["\(eg).scales"]?.shape, [4, 64, 128 / 32],
+                       "expert scales at the top-level group (32)")
+        // Attn q_proj follows the top-level mxfp4 (float -> no biases).
+        XCTAssertNil(w["model.layers.0.self_attn.q_proj.biases"], "mxfp4: no biases")
 
+        // The loader reads no override for born-quantized experts, so none is
+        // emitted (it would be dead config).
         let cfg = try JSONSerialization.jsonObject(
             with: Data(contentsOf: out.appendingPathComponent("config.json"))) as? [String: Any]
-        let ov = (cfg?["quantization"] as? [String: Any])?[eg] as? [String: Any]
-        XCTAssertEqual(ov?["mode"] as? String, "affine", "experts overridden to affine")
-        XCTAssertEqual(ov?["bits"] as? Int, 4)
+        XCTAssertNil((cfg?["quantization"] as? [String: Any])?[eg],
+                     "no dead override emitted for born-quantized experts")
+    }
+
+    func testNvfp4MoEThrowsBecauseExpertsCannotBeAffineAtGroup16() throws {
+        // nvfp4 top-level forces group 16, but experts are reconstructed affine and
+        // affine does not support group 16, so this combination cannot yield a
+        // loadable MoE checkpoint and must fail loudly rather than emit garbage.
+        let src = try makeSource([
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight": MLXRandom.normal([4, 64, 128]),
+        ], config: ["model_type": "qwen3_moe", "num_experts": 4])
+        defer { try? FileManager.default.removeItem(at: src) }
+        let ref = try makeReference(scalesFor: ["model.layers.0.mlp.switch_mlp.gate_proj"])
+        defer { try? FileManager.default.removeItem(at: ref) }
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("klm-quant-moe-nvfp4-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: out) }
+        XCTAssertThrowsError(
+            try CheckpointQuantizer.quantize(
+                sourceDir: src, outputDir: out, bits: 4, groupSize: 16, mode: "nvfp4",
+                referenceDir: ref))
     }
 
     func testReferenceWithoutScalesThrows() throws {

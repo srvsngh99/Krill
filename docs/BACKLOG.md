@@ -213,12 +213,16 @@ The dense (no-reference) pass supports dense text families
 quantizer learns the EXACT quantized-module set from the reference checkpoint's
 `.scales` (the generalization of `tools/requant_gemma4_nvfp4.py`), so it
 reproduces the proven mlx-community coverage for any family without
-reverse-engineering each loader predicate - stacked 3-D experts (forced affine),
-DeepSeek's float router gate, the Qwen2.5-VL float vision tower, and the Gemma
-PLE/tied-head all fall out automatically. `--protect <substr>` raises chosen
-modules to a higher precision (the Gemma vision/audio projectors auto-protect at
-8-bit affine, the color-fidelity fix), recorded as per-module overrides the
-loader resolves via `q.effective(path)`. Gated byte-identical vs a fresh
+reverse-engineering each loader predicate - DeepSeek's float router gate, the
+Qwen2.5-VL float vision tower, and the Gemma PLE/tied-head all fall out
+automatically. Stacked 3-D experts are quantized affine at the config's
+top-level group, mirroring the MoE runtime which reconstructs born-quantized
+experts affine from the top-level group (and reads no override for them); since
+affine supports only group 32/64/128, an nvfp4 MoE (group 16) is rejected up
+front (use `--mode affine` group 64 or `--mode mxfp4`/`mxfp8` group 32 for MoE).
+`--protect <substr>` raises chosen 2-D modules to a higher precision (the Gemma
+vision/audio projectors auto-protect at 8-bit affine, the color-fidelity fix),
+recorded as per-module overrides the loader resolves via `q.effective(path)`. Gated byte-identical vs a fresh
 `mx.quantize` recomputed from the same bf16 source at each module's effective
 precision (`tools/verify_native_quantize_reference.sh`; gemma-4-12b nvfp4 + 8-bit
 projectors). `--mode` affine/nvfp4/mxfp4/mxfp8 (the float formats auto-pick their
