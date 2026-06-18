@@ -5,18 +5,27 @@ import MLX
 /// / MLX-format checkpoint to a k-bit MLX-format checkpoint that KrillLM's own
 /// loader reads back, with no Python / mlx-lm shell-out.
 ///
-/// It quantizes exactly the tensor set the loader reconstructs for a dense family:
-/// every 2-D `*.weight` whose inner dimension is group-divisible (the Linear and
-/// Embedding leaves), emitting the packed `weight` + `scales` (+ `biases`) triple
-/// `MLX.quantized` produces, and passing every other tensor (norms, 1-D biases,
-/// non-divisible weights) through unchanged. This mirrors `mlx_lm.convert`'s
-/// effective behavior; on a dense checkpoint the produced packed tensors are
-/// byte-identical to it (same MLX op, same group/bits/mode, same layer set).
+/// It quantizes every 2-D `*.weight` (the `Linear`/`Embedding` leaves), emitting
+/// the packed `weight` + `scales` (+ `biases`) triple `MLX.quantized` produces,
+/// and passes every other tensor (norms, 1-D biases) through unchanged. This is
+/// the same set `mlx_lm.convert` quantizes for a dense model, so the produced
+/// tensors are byte-identical to an mlx-community build (same MLX op, same
+/// group/bits/mode/dtype, same layer set) - verified 1007/1007 on GLM-4-9B-0414
+/// affine 4-bit (`tools/verify_native_quantize_parity.sh`).
+///
+/// IMPORTANT vs the loader: KrillLM's loader reconstructs quantized layers with
+/// mlx-swift `quantize(model:)`, which quantizes EVERY `Linear`/`Embedding` leaf
+/// uniformly (no per-layer divisibility skip), so a dense checkpoint is only
+/// uniformly loadable if every such weight's inner dim is group-divisible.
+/// `mlx_lm.convert` instead silently leaves a non-divisible layer dense, which
+/// KrillLM's uniform load could not honor - so this quantizer THROWS on a
+/// non-divisible 2-D weight rather than emit a checkpoint that would mis-load.
+/// In practice every supported dense family has group-divisible dims.
 ///
 /// MoE (stacked 3-D experts), vision/multimodal (towers kept fp + Conv2d layouts),
-/// and Gemma 4 (PLE / tied-head specifics) checkpoints need per-family handling
-/// the loader applies but this shape-driven pass does not, so they are rejected
-/// up front rather than silently mis-quantized.
+/// and Gemma (PLE / tied-head specifics) checkpoints need per-family handling
+/// this shape-driven pass does not do, so they are rejected up front. Only affine
+/// is gated end-to-end today; nvfp4/mxfp4 are plumbed through but unverified.
 public enum CheckpointQuantizer {
 
     public enum QuantizeError: Error, CustomStringConvertible {
@@ -24,6 +33,7 @@ public enum CheckpointQuantizer {
         case invalidConfig(URL)
         case unsupportedFamily(String)
         case noWeights(URL)
+        case nonDivisibleWeight(name: String, dim: Int, groupSize: Int)
 
         public var description: String {
             switch self {
@@ -33,6 +43,11 @@ public enum CheckpointQuantizer {
                 return "native quantize supports dense text models only: \(why). "
                     + "Use a pre-quantized build or the Python mlx_lm path for this one."
             case .noWeights(let u): return "no .safetensors weights in \(u.path)"
+            case .nonDivisibleWeight(let name, let dim, let groupSize):
+                return "weight '\(name)' inner dim \(dim) is not divisible by group size "
+                    + "\(groupSize); KrillLM's loader quantizes every Linear uniformly, so "
+                    + "it cannot load a checkpoint with this layer left dense. Use a group "
+                    + "size that divides \(dim)."
             }
         }
     }
@@ -83,6 +98,13 @@ public enum CheckpointQuantizer {
         var quantizedCount = 0
         for name in weights.keys.sorted() {
             guard let w = weights[name] else { continue }
+            // A 2-D `.weight` is a Linear/Embedding the loader WILL quantize; if its
+            // inner dim is not group-divisible we cannot produce a uniformly-loadable
+            // checkpoint, so fail loudly instead of silently leaving it dense.
+            if name.hasSuffix(".weight"), w.ndim == 2, w.dim(1) % groupSize != 0 {
+                throw QuantizeError.nonDivisibleWeight(
+                    name: name, dim: w.dim(1), groupSize: groupSize)
+            }
             if name.hasSuffix(".weight"), w.ndim == 2, w.dim(1) % groupSize == 0 {
                 // Quantize AT the storage precision (mlx_lm.convert casts the model
                 // to the target dtype first), so the derived scales/biases are
@@ -149,7 +171,14 @@ public enum CheckpointQuantizer {
         }
         let modelType = (config["model_type"] as? String ?? "").lowercased()
         let arch = ((config["architectures"] as? [Any])?.first as? String ?? "").lowercased()
-        for bad in ["gemma", "vl", "vision", "llava", "mllama"] {
+        // Vision/VL towers are already caught by `vision_config` above; here we
+        // reject the remaining families that need per-family handling, matching
+        // unambiguous model_type / architecture markers (not bare substrings like
+        // "vl" that could clip an unrelated name).
+        if arch.contains("forconditionalgeneration") {
+            throw QuantizeError.unsupportedFamily("multimodal architecture '\(arch)'")
+        }
+        for bad in ["gemma", "llava", "mllama"] {
             if modelType.contains(bad) || arch.contains(bad) {
                 throw QuantizeError.unsupportedFamily("family '\(modelType)' needs per-family handling")
             }

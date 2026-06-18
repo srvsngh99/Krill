@@ -31,8 +31,6 @@ final class CheckpointQuantizerTests: XCTestCase {
             "model.layers.0.input_layernorm.weight": MLXArray.ones([128]),
             // 1-D bias -> passes through
             "model.layers.0.self_attn.q_proj.bias": MLXArray.zeros([128]),
-            // 2-D but inner dim NOT divisible by 64 -> passes through dense
-            "model.odd.weight": MLXRandom.normal([8, 30]),
         ], config: ["model_type": "llama", "architectures": ["LlamaForCausalLM"]])
         defer { try? FileManager.default.removeItem(at: src) }
 
@@ -56,8 +54,6 @@ final class CheckpointQuantizerTests: XCTestCase {
         // and NO scales/biases emitted for them.
         XCTAssertEqual(w["model.layers.0.input_layernorm.weight"]?.shape, [128])
         XCTAssertNil(w["model.layers.0.input_layernorm.scales"])
-        XCTAssertEqual(w["model.odd.weight"]?.shape, [8, 30], "non-divisible weight left dense")
-        XCTAssertNil(w["model.odd.scales"])
         XCTAssertNotNil(w["model.layers.0.self_attn.q_proj.bias"])
 
         // config.json carries the quantization block the loader reads.
@@ -91,6 +87,22 @@ final class CheckpointQuantizerTests: XCTestCase {
         // 4-bit affine round-trip: bounded error, not exact.
         let err = MLX.max(MLX.abs(deq.asType(.float32) - original.asType(.float32))).item(Float.self)
         XCTAssertLessThan(err, 0.5, "4-bit dequant stays within a sane bound of the original")
+    }
+
+    func testThrowsOnNonDivisibleWeight() throws {
+        // A 2-D weight whose inner dim is not group-divisible cannot be uniformly
+        // loaded by KrillLM, so the quantizer must fail loudly rather than leave it
+        // dense.
+        let src = try makeSource(
+            ["model.layers.0.mlp.down_proj.weight": MLXRandom.normal([8, 30])],
+            config: ["model_type": "llama"])
+        defer { try? FileManager.default.removeItem(at: src) }
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("klm-quant-nd-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: out) }
+        XCTAssertThrowsError(
+            try CheckpointQuantizer.quantize(
+                sourceDir: src, outputDir: out, bits: 4, groupSize: 64))
     }
 
     func testRejectsUnsupportedFamilies() throws {
