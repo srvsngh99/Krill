@@ -188,18 +188,13 @@ public enum CheckpointQuantizer {
             log("mode \(mode) requires \(topBits)-bit / group \(topGroup); overriding the passed bits/group")
         }
 
-        // Resolve per-module precision: protected modules win; stacked 3-D experts
-        // mirror the MoE runtime exactly.
+        // Resolve per-module precision. The 3-D expert rule is checked FIRST and
+        // wins over --protect: the MoE runtime reconstructs born-quantized experts
+        // at the top-level group/bits affine no matter what, so it cannot honor a
+        // protect precision on an expert - a `--protect down_proj` that matched the
+        // stacked `switch_mlp.down_proj` expert would otherwise emit an unloadable
+        // checkpoint.
         func perModule(_ module: String, ndim: Int) -> PerModule {
-            if protectList.contains(where: { module.contains($0) }) {
-                // Normalize the protect format the same way the top level is: the
-                // float formats only support one (bits, groupSize) each, so
-                // `--protect-mode mxfp8` works without the caller also passing
-                // group 32.
-                let (pb, pg) = effectiveParams(
-                    mode: protectMode, bits: protectBits, groupSize: protectGroupSize)
-                return PerModule(bits: pb, groupSize: pg, mode: protectMode.lowercased())
-            }
             if ndim == 3 {
                 // Stacked experts are born-quantized in the MoE runtime
                 // (MoEQuantizedSwitchedLinear): it reconstructs them as AFFINE at
@@ -209,6 +204,15 @@ public enum CheckpointQuantizer {
                 // including under a float top-level (nvfp4 => affine group 16),
                 // where the experts cannot be a float format anyway.
                 return PerModule(bits: topBits, groupSize: topGroup, mode: "affine")
+            }
+            if protectList.contains(where: { module.contains($0) }) {
+                // Normalize the protect format the same way the top level is: the
+                // float formats only support one (bits, groupSize) each, so
+                // `--protect-mode mxfp8` works without the caller also passing
+                // group 32.
+                let (pb, pg) = effectiveParams(
+                    mode: protectMode, bits: protectBits, groupSize: protectGroupSize)
+                return PerModule(bits: pb, groupSize: pg, mode: protectMode.lowercased())
             }
             return PerModule(bits: topBits, groupSize: topGroup, mode: topMode)
         }

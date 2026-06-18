@@ -257,6 +257,36 @@ final class CheckpointQuantizerTests: XCTestCase {
                      "no dead override emitted for born-quantized experts")
     }
 
+    func testProtectDoesNotOverrideExpertPrecision() throws {
+        // `--protect down_proj` matches the stacked 3-D `switch_mlp.down_proj`
+        // expert by substring, but the MoE runtime reconstructs experts at the
+        // top-level group affine regardless, so the expert must stay top-level
+        // affine (group 64 here) - protecting it would emit an unloadable checkpoint.
+        let src = try makeSource([
+            "model.layers.0.mlp.switch_mlp.down_proj.weight": MLXRandom.normal([4, 128, 256]),
+        ], config: ["model_type": "qwen3_moe", "num_experts": 4])
+        defer { try? FileManager.default.removeItem(at: src) }
+        let ref = try makeReference(scalesFor: ["model.layers.0.mlp.switch_mlp.down_proj"])
+        defer { try? FileManager.default.removeItem(at: ref) }
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("klm-quant-protmoe-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: out) }
+
+        try CheckpointQuantizer.quantize(
+            sourceDir: src, outputDir: out, bits: 4, groupSize: 64, mode: "affine",
+            referenceDir: ref, protect: ["down_proj"], protectBits: 8, protectGroupSize: 64)
+        let w = try loadArrays(url: out.appendingPathComponent("model.safetensors"))
+
+        let ed = "model.layers.0.mlp.switch_mlp.down_proj"   // [E=4, O=128, I=256]
+        // Expert stays at the top-level group (256/64 = 4), NOT a protect override.
+        XCTAssertEqual(w["\(ed).scales"]?.shape, [4, 128, 256 / 64],
+                       "expert ignores --protect, stays at top-level group")
+        let cfg = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: out.appendingPathComponent("config.json"))) as? [String: Any]
+        XCTAssertNil((cfg?["quantization"] as? [String: Any])?[ed],
+                     "no protect override emitted for the expert")
+    }
+
     func testNvfp4MoEThrowsBecauseExpertsCannotBeAffineAtGroup16() throws {
         // nvfp4 top-level forces group 16, but experts are reconstructed affine and
         // affine does not support group 16, so this combination cannot yield a
