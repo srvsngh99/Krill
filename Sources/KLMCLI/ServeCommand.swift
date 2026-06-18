@@ -26,15 +26,14 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Draft model for speculative decoding (alias, path, or 'auto'). Also reads KRILL_DRAFT_MODEL.")
     var draftModel: String?
 
-    @Flag(name: .long, help: "Force-enable n-gram (prompt-lookup) speculative decode, including on the concurrent batcher (single-stream is already on by default). No draft model needed; wins on repetitive workloads (RAG, code, structured output). Also reads KRILL_NGRAM_SPEC.")
+    @Flag(name: .long, help: "Explicitly enable n-gram (prompt-lookup) speculative decode (single-stream AND concurrent batcher). On by default already; this flag just pins it on regardless of config. Disable with KRILL_NGRAM_SPEC=0 / ngram_spec=false. Wins on repetitive workloads (RAG, code, structured output).")
     var ngramSpec: Bool = false
 
     func run() async throws {
-        // An n-gram opt-in must reach EVERY engine the server builds (the
-        // pre-loaded one AND the on-demand pool), so set the env the engine
-        // reads at init before any engine is constructed. A bare `--ngram-spec`
-        // flag and `KRILL_NGRAM_SPEC=1` are equivalent: both force the batcher
-        // spec path on too (single-stream is on by default regardless).
+        // n-gram spec is on by default (single-stream + batcher, each self-gated
+        // and adaptive). The flag remains as an explicit pin: set the env EVERY
+        // engine reads at init before any engine is constructed, so a config
+        // `ngram_spec = false` cannot disable it when the operator asked for it.
         if ngramSpec { setenv("KRILL_NGRAM_SPEC", "1", 1) }
 
         // Precedence (CLI flag > env > config.toml > default): KrillConfig.load()

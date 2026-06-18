@@ -157,6 +157,29 @@ final class NgramSpeculativeDecodingTests: XCTestCase {
         XCTAssertFalse(p.stalled)
     }
 
+    func testFastBailOnConsecutiveMisses() {
+        // maxConsecutiveMisses trips well before the (larger) window would.
+        let p = NgramProposer(config: .init(maxN: 2, minN: 1, maxDraft: 8, searchWindow: 0,
+                                            monitorWindow: 48, maxConsecutiveMisses: 6))
+        p.reset(prompt: [1, 2])
+        for _ in 0 ..< 5 { p.recordRound(extraTokens: 0) }
+        XCTAssertFalse(p.stalled, "5 misses < threshold of 6")
+        p.recordRound(extraTokens: 0)
+        XCTAssertTrue(p.stalled, "6 consecutive misses fast-bails before the 48 window")
+    }
+
+    func testFastBailResetByProductiveRound() {
+        // A productive round resets the consecutive-miss run, so dense echo with
+        // occasional gaps never fast-bails.
+        let p = NgramProposer(config: .init(maxN: 2, minN: 1, maxDraft: 8, searchWindow: 0,
+                                            monitorWindow: 48, maxConsecutiveMisses: 6))
+        p.reset(prompt: [1, 2])
+        for _ in 0 ..< 5 { p.recordRound(extraTokens: 0) }
+        p.recordRound(extraTokens: 4)            // echo match resets the run
+        for _ in 0 ..< 5 { p.recordRound(extraTokens: 0) }
+        XCTAssertFalse(p.stalled, "the productive round reset the miss counter")
+    }
+
     func testStallMonitorDisabledWhenWindowZero() {
         let p = NgramProposer(config: .init(maxN: 2, minN: 1, maxDraft: 8, searchWindow: 0,
                                             monitorWindow: 0, stallThreshold: 0.30))
