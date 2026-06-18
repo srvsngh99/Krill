@@ -6,6 +6,7 @@ import Logging
 import KrillEngine
 import KrillRegistry
 import KrillSampler
+import KrillTooling
 
 /// Krill HTTP server providing OpenAI-compatible and Ollama-compatible endpoints.
 ///

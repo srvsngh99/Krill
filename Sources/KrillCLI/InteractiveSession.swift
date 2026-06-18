@@ -5,6 +5,7 @@ import KrillEngine
 import KrillRegistry
 import KrillSampler
 import KrillServer
+import KrillTooling
 
 // SIGINT during a reply sets this flag (async-signal-safe: only a sig_atomic_t
 // is touched). The decode display loop polls it and breaks; breaking ends the

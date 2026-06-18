@@ -90,11 +90,16 @@ let package = Package(
             ]
         ),
         .target(
+            name: "KrillTooling",
+            dependencies: ["KrillRegistry"]
+        ),
+        .target(
             name: "KrillServer",
             dependencies: [
                 "KrillEngine",
                 "KrillCache",
                 "KrillRegistry",
+                "KrillTooling",
                 "KrillSampler",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -129,6 +134,7 @@ let package = Package(
                 "KrillSampler",
                 "KrillRegistry",
                 "KrillServer",
+                "KrillTooling",
                 "CEditLine",
                 "KrillTUI",
                 .product(name: "MLX", package: "mlx-swift"),
@@ -163,6 +169,7 @@ let package = Package(
             name: "KrillServerTests",
             dependencies: [
                 "KrillServer",
+                "KrillTooling",
                 "KrillEngine",
                 "KrillRegistry",
                 "KrillSampler",
@@ -174,6 +181,10 @@ let package = Package(
         .testTarget(
             name: "KrillTUITests",
             dependencies: ["KrillTUI"]
+        ),
+        .testTarget(
+            name: "KrillToolingTests",
+            dependencies: ["KrillTooling", "KrillRegistry", "KrillGrammar"]
         ),
         .testTarget(
             name: "KrillRegistryTests",

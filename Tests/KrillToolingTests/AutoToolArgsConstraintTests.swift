@@ -1,6 +1,6 @@
 import XCTest
 import KrillGrammar
-@testable import KrillServer
+@testable import KrillTooling
 
 /// Auto tool-call argument constraining (two-pass). Verifies the gate that
 /// decides whether a re-generation is needed, the bare-args parser, and that

@@ -1,4 +1,5 @@
 import Foundation
+import KrillTooling
 
 /// OpenAI Responses API compatibility so OpenAI Codex (and any client using
 /// `wire_api = "responses"`) works when pointed at Krill. Codex removed
