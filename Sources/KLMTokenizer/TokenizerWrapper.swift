@@ -20,6 +20,11 @@ public final class KLMTokenizer: @unchecked Sendable {
     /// vocab). Used to size the grammar logit mask to the logits width.
     /// `nil` when neither file declares it.
     public let vocabSize: Int?
+    /// Token IDs whose decoded text is suppressed (rendered empty) by
+    /// `decodeForOutput` so structural Gemma-4 media markers cannot leak into
+    /// the visible answer. Resolved once at load from `gemmaMediaMarkerLiterals`
+    /// (empty for every tokenizer that lacks them as dedicated special tokens).
+    public let outputSuppressedTokenIDs: Set<Int>
     /// Contents of `chat_template.jinja` from the model directory, if
     /// present. Newer HF checkpoints (Qwen 3 Coder, Qwen 3 Instruct-2507,
     /// Gemma 4) ship the chat template as a separate Jinja file instead
@@ -113,6 +118,12 @@ public final class KLMTokenizer: @unchecked Sendable {
 
         // Model vocab size (for sizing the grammar logit mask). Best-effort.
         self.vocabSize = Self.readVocabSize(directory: directory)
+
+        // Resolve the media-marker suppression set once (no-op on non-Gemma
+        // tokenizers). Computed eagerly so the streaming decode path stays
+        // lock-free under concurrent generation.
+        self.outputSuppressedTokenIDs = Self.resolveOutputSuppressedTokenIDs(
+            tokenizer: self.tokenizer)
     }
 
     /// Normalize a tokenizer.json for swift-transformers when it trips one of two
@@ -500,6 +511,49 @@ public final class KLMTokenizer: @unchecked Sendable {
     /// Decode a single token ID to its string representation.
     public func decode(token: Int) -> String {
         tokenizer.decode(tokens: [token])
+    }
+
+    /// Gemma-4 multimodal marker literals (image/audio soft tokens plus the
+    /// begin/end markers — mirrors `InferenceEngine.gemma4*`). They are
+    /// structural special tokens that demarcate a media run in the prompt; the
+    /// model occasionally emits one (notably `<image|>` = `<end_of_image>`)
+    /// during plain text decode, where the byte-level detokenizer renders the
+    /// literal into the visible answer. They must never reach the user.
+    private static let gemmaMediaMarkerLiterals = [
+        "<|image|>", "<|audio|>", "<|image>", "<|audio>", "<image|>", "<audio|>",
+    ]
+
+    /// Resolve `outputSuppressedTokenIDs` from `gemmaMediaMarkerLiterals`: a
+    /// literal contributes the id of the single token that, decoded on its own,
+    /// reproduces the literal exactly. Matching on each token's standalone
+    /// decode (rather than the whole encoding) makes this independent of any
+    /// BOS/EOS/metaspace tokens the tokenizer wraps around the literal, so it
+    /// neither misses the marker when a checkpoint appends specials nor fires on
+    /// a non-Gemma tokenizer that splits the literal into prose sub-pieces
+    /// (none of which decode back to the literal). Ambiguous cases (zero or more
+    /// than one matching token) are skipped, keeping `decodeForOutput` a
+    /// transparent pass-through everywhere it is not unambiguously a marker.
+    private static func resolveOutputSuppressedTokenIDs(
+        tokenizer: Tokenizer
+    ) -> Set<Int> {
+        var ids = Set<Int>()
+        for literal in gemmaMediaMarkerLiterals {
+            let matches = tokenizer.encode(text: literal)
+                .filter { tokenizer.decode(tokens: [$0]) == literal }
+            if matches.count == 1 {
+                ids.insert(matches[0])
+            }
+        }
+        return ids
+    }
+
+    /// Decode a single generated token for VISIBLE output. Identical to
+    /// `decode(token:)` except that structural media-marker special tokens
+    /// (see `outputSuppressedTokenIDs`) decode to the empty string instead of
+    /// their literal form, so they cannot leak into the streamed answer.
+    public func decodeForOutput(token: Int) -> String {
+        if outputSuppressedTokenIDs.contains(token) { return "" }
+        return tokenizer.decode(tokens: [token])
     }
 
     /// Apply chat template formatting for a conversation.
