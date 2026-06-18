@@ -30,12 +30,25 @@ public final class NgramProposer: @unchecked Sendable {
         /// (0 = whole history). Bounds scan cost and biases toward recent,
         /// more-relevant repetition.
         public var searchWindow: Int
+        /// Rolling window (in decode rounds) over which the stall monitor judges
+        /// whether prompt-lookup is paying off. 0 disables the monitor (the
+        /// proposer never reports itself stalled).
+        public var monitorWindow: Int
+        /// Average extra-tokens-per-round, over a full `monitorWindow`, below
+        /// which the proposer latches `stalled`. The caller then abandons the
+        /// n-gram loop and hands generation off to the plain pipeline decode
+        /// loop — on non-echo workloads the lookup never matches, so the
+        /// propose() scan + non-overlapped verify forward are pure tax.
+        public var stallThreshold: Double
 
-        public init(maxN: Int = 3, minN: Int = 1, maxDraft: Int = 16, searchWindow: Int = 2048) {
+        public init(maxN: Int = 3, minN: Int = 1, maxDraft: Int = 16, searchWindow: Int = 2048,
+                    monitorWindow: Int = 48, stallThreshold: Double = 0.30) {
             self.maxN = max(1, maxN)
             self.minN = max(1, min(minN, self.maxN))
             self.maxDraft = max(1, maxDraft)
             self.searchWindow = max(0, searchWindow)
+            self.monitorWindow = max(0, monitorWindow)
+            self.stallThreshold = stallThreshold
         }
     }
 
@@ -53,6 +66,18 @@ public final class NgramProposer: @unchecked Sendable {
     /// matches pay off we grow back toward `maxDraft`. Starts optimistic.
     public private(set) var effectiveCap: Int
 
+    /// Rolling window of per-round "extra tokens" (drafted tokens accepted beyond
+    /// the one a plain decode step always yields) and its running sum, used by the
+    /// stall monitor. `stalled` latches sticky-true the first time a full window
+    /// averages below `Config.stallThreshold`.
+    private var roundYields: [Int] = []
+    private var yieldSum: Int = 0
+
+    /// Sticky: once the prompt-lookup draft stops paying off over a full window,
+    /// this stays true for the rest of the generation. The caller reads it after
+    /// each round and, when set, hands off to the plain pipeline decode loop.
+    public private(set) var stalled: Bool = false
+
     public init(config: Config = .init(), eosIds: Set<Int> = []) {
         self.config = config
         self.eosIds = eosIds
@@ -64,6 +89,30 @@ public final class NgramProposer: @unchecked Sendable {
     public func reset(prompt: [Int]) {
         history = prompt
         effectiveCap = config.maxDraft
+        roundYields.removeAll(keepingCapacity: true)
+        yieldSum = 0
+        stalled = false
+    }
+
+    /// Feed one decode round's outcome to the stall monitor. `extraTokens` is the
+    /// number of tokens the draft saved this round *beyond* the single token a
+    /// plain decode step always produces (0 on a no-match round; `k` on a fully
+    /// accepted k-token round; the matched prefix length on a partial round). Once
+    /// the window is full, an average below `stallThreshold` latches `stalled`.
+    /// Echo-heavy workloads sustain a high average; non-echo workloads sit near 0.
+    public func recordRound(extraTokens: Int) {
+        guard config.monitorWindow > 0, !stalled else { return }
+        roundYields.append(extraTokens)
+        yieldSum += extraTokens
+        if roundYields.count > config.monitorWindow {
+            yieldSum -= roundYields.removeFirst()
+        }
+        // Only judge once a full window has accumulated, so a slow start (the
+        // echo not yet established) does not trip the monitor prematurely.
+        if roundYields.count >= config.monitorWindow {
+            let avg = Double(yieldSum) / Double(roundYields.count)
+            if avg < config.stallThreshold { stalled = true }
+        }
     }
 
     /// Update the adaptive cap from a round's outcome: `acceptedDraft` of the

@@ -115,6 +115,56 @@ final class NgramSpeculativeDecodingTests: XCTestCase {
         XCTAssertEqual(p.effectiveCap, 8, "reset restores the optimistic cap")
     }
 
+    // MARK: - Stall monitor (auto-disable / handoff trigger)
+
+    func testStallMonitorLatchesOnSustainedNonEcho() {
+        let p = NgramProposer(config: .init(maxN: 2, minN: 1, maxDraft: 8, searchWindow: 0,
+                                            monitorWindow: 4, stallThreshold: 0.30))
+        p.reset(prompt: [1, 2])
+        XCTAssertFalse(p.stalled, "starts unstalled")
+        // Three no-match rounds: window not yet full, no verdict.
+        p.recordRound(extraTokens: 0)
+        p.recordRound(extraTokens: 0)
+        p.recordRound(extraTokens: 0)
+        XCTAssertFalse(p.stalled, "partial window does not trip the monitor")
+        // Fourth fills the window at avg 0.0 < 0.30 -> latched.
+        p.recordRound(extraTokens: 0)
+        XCTAssertTrue(p.stalled, "a full window averaging below threshold latches stalled")
+    }
+
+    func testStallMonitorStaysClearWhenLookupPaysOff() {
+        let p = NgramProposer(config: .init(maxN: 2, minN: 1, maxDraft: 8, searchWindow: 0,
+                                            monitorWindow: 4, stallThreshold: 0.30))
+        p.reset(prompt: [1, 2])
+        // Mixed echo: a couple of no-match rounds amid productive ones keeps the
+        // windowed average above threshold, so the monitor never trips.
+        for r in [3, 0, 2, 0, 4, 0, 3, 0] { p.recordRound(extraTokens: r) }
+        XCTAssertFalse(p.stalled, "productive lookup keeps the average above threshold")
+    }
+
+    func testStallMonitorIsSticky() {
+        let p = NgramProposer(config: .init(maxN: 2, minN: 1, maxDraft: 8, searchWindow: 0,
+                                            monitorWindow: 2, stallThreshold: 0.30))
+        p.reset(prompt: [1, 2])
+        p.recordRound(extraTokens: 0)
+        p.recordRound(extraTokens: 0)
+        XCTAssertTrue(p.stalled)
+        // A later burst of perfect rounds does NOT un-stall it within a generation.
+        for _ in 0 ..< 10 { p.recordRound(extraTokens: 8) }
+        XCTAssertTrue(p.stalled, "stalled is sticky until reset()")
+        // reset() clears it for the next generation.
+        p.reset(prompt: [1, 2])
+        XCTAssertFalse(p.stalled)
+    }
+
+    func testStallMonitorDisabledWhenWindowZero() {
+        let p = NgramProposer(config: .init(maxN: 2, minN: 1, maxDraft: 8, searchWindow: 0,
+                                            monitorWindow: 0, stallThreshold: 0.30))
+        p.reset(prompt: [1, 2])
+        for _ in 0 ..< 100 { p.recordRound(extraTokens: 0) }
+        XCTAssertFalse(p.stalled, "monitorWindow == 0 disables the monitor entirely")
+    }
+
     func testEmptyAndShortHistory() {
         let p = NgramProposer(config: .init(maxN: 3, minN: 1, maxDraft: 10, searchWindow: 0))
         p.reset(prompt: [])
