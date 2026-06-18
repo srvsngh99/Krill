@@ -17,8 +17,8 @@ parity is ~bit-exact.
 Usage:
     python3 tools/verify_deepseek_parity.py /tmp/krill-deepseek-v2 v2
     python3 tools/verify_deepseek_parity.py /tmp/krill-deepseek-v3 v3
-    KLM_DEEPSEEK_V2_PARITY_DIR=/tmp/krill-deepseek-v2 \\
-        KLM_DEEPSEEK_V3_PARITY_DIR=/tmp/krill-deepseek-v3 \\
+    KRILL_DEEPSEEK_V2_PARITY_DIR=/tmp/krill-deepseek-v2 \\
+        KRILL_DEEPSEEK_V3_PARITY_DIR=/tmp/krill-deepseek-v3 \\
         swift test -c release --filter DeepSeekParityTests
 """
 import json

@@ -251,10 +251,10 @@ a half-working "Ollama impostor" is worse than a clean opt-in. So:
 
 Also add `--compat ollama|openai|both` (default `both`) now — this is
 independent of the port and safe to ship in Phase 1.
-Touch (Phase 1): `Sources/KLMCLI/ServeCommand.swift` (`--compat`, accept
+Touch (Phase 1): `Sources/KrillCLI/ServeCommand.swift` (`--compat`, accept
 `--port 11434`), `docs/SERVER_API.md`, `README.md` (deferral note).
-Touch (final activation): `Sources/KLMRegistry/Config.swift`
-(`server_port` default), `Sources/KLMCLI/ServeCommand.swift`,
+Touch (final activation): `Sources/KrillRegistry/Config.swift`
+(`server_port` default), `Sources/KrillCLI/ServeCommand.swift`,
 release notes.
 
 **A2. Discovery endpoints.**
@@ -264,15 +264,15 @@ Implement `GET /api/version` (return Krill version + a spoofable
 `POST /api/show` (`modelfile`, `parameters`, `template`, `details`,
 `model_info`, `capabilities`). These are read-mostly and unblock the
 majority of Ollama GUIs/integrations.
-Touch: `Sources/KLMServer/Server.swift`, new
-`Sources/KLMServer/OllamaCompat.swift`, `Sources/KLMRegistry/Registry.swift`
+Touch: `Sources/KrillServer/Server.swift`, new
+`Sources/KrillServer/OllamaCompat.swift`, `Sources/KrillRegistry/Registry.swift`
 (model metadata for `show`).
 
 **A3. Model lifecycle HTTP.**
 `POST /api/pull` (stream NDJSON progress), `DELETE /api/delete`,
 `POST /api/copy`, `HEAD|POST /api/blobs/:digest`. `/api/create` is paired
 with WS-C (Modelfile).
-Touch: `Sources/KLMServer/Server.swift`, `Sources/KLMRegistry/Puller.swift`
+Touch: `Sources/KrillServer/Server.swift`, `Sources/KrillRegistry/Puller.swift`
 (emit progress events).
 
 **Acceptance (WS-A):** a stock Ollama GUI (e.g. an Ollama-targeting chat
@@ -288,9 +288,9 @@ shows model info, pulls a model with a progress bar, and chats.
 embedding model family loader or mean/last-token pooling over an existing
 decoder's hidden states. Decide model support list (start: a small
 sentence-embedding MLX model from mlx-community).
-Touch: new `Sources/KLMEngine/EmbeddingEngine.swift`,
-`Sources/KLMCore/ModelLoader.swift` (pooling head),
-`Sources/KLMServer/Server.swift`, `Sources/KLMRegistry/AliasMap.swift`
+Touch: new `Sources/KrillEngine/EmbeddingEngine.swift`,
+`Sources/KrillCore/ModelLoader.swift` (pooling head),
+`Sources/KrillServer/Server.swift`, `Sources/KrillRegistry/AliasMap.swift`
 (embedding aliases).
 **Acceptance:** `curl /api/embed` and the OpenAI Python SDK
 `client.embeddings.create(...)` return correctly-shaped, L2-normalized
@@ -310,10 +310,10 @@ Define a Krill Modelfile (accept Ollama's syntax verbatim where feasible:
 - Persist custom models as manifests referencing base blobs (no weight
   copy) plus an overrides blob (system/template/params).
 
-Touch: new `Sources/KLMRegistry/Modelfile.swift`,
-`Sources/KLMRegistry/ModelManifest.swift` (overrides field),
-`Sources/KLMCLI/{CreateCommand,ShowCommand,CpCommand}.swift`,
-`Sources/KLMTokenizer/TokenizerWrapper.swift` (template override resolution).
+Touch: new `Sources/KrillRegistry/Modelfile.swift`,
+`Sources/KrillRegistry/ModelManifest.swift` (overrides field),
+`Sources/KrillCLI/{CreateCommand,ShowCommand,CpCommand}.swift`,
+`Sources/KrillTokenizer/TokenizerWrapper.swift` (template override resolution).
 **Acceptance:** a Modelfile that sets `SYSTEM` + `PARAMETER temperature` +
 `TEMPLATE` round-trips through `create` → `show` → `run`/`/api/chat` with
 the overrides applied; `ollama show`-shaped JSON validates against clients.
@@ -322,7 +322,7 @@ the overrides applied; `ollama show`-shaped JSON validates against clients.
 
 **D1. Tool/function calling.** Implement `tools[]` + `tool_calls` +
 `role:"tool"` on `/api/chat`, `/v1/chat/completions`, and (WS-F)
-`/v1/messages`. Replace the stub in `Sources/KLMCore/ToolParser.swift`
+`/v1/messages`. Replace the stub in `Sources/KrillCore/ToolParser.swift`
 with model-family-aware tool-call extraction (chat-template
 `tools` injection + structured parse of the model's tool-call syntax).
 Streaming tool-call deltas required for agent clients.
@@ -330,7 +330,7 @@ Streaming tool-call deltas required for agent clients.
 **D2. Structured output.** `format:"json"` (constrained/guided JSON) and
 `format:<JSON schema>` on `/api/generate` & `/api/chat`; map OpenAI
 `response_format` → same path. Implement via grammar/logit-mask sampling in
-`Sources/KLMSampler/Sampler.swift` (new constrained-decoding module).
+`Sources/KrillSampler/Sampler.swift` (new constrained-decoding module).
 
 **D3. Sampler params (T2-10).** Add `mirostat`, `mirostat_tau`,
 `mirostat_eta`, `min_p`, `typical_p`, `tfs_z`, `repeat_last_n`,
@@ -342,10 +342,10 @@ request decoders.
 `KRILL_CONTEXT_LENGTH` / `OLLAMA_CONTEXT_LENGTH`; clamp to model max with a
 warning rather than fixed silent cap.
 
-Touch: `Sources/KLMCore/ToolParser.swift`,
-`Sources/KLMSampler/Sampler.swift` (+ new `ConstrainedSampler.swift`),
-`Sources/KLMEngine/InferenceEngine.swift`,
-`Sources/KLMServer/Server.swift`.
+Touch: `Sources/KrillCore/ToolParser.swift`,
+`Sources/KrillSampler/Sampler.swift` (+ new `ConstrainedSampler.swift`),
+`Sources/KrillEngine/InferenceEngine.swift`,
+`Sources/KrillServer/Server.swift`.
 **Acceptance:** an agent loop (e.g. an OpenAI-SDK function-calling sample)
 completes a multi-turn tool call against `/v1/chat/completions`; a
 JSON-schema request returns schema-valid output; `num_ctx` and the new
@@ -363,9 +363,9 @@ sampler params measurably change behavior in tests.
   with a request queue + serialized execution; true batching can be a
   follow-up (cross-link to speedup plan).
 
-Touch: `Sources/KLMServer/Server.swift` (scheduler/queue),
-new `Sources/KLMServer/ModelScheduler.swift`,
-`Sources/KLMCLI/StopCommand.swift`, `Sources/KLMRegistry/Config.swift`.
+Touch: `Sources/KrillServer/Server.swift` (scheduler/queue),
+new `Sources/KrillServer/ModelScheduler.swift`,
+`Sources/KrillCLI/StopCommand.swift`, `Sources/KrillRegistry/Config.swift`.
 **Acceptance:** model auto-unloads after `keep_alive`; `/api/ps` shows
 countdown; N concurrent clients are queued not dropped (until
 `MAX_QUEUE`), and a load test does not corrupt KV/prefix cache.
@@ -376,8 +376,8 @@ countdown; N concurrent clients are queued not dropped (until
 `tool_result`, streaming, `thinking`) so Claude Code / Anthropic-SDK
 clients work via `ANTHROPIC_BASE_URL`. Add `think` / `reasoning_effort`
 plumbing for reasoning-capable models, returning `message.thinking`.
-Touch: new `Sources/KLMServer/AnthropicCompat.swift`,
-`Sources/KLMEngine/InferenceEngine.swift` (thinking segmentation).
+Touch: new `Sources/KrillServer/AnthropicCompat.swift`,
+`Sources/KrillEngine/InferenceEngine.swift` (thinking segmentation).
 **Acceptance:** Claude Code configured with
 `ANTHROPIC_BASE_URL=http://localhost:11434` completes a tool-using session.
 
@@ -392,8 +392,8 @@ Touch: new `Sources/KLMServer/AnthropicCompat.swift`,
   existing user environments and `launchctl setenv` setups work unchanged.
 - Flash Attention path in MLX (advisory; cross-links speedup plan).
 
-Touch: `Sources/KLMRegistry/Config.swift` (env alias table),
-`Sources/KLMServer/Server.swift` (CORS), `docs/SERVER_API.md`.
+Touch: `Sources/KrillRegistry/Config.swift` (env alias table),
+`Sources/KrillServer/Server.swift` (CORS), `docs/SERVER_API.md`.
 **Acceptance:** an `OLLAMA_HOST`/`OLLAMA_MODELS` environment drives Krill
 identically; a browser-extension client passes CORS preflight.
 

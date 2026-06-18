@@ -161,7 +161,7 @@ resident and counted by `phys_footprint` / `RSIZE` — the figure the
 benchmark samples for `memory_ratio` — even though MLX treats them as
 "free", so an uncapped pool can grow into the multi-GB range under
 sustained load. Krill caps it on every native model load via
-`MLXMemoryConfig` (`Sources/KLMCore/MLXMemoryConfig.swift`):
+`MLXMemoryConfig` (`Sources/KrillCore/MLXMemoryConfig.swift`):
 
 - Default: **256 MB** — covers Gemma 4 e2b's fixed-size decode-step buffers
   so the hot loop still recycles (no decode regression).

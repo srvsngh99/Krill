@@ -108,11 +108,11 @@ micro-optimizations are unlikely to produce a durable `>= 1.5x` ratio.
 ## Key Files
 
 ```text
-Sources/KLMEngine/SpeculativeDecoder.swift
-Sources/KLMEngine/InferenceEngine.swift
-Sources/KLMCore/Gemma4Model.swift
-Sources/KLMCache/KVCache.swift
-Sources/KLMCache/QuantizedKVCache.swift
+Sources/KrillEngine/SpeculativeDecoder.swift
+Sources/KrillEngine/InferenceEngine.swift
+Sources/KrillCore/Gemma4Model.swift
+Sources/KrillCache/KVCache.swift
+Sources/KrillCache/QuantizedKVCache.swift
 tools/gemma4_multimodal_benchmark.py
 tools/release_gate.py
 docs/RELEASE_GATE_DECODE_PROPOSAL.md

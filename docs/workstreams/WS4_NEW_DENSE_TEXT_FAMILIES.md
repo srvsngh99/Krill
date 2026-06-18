@@ -90,17 +90,17 @@ vision-language, ASR, TTS, or diffusion models.
 ## Key Files
 
 ```text
-Sources/KLMCore/LlamaModel.swift
-Sources/KLMCore/QwenModel.swift
-Sources/KLMCore/MistralModel.swift
-Sources/KLMCore/GemmaModel.swift
-Sources/KLMCore/Gemma4Model.swift
-Sources/KLMCore/PhiModel.swift
-Sources/KLMCore/GLMModel.swift
-Sources/KLMCore/ModelConfig.swift
-Sources/KLMCore/ModelLoader.swift
-Sources/KLMRegistry/AliasMap.swift
-Sources/KLMTokenizer/TokenizerWrapper.swift
+Sources/KrillCore/LlamaModel.swift
+Sources/KrillCore/QwenModel.swift
+Sources/KrillCore/MistralModel.swift
+Sources/KrillCore/GemmaModel.swift
+Sources/KrillCore/Gemma4Model.swift
+Sources/KrillCore/PhiModel.swift
+Sources/KrillCore/GLMModel.swift
+Sources/KrillCore/ModelConfig.swift
+Sources/KrillCore/ModelLoader.swift
+Sources/KrillRegistry/AliasMap.swift
+Sources/KrillTokenizer/TokenizerWrapper.swift
 ```
 
 ## Implementation Checklist For A New Dense Model

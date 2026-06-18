@@ -9,7 +9,7 @@
 
 ### 1. Create the model file
 
-Add `Sources/KLMCore/NewModel.swift` with:
+Add `Sources/KrillCore/NewModel.swift` with:
 
 ```swift
 // Config struct conforming to ModelConfig

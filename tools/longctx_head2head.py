@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Long-context head-to-head: Krill vs Ollama, same prompt, same box.
 
-Mirrors Tests/KLMEngineTests/Gemma4DecodeSweepTests.swift's prompt builder:
+Mirrors Tests/KrillEngineTests/Gemma4DecodeSweepTests.swift's prompt builder:
 repeated ~55-token structured sections with a needle ("tangerine satellite")
 planted at the START and a direct question at the end. Both engines are hit
 through their Ollama-compatible POST /api/generate, so the timing fields are

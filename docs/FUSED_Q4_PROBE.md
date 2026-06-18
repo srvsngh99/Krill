@@ -5,7 +5,7 @@
 A probe testing whether a hand-written fused affine-4bit dequant + GEMV Metal
 kernel can beat MLX's built-in `quantizedMatmul` on the M-series decode shape
 (single query row, `x @ dequant(w)^T`). The kernel lives in
-`Sources/KLMKernels/KernelRegistry.swift` as `KLMKernels.fusedQ4Gemv` (JIT via
+`Sources/KrillKernels/KernelRegistry.swift` as `KrillKernels.fusedQ4Gemv` (JIT via
 `MLXFast.metalKernel`), one thread per output row, dequantizing on the fly
 (`w = q * scale + bias`, MLX's affine convention) and accumulating in fp32 with
 no materialized weight matrix.
@@ -41,11 +41,11 @@ remain the shipped quantized-matmul paths.
 
 ```
 make metallib CONFIGURATION=release
-KLM_FUSED_Q4_BENCH=1 swift test -c release \
+KRILL_FUSED_Q4_BENCH=1 swift test -c release \
     --filter 'FusedQ4KernelTests/testBenchmarkVsBuiltin'
 ```
 
-`KLMKernels.fusedQ4Enabled` reads `KRILL_FUSED_Q4=1`; it is off by default and,
+`KrillKernels.fusedQ4Enabled` reads `KRILL_FUSED_Q4=1`; it is off by default and,
 because the kernel is not wired into any forward path, the flag currently only
 documents intent for a benchmark harness or a future re-attempt.
 

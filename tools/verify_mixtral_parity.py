@@ -16,7 +16,7 @@ Usage:
 Writes into that dir: config.json, model.safetensors, reference_logits.json
 (the last-token logits for a fixed token sequence). Then run the gated Swift
 test against it:
-    KLM_MIXTRAL_PARITY_DIR=/tmp/krill-mixtral-parity \\
+    KRILL_MIXTRAL_PARITY_DIR=/tmp/krill-mixtral-parity \\
         swift test -c release --filter MixtralParityTests
 """
 import json

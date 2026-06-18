@@ -5,7 +5,7 @@ Native Swift+MLX runtime for the GLM-4-0414 / GLM-Z1 generation (model_type
 
 ## Shipped
 
-- `Sources/KLMCore/Glm4Model.swift` — `Glm4ForCausalLM`: separate q/k/v/o (bias on
+- `Sources/KrillCore/Glm4Model.swift` — `Glm4ForCausalLM`: separate q/k/v/o (bias on
   q/k/v only), four-RMSNorm sandwich (input / post_self_attn / post_attention /
   post_mlp), partial RoPE, fused gate_up. Built with the `native-port` workflow:
   the local gemma-4-12b-coder model drafted the Swift, then it was integrated and
@@ -59,7 +59,7 @@ decode.
 
 - `tools/bench_runtimes.py` — 3-way (GGUF / MLX-Python / Native MLX-Swift) bench,
   family-agnostic via flags.
-- `Tests/KLMCoreTests/QuantFidelityTests.swift` — logit-fidelity-vs-bf16 harness
+- `Tests/KrillCoreTests/QuantFidelityTests.swift` — logit-fidelity-vs-bf16 harness
   (honors per-module quant overrides; the only consistent way to compare a mixed
   Krill quant against a baseline).
 - `.claude/skills/native-port/` — the general port skill (`families/glm4.md`).

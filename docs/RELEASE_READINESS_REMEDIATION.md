@@ -150,8 +150,8 @@ do not affect these results):
 | --- | --- |
 | `make test` | Passed: 123 tests, 8 skipped (env-gated), 0 failures |
 | `make release` | Passed; `.build/release/krill` 37 MB |
-| Live int8 KV parity test (`KLM_GEMMA4_MODEL_PATH=…`) | Passed |
-| Live chat image-conditioning test (`KLM_GEMMA4_MODEL_PATH=…`) | Passed |
+| Live int8 KV parity test (`KRILL_GEMMA4_MODEL_PATH=…`) | Passed |
+| Live chat image-conditioning test (`KRILL_GEMMA4_MODEL_PATH=…`) | Passed |
 | Native CLI text smoke | Coherent output |
 | Native CLI image smoke | Identifies red-box fixture |
 | CLI audio smoke (`mlx-vlm` bridge) | Runs end to end |
@@ -473,11 +473,11 @@ What landed:
 
 Coverage:
 
-- `Tests/KLMCoreTests/QuantizedPrefixCacheTests.swift` — 4 unit tests
+- `Tests/KrillCoreTests/QuantizedPrefixCacheTests.swift` — 4 unit tests
   (round trip, dtype isolation in both directions, restore+truncate+update
   length invariants).
-- `Tests/KLMEngineTests/QuantizedPrefixCacheLiveTests.swift` (gated by
-  `KLM_GEMMA4_MODEL_PATH`) — cold and warm runs through `InferenceEngine`
+- `Tests/KrillEngineTests/QuantizedPrefixCacheLiveTests.swift` (gated by
+  `KRILL_GEMMA4_MODEL_PATH`) — cold and warm runs through `InferenceEngine`
   with `kvCacheDtype: "int8"` and a shared `PrefixCache` produce
   identical greedy tokens.
 
@@ -644,7 +644,7 @@ compounding causes**:
 
 What landed:
 
-- `Sources/KLMCore/MLXMemoryConfig.swift` — `resolveCacheLimitMB`
+- `Sources/KrillCore/MLXMemoryConfig.swift` — `resolveCacheLimitMB`
   (pure, env-driven) + `apply()` which sets `MLX.Memory.cacheLimit`.
   Default 256 MB; `KRILL_MLX_CACHE_LIMIT_MB` overrides (`0` = legacy
   unbounded). 256 MB comfortably covers Gemma 4 e2b's fixed-size
@@ -656,7 +656,7 @@ What landed:
 
 Coverage:
 
-- `Tests/KLMCoreTests/MLXMemoryConfigTests.swift` — 5 unit tests (default,
+- `Tests/KrillCoreTests/MLXMemoryConfigTests.swift` — 5 unit tests (default,
   explicit value, `0`→disabled, whitespace trim, invalid→default).
 - Net Swift test count: `128 / 9` → `133 / 9`, 0 failures.
 
@@ -757,7 +757,7 @@ Coverage (Swift `make test` 195/9/0 → **202/9/0**, 0 failures):
   `testKeepAliveDeadlineDoesNotEvictDuringActiveRequest`,
   `testStreamingResponseHeadsIncludeCorsHeaders`; extended
   `testApiCopyRoundTripsManifest` to assert overrides survive.
-- `KLMRegistryTests`: extended the OLLAMA-alias test for `OLLAMA_MODELS`;
+- `KrillRegistryTests`: extended the OLLAMA-alias test for `OLLAMA_MODELS`;
   added `testRegistryModelsDirOverrideRootsManifestsAndBlobs`.
 
 Verified: `make test` 202/9/0, `make release` passed, `python3 -m

@@ -26,8 +26,8 @@ Required properties:
 
 Files:
 
-- `Tests/KLMCoreTests/KVCacheTests.swift`
-- `Tests/KLMCoreTests/PrefixCacheTests.swift`
+- `Tests/KrillCoreTests/KVCacheTests.swift`
+- `Tests/KrillCoreTests/PrefixCacheTests.swift`
 
 Required tests:
 
@@ -50,8 +50,8 @@ Non-goal for this PR:
 
 Files:
 
-- `Tests/KLMEngineTests/SpeculativeDecodingTests.swift`
-- `Sources/KLMEngine/SpeculativeDecoder.swift` only for narrow internal seams.
+- `Tests/KrillEngineTests/SpeculativeDecodingTests.swift`
+- `Sources/KrillEngine/SpeculativeDecoder.swift` only for narrow internal seams.
 
 Required tests:
 
@@ -69,9 +69,9 @@ Nice-to-have:
 
 Files:
 
-- `Sources/KLMServer/Server.swift`
-- Optional `Sources/KLMServer/ServerParsing.swift`
-- `Tests/KLMServerTests/ServerTests.swift`
+- `Sources/KrillServer/Server.swift`
+- Optional `Sources/KrillServer/ServerParsing.swift`
+- `Tests/KrillServerTests/ServerTests.swift`
 
 Required tests:
 
@@ -89,8 +89,8 @@ Nice-to-have:
 
 Files:
 
-- `Sources/KLMRegistry/Puller.swift`
-- `Tests/KLMRegistryTests/PullerTests.swift`
+- `Sources/KrillRegistry/Puller.swift`
+- `Tests/KrillRegistryTests/PullerTests.swift`
 
 Required tests:
 
@@ -109,10 +109,10 @@ Implementation guidance:
 
 The main thread owns `Package.swift` dependency changes:
 
-- `KLMCoreTests` gets `MLX`.
-- `KLMEngineTests` gets `MLX`.
-- New `KLMServerTests` gets `KLMServer`, `KLMEngine`, `KLMRegistry`, `KLMSampler`, `NIOCore`, `NIOEmbedded`, and `NIOHTTP1`.
-- `KLMRegistryTests` gets `Crypto`.
+- `KrillCoreTests` gets `MLX`.
+- `KrillEngineTests` gets `MLX`.
+- New `KrillServerTests` gets `KrillServer`, `KrillEngine`, `KrillRegistry`, `KrillSampler`, `NIOCore`, `NIOEmbedded`, and `NIOHTTP1`.
+- `KrillRegistryTests` gets `Crypto`.
 
 ## Verification
 
@@ -139,28 +139,28 @@ shortlist when scoping a new follow-up.
 
 ### PR #5 (merge-blocking coverage for PR #4 fixes)
 
-- `Tests/KLMRegistryTests/PullerTests.swift`
-- `Tests/KLMServerTests/ServerTests.swift`
-- Expanded `Tests/KLMCoreTests/PrefixCacheTests.swift`,
-  `Tests/KLMCoreTests/KVCacheTests.swift`,
-  `Tests/KLMEngineTests/SpeculativeDecodingTests.swift`.
+- `Tests/KrillRegistryTests/PullerTests.swift`
+- `Tests/KrillServerTests/ServerTests.swift`
+- Expanded `Tests/KrillCoreTests/PrefixCacheTests.swift`,
+  `Tests/KrillCoreTests/KVCacheTests.swift`,
+  `Tests/KrillEngineTests/SpeculativeDecodingTests.swift`.
 
 ### PR #9 (`feat/release-readiness-remediation`) and follow-ups
 
-- `Tests/KLMServerTests/MultimodalEndpointsTests.swift` — server multimodal
+- `Tests/KrillServerTests/MultimodalEndpointsTests.swift` — server multimodal
   request/response shape coverage and `testTwoDifferentImagesProduceDifferentOutputs`.
-- `Tests/KLMEngineTests/QuantizedKVCacheUnitTests.swift` — int8 cache shape
+- `Tests/KrillEngineTests/QuantizedKVCacheUnitTests.swift` — int8 cache shape
   and quantize/dequantize unit checks.
-- `Tests/KLMEngineTests/QuantizedKVCacheIntegrationTests.swift`
+- `Tests/KrillEngineTests/QuantizedKVCacheIntegrationTests.swift`
   (env-gated) — int8 vs fp16 greedy parity through `InferenceEngine`.
-- `Tests/KLMEngineTests/MultimodalPrefixCacheTests.swift` — verifies the
+- `Tests/KrillEngineTests/MultimodalPrefixCacheTests.swift` — verifies the
   prefix cache key includes media bytes (schema v2).
 
 ### PR #11 (`perf: compose int8 KV cache with prefix cache`)
 
-- `Tests/KLMCoreTests/QuantizedPrefixCacheTests.swift` — 4 unit tests:
+- `Tests/KrillCoreTests/QuantizedPrefixCacheTests.swift` — 4 unit tests:
   uint8 round-trip, dtype isolation in both directions, restore+truncate+update.
-- `Tests/KLMEngineTests/QuantizedPrefixCacheLiveTests.swift` (env-gated) —
+- `Tests/KrillEngineTests/QuantizedPrefixCacheLiveTests.swift` (env-gated) —
   `testInt8PrefixCacheReplayMatchesColdRun` asserts cold and warm runs through
   `InferenceEngine` with `kvCacheDtype: "int8"` and a shared `PrefixCache`
   produce identical greedy tokens.

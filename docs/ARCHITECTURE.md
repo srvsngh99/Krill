@@ -21,32 +21,32 @@ Native Swift covers Gemma 4 text and image (text model + SigLIP2 vision encoder)
 ## Module Dependency Graph
 
 ```
-KLMCLI (executable)
-  |-- KLMEngine        (inference orchestration)
-  |     |-- KLMCore    (model architectures)
-  |     |-- KLMCache   (KV cache, prefix cache)
-  |     |-- KLMTokenizer (tokenizer wrapper)
-  |     |-- KLMSampler (greedy, top-k, top-p)
-  |-- KLMServer        (HTTP API)
-  |     |-- KLMEngine
-  |-- KLMRegistry      (model store, HF puller)
-  |-- KLMRuntime       (Metal GPU validation)
+KrillCLI (executable)
+  |-- KrillEngine        (inference orchestration)
+  |     |-- KrillCore    (model architectures)
+  |     |-- KrillCache   (KV cache, prefix cache)
+  |     |-- KrillTokenizer (tokenizer wrapper)
+  |     |-- KrillSampler (greedy, top-k, top-p)
+  |-- KrillServer        (HTTP API)
+  |     |-- KrillEngine
+  |-- KrillRegistry      (model store, HF puller)
+  |-- KrillRuntime       (Metal GPU validation)
 ```
 
 ## Source Layout
 
 ```
 Sources/
-  KLMCLI/             CLI commands (run, serve, launch, pull, bench, etc.)
-  KLMEngine/          Inference engine, speculative decoder, Python fallback
-  KLMCore/            Model architectures (Llama, Gemma4, Qwen, etc.) + model loader
-  KLMCache/           KV cache (batched concat) + prefix cache (LRU + disk)
-  KLMServer/          HTTP server (OpenAI + Ollama APIs)
-  KLMTokenizer/       HuggingFace tokenizer wrapper
-  KLMSampler/         Token sampling (greedy, temperature, top-k, top-p)
-  KLMRegistry/        Model registry, HF puller, manifests
-  KLMRuntime/         Metal runtime validation
-  KLMKernels/         Custom Metal shaders (planned)
+  KrillCLI/             CLI commands (run, serve, launch, pull, bench, etc.)
+  KrillEngine/          Inference engine, speculative decoder, Python fallback
+  KrillCore/            Model architectures (Llama, Gemma4, Qwen, etc.) + model loader
+  KrillCache/           KV cache (batched concat) + prefix cache (LRU + disk)
+  KrillServer/          HTTP server (OpenAI + Ollama APIs)
+  KrillTokenizer/       HuggingFace tokenizer wrapper
+  KrillSampler/         Token sampling (greedy, temperature, top-k, top-p)
+  KrillRegistry/        Model registry, HF puller, manifests
+  KrillRuntime/         Metal runtime validation
+  KrillKernels/         Custom Metal shaders (planned)
 ```
 
 ## Generation Pipeline
@@ -136,9 +136,9 @@ endpoint.
 | OpenAI Responses | `/v1/responses` | Codex (it dropped `wire_api="chat"`) |
 
 **Layout.** Agent knowledge is a declarative table in
-`Sources/KLMCLI/AgentProfiles.swift` (one `AgentProfile` literal per agent:
+`Sources/KrillCLI/AgentProfiles.swift` (one `AgentProfile` literal per agent:
 wire protocol, env to export, config files to `write`/`mergeJSON`, setup
-`preExec` commands, binary, install hint). `Sources/KLMCLI/LaunchCommand.swift`
+`preExec` commands, binary, install hint). `Sources/KrillCLI/LaunchCommand.swift`
 stays generic over the table.
 
 **Flow.** Resolve the profile and model (`--model` or first installed) -> ensure

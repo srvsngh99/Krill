@@ -1,6 +1,6 @@
 # Verify-forward `beta` profile (n-gram spec-decode go/no-go)
 
-Probe: `Tests/KLMCoreTests/VerifyProfileTests.swift`, gated on `KRILL_VERIFY_PROFILE`.
+Probe: `Tests/KrillCoreTests/VerifyProfileTests.swift`, gated on `KRILL_VERIFY_PROFILE`.
 
 ## Why
 

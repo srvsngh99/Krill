@@ -12,7 +12,7 @@ faster and exercises the same easy-to-miss surfaces: the Qwen2-MoE router
 
 Usage:
     python3 tools/verify_qwen2_moe_parity.py /tmp/krill-qwen2moe-parity
-    KLM_QWEN2_MOE_PARITY_DIR=/tmp/krill-qwen2moe-parity \\
+    KRILL_QWEN2_MOE_PARITY_DIR=/tmp/krill-qwen2moe-parity \\
         swift test -c release --filter Qwen2MoEParityTests
 """
 import json

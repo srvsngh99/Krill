@@ -6,7 +6,7 @@ target (2026-05-19): native validated vs the mlx-vlm oracle on a
 deterministic speech fixture, benchmarked faster than Ollama,
 default-flipped, release-gate audio promoted to hard, and the
 mlx-vlm bridge removed (oracle pinned to
-`Tests/KLMEngineTests/Fixtures/ws6_oracle_baseline.json`). Pending:
+`Tests/KrillEngineTests/Fixtures/ws6_oracle_baseline.json`). Pending:
 a tagged release shipping this posture.
 Owner: unassigned
 
@@ -16,12 +16,12 @@ Owner: unassigned
   `embed_audio.*` keys+shapes, USM feature-extractor defaults, and the
   weight-key map are documented in `docs/GEMMA4_INTERNALS.md` ("Audio
   Encoder"), cross-checked against the `mlx-vlm` oracle.
-- **WS2 Preprocessing — DONE.** `Sources/KLMCore/AudioPreprocessor.swift`
+- **WS2 Preprocessing — DONE.** `Sources/KrillCore/AudioPreprocessor.swift`
   is an exact Swift port of `Gemma4AudioFeatureExtractor` defaults
   (mono 16 kHz, semicausal pad, periodic-Hann STFT rfft 512, HTK mel
   257x128, `log(.+1e-3)`, pad-frame zeroing, `ceil(ms/40)` cap 750).
   Unit-tested (`AudioPreprocessorTests`, 7 tests).
-- **WS3 Audio tower — DONE.** `Sources/KLMCore/AudioEncoder.swift`
+- **WS3 Audio tower — DONE.** `Sources/KrillCore/AudioEncoder.swift`
   rewritten from the placeholder into the real USM Conformer (SSCP conv
   subsampling, 12 macaron blocks, chunked relative-position attention
   with logit softcap, causal lightweight conv, `output_proj`); module
@@ -35,7 +35,7 @@ Owner: unassigned
   multimodal handlers route audio natively when `KRILL_NATIVE_AUDIO=1`,
   else bridge. `KRILL_AUDIO_BRIDGE_ONLY=1` forces the oracle.
 - **WS5 Tests — DONE (unit) / live gated.** 216 Swift tests green
-  (+13). Live native-audio E2E test is `KLM_GEMMA4_MODEL_PATH`-gated
+  (+13). Live native-audio E2E test is `KRILL_GEMMA4_MODEL_PATH`-gated
   (skips in CI).
 - **WS6 Benchmark/gate — PENDING.** Requires running native audio on
   the real Gemma 4 E2B checkpoint on the M4 target vs the `mlx-vlm`
@@ -79,14 +79,14 @@ image+audio  -> mlx-vlm bridge
 Important files:
 
 ```text
-Sources/KLMCLI/RunCommand.swift
-Sources/KLMCore/Gemma4Model.swift
-Sources/KLMCore/ModelLoader.swift
-Sources/KLMCore/VisionEncoder.swift
-Sources/KLMEngine/InferenceEngine.swift
-Sources/KLMEngine/PythonFallback.swift
-Sources/KLMServer/Server.swift
-Sources/KLMServer/ServerMultimodal.swift
+Sources/KrillCLI/RunCommand.swift
+Sources/KrillCore/Gemma4Model.swift
+Sources/KrillCore/ModelLoader.swift
+Sources/KrillCore/VisionEncoder.swift
+Sources/KrillEngine/InferenceEngine.swift
+Sources/KrillEngine/PythonFallback.swift
+Sources/KrillServer/Server.swift
+Sources/KrillServer/ServerMultimodal.swift
 tools/gemma4_multimodal_benchmark.py
 tools/release_gate.py
 docs/GEMMA4_INTERNALS.md
@@ -212,13 +212,13 @@ attention mask or valid-frame metadata
 Suggested file:
 
 ```text
-Sources/KLMCore/AudioPreprocessor.swift
+Sources/KrillCore/AudioPreprocessor.swift
 ```
 
 Testing:
 
 ```text
-Tests/KLMCoreTests/AudioPreprocessorTests.swift
+Tests/KrillCoreTests/AudioPreprocessorTests.swift
 ```
 
 Acceptance:
@@ -246,13 +246,13 @@ AudioProjection / embed_audio projection
 Suggested file:
 
 ```text
-Sources/KLMCore/AudioEncoder.swift
+Sources/KrillCore/AudioEncoder.swift
 ```
 
 Model loading changes:
 
 ```text
-Sources/KLMCore/ModelLoader.swift
+Sources/KrillCore/ModelLoader.swift
 ```
 
 Load:
@@ -308,10 +308,10 @@ audio bytes
 Required changes:
 
 ```text
-Sources/KLMEngine/InferenceEngine.swift
-Sources/KLMCLI/RunCommand.swift
-Sources/KLMServer/Server.swift
-Sources/KLMServer/ServerMultimodal.swift
+Sources/KrillEngine/InferenceEngine.swift
+Sources/KrillCLI/RunCommand.swift
+Sources/KrillServer/Server.swift
+Sources/KrillServer/ServerMultimodal.swift
 ```
 
 Routing rules:
@@ -358,7 +358,7 @@ ServerAudioRoutingTests
 Live tests, gated by:
 
 ```text
-KLM_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b
+KRILL_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b
 ```
 
 Required live checks:
@@ -444,8 +444,8 @@ Gemma 4 E2B checkpoint + `mlx-vlm` + Ollama; it is gated/skipped in CI.
    semantically equivalent to the bridge on the deterministic fixture:
 
    ```text
-   KLM_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b \
-   KLM_BENCH_ASSETS_DIR=.build/benchmarks/assets \
+   KRILL_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b \
+   KRILL_BENCH_ASSETS_DIR=.build/benchmarks/assets \
    swift test --filter Gemma4SmokeTests/testWS6NativeAudioMatchesBridgeOracleOnSineTone
    ```
 
@@ -528,9 +528,9 @@ Use this prompt when dispatching an implementation agent:
 Implement native Gemma 4 audio for Krill.
 
 Start by reading docs/NATIVE_GEMMA4_AUDIO_PLAN.md,
-docs/GEMMA4_INTERNALS.md, Sources/KLMCore/Gemma4Model.swift,
-Sources/KLMCore/VisionEncoder.swift, Sources/KLMCore/ModelLoader.swift,
-Sources/KLMEngine/InferenceEngine.swift, Sources/KLMEngine/PythonFallback.swift,
+docs/GEMMA4_INTERNALS.md, Sources/KrillCore/Gemma4Model.swift,
+Sources/KrillCore/VisionEncoder.swift, Sources/KrillCore/ModelLoader.swift,
+Sources/KrillEngine/InferenceEngine.swift, Sources/KrillEngine/PythonFallback.swift,
 and tools/gemma4_multimodal_benchmark.py.
 
 Goal: replace the mlx-vlm bridge for Gemma 4 audio with a native Swift + MLX
@@ -538,7 +538,7 @@ audio preprocessing, audio tower, and audio projection path that runs on
 Metal. Keep the bridge as fallback/debug only.
 
 Do not weaken release gates. Add focused unit tests and live tests gated by
-KLM_GEMMA4_MODEL_PATH. Update docs after implementation.
+KRILL_GEMMA4_MODEL_PATH. Update docs after implementation.
 
 Important acceptance:
 - CLI and server audio do not use PythonFallback when native audio is

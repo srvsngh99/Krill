@@ -40,7 +40,7 @@ linked detail doc.
   `1/(alpha+beta) ~ 1.10x`.
 - **RE-OPENED and partially solved via a different algorithm (n-gram /
   prompt-lookup).** The WS2 `beta` was *fitted*, never profiled. A direct probe
-  (`Tests/KLMCoreTests/VerifyProfileTests.swift`, `docs/VERIFY_PROFILE.md`)
+  (`Tests/KrillCoreTests/VerifyProfileTests.swift`, `docs/VERIFY_PROFILE.md`)
   measured the clean width-K verify cost: `beta ~ 0.23` at K=16 (ceiling
   3.2-4.3x), because `tK` *saturates* in K (extra positions ride along on one
   weight stream). Removing the draft model (n-gram drafts from context,
@@ -82,7 +82,7 @@ linked detail doc.
 - **Goal:** a hand-written fused dequant + GEMV Metal kernel beating MLX's
   built-in `quantizedMatmul` on the 4-bit decode shape (a universal,
   every-token, every-model win if it worked).
-- **Status:** CLOSED. `KLMKernels.fusedQ4Gemv` is numerically correct (matches
+- **Status:** CLOSED. `KrillKernels.fusedQ4Gemv` is numerically correct (matches
   MLX, cosine > 0.9999) but **~2.9x slower** (PR #134, `b6cd07a`). Landed as a
   probe + benchmark + doc; not wired in.
 - **Why it's capped:** decode matmul is memory-bandwidth bound (you must stream
@@ -244,7 +244,7 @@ compute, is the actual binding constraint.)
   after very long requests the MLX buffer-recycling pool can depress later
   long-context requests - cache-pool trimming after long requests is a
   follow-up.
-  Needle retrieval verified by direct question (`KLM_SWEEP_DIRECT_Q=1`) at
+  Needle retrieval verified by direct question (`KRILL_SWEEP_DIRECT_Q=1`) at
   long contexts; the sweep's default needle column goes N past ~20k purely as
   a 64-token generation-budget artifact (summary-first prompt).
 

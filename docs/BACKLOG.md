@@ -18,7 +18,7 @@ deferred:
   round-trip). The other four follow each tool's documented OpenAI-compatible
   config but were not run against a real binary; verify their exact env/config
   schema once installed and tweak the `AgentProfile` literal if a version
-  drifted. Profiles live in `Sources/KLMCLI/AgentProfiles.swift`.
+  drifted. Profiles live in `Sources/KrillCLI/AgentProfiles.swift`.
 - **`codex-app` (Codex desktop).** The GUI reads the real `~/.codex/config.toml`
   (it does not inherit a shell `CODEX_HOME`), so wiring it means merging a
   provider + profile into the user's file AND setting their default provider -
@@ -121,7 +121,7 @@ stale entry from a prior run could mask a real partial-reuse miss.
 
 ## Extract a shared MoE `SwitchGLU` / `QuantizedSwitchedLinear` module
 
-**Status:** DONE — `Sources/KLMCore/MoESwitchGLU.swift` (`MoEQuantizedSwitchedLinear`
+**Status:** DONE — `Sources/KrillCore/MoESwitchGLU.swift` (`MoEQuantizedSwitchedLinear`
 + `MoESwitchGLU`, parameterized by `MoEActivation.{swiglu,geglu}`). All six families
 (Qwen3-MoE, Gemma 4, Mixtral, Qwen2-MoE, OLMoE, DeepSeek-V2) refactored onto it; the
 per-family copies are deleted (net −421 lines). Bit-exact gated: the four synthetic
@@ -140,14 +140,14 @@ generate coherent output on the real checkpoints.
 `[E, O, I_packed]` quantized switched-linear per projection + a SwitchGLU that runs the
 decode/prefill sort path) is currently **copy-pasted per family**:
 
-- `Qwen3QuantizedSwitchedLinear` / `Qwen3SwitchGLU` - `Sources/KLMCore/Qwen3MoEModel.swift`
-- `Gemma4QuantizedSwitchedLinear` / `Gemma4SwitchGLU` - `Sources/KLMCore/Gemma4Model.swift`
+- `Qwen3QuantizedSwitchedLinear` / `Qwen3SwitchGLU` - `Sources/KrillCore/Qwen3MoEModel.swift`
+- `Gemma4QuantizedSwitchedLinear` / `Gemma4SwitchGLU` - `Sources/KrillCore/Gemma4Model.swift`
 - one copy per new MoE family added in the native-MoE workstream (Mixtral, Qwen2-MoE,
   OLMoE, DeepSeek).
 
 The only real difference between copies is the activation (SiLU/SwiGLU vs Gemma's GeGLU)
 and a couple of router details. The `(token, expert)` sort path is *already* shared
-(`Sources/KLMCore/MoESortPath.swift`) - this item is about sharing the rest.
+(`Sources/KrillCore/MoESortPath.swift`) - this item is about sharing the rest.
 
 **Proposed work.** Factor out a single generic `MoESwitchGLU` + `QuantizedSwitchedLinear`
 in a dedicated file, parameterized by an activation closure (and any small per-family
@@ -167,7 +167,7 @@ and their numerics are pinned by parity tests.
 
 **Status:** DONE (synthetic parity); only the 671B real-checkpoint run is RAM-blocked here.
 
-**Context.** The native DeepSeek runtime (`Sources/KLMCore/DeepSeekModel.swift`) serves
+**Context.** The native DeepSeek runtime (`Sources/KrillCore/DeepSeekModel.swift`) serves
 **DeepSeek-V2 / V2-Lite** end-to-end: MLA with the standard `kv_b_proj` decompression,
 YaRN RoPE, the always-on shared expert, the `first_k_dense_replace` dense prefix, and the
 V2 softmax / `group_limited_greedy` router. This is numerically verified against mlx-lm
@@ -190,7 +190,7 @@ V2 softmax / `group_limited_greedy` router. This is numerically verified against
   longer rejects V3.
 
 Verified by `tools/verify_deepseek_parity.py <dir> v3` -> `DeepSeekParityTests`
-(`KLM_DEEPSEEK_V3_PARITY_DIR`): logit parity vs mlx-lm (argmax + cosine > 0.9999), plus a
+(`KRILL_DEEPSEEK_V3_PARITY_DIR`): logit parity vs mlx-lm (argmax + cosine > 0.9999), plus a
 decode-matches-prefill self-consistency test for the L==1 latent-cache path. The parity
 tool randomizes the V3 router (its gate weight initializes to zero, which would make every
 routed score tie at 0.5 and decide selection by tie-break artifact rather than numerics).
@@ -202,7 +202,7 @@ bigger box.
 ## Native Swift+MLX `krill quantize` (drop the Python shell-out)
 
 **Status:** DONE. `krill quantize` is now pure Swift+MLX
-(`Sources/KLMCore/CheckpointQuantizer.swift`) - the python3/mlx_lm.convert
+(`Sources/KrillCore/CheckpointQuantizer.swift`) - the python3/mlx_lm.convert
 shell-out is gone, so the shipped binary has no Python anywhere. Output is
 **byte-identical to the canonical MLX op** (affine: 1007/1007 vs mlx-community
 4-bit, `tools/verify_native_quantize_parity.sh`; nvfp4: 765/765 vs
@@ -235,7 +235,7 @@ Original write-up kept below for context.
 embedding / audio / vision path is already pure Swift+MLX with no sidecar; the
 historical mlx-lm bridge was fully retired.
 
-**Context.** `Sources/KLMCLI/QuantizeCommand.swift` implements `krill quantize`
+**Context.** `Sources/KrillCLI/QuantizeCommand.swift` implements `krill quantize`
 by shelling out to `python3 -c "import mlx_lm; mlx_lm.convert(...)"`. It is an
 optional, offline, manually-invoked model-prep utility -- it is NEVER auto-called
 by load or serve (only registered as a CLI subcommand in `KrillCLI.swift`), and

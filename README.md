@@ -69,7 +69,7 @@ Gemma 4 (`gemma-4-12b` flagship, `gemma-4-e2b` / `gemma-4-e4b` smaller):
 Additional native vision runtimes (server image serving): LLaVA-1.5,
 Llama-3.2-Vision (mllama, multi-image), and Qwen2.5-VL.
 
-[^native-audio]: The native Swift+MLX Gemma 4 USM Conformer audio path (`Sources/KLMCore/AudioPreprocessor.swift` + `AudioEncoder.swift`) is the **only** audio path. It was numerically validated against the (now-removed) `mlx-vlm` oracle on a real Gemma 4 checkpoint on the M4 target (verbatim-equivalent transcription on a deterministic speech fixture) and benchmarked **faster than Ollama** (audio prefill ~2.4×, audio wall ~0.53×). The oracle outputs were pinned to `Tests/KLMEngineTests/Fixtures/ws6_oracle_baseline.json` before bridge removal so the parity contract stays testable without the Python dependency. See [`docs/NATIVE_GEMMA4_AUDIO_PLAN.md`](docs/NATIVE_GEMMA4_AUDIO_PLAN.md).
+[^native-audio]: The native Swift+MLX Gemma 4 USM Conformer audio path (`Sources/KrillCore/AudioPreprocessor.swift` + `AudioEncoder.swift`) is the **only** audio path. It was numerically validated against the (now-removed) `mlx-vlm` oracle on a real Gemma 4 checkpoint on the M4 target (verbatim-equivalent transcription on a deterministic speech fixture) and benchmarked **faster than Ollama** (audio prefill ~2.4×, audio wall ~0.53×). The oracle outputs were pinned to `Tests/KrillEngineTests/Fixtures/ws6_oracle_baseline.json` before bridge removal so the parity contract stays testable without the Python dependency. See [`docs/NATIVE_GEMMA4_AUDIO_PLAN.md`](docs/NATIVE_GEMMA4_AUDIO_PLAN.md).
 
 Text generation also runs natively for Llama 3.x, Qwen 2.5 / Qwen 3 (incl. MoE),
 Mistral, Gemma 2, Phi, GLM-4, Mixtral, OLMoE, and DeepSeek-V2/V3, plus a ~15-family
@@ -436,15 +436,15 @@ For coding agents (Aider, gptme, OpenHands) configure them with the OpenAI-compa
 ## Architecture
 
 ```
-KLMCLI           CLI entry point (swift-argument-parser)
-KLMEngine        Inference orchestration + speculative decoding
-KLMCore          Model architectures (Llama, Qwen, Mistral, Gemma, Phi)
-KLMCache         KV cache (fp16, int8 quantized, prefix cache)
-KLMKernels       Custom fused Metal shaders (SwiGLU)
-KLMRegistry      Model store, HF Hub puller, config
-KLMServer        OpenAI + Ollama HTTP server (swift-nio)
-KLMSampler       Greedy, temperature, top-k, top-p
-KLMTokenizer     swift-transformers tokenizer wrapper
+KrillCLI           CLI entry point (swift-argument-parser)
+KrillEngine        Inference orchestration + speculative decoding
+KrillCore          Model architectures (Llama, Qwen, Mistral, Gemma, Phi)
+KrillCache         KV cache (fp16, int8 quantized, prefix cache)
+KrillKernels       Custom fused Metal shaders (SwiGLU)
+KrillRegistry      Model store, HF Hub puller, config
+KrillServer        OpenAI + Ollama HTTP server (swift-nio)
+KrillSampler       Greedy, temperature, top-k, top-p
+KrillTokenizer     swift-transformers tokenizer wrapper
 ```
 
 ## Configuration

@@ -32,7 +32,7 @@ release language claims faster raw decode. Workstreams 1–3 below remain before
 
 - **PR #16 (`feat: cap MLX Metal buffer cache; close memory_ratio`,
   branch `feat/mlx-cache-cap-memory-gate`).** Added
-  `Sources/KLMCore/MLXMemoryConfig.swift` — a pure env resolver
+  `Sources/KrillCore/MLXMemoryConfig.swift` — a pure env resolver
   (`resolveCacheLimitMB`) plus `apply()` that sets `MLX.Memory.cacheLimit`,
   wired into `loadModel(from:)` at the single native-load chokepoint.
   Default cap 256 MB; `KRILL_MLX_CACHE_LIMIT_MB` overrides (`0` = legacy
@@ -235,14 +235,14 @@ Acceptance:
 Key files:
 
 ```text
-Sources/KLMCore/AudioEncoder.swift
-Sources/KLMCore/Gemma4Model.swift
-Sources/KLMCore/ModelLoader.swift
-Sources/KLMEngine/InferenceEngine.swift
-Sources/KLMEngine/PythonFallback.swift
-Sources/KLMServer/Server.swift
-Tests/KLMEngineTests/Gemma4SmokeTests.swift
-Tests/KLMServerTests/MultimodalEndpointsTests.swift
+Sources/KrillCore/AudioEncoder.swift
+Sources/KrillCore/Gemma4Model.swift
+Sources/KrillCore/ModelLoader.swift
+Sources/KrillEngine/InferenceEngine.swift
+Sources/KrillEngine/PythonFallback.swift
+Sources/KrillServer/Server.swift
+Tests/KrillEngineTests/Gemma4SmokeTests.swift
+Tests/KrillServerTests/MultimodalEndpointsTests.swift
 tools/gemma4_multimodal_benchmark.py
 ```
 
@@ -280,11 +280,11 @@ Acceptance:
 Key files:
 
 ```text
-Sources/KLMEngine/SpeculativeDecoder.swift
-Sources/KLMEngine/InferenceEngine.swift
-Sources/KLMCache/KVCache.swift
-Sources/KLMCore/Gemma4Model.swift
-Tests/KLMEngineTests/SpeculativeDecodingTests.swift
+Sources/KrillEngine/SpeculativeDecoder.swift
+Sources/KrillEngine/InferenceEngine.swift
+Sources/KrillCache/KVCache.swift
+Sources/KrillCore/Gemma4Model.swift
+Tests/KrillEngineTests/SpeculativeDecodingTests.swift
 tools/krill_vs_ollama_benchmark.py
 tools/gemma4_multimodal_benchmark.py
 ```
@@ -328,12 +328,12 @@ Acceptance:
 Key files:
 
 ```text
-Sources/KLMCore/Gemma4Model.swift
-Sources/KLMCore/VisionEncoder.swift
-Sources/KLMEngine/InferenceEngine.swift
-Sources/KLMSampler/Sampler.swift
-Sources/KLMCache/KVCache.swift
-Sources/KLMCache/QuantizedKVCache.swift
+Sources/KrillCore/Gemma4Model.swift
+Sources/KrillCore/VisionEncoder.swift
+Sources/KrillEngine/InferenceEngine.swift
+Sources/KrillSampler/Sampler.swift
+Sources/KrillCache/KVCache.swift
+Sources/KrillCache/QuantizedKVCache.swift
 tools/release_gate.py
 tools/gemma4_multimodal_benchmark.py
 docs/BENCHMARKING.md
@@ -441,10 +441,10 @@ Done:
 - `InferenceEngine` removes the `&& !useInt8KV` block on prefix cache and
   dispatches to the quantized snapshot/restore path when int8 is active.
   Truncate-and-re-forward keeps the prompt length stable on a full hit.
-- Unit coverage: `Tests/KLMCoreTests/QuantizedPrefixCacheTests.swift`
+- Unit coverage: `Tests/KrillCoreTests/QuantizedPrefixCacheTests.swift`
   (round-trip; cross-dtype isolation in both directions; truncate+update).
 - Live coverage:
-  `Tests/KLMEngineTests/QuantizedPrefixCacheLiveTests.swift`
+  `Tests/KrillEngineTests/QuantizedPrefixCacheLiveTests.swift`
   runs the same prompt twice with `kvCacheDtype: "int8"` and a shared
   prefix cache, asserting cold/warm greedy tokens match.
 
@@ -498,11 +498,11 @@ Useful commands:
 make test
 make release
 
-KLM_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b \
+KRILL_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b \
 CLANG_MODULE_CACHE_PATH=.build/clang-module-cache \
 swift test --filter QuantizedKVCacheIntegrationTests/testInt8AndFp16ProduceSimilarGreedyPrefix --skip-build
 
-KLM_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b \
+KRILL_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b \
 CLANG_MODULE_CACHE_PATH=.build/clang-module-cache \
 swift test --filter MultimodalEndpointsTests/testTwoDifferentImagesProduceDifferentOutputs --skip-build
 

@@ -141,7 +141,7 @@ reverse chronological order. Versioning follows
   Ctrl-C cancel, Ctrl-D quit, resize-aware. Built raw (termios + ANSI, no TUI
   dependency). `--classic` selects the libedit line REPL, and Krill
   auto-falls-back to it when stdout is not a TTY. Pure logic (key decoding, text
-  wrap, slash menu) lives in a new unit-tested `KLMTUI` library.
+  wrap, slash menu) lives in a new unit-tested `KrillTUI` library.
 
 - **Polished interactive chat REPL.** `krill run <model>` (no prompt) is now a
   real multi-turn conversation (it previously discarded history between turns).
@@ -415,7 +415,7 @@ published Gemma 4 SKU (decode, prefill, and total wall time).
   A/B) already cover the common nested cases.
 - **Grammar-constrained JSON decoding (Stage A)** (follow-up #9):
   `format:"json"` / OpenAI `response_format` now drive a real token-level
-  logit mask, not just guided prompting. A new `KLMGrammar` module runs an
+  logit mask, not just guided prompting. A new `KrillGrammar` module runs an
   incremental JSON-value automaton (`JSONGrammar`) plus a tokenizer-vocab
   mask (`JSONTokenMask`) so the sampler can only pick tokens that keep the
   output a valid JSON prefix; EOS is forbidden until the value is complete.
@@ -518,7 +518,7 @@ published Gemma 4 SKU (decode, prefill, and total wall time).
 - **Gemma 4 26B-A4B native text MoE** (#81): first native inference of
   the sparse 26B-A4B variant on Apple Silicon. Router + top-K expert
   dispatch in Swift+MLX. Closes #80.
-- **KLMAgent skeleton** (#65): `OperatorLoop`, `OperatorTool`,
+- **KrillAgent skeleton** (#65): `OperatorLoop`, `OperatorTool`,
   `OperatorEvent`, `HardwareInfo`, and `Recommender` land the structural
   foundation for agent mode (slice 3 sub-PR A). Tool wiring + CLI follow
   in later sub-PRs.
@@ -688,7 +688,7 @@ project's first Swift CI workflow.
   `Package.resolved`, metallib step gated by `REQUIRE_METALLIB=1`.
   The repo previously only ran the Python tools-tests workflow; the
   entire Swift core had no automated coverage.
-- **`KrillVersion` constant** in `Sources/KLMRegistry/KrillVersion.swift`
+- **`KrillVersion` constant** in `Sources/KrillRegistry/KrillVersion.swift`
   (#56) replaces four hardcoded "0.3.0" string literals across CLI,
   server, and Ollama-compat. `KrillVersionMatchesVersionFile` test
   asserts agreement with the repo-root `VERSION` file at build time.
@@ -785,7 +785,7 @@ faster wall-time).
   a 2-deep `asyncEval` decode pipeline mirroring
   `InferenceEngine.swift:769-781`, and an mRoPE cos/sin hoist that
   removes 35 redundant per-layer rebuilds.
-- **`KLMKernels.fusedSwiGLU`** kernel: dropped the hardcoded
+- **`KrillKernels.fusedSwiGLU`** kernel: dropped the hardcoded
   `half(...)` cast on the output (#48); Metal's implicit conversion
   now handles fp16, bf16, and fp32 buffers correctly.
 - **Speculative decoding verification batched** into one argmax

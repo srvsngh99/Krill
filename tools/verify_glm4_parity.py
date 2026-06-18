@@ -6,7 +6,7 @@ exact same weights.
 
 This is the OFFLINE TEST ORACLE only -- it never runs at inference time and is
 not part of the Krill engine. The runtime itself is pure Swift + MLX
-(Sources/KLMCore/Glm4Model.swift); this Python fixture only exists to gate it,
+(Sources/KrillCore/Glm4Model.swift); this Python fixture only exists to gate it,
 exactly like tools/verify_mixtral_parity.py gates the native Mixtral runtime.
 
 Why tiny + synthetic: a real GLM-4-9B-0414 does not need to load to prove the
@@ -25,7 +25,7 @@ MLX, so parity should be ~bit-exact.
 
 The Glm4 weight-key layout this fixture emits is the GROUND TRUTH the Swift
 @ModuleInfo keys must match. It is DIFFERENT from the legacy ChatGLM layout in
-Sources/KLMCore/GLMModel.swift (transformer.encoder.layers.*.self_attention.
+Sources/KrillCore/GLMModel.swift (transformer.encoder.layers.*.self_attention.
 query_key_value / dense_h_to_4h / word_embeddings / output_layer).
 
 Usage:
@@ -34,7 +34,7 @@ Usage:
 Writes into that dir: config.json, model.safetensors, reference_logits.json
 (the last-token logits for a fixed token sequence). Then run the gated Swift
 test against it:
-    KLM_GLM4_PARITY_DIR=/tmp/krill-glm4-parity \\
+    KRILL_GLM4_PARITY_DIR=/tmp/krill-glm4-parity \\
         swift test -c release --filter Glm4ParityTests
 """
 import json

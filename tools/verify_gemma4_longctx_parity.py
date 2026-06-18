@@ -21,7 +21,7 @@ Usage:
   python3 -m venv /tmp/gemma4ref && /tmp/gemma4ref/bin/pip install mlx-vlm
   /tmp/gemma4ref/bin/python tools/verify_gemma4_longctx_parity.py \
       --model ~/.krill/models/blobs/gemma-4-e2b
-  KLM_GEMMA4_PARITY_DIR=~/.krill/models/blobs/gemma-4-e2b \
+  KRILL_GEMMA4_PARITY_DIR=~/.krill/models/blobs/gemma-4-e2b \
       swift test --filter Gemma4LongCtxParityTests
 """
 import argparse

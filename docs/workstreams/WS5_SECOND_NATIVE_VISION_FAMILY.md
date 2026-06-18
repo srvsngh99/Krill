@@ -13,7 +13,7 @@ oracle baseline.
 
 ## What landed in the runtime PR (this PR)
 
-- `Qwen25VLRuntime` (`Sources/KLMEngine/Qwen25VLRuntime.swift`):
+- `Qwen25VLRuntime` (`Sources/KrillEngine/Qwen25VLRuntime.swift`):
   the native decode driver - prefill then an incremental KV-cached
   decode loop. It threads the per-step mRoPE offset
   (`Qwen25VLForConditionalGeneration.mropePositionOffset`): the
@@ -42,23 +42,23 @@ oracle baseline.
 - Engine + tokenizer. `InferenceEngine.generate` detects a VL model
   and routes through `generateQwen25VL`, which preprocesses the
   image and renders the ChatML prompt with the `<|image_pad|>` run
-  via `KLMTokenizer.formatQwen25VLTokenIds`.
+  via `KrillTokenizer.formatQwen25VLTokenIds`.
 - Server. `ModelAdapter` routes `.qwen25vl` to `.denseEngine`; the
   standard chat path handles a VL request exactly like Gemma 4
   vision (`decodeMediaForRequest` -> `engine.generate(... imageData:)`).
   `handleVLMChat` / `decodeMediaForRequestVLM` / the `vlmEngine`
   field / the `.visionBridge` routing are removed.
-- Bridge retired. `Sources/KLMEngine/Qwen25VLEngine.swift` and
+- Bridge retired. `Sources/KrillEngine/Qwen25VLEngine.swift` and
   `tools/qwen25vl_bridge.py` are deleted; the shared sidecar
   plumbing (`LineReader`, `VLMError`, the venv interpreter path)
-  moved to `Sources/KLMEngine/PythonSidecar.swift` for `MoEEngine`.
+  moved to `Sources/KrillEngine/PythonSidecar.swift` for `MoEEngine`.
   Tier promoted to `production_native` in `ModelCapabilities`.
 - Tests. `Qwen25VLRuntimeTests` is the decode-correctness gold
   standard: an incremental prefill+decode loop must match a single
   full forward over `prompt + generated`, per-position, including a
   non-square image span and a decode run long enough to cross the
   KV-cache compaction threshold. `Qwen25VLSmokeTests` (gated on
-  `KLM_QWEN25VL_MODEL_PATH`) loads the real checkpoint, asserts the
+  `KRILL_QWEN25VL_MODEL_PATH`) loads the real checkpoint, asserts the
   image conditions the answer, and checks rubric-equivalence to the
   recorded mlx-vlm oracle (`Fixtures/ws5_oracle_baseline.json`).
   Window-mask and preprocessing tests cover the foundation pieces.
@@ -86,7 +86,7 @@ oracle baseline.
   vision tower, splices vision embeddings into the `<|image_pad|>`
   span (`injectVisionEmbeds`), computes mRoPE positions, runs the
   text stack, and projects to logits.
-- `Sources/KLMCore/ModelLoader.swift`: the `KRILL_NATIVE_QWEN25VL=1`
+- `Sources/KrillCore/ModelLoader.swift`: the `KRILL_NATIVE_QWEN25VL=1`
   arm now calls `loadQwen25VL`, which builds the native model,
   loads weights, and returns a `LoadedModel` with both a text-only
   `forward` and a `multimodalForward` closure.
@@ -108,7 +108,7 @@ follow-up.
 
 ## What landed in the native foundation PR (prior)
 
-- `Sources/KLMCore/Qwen25VLModel.swift` (new): native Swift+MLX
+- `Sources/KrillCore/Qwen25VLModel.swift` (new): native Swift+MLX
   modules for Qwen 2.5-VL.
   - `Qwen25VLConfig` parses the full `config.json`: language-side
     fields (compatible with the existing dense Qwen 2.5 attention
@@ -140,7 +140,7 @@ follow-up.
   - `Qwen25VLImagePreprocessor`: CLIP-mean normalize +
     pack-patches helpers (resize to multiple of 28 stays on the
     caller side so platform-native resize backends can plug in).
-- `Sources/KLMCore/ModelLoader.swift`: the qwen2_5_vl arm now
+- `Sources/KrillCore/ModelLoader.swift`: the qwen2_5_vl arm now
   reserves the `KRILL_NATIVE_QWEN25VL=1` env-gate. With the gate
   set the loader emits a "foundation modules landed, runtime is
   the follow-up" rejection so users see the env-gate is intentional;
@@ -173,7 +173,7 @@ follow-up.
 
 ## What landed in the runtime PR
 
-- `Sources/KLMEngine/Qwen25VLEngine.swift`: long-lived Python
+- `Sources/KrillEngine/Qwen25VLEngine.swift`: long-lived Python
   sidecar wrapping `mlx_vlm.generate`. JSON-over-stdin/stdout
   protocol matches the shape Gemma 4 audio used before WS1
   retired its bridge. One sidecar per server instance, lazy
@@ -182,13 +182,13 @@ follow-up.
   mlx-vlm 0.5.0 chat-template bug by constructing the Qwen
   2.5-VL chat sequence manually (system + user + vision_start /
   image_pad / vision_end + user text + assistant marker).
-- `Sources/KLMServer/Server.swift`: chat-completion routes
+- `Sources/KrillServer/Server.swift`: chat-completion routes
   (`/v1/chat/completions` and `/api/chat`) dispatch VL-family
   requests through `handleVLMChatOpenAI` before the
   InferenceEngine model-loaded gate, so a VL request does not
   get refused for "no model loaded". One image per request; the
   bridge ignores per-request sampling parameters.
-- `Sources/KLMRegistry/ModelCapabilities.swift`: `.qwen25vl`
+- `Sources/KrillRegistry/ModelCapabilities.swift`: `.qwen25vl`
   tier moved from `experimental` to `compatible_fallback` (the
   workstream's tier definition for bridge-backed runtimes).
 
@@ -291,7 +291,7 @@ From the workstream's acceptance bar:
   is a non-goal for this PR and is the follow-up.
 - "Image fixture changes output versus text-only prompt." -
   **DONE** (`testImageInputChangesOutputVsTextOnly` in
-  `Tests/KLMEngineTests/Qwen25VLBridgeTests.swift`).
+  `Tests/KrillEngineTests/Qwen25VLBridgeTests.swift`).
 - "Two different image fixtures produce different outputs." -
   **DONE** (`testTwoFixturesProduceDifferentOutputs`; red
   fixture -> "Red", green fixture -> "Green").
@@ -337,10 +337,10 @@ benchmark fixture and gate
 ## Key Files
 
 ```text
-Sources/KLMCore/VisionEncoder.swift
-Sources/KLMCore/ModelLoader.swift
-Sources/KLMEngine/InferenceEngine.swift
-Sources/KLMServer/ServerMultimodal.swift
+Sources/KrillCore/VisionEncoder.swift
+Sources/KrillCore/ModelLoader.swift
+Sources/KrillEngine/InferenceEngine.swift
+Sources/KrillServer/ServerMultimodal.swift
 tools/gemma4_multimodal_benchmark.py
 docs/GEMMA4_INTERNALS.md
 docs/SERVER_API.md

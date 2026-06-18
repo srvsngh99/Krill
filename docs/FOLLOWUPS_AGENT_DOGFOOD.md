@@ -24,7 +24,7 @@ crashes inside the attention reshape during the first forward pass.
 Different shape mismatches in different reshape sites → multiple shape
 assumptions are tied to e2b's specific config.
 
-**Likely root cause.** `Sources/KLMCore/Gemma4Model.swift:91`:
+**Likely root cause.** `Sources/KrillCore/Gemma4Model.swift:91`:
 
 ```swift
 public func isFullAttention(layerIdx: Int) -> Bool {
@@ -49,7 +49,7 @@ Q/K/V projections at `Gemma4Model.swift:213, 228-229`.
 **Suggested fix.**
 1. Parse a `layer_types: [...]` (or equivalent) array from `config.json` per
    variant; fall back to the modulo pattern only when absent.
-2. Add a per-variant smoke test under `Tests/KLMEngineTests/` that loads
+2. Add a per-variant smoke test under `Tests/KrillEngineTests/` that loads
    each Gemma 4 SKU (e2b, e4b, 26B-A4B, 31B) and asserts a single token
    generates. e2b is currently the only one covered.
 
@@ -63,7 +63,7 @@ Q/K/V projections at `Gemma4Model.swift:213, 228-229`.
 **Symptom.** `krill pull gemma-4-12b` and `krill pull gemma-4-27b`
 both fail with `HTTP 401: Failed to list repo files`.
 
-**Root cause.** `Sources/KLMRegistry/AliasMap.swift:185-190`:
+**Root cause.** `Sources/KrillRegistry/AliasMap.swift:185-190`:
 
 ```swift
 "gemma-4-12b": ResolvedModel(
@@ -81,7 +81,7 @@ family.) HF returns 401 (which it uses uniformly for "not found or
 private") rather than 404, which made these look like license-gates
 at first.
 
-`Sources/KLMEngine/SpeculativeDecoder.swift:271-272` has matching
+`Sources/KrillEngine/SpeculativeDecoder.swift:271-272` has matching
 `draftPairs` entries pointing at the same dead aliases.
 
 **Suggested fix.** Remove both `gemma-4-12b` and `gemma-4-27b` from
@@ -99,7 +99,7 @@ the local blob is missing `chat_template.jinja`, `added_tokens.json`,
 `merges.txt`, `vocab.json`, and `model.safetensors.index.json`. Loading
 the tokenizer fails with "chat_template is not set."
 
-**Root cause.** `Sources/KLMRegistry/Puller.swift:84-94`:
+**Root cause.** `Sources/KrillRegistry/Puller.swift:84-94`:
 
 ```swift
 let essentialFiles = fileList.filter { file in
@@ -166,7 +166,7 @@ overrides:
 }
 ```
 
-`Sources/KLMCore/Qwen3MoEModel.swift:45,117` reads this as a single
+`Sources/KrillCore/Qwen3MoEModel.swift:45,117` reads this as a single
 `QuantizationConfig` and applies the top-level `(bits=4, group_size=64)`
 uniformly. Mixed-precision per-module overrides are not honored, so the
 8-bit gate weights get instantiated as 4-bit `QuantizedLinear`, and the
@@ -192,7 +192,7 @@ orthogonal - the runtime can ship now and optimize dispatch later.
 ## 5. Remove the MoE Python sidecar entirely
 
 Not a bug per se, but project direction: the `MoEEngine` /
-`PythonSidecar` bridge in `Sources/KLMEngine/MoEEngine.swift` is the
+`PythonSidecar` bridge in `Sources/KrillEngine/MoEEngine.swift` is the
 last `~/.krill/venv` consumer in the chat path. WS5 already retired
 the Qwen 2.5-VL bridge for the same reason. Once §3 and §4 land:
 
@@ -204,7 +204,7 @@ the Qwen 2.5-VL bridge for the same reason. Once §3 and §4 land:
 - Update the "compatible_fallback tier" language in
   `ModelCapabilities.swift` to reflect that MoE is now first-class.
 - Remove the "opt-in until scatter-dispatch lands" gate referenced in
-  the error message at `KLMCli/ServeCommand.swift`.
+  the error message at `KrillCli/ServeCommand.swift`.
 
 ---
 

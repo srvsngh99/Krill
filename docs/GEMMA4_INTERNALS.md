@@ -19,12 +19,12 @@ This is a release-readiness baseline, not a production release. See [`RELEASE_RE
 
 | File | What it contains |
 |------|-----------------|
-| `Sources/KLMCore/Gemma4Model.swift` | Text model, attention, MLP, PLE, multimodal wrapper |
-| `Sources/KLMCore/VisionEncoder.swift` | SigLIP2 vision encoder, image preprocessing |
-| `Sources/KLMCore/AudioEncoder.swift` | Conformer audio encoder, WAV/mel preprocessing |
-| `Sources/KLMCore/ModelLoader.swift` | Weight loading, quantization, tied embeddings |
-| `Sources/KLMEngine/InferenceEngine.swift` | Multimodal generate path |
-| `Sources/KLMTokenizer/TokenizerWrapper.swift` | Gemma4 chat template (direct token IDs) |
+| `Sources/KrillCore/Gemma4Model.swift` | Text model, attention, MLP, PLE, multimodal wrapper |
+| `Sources/KrillCore/VisionEncoder.swift` | SigLIP2 vision encoder, image preprocessing |
+| `Sources/KrillCore/AudioEncoder.swift` | Conformer audio encoder, WAV/mel preprocessing |
+| `Sources/KrillCore/ModelLoader.swift` | Weight loading, quantization, tied embeddings |
+| `Sources/KrillEngine/InferenceEngine.swift` | Multimodal generate path |
+| `Sources/KrillTokenizer/TokenizerWrapper.swift` | Gemma4 chat template (direct token IDs) |
 
 ## Config (Gemma4Config)
 
@@ -297,8 +297,8 @@ scales/biases [1536,24], group_size 64, bits 4). Identical structure to
 the shared `maskedScatter`.
 
 ### Native vs bridge
-Native Swift+MLX path lands in `Sources/KLMCore/AudioPreprocessor.swift`
-(frontend) + `Sources/KLMCore/AudioEncoder.swift` (tower, rewritten from
+Native Swift+MLX path lands in `Sources/KrillCore/AudioPreprocessor.swift`
+(frontend) + `Sources/KrillCore/AudioEncoder.swift` (tower, rewritten from
 the placeholder). The `mlx-vlm` bridge stays as fallback/oracle behind
 `KRILL_AUDIO_BRIDGE_ONLY=1`; native is gated by `KRILL_NATIVE_AUDIO`.
 

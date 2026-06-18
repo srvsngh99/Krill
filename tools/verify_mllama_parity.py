@@ -18,7 +18,7 @@ the numerics (both runtimes are MLX, so parity is ~bit-exact).
 
 Usage:
     python3 tools/verify_mllama_parity.py /tmp/krill-mllama
-    KLM_MLLAMA_PARITY_DIR=/tmp/krill-mllama swift test --filter MllamaParityTests
+    KRILL_MLLAMA_PARITY_DIR=/tmp/krill-mllama swift test --filter MllamaParityTests
 """
 import json
 import os

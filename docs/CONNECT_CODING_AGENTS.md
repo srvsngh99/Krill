@@ -87,7 +87,7 @@ it), then select your local model. Exact config path varies by version.
 ## Adding a new agent
 
 Agent knowledge lives in one declarative table:
-[`Sources/KLMCLI/AgentProfiles.swift`](../Sources/KLMCLI/AgentProfiles.swift).
+[`Sources/KrillCLI/AgentProfiles.swift`](../Sources/KrillCLI/AgentProfiles.swift).
 Append one `AgentProfile` literal:
 
 - `wire`: which protocol it speaks (picks the endpoint).

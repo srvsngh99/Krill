@@ -22,7 +22,7 @@ native `<|tool_call|>` array correctly when the model does emit one.
 
 **Phi-4-mini base-runtime fixes (2026-06-01, prerequisite for the above).**
 The Phi runtime was written for Phi-3-mini and produced pure garbage on
-phi-4-mini; five distinct bugs were fixed in `Sources/KLMCore/PhiModel.swift`
+phi-4-mini; five distinct bugs were fixed in `Sources/KrillCore/PhiModel.swift`
 (+ loader/engine): (1) `partial_rotary_factor` 0.75 was ignored (full RoPE on a
 partial-rotary head); (2) `tie_word_embeddings` was ignored (random `lm_head`);
 (3) the checkpoint's **fused `qkv_proj`** was silently dropped because the model
@@ -124,7 +124,7 @@ problem.
 
 ## 2. Root cause (confirmed)
 
-`Sources/KLMServer/ToolCalling.swift` hand-rolls a generic
+`Sources/KrillServer/ToolCalling.swift` hand-rolls a generic
 Hermes/Qwen-style instruction (`injectToolSystem` ->
 `toolSystemPrompt`) that asks the model to emit:
 
@@ -182,7 +182,7 @@ M4 target, mirroring the audio plan's WS6.
 block in `<|tool> … <tool|>` and feed prior `tool` role messages back
 as `<|tool_response> … <tool_response|>`. Carry `tools` through
 `InferenceEngine.generate(messages:)` (currently dropped - see
-`Sources/KLMEngine/InferenceEngine.swift:260`). Verify byte-exact
+`Sources/KrillEngine/InferenceEngine.swift:260`). Verify byte-exact
 against Ollama's rendered prompt via `/api/generate` `raw`/template
 dump for the same tools+messages.
 
@@ -213,7 +213,7 @@ renderer/parser. No endpoint-shape changes.
 ### WS5 - Tests + benchmark gate
 
 Swift unit tests for render + parse (golden strings from
-`response_schema`). Live E2E gated on `KLM_GEMMA4_MODEL_PATH`. The §5
+`response_schema`). Live E2E gated on `KRILL_GEMMA4_MODEL_PATH`. The §5
 benchmark must go green vs Ollama before WS3 flips the Gemma 4 default
 on. Then add a hard `tool_call` cell to the parity gate.
 

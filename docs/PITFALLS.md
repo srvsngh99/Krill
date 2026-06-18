@@ -23,7 +23,7 @@ if let shared = sharedCache, let snap = shared.snapshot() {
 
 **How to avoid**: When implementing KV sharing for any model, verify against the reference: does the shared layer compute new K/V or reuse the donor's? For Gemma4, shared layers only compute Q.
 
-**Files**: `Sources/KLMCore/Gemma4Model.swift`
+**Files**: `Sources/KrillCore/Gemma4Model.swift`
 
 ---
 
@@ -51,7 +51,7 @@ public func formatGemma4TokenIds(messages:) -> [Int] {
 
 **How to avoid**: Any model with special tokens that don't survive decode->encode round-trips needs a direct token ID path. Check by decoding special tokens and re-encoding: `encode(decode([specialId])) == [specialId]`?
 
-**Files**: `Sources/KLMTokenizer/TokenizerWrapper.swift`, `Sources/KLMEngine/InferenceEngine.swift`
+**Files**: `Sources/KrillTokenizer/TokenizerWrapper.swift`, `Sources/KrillEngine/InferenceEngine.swift`
 
 ---
 
@@ -75,7 +75,7 @@ private func lmHead(_ hidden: MLXArray) -> MLXArray {
 
 **How to avoid**: Check if the Python reference has a separate `lm_head` or uses `embed_tokens.as_linear()`. If the checkpoint has no `lm_head.*` keys, it's tied.
 
-**Files**: `Sources/KLMCore/Gemma4Model.swift`, `Sources/KLMCore/ModelLoader.swift`
+**Files**: `Sources/KrillCore/Gemma4Model.swift`, `Sources/KrillCore/ModelLoader.swift`
 
 ---
 
@@ -96,7 +96,7 @@ downProj(geluApproximate(gateProj(x)) * upProj(x))
 
 **How to avoid**: Check the Python model's activation function. `nn.gelu_approx`, `nn.gelu`, `F.gelu(approximate='tanh')` are all different. Match exactly.
 
-**Files**: `Sources/KLMCore/Gemma4Model.swift`
+**Files**: `Sources/KrillCore/Gemma4Model.swift`
 
 ---
 
@@ -123,7 +123,7 @@ for k in sorted(arrays):
 ```
 Then design the Swift modules so `@ModuleInfo` keys produce identical paths.
 
-**Files**: `Sources/KLMCore/VisionEncoder.swift`
+**Files**: `Sources/KrillCore/VisionEncoder.swift`
 
 ---
 
@@ -152,7 +152,7 @@ for row in 0 ..< newH {
 
 **How to avoid**: Check the Python processor's output shape and dtype. Print `processor(images=[img])['pixel_values'].shape` and `.dtype`.
 
-**Files**: `Sources/KLMCore/VisionEncoder.swift`
+**Files**: `Sources/KrillCore/VisionEncoder.swift`
 
 ---
 
@@ -171,7 +171,7 @@ return MLX.where(maskFlat, aligned, inputTensor.flattened())
 
 **How to avoid**: Check the Python model's `get_input_embeddings` method. Look for `masked_scatter` or equivalent.
 
-**Files**: `Sources/KLMCore/Gemma4Model.swift`
+**Files**: `Sources/KrillCore/Gemma4Model.swift`
 
 ---
 
@@ -193,7 +193,7 @@ func computeImageTokenCount(imageData: Data) -> Int {
 
 **How to avoid**: Never hardcode token counts from config maximums. Compute from the actual preprocessed input.
 
-**Files**: `Sources/KLMEngine/InferenceEngine.swift`
+**Files**: `Sources/KrillEngine/InferenceEngine.swift`
 
 ---
 
@@ -207,7 +207,7 @@ func computeImageTokenCount(imageData: Data) -> Int {
 
 **How to avoid**: Set cache thresholds based on expected workload. For server benchmarks with short prompts, 8 is reasonable.
 
-**Files**: `Sources/KLMCache/PrefixCache.swift`, `Sources/KLMEngine/InferenceEngine.swift`
+**Files**: `Sources/KrillCache/PrefixCache.swift`, `Sources/KrillEngine/InferenceEngine.swift`
 
 ---
 
@@ -230,7 +230,7 @@ let line = "{\"model\":\"\(name)\",\"response\":\"\(escaped)\",\"done\":false}\n
 
 **How to avoid**: Profile the hot path. For streaming, avoid Foundation JSON on every token.
 
-**Files**: `Sources/KLMServer/Server.swift`
+**Files**: `Sources/KrillServer/Server.swift`
 
 ---
 

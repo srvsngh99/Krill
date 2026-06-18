@@ -11,7 +11,7 @@ and the `gatherQuantizedMM` SwitchGLU. Both runtimes are MLX, so parity is
 
 Usage:
     python3 tools/verify_olmoe_parity.py /tmp/krill-olmoe-parity
-    KLM_OLMOE_PARITY_DIR=/tmp/krill-olmoe-parity \\
+    KRILL_OLMOE_PARITY_DIR=/tmp/krill-olmoe-parity \\
         swift test -c release --filter OLMoEParityTests
 """
 import json

@@ -234,7 +234,7 @@ app-bundle: release
 	@mkdir -p "$(APP_DIR)/Contents/MacOS" "$(APP_DIR)/Contents/Resources/$(MLX_BUNDLE)"
 	@cp "$(BUILD_DIR)/$(BINARY_NAME)" "$(APP_DIR)/Contents/MacOS/$(BINARY_NAME)"
 	# The metallib must live in Contents/Resources (codesign rejects non-code
-	# files in Contents/MacOS). The KLMRuntime loader searches the SPM resource
+	# files in Contents/MacOS). The KrillRuntime loader searches the SPM resource
 	# bundle Contents/Resources/$(MLX_BUNDLE)/default.metallib, so reproduce that
 	# bundle here - WITH its own Info.plist so `codesign --deep` accepts it as a
 	# nested bundle (a bare *.bundle folder is rejected as "unsuitable format").

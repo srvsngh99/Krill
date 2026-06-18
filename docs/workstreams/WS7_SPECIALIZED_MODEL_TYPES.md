@@ -35,7 +35,7 @@ Before a specialized type gets a runtime it must, per the roadmap, at
 least fail with an explicit error rather than being mis-handled. That
 foundation has landed for every WS7 type that is not yet runnable:
 
-- `SpecializedModelType` (`Sources/KLMCore/SpecializedModelTypes.swift`)
+- `SpecializedModelType` (`Sources/KrillCore/SpecializedModelTypes.swift`)
   enumerates the specialized types Krill does not run as a causal LM:
   speech recognition, speech synthesis, image generation,
   video-language, document OCR.
@@ -167,10 +167,10 @@ Acceptance:
 ## Key Files
 
 ```text
-Sources/KLMCore/EmbeddingModel.swift
-Sources/KLMEngine/EmbeddingEngine.swift
-Sources/KLMServer/Server.swift
-Sources/KLMServer/ServerParsing.swift
+Sources/KrillCore/EmbeddingModel.swift
+Sources/KrillEngine/EmbeddingEngine.swift
+Sources/KrillServer/Server.swift
+Sources/KrillServer/ServerParsing.swift
 docs/SERVER_API.md
 docs/BENCHMARKING.md
 ```

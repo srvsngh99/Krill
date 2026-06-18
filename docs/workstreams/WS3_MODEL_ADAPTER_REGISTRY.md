@@ -11,7 +11,7 @@ Detailed usage: [../MODEL_REGISTRY.md](../MODEL_REGISTRY.md)
 - `Capability` enum (textGeneration, visionInput, audioInput,
   embeddings, tools, structuredOutput, moe, reranker) and
   `SupportTier` enum (productionNative, compatibleFallback,
-  experimental, unsupported) in `Sources/KLMRegistry/ModelCapabilities.swift`.
+  experimental, unsupported) in `Sources/KrillRegistry/ModelCapabilities.swift`.
 - Per-family capability set + support tier lookups, plus a stable
   `ollamaTag` mapping so the discovery endpoints emit Ollama-compatible
   capability identifiers.
@@ -32,7 +32,7 @@ first real users (a second native VLM, a native MoE runtime) were not
 yet in tree. WS5 and WS6 have since landed, so the server-side adapter
 is now warranted and shipped:
 
-- `ModelAdapter` in `Sources/KLMRegistry/ModelAdapter.swift`: a
+- `ModelAdapter` in `Sources/KrillRegistry/ModelAdapter.swift`: a
   `Sendable` value type that is the single declarative source of
   truth for a family's server-side contract -
   - `chatRouting` (`.denseEngine` / `.visionBridge` /
@@ -152,12 +152,12 @@ experimental
 ## Key Files
 
 ```text
-Sources/KLMRegistry/AliasMap.swift
-Sources/KLMRegistry/ModelManifest.swift
-Sources/KLMCore/ModelLoader.swift
-Sources/KLMEngine/InferenceEngine.swift
-Sources/KLMServer/Server.swift
-Sources/KLMServer/ServerMultimodal.swift
+Sources/KrillRegistry/AliasMap.swift
+Sources/KrillRegistry/ModelManifest.swift
+Sources/KrillCore/ModelLoader.swift
+Sources/KrillEngine/InferenceEngine.swift
+Sources/KrillServer/Server.swift
+Sources/KrillServer/ServerMultimodal.swift
 docs/ARCHITECTURE.md
 docs/ADDING_MODELS.md
 ```

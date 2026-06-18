@@ -14,7 +14,7 @@ numerics (both runtimes are MLX, so parity is ~bit-exact).
 
 Usage:
     python3 tools/verify_llava_parity.py /tmp/krill-llava
-        KLM_LLAVA_PARITY_DIR=/tmp/krill-llava \\
+        KRILL_LLAVA_PARITY_DIR=/tmp/krill-llava \\
         swift test --filter LlavaParityTests
 """
 import json
