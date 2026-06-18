@@ -1,4 +1,5 @@
 import Foundation
+import KrillTooling
 
 /// Anthropic Messages API compatibility (WS-F / T2-9) so Claude Code and
 /// the Anthropic SDK work when pointed at Krill via `ANTHROPIC_BASE_URL`.

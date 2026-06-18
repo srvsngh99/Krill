@@ -1,6 +1,6 @@
 import XCTest
 import KrillGrammar
-@testable import KrillServer
+@testable import KrillTooling
 
 /// Front A: grammar-constrained (forced) tool calls. Verifies the schema
 /// builder, the bare-JSON parser, and that the built schema actually compiles
@@ -81,15 +81,5 @@ final class ForcedToolCallTests: XCTestCase {
     func testParseForcedToolCallRejectsNonCall() {
         XCTAssertNil(ToolCalling.parseForcedToolCall("I cannot help with that."))
         XCTAssertNil(ToolCalling.parseForcedToolCall(#"{"foo":"bar"}"#))
-    }
-
-    func testToolChoiceParsing() {
-        XCTAssertEqual(ServerParsing.parseToolChoice("required"), .required)
-        XCTAssertEqual(ServerParsing.parseToolChoice("none"), .none)
-        XCTAssertEqual(ServerParsing.parseToolChoice("auto"), .auto)
-        XCTAssertEqual(ServerParsing.parseToolChoice(nil), .auto)
-        XCTAssertEqual(
-            ServerParsing.parseToolChoice(["type": "function", "function": ["name": "add"]]),
-            .function("add"))
     }
 }

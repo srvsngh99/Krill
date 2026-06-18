@@ -4,6 +4,7 @@ import KrillEngine
 import KrillRegistry
 import KrillSampler
 import KrillServer
+import KrillTooling
 import KrillTUI
 
 // Terminal resize (SIGWINCH) sets this flag; the run loop polls it and re-reads
