@@ -267,6 +267,9 @@ public final class SpeculativeDecoder: @unchecked Sendable {
             MLX.eval(logits)
             let tok = sampler.sample(logits)
             proposer.append([tok])
+            // A no-match round saved nothing beyond the single decoded token —
+            // feed 0 to the stall monitor so non-echo stretches drive it down.
+            proposer.recordRound(extraTokens: 0)
             recordVerification(acceptedTokenCount: 1, proposedTokenCount: 0, doAdapt: false)
             return [tok]
         }
@@ -327,7 +330,11 @@ public final class SpeculativeDecoder: @unchecked Sendable {
         // Feed the adaptive cap: on full acceptance all k drafts were correct;
         // on rejection at index i, accepted.count-1 drafts matched (the last is
         // the target replacement, not a draft token).
-        proposer.recordOutcome(acceptedDraft: allAccepted ? k : accepted.count - 1, proposed: k)
+        let acceptedDraft = allAccepted ? k : accepted.count - 1
+        proposer.recordOutcome(acceptedDraft: acceptedDraft, proposed: k)
+        // Extra tokens this round = accepted drafts (the trailing bonus/replacement
+        // is the token a plain decode step would have produced anyway).
+        proposer.recordRound(extraTokens: acceptedDraft)
         proposer.append(accepted)
         recordVerification(acceptedTokenCount: accepted.count, proposedTokenCount: k, doAdapt: false)
         return accepted

@@ -90,6 +90,40 @@ final class NgramLiveParityTests: XCTestCase {
         }
     }
 
+    /// The stall-monitor handoff must be byte-transparent: a long non-echo
+    /// generation drives the proposer's rolling acceptance below threshold, it
+    /// latches `stalled`, and the engine hands off mid-stream to the plain
+    /// pipeline loop. The bridge forward (advance cache, sample next, don't
+    /// re-emit) must leave NO gap or duplicate at the seam, so the n-gram output
+    /// stays prefix-consistent with standard decode across the handoff boundary.
+    func testNgramHandoffMatchesStandardDecode() async throws {
+        let dir = try requireModelDirectory()
+        let engine = InferenceEngine(modelDirectory: dir)
+        try await engine.load()
+
+        // Non-echo prose: the model paraphrases, so the lookup rarely matches and
+        // the monitor (window 48) trips well within this length, forcing the
+        // handoff partway through the generation.
+        let prompt = "Write a thorough original explanation of how photosynthesis "
+            + "works, then describe three distinct real-world consequences if it "
+            + "stopped, using fresh wording throughout."
+
+        let ref = await collect(engine, prompt: prompt, ngram: false, maxTokens: 220)
+        let ng = await collect(engine, prompt: prompt, ngram: true, maxTokens: 220)
+
+        var lcp = 0
+        while lcp < ref.tokens.count && lcp < ng.tokens.count
+            && ref.tokens[lcp] == ng.tokens[lcp] { lcp += 1 }
+        XCTAssertEqual(lcp, min(ref.tokens.count, ng.tokens.count),
+            "handoff output must match standard decode up to the shorter length "
+            + "(LCP=\(lcp), ref=\(ref.tokens.count), ngram=\(ng.tokens.count)) — "
+            + "a seam gap/duplicate would break this before the shorter length")
+
+        // Sanity: the generation was long enough to exercise the monitor window.
+        XCTAssertGreaterThan(ng.tokens.count, 48,
+            "test prompt must generate past the monitor window to exercise handoff")
+    }
+
     /// Wall-clock observation (gated): decode tok/s standard vs n-gram on a
     /// highly repetitive prompt. Prints only; proves the single-stream win.
     func testNgramDecodeSpeedupObservation() async throws {

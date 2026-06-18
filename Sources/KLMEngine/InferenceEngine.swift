@@ -71,12 +71,27 @@ public final class InferenceEngine: @unchecked Sendable {
     private var autoUseSpec: Bool = false
 
     /// When true, greedy requests default to **n-gram (prompt-lookup)**
-    /// speculative decode (no draft model — the draft is matched from the
-    /// context). Enabled by `KRILL_NGRAM_SPEC=1` or `setNgramSpec(true)`. A
-    /// loaded draft model takes precedence; n-gram is the default speculative
-    /// path when no curated draft pair exists. An explicit
-    /// `useNgramSpeculative: false` opts out even when enabled.
+    /// speculative decode on the single stream (no draft model — the draft is
+    /// matched from the context). **Default ON**: a per-generation stall monitor
+    /// (`NgramProposer.stalled`) hands off to the plain pipeline decode loop the
+    /// moment the lookup stops paying off, so the >=1.0x floor is held on
+    /// non-echo workloads while echo-heavy ones (RAG, code, structured output)
+    /// keep the ~1.85x win. Disable with `KRILL_NGRAM_SPEC=0` / config
+    /// `ngram_spec = false`. A loaded draft model takes precedence; an explicit
+    /// `useNgramSpeculative: false` opts out per request.
     private var autoUseNgram: Bool = {
+        guard let v = ProcessInfo.processInfo.environment["KRILL_NGRAM_SPEC"] else { return true }
+        return !(v == "0" || v.lowercased() == "false" || v.lowercased() == "off")
+    }()
+
+    /// N-gram speculative decode on the **concurrent batcher** path is a separate
+    /// opt-in (default OFF). The batcher's byte-exact CPU/GPU overlap pipeline is
+    /// the universal concurrent default; the spec round bypasses that overlap and
+    /// has no stall→overlap handoff yet, so enabling it by default would regress
+    /// non-echo concurrent throughput. Explicit `KRILL_NGRAM_SPEC=1` /
+    /// `setNgramSpec(true)` / `serve --ngram-spec` turns it on for echo-heavy
+    /// concurrent serving.
+    private var batcherNgramSpec: Bool = {
         guard let v = ProcessInfo.processInfo.environment["KRILL_NGRAM_SPEC"] else { return false }
         return v == "1" || v.lowercased() == "true"
     }()
@@ -432,6 +447,10 @@ public final class InferenceEngine: @unchecked Sendable {
     /// govern the batched path.
     public func setNgramSpec(_ enabled: Bool) {
         self.autoUseNgram = enabled
+        // An explicit toggle governs the batcher too: turning it on opts the
+        // concurrent path into the spec round; turning it off forces the
+        // byte-exact overlap pipeline everywhere.
+        self.batcherNgramSpec = enabled
     }
 
     /// True if the engine will take the n-gram speculative path by default on a
@@ -1527,119 +1546,14 @@ public final class InferenceEngine: @unchecked Sendable {
                 // -- Decode loop --
                 let decodeStart = CFAbsoluteTimeGetCurrent()
 
-                if shouldSpec, let specDec = capturedSpecDecoder, let draftCaches {
-
-                    // Emit the first token sampled from prefill logits — specDec.step
-                    // only returns tokens *after* lastToken, so we must yield it here.
-                    if stopIds.contains(nextToken) {
-                        continuation.yield(TokenEvent(
-                            tokenId: nextToken, text: "",
-                            elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
-                    } else {
-                        let firstText = capturedTokenizer.decode(token: nextToken)
-                        continuation.yield(TokenEvent(
-                            tokenId: nextToken, text: firstText,
-                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
-                        generatedCount += 1
-                    }
-
-                    while generatedCount < maxTokens && !stopIds.contains(nextToken) {
-                        if genCancel.isCancelled { break }
-                        // Speculative step: get multiple tokens at once.
-                        // Spec path requires fp16 caches; shouldSpec already excludes int8.
-                        let accepted = specDec.step(
-                            lastToken: nextToken,
-                            targetCaches: fp16Caches!,
-                            draftCaches: draftCaches
-                        )
-
-                        // A stop token can appear before the end of an accepted
-                        // run (a draft EOS that was verified, then a bonus token
-                        // forwarded past it). Stop the WHOLE generation at the
-                        // first stop id, not just the inner loop — otherwise the
-                        // non-stop bonus becomes the next lastToken and the outer
-                        // loop emits content after `isEnd`.
-                        var hitStop = false
-                        for token in accepted {
-                            if stopIds.contains(token) {
-                                continuation.yield(TokenEvent(
-                                    tokenId: token, text: "",
-                                    elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
-                                hitStop = true
-                                break
-                            }
-
-                            let text = capturedTokenizer.decode(token: token)
-                            continuation.yield(TokenEvent(
-                                tokenId: token, text: text,
-                                elapsed: CFAbsoluteTimeGetCurrent() - startTime))
-                            generatedCount += 1
-
-                            if generatedCount >= maxTokens { break }
-                        }
-                        if hitStop { break }
-
-                        nextToken = accepted.last ?? eosId
-                        if stopIds.contains(nextToken) || generatedCount >= maxTokens { break }
-                    }
-                } else if shouldNgram, let ngramDec = capturedNgramDecoder,
-                          let proposer = capturedNgramProposer, let fp16Caches {
-                    // === N-gram (prompt-lookup) speculative path ===
-                    // No draft model / no draft cache: the proposer matches the
-                    // running context. Seed it with the FULL prompt (not the
-                    // prefix-trimmed input) + the prefill-sampled first token. Each
-                    // accepted token is the target's greedy argmax, so output
-                    // matches the standard path except at fp16 verify-vs-decode
-                    // near-ties (same as the batched decoder).
-                    proposer.reset(prompt: promptTokens)
-
-                    // Emit the first token (ngramStep returns tokens AFTER lastToken).
-                    if stopIds.contains(nextToken) {
-                        continuation.yield(TokenEvent(
-                            tokenId: nextToken, text: "",
-                            elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
-                    } else {
-                        proposer.append([nextToken])
-                        let firstText = capturedTokenizer.decode(token: nextToken)
-                        continuation.yield(TokenEvent(
-                            tokenId: nextToken, text: firstText,
-                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
-                        generatedCount += 1
-                    }
-
-                    while generatedCount < maxTokens && !stopIds.contains(nextToken) {
-                        if genCancel.isCancelled { break }
-                        // ngramStep appends accepted tokens to the proposer itself.
-                        let accepted = ngramDec.ngramStep(
-                            lastToken: nextToken,
-                            targetCaches: fp16Caches,
-                            proposer: proposer)
-
-                        // Stop the whole generation at the first stop id in the
-                        // accepted run (a verified EOS draft followed by a bonus),
-                        // not just the inner loop — see the draft-spec path above.
-                        var hitStop = false
-                        for token in accepted {
-                            if stopIds.contains(token) {
-                                continuation.yield(TokenEvent(
-                                    tokenId: token, text: "",
-                                    elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
-                                hitStop = true
-                                break
-                            }
-                            let text = capturedTokenizer.decode(token: token)
-                            continuation.yield(TokenEvent(
-                                tokenId: token, text: text,
-                                elapsed: CFAbsoluteTimeGetCurrent() - startTime))
-                            generatedCount += 1
-                            if generatedCount >= maxTokens { break }
-                        }
-                        if hitStop { break }
-
-                        nextToken = accepted.last ?? eosId
-                        if stopIds.contains(nextToken) || generatedCount >= maxTokens { break }
-                    }
-                } else {
+                // Plain (non-spec) decode, factored into a closure so the n-gram
+                // path can hand off to it mid-generation when its stall monitor
+                // trips. Entry invariant: `nextToken`/`nextTokenArr` is the next
+                // token to forward and has NOT been emitted; the KV caches cover
+                // everything before it. Captures the surrounding `var`s by
+                // reference, so the fresh `else` call below is byte-for-byte the
+                // old inline path.
+                let runStandardDecode: () -> Void = {
                     // === Standard Decode Path ===
                     // WS-D D3: only when the request opts into penalties /
                     // mirostat do we maintain a recent-token window; the
@@ -1773,6 +1687,143 @@ public final class InferenceEngine: @unchecked Sendable {
                         }
                     }
                     }
+                }
+
+                if shouldSpec, let specDec = capturedSpecDecoder, let draftCaches {
+
+                    // Emit the first token sampled from prefill logits — specDec.step
+                    // only returns tokens *after* lastToken, so we must yield it here.
+                    if stopIds.contains(nextToken) {
+                        continuation.yield(TokenEvent(
+                            tokenId: nextToken, text: "",
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
+                    } else {
+                        let firstText = capturedTokenizer.decode(token: nextToken)
+                        continuation.yield(TokenEvent(
+                            tokenId: nextToken, text: firstText,
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                        generatedCount += 1
+                    }
+
+                    while generatedCount < maxTokens && !stopIds.contains(nextToken) {
+                        if genCancel.isCancelled { break }
+                        // Speculative step: get multiple tokens at once.
+                        // Spec path requires fp16 caches; shouldSpec already excludes int8.
+                        let accepted = specDec.step(
+                            lastToken: nextToken,
+                            targetCaches: fp16Caches!,
+                            draftCaches: draftCaches
+                        )
+
+                        // A stop token can appear before the end of an accepted
+                        // run (a draft EOS that was verified, then a bonus token
+                        // forwarded past it). Stop the WHOLE generation at the
+                        // first stop id, not just the inner loop — otherwise the
+                        // non-stop bonus becomes the next lastToken and the outer
+                        // loop emits content after `isEnd`.
+                        var hitStop = false
+                        for token in accepted {
+                            if stopIds.contains(token) {
+                                continuation.yield(TokenEvent(
+                                    tokenId: token, text: "",
+                                    elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
+                                hitStop = true
+                                break
+                            }
+
+                            let text = capturedTokenizer.decode(token: token)
+                            continuation.yield(TokenEvent(
+                                tokenId: token, text: text,
+                                elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                            generatedCount += 1
+
+                            if generatedCount >= maxTokens { break }
+                        }
+                        if hitStop { break }
+
+                        nextToken = accepted.last ?? eosId
+                        if stopIds.contains(nextToken) || generatedCount >= maxTokens { break }
+                    }
+                } else if shouldNgram, let ngramDec = capturedNgramDecoder,
+                          let proposer = capturedNgramProposer, let fp16Caches {
+                    // === N-gram (prompt-lookup) speculative path ===
+                    // No draft model / no draft cache: the proposer matches the
+                    // running context. Seed it with the FULL prompt (not the
+                    // prefix-trimmed input) + the prefill-sampled first token. Each
+                    // accepted token is the target's greedy argmax, so output
+                    // matches the standard path except at fp16 verify-vs-decode
+                    // near-ties (same as the batched decoder).
+                    proposer.reset(prompt: promptTokens)
+                    // Set when the stall monitor trips: finish on the plain
+                    // pipeline path instead of paying the lookup tax (see below).
+                    var ngramHandoff = false
+
+                    // Emit the first token (ngramStep returns tokens AFTER lastToken).
+                    if stopIds.contains(nextToken) {
+                        continuation.yield(TokenEvent(
+                            tokenId: nextToken, text: "",
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
+                    } else {
+                        proposer.append([nextToken])
+                        let firstText = capturedTokenizer.decode(token: nextToken)
+                        continuation.yield(TokenEvent(
+                            tokenId: nextToken, text: firstText,
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                        generatedCount += 1
+                    }
+
+                    while generatedCount < maxTokens && !stopIds.contains(nextToken) {
+                        if genCancel.isCancelled { break }
+                        // ngramStep appends accepted tokens to the proposer itself.
+                        let accepted = ngramDec.ngramStep(
+                            lastToken: nextToken,
+                            targetCaches: fp16Caches,
+                            proposer: proposer)
+
+                        // Stop the whole generation at the first stop id in the
+                        // accepted run (a verified EOS draft followed by a bonus),
+                        // not just the inner loop — see the draft-spec path above.
+                        var hitStop = false
+                        for token in accepted {
+                            if stopIds.contains(token) {
+                                continuation.yield(TokenEvent(
+                                    tokenId: token, text: "",
+                                    elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
+                                hitStop = true
+                                break
+                            }
+                            let text = capturedTokenizer.decode(token: token)
+                            continuation.yield(TokenEvent(
+                                tokenId: token, text: text,
+                                elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                            generatedCount += 1
+                            if generatedCount >= maxTokens { break }
+                        }
+                        if hitStop { break }
+
+                        nextToken = accepted.last ?? eosId
+                        if stopIds.contains(nextToken) || generatedCount >= maxTokens { break }
+                        // Stall monitor tripped: the lookup stopped paying off
+                        // (non-echo workload). Abandon the n-gram loop and finish
+                        // on the plain pipeline path, recovering its overlap win.
+                        if proposer.stalled { ngramHandoff = true; break }
+                    }
+
+                    // Hand off to the plain pipeline decode loop. `nextToken` was
+                    // emitted but not forwarded; forward it once to advance the KV
+                    // cache and sample the next token WITHOUT re-emitting it, which
+                    // restores `runStandardDecode`'s entry invariant exactly (the
+                    // pipeline loop then forwards-and-emits from the next token on).
+                    if ngramHandoff, generatedCount < maxTokens, !stopIds.contains(nextToken) {
+                        let seed = MLXArray(Int32(nextToken)).reshaped(1, 1)
+                        let logits = capturedForward(seed, caches)
+                        nextTokenArr = sampler.sampleArray(logits, mask: nil)
+                        asyncEval(nextTokenArr)
+                        nextToken = nextTokenArr.item(Int.self)
+                        runStandardDecode()
+                    }
+                } else {
+                    runStandardDecode()
                 }
 
                 let decodeDuration = CFAbsoluteTimeGetCurrent() - decodeStart
@@ -2622,7 +2673,7 @@ extension InferenceEngine {
                 // Batched n-gram speculation when enabled + fp16 (the spec round
                 // commits to fp16 KVCache). Degenerates to one token/round on
                 // non-repetitive input, so it never loses to the plain path.
-                specEnabled: autoUseNgram && !useQuantizedBatched(model))
+                specEnabled: batcherNgramSpec && !useQuantizedBatched(model))
             continuousBatcher = ContinuousBatcher(
                 deps: deps, maxRows: maxRows, windowMs: windowMs)
         }
