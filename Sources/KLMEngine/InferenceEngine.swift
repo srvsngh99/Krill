@@ -71,29 +71,22 @@ public final class InferenceEngine: @unchecked Sendable {
     private var autoUseSpec: Bool = false
 
     /// When true, greedy requests default to **n-gram (prompt-lookup)**
-    /// speculative decode on the single stream (no draft model — the draft is
-    /// matched from the context). **Default ON**: a per-generation stall monitor
-    /// (`NgramProposer.stalled`) hands off to the plain pipeline decode loop the
-    /// moment the lookup stops paying off, so the >=1.0x floor is held on
-    /// non-echo workloads while echo-heavy ones (RAG, code, structured output)
-    /// keep the ~1.85x win. Disable with `KRILL_NGRAM_SPEC=0` / config
-    /// `ngram_spec = false`. A loaded draft model takes precedence; an explicit
-    /// `useNgramSpeculative: false` opts out per request.
+    /// speculative decode (no draft model — the draft is matched from the
+    /// context). **Default ON**, and it now governs BOTH paths:
+    /// - Single stream: a per-generation stall monitor (`NgramProposer.stalled`)
+    ///   hands off to the plain pipeline decode loop the moment the lookup stops
+    ///   paying off.
+    /// - Concurrent batcher: each epoch chooses the spec round only while a
+    ///   majority of its (all-greedy) rows are still drafting productively, and
+    ///   otherwise falls back to the byte-exact overlap pipeline
+    ///   (`ContinuousBatcher.epochUsesSpec`). So non-echo concurrent traffic
+    ///   keeps the overlap win, while echo-heavy traffic keeps the ~1.85x win.
+    /// Disable both with `KRILL_NGRAM_SPEC=0` / config `ngram_spec = false`. A
+    /// loaded draft model takes precedence; an explicit `useNgramSpeculative:
+    /// false` opts out per single-stream request.
     private var autoUseNgram: Bool = {
         guard let v = ProcessInfo.processInfo.environment["KRILL_NGRAM_SPEC"] else { return true }
         return !(v == "0" || v.lowercased() == "false" || v.lowercased() == "off")
-    }()
-
-    /// N-gram speculative decode on the **concurrent batcher** path is a separate
-    /// opt-in (default OFF). The batcher's byte-exact CPU/GPU overlap pipeline is
-    /// the universal concurrent default; the spec round bypasses that overlap and
-    /// has no stall→overlap handoff yet, so enabling it by default would regress
-    /// non-echo concurrent throughput. Explicit `KRILL_NGRAM_SPEC=1` /
-    /// `setNgramSpec(true)` / `serve --ngram-spec` turns it on for echo-heavy
-    /// concurrent serving.
-    private var batcherNgramSpec: Bool = {
-        guard let v = ProcessInfo.processInfo.environment["KRILL_NGRAM_SPEC"] else { return false }
-        return v == "1" || v.lowercased() == "true"
     }()
 
     /// True while a model swap is in progress. Checked by server to return 503.
@@ -447,10 +440,6 @@ public final class InferenceEngine: @unchecked Sendable {
     /// govern the batched path.
     public func setNgramSpec(_ enabled: Bool) {
         self.autoUseNgram = enabled
-        // An explicit toggle governs the batcher too: turning it on opts the
-        // concurrent path into the spec round; turning it off forces the
-        // byte-exact overlap pipeline everywhere.
-        self.batcherNgramSpec = enabled
     }
 
     /// True if the engine will take the n-gram speculative path by default on a
@@ -2673,7 +2662,7 @@ extension InferenceEngine {
                 // Batched n-gram speculation when enabled + fp16 (the spec round
                 // commits to fp16 KVCache). Degenerates to one token/round on
                 // non-repetitive input, so it never loses to the plain path.
-                specEnabled: batcherNgramSpec && !useQuantizedBatched(model))
+                specEnabled: autoUseNgram && !useQuantizedBatched(model))
             continuousBatcher = ContinuousBatcher(
                 deps: deps, maxRows: maxRows, windowMs: windowMs)
         }

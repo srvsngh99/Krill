@@ -5,7 +5,10 @@ MODEL=llama-3.2-3b
 PROMPT="Count slowly from one to forty, adding a short remark after each number."
 
 start_serve() {  # $1 = extra env assignment (e.g. KRILL_DECODE_PIPELINE=0)
-  env $1 KRILL_NUM_PARALLEL=4 .build/release/krillm serve --model "$MODEL" --port $PORT >/tmp/serve_$2.log 2>&1 &
+  # Pin n-gram spec OFF so this gate isolates the overlap-pipeline toggle (spec
+  # is on by default and would otherwise mask KRILL_DECODE_PIPELINE). The
+  # spec-on concurrent byte-exact gate is tools/batcher_ngram_gate.sh.
+  env KRILL_NGRAM_SPEC=0 $1 KRILL_NUM_PARALLEL=4 .build/release/krillm serve --model "$MODEL" --port $PORT >/tmp/serve_$2.log 2>&1 &
   echo $!
 }
 wait_ready() {

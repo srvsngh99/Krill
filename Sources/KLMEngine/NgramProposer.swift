@@ -40,15 +40,25 @@ public final class NgramProposer: @unchecked Sendable {
         /// loop — on non-echo workloads the lookup never matches, so the
         /// propose() scan + non-overlapped verify forward are pure tax.
         public var stallThreshold: Double
+        /// Latch `stalled` after this many CONSECUTIVE no-yield rounds (a run of
+        /// pure misses), independent of the windowed average. 0 disables it.
+        /// This is the fast bail for pure non-echo: it trips in `maxConsecutiveMisses`
+        /// rounds instead of waiting out the whole `monitorWindow`, which matters
+        /// where each unproductive round is expensive (the batcher's W-wide verify
+        /// forward) so the non-echo ramp must be short. A productive (echo) round
+        /// resets the counter, so dense echo never trips it.
+        public var maxConsecutiveMisses: Int
 
         public init(maxN: Int = 3, minN: Int = 1, maxDraft: Int = 16, searchWindow: Int = 2048,
-                    monitorWindow: Int = 48, stallThreshold: Double = 0.30) {
+                    monitorWindow: Int = 48, stallThreshold: Double = 0.30,
+                    maxConsecutiveMisses: Int = 0) {
             self.maxN = max(1, maxN)
             self.minN = max(1, min(minN, self.maxN))
             self.maxDraft = max(1, maxDraft)
             self.searchWindow = max(0, searchWindow)
             self.monitorWindow = max(0, monitorWindow)
             self.stallThreshold = stallThreshold
+            self.maxConsecutiveMisses = max(0, maxConsecutiveMisses)
         }
     }
 
@@ -72,6 +82,8 @@ public final class NgramProposer: @unchecked Sendable {
     /// averages below `Config.stallThreshold`.
     private var roundYields: [Int] = []
     private var yieldSum: Int = 0
+    /// Count of consecutive no-yield rounds, for the `maxConsecutiveMisses` fast bail.
+    private var consecutiveMisses: Int = 0
 
     /// Sticky: once the prompt-lookup draft stops paying off over a full window,
     /// this stays true for the rest of the generation. The caller reads it after
@@ -91,6 +103,7 @@ public final class NgramProposer: @unchecked Sendable {
         effectiveCap = config.maxDraft
         roundYields.removeAll(keepingCapacity: true)
         yieldSum = 0
+        consecutiveMisses = 0
         stalled = false
     }
 
@@ -101,7 +114,19 @@ public final class NgramProposer: @unchecked Sendable {
     /// the window is full, an average below `stallThreshold` latches `stalled`.
     /// Echo-heavy workloads sustain a high average; non-echo workloads sit near 0.
     public func recordRound(extraTokens: Int) {
-        guard config.monitorWindow > 0, !stalled else { return }
+        guard !stalled else { return }
+        // Fast bail on a run of pure misses (independent of the window). A
+        // productive round resets the run, so dense echo never trips this.
+        if config.maxConsecutiveMisses > 0 {
+            if extraTokens == 0 {
+                consecutiveMisses += 1
+                if consecutiveMisses >= config.maxConsecutiveMisses { stalled = true; return }
+            } else {
+                consecutiveMisses = 0
+            }
+        }
+        // Windowed-average bail (the nuanced low-but-nonzero case).
+        guard config.monitorWindow > 0 else { return }
         roundYields.append(extraTokens)
         yieldSum += extraTokens
         if roundYields.count > config.monitorWindow {
