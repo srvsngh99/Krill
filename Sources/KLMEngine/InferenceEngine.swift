@@ -1666,14 +1666,19 @@ public final class InferenceEngine: @unchecked Sendable {
                     // before sampling the next, which cannot overlap); the trailing
                     // over-generated forward on stop/maxTokens is discarded. Gated:
                     // the default `else` path below is byte-for-byte unchanged.
+                    // Also excludes grammar (grammarSession == nil): the reorder
+                    // syncs the CURRENT token, so a per-step `advance(cur)` would
+                    // re-advance the already-advanced token (prefill advances T0,
+                    // each iter advances the token it just accepted) and shift the
+                    // mask off-by-one. Grammar-constrained generations fall to the
+                    // unchanged default loop.
                     let usePipeline = ProcessInfo.processInfo.environment["KRILL_DECODE_PIPELINE"] != nil
-                        && !trackHistory
+                        && !trackHistory && grammarSession == nil
                     if usePipeline {
                         while generatedCount < maxTokens {
                             if genCancel.isCancelled { break }
-                            let stepMask = grammarSession?.currentMask()
                             let logits = capturedForward(nextTokenArr.reshaped(1, 1), caches)
-                            let nextTokenArr2 = sampler.sampleArray(logits, mask: stepMask)
+                            let nextTokenArr2 = sampler.sampleArray(logits, mask: nil)
                             asyncEval(nextTokenArr2)
 
                             // Sync the CURRENT token (dispatched last iteration; the
@@ -1692,9 +1697,6 @@ public final class InferenceEngine: @unchecked Sendable {
                                 elapsed: CFAbsoluteTimeGetCurrent() - startTime))
                             generatedCount += 1
                             nextToken = cur
-                            if let s = grammarSession, !s.advance(token: cur) {
-                                grammarSession = nil
-                            }
                             nextTokenArr = nextTokenArr2
                         }
                     } else {
