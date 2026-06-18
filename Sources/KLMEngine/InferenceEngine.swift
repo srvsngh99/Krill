@@ -1655,6 +1655,49 @@ public final class InferenceEngine: @unchecked Sendable {
                     // the time we sync, the GPU has already started executing
                     // forward N+1, so kernel launch and host string work overlap
                     // with kernel execution.
+                    // KRILL_DECODE_PIPELINE: build+dispatch the NEXT forward from
+                    // the current lazy token BEFORE syncing the current token, so
+                    // CPU graph-construction of step N+1 overlaps GPU compute of
+                    // step N (dispatched last iteration). The split-timer showed
+                    // ~56% of per-token time is CPU graph-build running serially
+                    // with the ~43% GPU-sync; this collapses them to ~max() and
+                    // matches mlx-lm's generate_step double-buffer. Greedy /
+                    // non-penalty only (penalties need the current host token
+                    // before sampling the next, which cannot overlap); the trailing
+                    // over-generated forward on stop/maxTokens is discarded. Gated:
+                    // the default `else` path below is byte-for-byte unchanged.
+                    let usePipeline = ProcessInfo.processInfo.environment["KRILL_DECODE_PIPELINE"] != nil
+                        && !trackHistory
+                    if usePipeline {
+                        while generatedCount < maxTokens {
+                            if genCancel.isCancelled { break }
+                            let stepMask = grammarSession?.currentMask()
+                            let logits = capturedForward(nextTokenArr.reshaped(1, 1), caches)
+                            let nextTokenArr2 = sampler.sampleArray(logits, mask: stepMask)
+                            asyncEval(nextTokenArr2)
+
+                            // Sync the CURRENT token (dispatched last iteration; the
+                            // GPU finished it while we built the next forward above).
+                            let cur = nextTokenArr.item(Int.self)
+                            if stopIds.contains(cur) {
+                                continuation.yield(TokenEvent(
+                                    tokenId: cur, text: "",
+                                    elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
+                                break
+                            }
+                            let text = ProcessInfo.processInfo.environment["KRILL_BENCH_NO_DETOK"] != nil
+                                ? "" : capturedTokenizer.decode(token: cur)
+                            continuation.yield(TokenEvent(
+                                tokenId: cur, text: text,
+                                elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                            generatedCount += 1
+                            nextToken = cur
+                            if let s = grammarSession, !s.advance(token: cur) {
+                                grammarSession = nil
+                            }
+                            nextTokenArr = nextTokenArr2
+                        }
+                    } else {
                     while generatedCount < maxTokens {
                         if genCancel.isCancelled { break }
                         if stopIds.contains(nextToken) {
@@ -1707,6 +1750,7 @@ public final class InferenceEngine: @unchecked Sendable {
                         if let s = grammarSession, !s.advance(token: nextToken) {
                             grammarSession = nil
                         }
+                    }
                     }
                 }
 
