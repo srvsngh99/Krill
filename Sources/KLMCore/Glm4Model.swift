@@ -14,8 +14,7 @@ import KLMCache
 //   - partial RoPE (only the first `partial_rotary_factor * head_dim` dims rotate)
 //   - fused gate_up_proj SwiGLU, untied lm_head, standard `model.layers.*` naming
 //
-// Config authored by the local gemma-4-12b coder (see .claude/skills/glm-port);
-// `quantization` field added during integration to satisfy `ModelConfig`.
+// The `quantization` field is required by the `ModelConfig` protocol.
 public struct Glm4Config: ModelConfig, Codable, Sendable {
     public let hiddenSize: Int
     public let intermediateSize: Int

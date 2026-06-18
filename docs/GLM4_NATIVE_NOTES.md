@@ -7,8 +7,9 @@ Native Swift+MLX runtime for the GLM-4-0414 / GLM-Z1 generation (model_type
 
 - `Sources/KLMCore/Glm4Model.swift` — `Glm4ForCausalLM`: separate q/k/v/o (bias on
   q/k/v only), four-RMSNorm sandwich (input / post_self_attn / post_attention /
-  post_mlp), partial RoPE, fused gate_up. Authored via the `native-port` skill
-  (gemma-4-12b-coder drove the Swift; Claude Code integrated + gated).
+  post_mlp), partial RoPE, fused gate_up. Built with the `native-port` workflow:
+  the local gemma-4-12b-coder model drafted the Swift, then it was integrated and
+  gated against an mlx-lm parity oracle.
 - Routing: new `glm4` ArchitectureRule ordered BEFORE the legacy `glm` rule
   (`arch.contains("glm")` would otherwise capture it → garbage). `ModelFamily.glm4`
   + capabilities + `loadGlm4` + exhaustive-switch updates (ModelAdapter,

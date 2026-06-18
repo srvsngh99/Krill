@@ -287,7 +287,12 @@ let architectureRules: [ArchitectureRule] = [
     // match wins.
     ArchitectureRule(
         id: "glm4",
-        matches: { arch, mt in arch.contains("glm4") || mt == "glm4" },
+        // Exclude `Glm4MoeForCausalLM` (GLM-4.5 / GLM-MoE, model_type
+        // "glm4_moe"): it also contains "glm4" but is a sparse-MoE arch the
+        // dense `loadGlm4` cannot serve. Without the `moe` guard this rule would
+        // hijack it and hard-fail mid-forward, and contradict the manifest's
+        // `glm4_moe -> .glm` mapping. MoE GLM is an out-of-scope follow-up.
+        matches: { arch, mt in (arch.contains("glm4") && !arch.contains("moe")) || mt == "glm4" },
         action: .load { try loadGlm4(configData: $0, directory: $1) }),
 
     ArchitectureRule(
