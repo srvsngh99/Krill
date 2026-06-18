@@ -296,6 +296,35 @@ compute, is the actual binding constraint.)
   reuse prefixes (system prompts, RAG, tool schemas) sit far under the cap on
   every family. Raise it on a larger-RAM box.
 
+### 8. Naive sub-4-bit quantization (3-bit / 2-bit)
+
+- **Goal:** exploit Apple's memory-bandwidth-bound decode by storing weights in
+  fewer than 4 bits (3-bit / 2-bit), expecting near-proportional decode speedup
+  on a bandwidth-bound box -- a possible motivation for an Apple-tuned low-bit
+  format.
+- **Status:** CLOSED (declined on evidence, 2026-06-19; forked experiment, no
+  code shipped). Tested uniform affine N-bit on two families via the native
+  quantizer.
+- **Why it's capped (two independent reasons):**
+  - *Speed is sub-linear.* GLM-4-9B (text-dense, ~fully quantized): 4-bit 44.6 ->
+    3-bit 48.8 (+9.4%) -> 2-bit 61.4 (+37.7%) tok/s. Gemma-4-12B (multimodal):
+    +6.8% / +18.9% -- smaller because its fp16 vision/audio towers stay
+    unquantized. "Fixed-floor theory": speedup tracks how much of the model is
+    actually quantized; a -44% byte cut buys only +37.7% even fully-quantized
+    because per-token sampling, KV, dequant and activations are real fixed costs.
+    Decode is *mostly* but not *purely* weight-bandwidth bound.
+  - *Quality falls off a cliff.* MMLU-500 paired (GLM-4-9B, McNemar): 4-bit 72.6%
+    -> 3-bit 68.8% = **-3.8 pts, p=0.016 (significant)**; 2-bit collapses (token
+    salad). A light 4-fact + 1-code probe FALSELY read "3-bit clean" -- always
+    use the paired MMLU/McNemar bar, not a vibe probe. By the
+    don't-drop-accuracy-for-speed standard, +9% for -3.8 MMLU is a bad trade.
+- **Re-attempt trigger:** the *format* is not the lever; the quantization
+  *algorithm* is. Re-attempt only when a strong **quant-aware low-bit method**
+  (GPTQ / AWQ / QuIP# / QTIP) is available in MLX that claws back most of the
+  ~3.8 points. Then +9-15% on bandwidth-bound Apple (bigger on fully-quantized
+  dense models, smaller on multimodal with fp16 towers) becomes a genuine if
+  modest win. Do NOT build a naive lower-bit number format.
+
 ---
 
 ## Resource ceilings (RAM-blocked on the 24GB dev box)
