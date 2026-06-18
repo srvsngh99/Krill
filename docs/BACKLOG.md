@@ -196,3 +196,68 @@ tool randomizes the V3 router (its gate weight initializes to zero, which would 
 routed score tie at 0.5 and decide selection by tie-break artifact rather than numerics).
 Only the 671B real V3 is RAM-blocked on a small host -- run the real-checkpoint parity on a
 bigger box.
+
+---
+
+## Native Swift+MLX `krillm quantize` (drop the Python shell-out)
+
+**Status:** deferred (owner decision). The only Python touchpoint left in the
+*shipped binary*. Everything in the inference / serving / model-load /
+embedding / audio / vision path is already pure Swift+MLX with no sidecar; the
+historical mlx-lm bridge was fully retired.
+
+**Context.** `Sources/KLMCLI/QuantizeCommand.swift` implements `krillm quantize`
+by shelling out to `python3 -c "import mlx_lm; mlx_lm.convert(...)"`. It is an
+optional, offline, manually-invoked model-prep utility -- it is NEVER auto-called
+by load or serve (only registered as a CLI subcommand in `KrillCLI.swift`), and
+it degrades gracefully (checks for python3 + mlx-lm, prints install hints if
+absent). So it is not a runtime sidecar, but it is Python usage in the product
+binary and the goal is fully-native, no Python anywhere outside tests/benchmarks.
+
+**Proposed work.** Reimplement the convert/quantize in Swift+MLX:
+- Load the HF safetensors + config via `swift-transformers` (already a dep).
+- Quantize the eligible linear weights with mlx-swift's quantization primitives
+  (`MLX.quantized` / `QuantizedLinear`), honoring `--bits` / `--group-size` and
+  the same skip rules mlx-lm applies (e.g. do not quantize tiny / non-divisible
+  tensors; keep embeddings/norms as configured).
+- Write the MLX-format weights + an updated `config.json` (with the
+  `quantization` block) into the registry path, matching the on-disk layout the
+  native loader already reads.
+- Gate it: quantize a small model both ways (this native path vs
+  `mlx_lm.convert`) and assert the produced weights load and yield logit parity
+  within the bf16/quant tolerance the loader already tolerates.
+
+**Why deferred.** Inference is already 100% native; this is the last cosmetic
+Python dependency and it sits on a cold, optional prep path, so it is low-urgency
+relative to runtime work. Picking it up makes the shipped binary Python-free.
+
+---
+
+## Batcher-side stall monitor + spec->overlap handoff (concurrent n-gram default-on)
+
+**Status:** deferred follow-up to PR #232 (single-stream adaptive n-gram spec).
+
+**Context.** PR #232 made n-gram (prompt-lookup) speculative decode the default
+on the SINGLE stream, with a stall monitor that hands off to the byte-exact
+overlap pipeline loop when the lookup stops paying off (non-echo workloads). The
+CONCURRENT batcher's n-gram spec path was deliberately left as an explicit
+opt-in (`batcherNgramSpec`, default false): its spec round
+(`ContinuousBatcher.decodeSpecRound`) bypasses the +9-11% CPU/GPU overlap
+pipeline (PR #231) and has no equivalent stall->overlap handoff, so enabling it
+by default would regress non-echo CONCURRENT throughput. Today the batcher's
+default path keeps its byte-exact overlap win for everyone.
+
+**Proposed work.** Give the batcher the same adaptiveness the single stream has:
+- Per-row stall monitors (each row already owns a `NgramProposer`; PR #232 added
+  the `recordRound` / sticky `stalled` machinery -- reuse it).
+- When all (or enough) live rows in an epoch have stalled, switch that epoch from
+  `decodeSpecRound` back to the overlap pipeline path (the epoch already
+  re-stacks the live rows each round, so the switch is at an epoch boundary --
+  no mid-forward surgery). Mixed epochs (some rows still echoing) keep the spec
+  round, which degenerates to W=1 for the stalled rows.
+- Then flip the batcher default to on, gated by the same `ngram_spec` config.
+
+**Why deferred.** The single-stream win is the high-value, low-risk half and is
+shipped. The batcher needs the epoch-level path-switch logic above to avoid
+regressing the proven concurrent overlap, so it is a separate, carefully-gated
+piece of work.
