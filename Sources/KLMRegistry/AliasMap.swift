@@ -206,10 +206,23 @@ private let aliases: [String: ResolvedModel] = [
     // 26B-A4B and 31B are not aliased here yet (the `Gemma4Model` loader is
     // currently e2b-shape-specific) - see docs/FOLLOWUPS_AGENT_DOGFOOD.md §1.
 
-    // GLM-4
+    // GLM-4 (legacy ChatGLM architecture -> `.glm` / `loadGLM`)
     "glm-4-9b": ResolvedModel(
         repo: "mlx-community/glm-4-9b-chat-4bit",
         name: "glm-4-9b", family: .glm, params: "9B", quant: "4bit", context: 131072),
+
+    // GLM-4-0414 / GLM-Z1 generation (arch Glm4ForCausalLM -> `.glm4` /
+    // `loadGlm4`, the native Swift+MLX runtime in Glm4Model.swift). mlx-community
+    // already hosts these MLX weights, so the aliases point straight at them.
+    "glm-4-9b-0414": ResolvedModel(
+        repo: "mlx-community/GLM-4-9B-0414-4bit",
+        name: "glm-4-9b-0414", family: .glm4, params: "9B", quant: "4bit", context: 32768),
+    "glm-z1-9b": ResolvedModel(
+        repo: "mlx-community/GLM-Z1-9B-0414-4bit",
+        name: "glm-z1-9b", family: .glm4, params: "9B", quant: "4bit", context: 32768),
+    "glm-4-32b-0414": ResolvedModel(
+        repo: "mlx-community/GLM-4-32B-0414-4bit",
+        name: "glm-4-32b-0414", family: .glm4, params: "32B", quant: "4bit", context: 32768),
 
     // Sentence-embedding models (dedicated encoders for /api/embed,
     // /v1/embeddings). Original sentence-transformers/BAAI repos ship

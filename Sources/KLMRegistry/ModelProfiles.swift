@@ -86,6 +86,14 @@ public enum ModelProfiles {
                 strengths: ["Strong Chinese and English", "Good general chat", "Tool calling"],
                 weaknesses: ["Smaller ecosystem", "Less coverage on niche English tasks"],
                 goodFor: ["Bilingual chat", "General assistants"])
+        case .glm4:
+            return ModelProfile(
+                displayName: "GLM-4", vendor: "Zhipu AI / Z.ai", released: "Apr 2025 (0414)",
+                trainingCutoff: "not publicly disclosed",
+                tagline: "GLM-4-0414 / GLM-Z1: stronger reasoning and coding, English+Chinese.",
+                strengths: ["Strong reasoning (GLM-Z1)", "Good coding", "Bilingual"],
+                weaknesses: ["32B is tight on a 24GB box", "Flagship GLM-4.5+ are MoE and far larger"],
+                goodFor: ["Reasoning", "Coding", "Bilingual chat"])
         case .bert, .reranker:
             return ModelProfile(
                 displayName: "BERT", vendor: "Encoder", released: "various",

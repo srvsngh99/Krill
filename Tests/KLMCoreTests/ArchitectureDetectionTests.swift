@@ -56,6 +56,19 @@ final class ArchitectureDetectionTests: XCTestCase {
         XCTAssertEqual(id(modelType: "chatglm"), "glm")
     }
 
+    func testGLM4Detection() {
+        // GLM-4-0414 / GLM-Z1 must route to the new glm4 rule, NOT the legacy
+        // glm rule (whose `arch.contains("glm")` matcher would otherwise claim
+        // it first). The glm4 rule is ordered before glm for exactly this.
+        XCTAssertEqual(id(arch: "Glm4ForCausalLM"), "glm4")
+        XCTAssertEqual(id(modelType: "glm4"), "glm4")
+        // Glm4MoeForCausalLM (GLM-4.5 / GLM-MoE) also contains "glm4" but is a
+        // sparse-MoE arch the dense glm4 runtime cannot serve. It must NOT route
+        // to glm4; the `moe` guard sends it on to the legacy glm rule instead.
+        XCTAssertNotEqual(id(arch: "Glm4MoeForCausalLM"), "glm4")
+        XCTAssertEqual(id(arch: "Glm4MoeForCausalLM"), "glm")
+    }
+
     func testMoEFamilies() {
         XCTAssertEqual(id(arch: "Qwen3MoeForCausalLM"), "qwen3_moe")
         XCTAssertEqual(id(modelType: "qwen3_moe"), "qwen3_moe")
