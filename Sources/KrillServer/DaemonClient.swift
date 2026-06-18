@@ -1,4 +1,5 @@
 import Foundation
+import KrillTooling
 
 /// Thin HTTP client that talks to a locally running `krill serve`
 /// daemon. Used by `krill run` to detect an already-running daemon

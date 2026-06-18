@@ -1,5 +1,6 @@
 import XCTest
 @testable import KrillServer
+import KrillTooling
 
 /// Pure translation tests for the OpenAI Responses API compat layer
 /// (`POST /v1/responses`). Transport/streaming is covered separately; these

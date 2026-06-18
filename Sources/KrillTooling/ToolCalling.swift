@@ -16,13 +16,18 @@ import KrillRegistry
 /// both `name` and `arguments`.
 ///
 /// Pure and Sendable so it is unit-testable without a model or a channel.
-internal enum ToolCalling {
+public enum ToolCalling {
 
-    struct ParsedToolCall: Equatable, Sendable {
-        let name: String
+    public struct ParsedToolCall: Equatable, Sendable {
+        public let name: String
         /// Arguments as a JSON *string* (OpenAI wants a string; Ollama wants
         /// the decoded object - callers convert as needed).
-        let argumentsJSON: String
+        public let argumentsJSON: String
+
+        public init(name: String, argumentsJSON: String) {
+            self.name = name
+            self.argumentsJSON = argumentsJSON
+        }
     }
 
     /// Wire format a model family was fine-tuned on. Tool calling is
@@ -38,7 +43,7 @@ internal enum ToolCalling {
     ///   This matches what Qwen 2.5/3 emit and works acceptably on
     ///   Llama/Mistral; it is the fallback for families without a native
     ///   adapter, NOT a universal default.
-    enum ToolFormat: Sendable {
+    public enum ToolFormat: Sendable {
         case hermes
         case gemma4
         case llama
@@ -65,7 +70,7 @@ internal enum ToolCalling {
         ///
         /// A nil or unrecognized family string falls back to
         /// `.hermes`, matching the registry's own default.
-        static func forFamily(_ family: String?) -> ToolFormat {
+        public static func forFamily(_ family: String?) -> ToolFormat {
             guard let family,
                   let modelFamily = ModelFamily(rawValue: family) else {
                 return .hermes
@@ -112,7 +117,7 @@ internal enum ToolCalling {
     /// Prepare messages so the model sees tools in the format it was trained
     /// on. `format` defaults to `.hermes` so existing callers/tests keep
     /// their exact behavior; the server passes the resolved family adapter.
-    static func injectToolSystem(
+    public static func injectToolSystem(
         into messages: [[String: String]],
         tools: [ServerToolSpec],
         format: ToolFormat = .hermes
@@ -150,7 +155,7 @@ internal enum ToolCalling {
     ///   = any object (the schema grammar has no `oneOf`, so per-name argument
     ///   schemas cannot be expressed; name is still pinned to a valid tool).
     /// Returns nil when no tool resolves (caller falls back to unconstrained).
-    static func forcedToolCallSchema(
+    public static func forcedToolCallSchema(
         tools: [ServerToolSpec], choice: ServerToolChoice
     ) -> String? {
         let candidates: [ServerToolSpec]
@@ -217,7 +222,7 @@ internal enum ToolCalling {
 
     /// Inject the forced-tool system turn (replaces the family-specific
     /// injection when `tool_choice` forces a call).
-    static func injectForcedToolSystem(
+    public static func injectForcedToolSystem(
         into messages: [[String: String]],
         tools: [ServerToolSpec],
         choice: ServerToolChoice
@@ -238,7 +243,7 @@ internal enum ToolCalling {
     /// tool call into a `ParsedToolCall`. Tolerant of surrounding whitespace
     /// and a stray code fence. Returns nil if it is not a `{name,arguments}`
     /// object.
-    static func parseForcedToolCall(_ text: String) -> ParsedToolCall? {
+    public static func parseForcedToolCall(_ text: String) -> ParsedToolCall? {
         var s = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if s.hasPrefix("```") {
             s = s.replacingOccurrences(of: "```json", with: "")
@@ -277,7 +282,7 @@ internal enum ToolCalling {
     /// targets the dominant small-model failure (empty `{}` / missing required
     /// fields, e.g. codex's shell tool missing `cmd`) without forcing a second
     /// pass on otherwise-usable arguments. Pure + unit-testable.
-    static func argsSatisfySchema(argumentsJSON: String, parametersJSON: String) -> Bool {
+    public static func argsSatisfySchema(argumentsJSON: String, parametersJSON: String) -> Bool {
         guard let argsData = argumentsJSON.data(using: .utf8),
               let args = try? JSONSerialization.jsonObject(with: argsData) as? [String: Any]
         else { return false }  // not even a JSON object -> must re-generate
@@ -291,7 +296,7 @@ internal enum ToolCalling {
     /// Instruction turn for pass 2: ask the model for ONLY the JSON arguments
     /// object for `tool`. Decoding is grammar-constrained to the tool's
     /// parameter schema, so this only needs to orient the model.
-    static func argsRegenPrompt(tool: ServerToolSpec) -> String {
+    public static func argsRegenPrompt(tool: ServerToolSpec) -> String {
         return "Now output ONLY the JSON arguments object to call the tool "
             + "\"\(escapeForPrompt(tool.name))\". Its parameter schema is: "
             + "\(tool.parametersJSON). Respond with a single JSON object giving "
@@ -301,7 +306,7 @@ internal enum ToolCalling {
     /// Parse a bare arguments object (pass-2 output) into a compact JSON
     /// string. Tolerant of surrounding whitespace and a stray code fence.
     /// Returns nil if no JSON object is present.
-    static func parseArgsObject(_ text: String) -> String? {
+    public static func parseArgsObject(_ text: String) -> String? {
         var s = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if s.hasPrefix("```") {
             s = s.replacingOccurrences(of: "```json", with: "")
@@ -723,7 +728,7 @@ internal enum ToolCalling {
         ("<|tool_call|>", "<tool_call|>"),
     ]
 
-    static func extractToolCalls(from text: String, format: ToolFormat = .hermes)
+    public static func extractToolCalls(from text: String, format: ToolFormat = .hermes)
         -> (calls: [ParsedToolCall], cleanedText: String)
     {
         switch format {
@@ -742,7 +747,7 @@ internal enum ToolCalling {
     /// running them on a no-tools turn would misclassify ordinary JSON
     /// output as a tool call (e.g. an Anthropic `tool_use` block). With no
     /// tools offered there can be no tool calls by definition.
-    static func extractIfToolsOffered(
+    public static func extractIfToolsOffered(
         from text: String, hasTools: Bool, format: ToolFormat
     ) -> (calls: [ParsedToolCall], cleanedText: String) {
         guard hasTools else { return ([], text) }
@@ -1167,7 +1172,7 @@ internal enum ToolCalling {
     // MARK: - Response shaping
 
     /// OpenAI `message.tool_calls` array (arguments as a JSON string).
-    static func openAIToolCalls(_ calls: [ParsedToolCall]) -> [[String: Any]] {
+    public static func openAIToolCalls(_ calls: [ParsedToolCall]) -> [[String: Any]] {
         calls.enumerated().map { i, c in
             [
                 "id": "call_\(randomId())\(i)",
@@ -1178,7 +1183,7 @@ internal enum ToolCalling {
     }
 
     /// Ollama `message.tool_calls` array (arguments as a decoded object).
-    static func ollamaToolCalls(_ calls: [ParsedToolCall]) -> [[String: Any]] {
+    public static func ollamaToolCalls(_ calls: [ParsedToolCall]) -> [[String: Any]] {
         calls.map { c in
             let argsObj = (try? JSONSerialization.jsonObject(
                 with: Data(c.argumentsJSON.utf8))) ?? [String: Any]()

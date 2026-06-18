@@ -7,6 +7,7 @@ import KrillRegistry
 import KrillSampler
 import MLX
 @testable import KrillServer
+import KrillTooling
 
 final class ServerTests: XCTestCase {
     func testMessageConversionPreservesStructuredConversation() {

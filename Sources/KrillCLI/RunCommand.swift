@@ -5,6 +5,7 @@ import KrillCore
 import KrillSampler
 import KrillRegistry
 import KrillServer
+import KrillTooling
 
 struct RunCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(

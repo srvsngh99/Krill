@@ -2,6 +2,7 @@ import Foundation
 import NIOCore
 import NIOHTTP1
 import KrillSampler
+import KrillTooling
 
 internal enum ServerLimits {
     static let maxBodySize = 10 * 1024 * 1024
@@ -52,15 +53,6 @@ internal struct ServerMediaPayload: Equatable, Sendable {
     var isEmpty: Bool { images.isEmpty && audio == nil }
 }
 
-/// A normalized tool/function definition (Sendable). `parametersJSON` is
-/// the raw JSON-schema object serialized to a string so it can flow through
-/// Sendable boundaries and be embedded verbatim into the tool prompt.
-internal struct ServerToolSpec: Equatable, Sendable {
-    let name: String
-    let description: String
-    let parametersJSON: String
-}
-
 /// Structured-output request (WS-D D2 / T1-1). `.json` = free-form JSON;
 /// `.schema` carries a JSON-schema string the output must conform to;
 /// `.regex` carries a regular-expression pattern the output must fully match
@@ -72,23 +64,6 @@ internal enum ResponseFormat: Equatable, Sendable {
     case schema(String)
     case regex(String)
     case cfg(String)
-}
-
-/// OpenAI `tool_choice`: how the model may use the offered tools.
-/// `.auto` (default) = model decides; `.none` = never call a tool;
-/// `.required` = must call some tool; `.function(name)` = must call exactly
-/// that tool. The forced variants let the server grammar-CONSTRAIN the output
-/// to a valid tool-call JSON (best-effort; fails open), where `.auto` leaves
-/// decoding unconstrained so the model can also answer in prose.
-internal enum ServerToolChoice: Equatable, Sendable {
-    case auto
-    case none
-    case required
-    case function(String)
-    /// True when the model MUST emit a tool call (safe to constrain decoding).
-    var forcesCall: Bool {
-        switch self { case .required, .function: return true; case .auto, .none: return false }
-    }
 }
 
 internal struct ServerChatRequest: Equatable, Sendable {

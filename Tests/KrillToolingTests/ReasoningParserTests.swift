@@ -1,5 +1,5 @@
 import XCTest
-@testable import KrillServer
+@testable import KrillTooling
 
 final class ReasoningParserTests: XCTestCase {
 
