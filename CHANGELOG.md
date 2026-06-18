@@ -6,6 +6,54 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-19
+
+### Added
+
+- **Native Swift+MLX GLM-4-0414 / GLM-Z1 runtime.** `Glm4ForCausalLM`
+  (model_type `glm4`) runs natively with no Python, gated argmax-exact against
+  an mlx-lm logit oracle. New aliases `glm-4-9b-0414`, `glm-z1-9b`,
+  `glm-4-32b-0414` resolve to the mlx-community 4-bit builds.
+- **`krillm quantize` is now 100% Swift+MLX - the python3/mlx_lm.convert
+  shell-out is gone**, so the shipped binary has no Python anywhere. The dense
+  pass quantizes every 2-D group-divisible weight (Llama/Qwen/Mistral/Phi/GLM)
+  byte-identical to the canonical MLX op (1007/1007 vs mlx-community affine,
+  765/765 vs `mx.quantize` nvfp4). `--mode affine|nvfp4|mxfp4|mxfp8` (the float
+  formats auto-pick their required group size); `--dtype` default fp16.
+- **`krillm quantize --reference <a 4-bit build>` extends the native quantizer
+  to MoE / vision / Gemma.** It learns the exact quantized-module set from the
+  reference checkpoint's `.scales` tensors, so it reproduces the proven coverage
+  for any family with no per-family code: MoE (stacked experts quantized affine
+  at the top-level group, the float router gate left float), vision/multimodal
+  (the float vision tower preserved, e.g. Qwen2.5-VL), and Gemma (PLE / tied-head
+  specifics) all fall out automatically. `--protect <substr>` raises chosen 2-D
+  modules to a higher precision - the Gemma vision/audio projectors auto-protect
+  at 8-bit affine (the red-channel color-fidelity fix) - recorded as per-module
+  config overrides. gemma-4-12b nvfp4 + 8-bit projectors verifies 1012/1012
+  byte-identical. (An nvfp4 MoE is rejected up front: experts must be affine and
+  affine cannot use group 16 - use `--mode affine` or `mxfp4`/`mxfp8` for MoE.)
+
+### Changed
+
+- **Single-stream decode overlaps CPU graph-build with GPU compute (+13-23% tok/s
+  across dense families, byte-exact).** Default on; disable with
+  `KRILL_DECODE_PIPELINE=0` or `decode_pipeline = false`.
+- **The concurrent batcher overlaps CPU/GPU the same way (+9-11% throughput at
+  N=8, byte-exact).**
+- **Adaptive n-gram (prompt-lookup) speculative decode is now on by default**, on
+  both the single stream and the concurrent batcher. A stall monitor hands off to
+  the byte-exact overlap path when the lookup stops paying off, so non-echo
+  workloads are not penalized. Disable with `KRILL_NGRAM_SPEC=0` or
+  `ngram_spec = false`.
+
+### Fixed
+
+- **Gemma-4 media markers no longer leak into visible output.** The encoder-free
+  Gemma-4 SKUs wrap a media run in structural special tokens
+  (`<start_of_image>` ... `<end_of_image>`, likewise audio); the model
+  occasionally emitted one (most visibly the literal `<image|>`), which is now
+  suppressed in the detokenized text on every server and CLI path.
+
 ## [0.9.1] - 2026-06-17
 
 ### Added
