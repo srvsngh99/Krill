@@ -348,6 +348,71 @@ final class ContinuousBatcher: @unchecked Sendable {
                 var step = 0
                 var cancelledMidEpoch = false
                 let sMaxT = rows.map { $0.epochSlidingBaseLen }.max() ?? 0
+                // Overlap pipeline (all-greedy, non-penalty, non-rotating epochs):
+                // build + dispatch step N's forward+sample BEFORE syncing/emitting
+                // step N-1's tokens, so the host sync+emit overlaps GPU compute
+                // (mirrors the single-stream KRILL_DECODE_PIPELINE win, ported to
+                // the batcher). The forwards, logits and per-row argmax are
+                // IDENTICAL to the serial loop below -> byte-exact output; only the
+                // host-sync timing moves. All-greedy means sampling is one batched
+                // argMax + a single [R] sync instead of R per-row syncs. On break,
+                // the pending sample is flushed to still-live rows; a finished
+                // row's trailing-forward KV is harmlessly discarded (its cache is
+                // finalized), so scatterBack(step) stays exact - no trim. Honors
+                // KRILL_DECODE_PIPELINE (default on; =0 disables).
+                let pipeEligible = !hasRotating
+                    && ProcessInfo.processInfo.environment["KRILL_DECODE_PIPELINE"] != "0"
+                    && rows.allSatisfy { $0.sampler.isGreedy && !$0.needsHistory }
+                if pipeEligible {
+                    var fedArr = MLXArray(rows.map { Int32($0.current) })   // [R]
+                    var pendingSample: MLXArray? = nil
+                    while true {
+                        if Task.isCancelled { cancelledMidEpoch = true; break }
+                        let R = rows.count
+                        let offsets = rows.map { $0.epochBaseLen + step }
+                        let totalLen = sMax + step + 1
+                        let mask = buildBatchedDecodeMask(
+                            lengths: rows.map { $0.epochBaseLen }, sMax: sMax,
+                            totalLen: totalLen, dtype: kDtype)
+                        let logits = deps.batchedForward(fedArr.reshaped(R, 1), stacked, mask, offsets)
+                        let sampled = argMax(logits, axis: -1).reshaped([R]).asType(.int32)
+                        MLX.asyncEval(sampled)
+                        step += 1
+                        var doBreak = false
+                        if let prev = pendingSample {
+                            let host = prev.asArray(Int32.self)
+                            let now = CFAbsoluteTimeGetCurrent()
+                            for i in 0 ..< R {
+                                let row = rows[i]
+                                if row.isFinished { continue }
+                                if row.decodeStartedAt == nil { row.decodeStartedAt = now }
+                                let next = Int(host[i])
+                                row.current = next
+                                if emit(row, token: next, now: now) { doBreak = true }
+                                if row.cancelled.isCancelled { doBreak = true }
+                            }
+                            if !pendingIsEmpty() { doBreak = true }
+                        }
+                        pendingSample = sampled
+                        fedArr = sampled
+                        if doBreak {
+                            // Flush the last sample to rows still live (rows that
+                            // finished in the loop above are already finalized and
+                            // skipped). Their forward ran but no token is emitted.
+                            let host = sampled.asArray(Int32.self)
+                            let now = CFAbsoluteTimeGetCurrent()
+                            for i in 0 ..< R {
+                                let row = rows[i]
+                                if row.isFinished { continue }
+                                if row.decodeStartedAt == nil { row.decodeStartedAt = now }
+                                let next = Int(host[i])
+                                row.current = next
+                                _ = emit(row, token: next, now: now)
+                            }
+                            break
+                        }
+                    }
+                } else {
                 while true {
                     if Task.isCancelled { cancelledMidEpoch = true; break }
                     let R = rows.count
@@ -390,6 +455,7 @@ final class ContinuousBatcher: @unchecked Sendable {
                     // Break the epoch (scatter + re-stack) when the active set must
                     // change: a row finished/cancelled, or a newcomer is waiting.
                     if setChanged || !pendingIsEmpty() { break }
+                }
                 }
 
                 if cancelledMidEpoch {

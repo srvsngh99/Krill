@@ -94,6 +94,11 @@ public final class Sampler: @unchecked Sendable {
     /// Whether the decode loop must track recent tokens for this request.
     public var needsHistory: Bool { params.penaltiesActive }
 
+    /// True when this request decodes greedily (pure argmax). Combined with
+    /// `!needsHistory`, an epoch of all-greedy rows can batch its sampling into
+    /// a single `argMax` + one host sync (the batched-decode overlap path).
+    public var isGreedy: Bool { params.temperature <= 0 && params.mirostat == 0 }
+
     /// Sample the next token from logits.
     ///
     /// - Parameter logits: Raw logits, shape `[B, vocabSize]` or `[B, 1, vocabSize]`
