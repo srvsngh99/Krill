@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build a tiny LLaVA-1.5 checkpoint with mlx-vlm and record its reference
-logits, to check the native KrillLM `LlavaForCausalLM` runtime for logit parity
+logits, to check the native Krill `LlavaForCausalLM` runtime for logit parity
 against mlx-vlm on identical weights + pixel inputs.
 
 Exercises the full LLaVA path: the CLIP vision tower (Conv2d patch embed + class
@@ -13,8 +13,8 @@ The real llava-1.5-7b is large; a tiny synthetic LLaVA stands in for the
 numerics (both runtimes are MLX, so parity is ~bit-exact).
 
 Usage:
-    python3 tools/verify_llava_parity.py /tmp/krillm-llava
-        KLM_LLAVA_PARITY_DIR=/tmp/krillm-llava \\
+    python3 tools/verify_llava_parity.py /tmp/krill-llava
+        KRILL_LLAVA_PARITY_DIR=/tmp/krill-llava \\
         swift test --filter LlavaParityTests
 """
 import json

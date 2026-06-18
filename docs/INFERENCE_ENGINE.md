@@ -2,14 +2,14 @@
 
 ## InferenceEngine
 
-`Sources/KLMEngine/InferenceEngine.swift` — the central orchestrator.
+`Sources/KrillEngine/InferenceEngine.swift` — the central orchestrator.
 
 ### State
 
 | Property | Type | Purpose |
 |----------|------|---------|
 | `loadedModel` | `LoadedModel?` | Current model (module + forward closures) |
-| `tokenizer` | `KLMTokenizer?` | Tokenizer for the loaded model |
+| `tokenizer` | `KrillTokenizer?` | Tokenizer for the loaded model |
 | `modelDirectory` | `URL` | Path to model weights |
 | `prefixCache` | `PrefixCache` | Shared prefix cache |
 | `specDecoder` | `SpeculativeDecoder?` | Optional draft model |
@@ -92,7 +92,7 @@ while generatedCount < maxTokens:
 
 ## KV Cache
 
-`Sources/KLMCache/KVCache.swift`
+`Sources/KrillCache/KVCache.swift`
 
 ### Batched Concatenation Strategy
 
@@ -109,12 +109,12 @@ K/V arrays: `[B, numKVHeads, seqLen, headDim]` — sequence on axis 2.
 
 ## Prefix Cache
 
-`Sources/KLMCache/PrefixCache.swift`
+`Sources/KrillCache/PrefixCache.swift`
 
 ### Two-Tier Architecture
 
 1. **Memory LRU** (default 8 entries): fast, no I/O
-2. **Disk** (`~/.krillm/cache/`): safetensors, persistent across restarts
+2. **Disk** (`~/.krill/cache/`): safetensors, persistent across restarts
 
 ### Cache Key
 FNV-1a hash of `modelId + token_bytes`. Not cryptographic, just for keying.
@@ -133,7 +133,7 @@ Store happens in `Task.detached` — non-blocking on generation path.
 
 ## Speculative Decoding
 
-`Sources/KLMEngine/SpeculativeDecoder.swift`
+`Sources/KrillEngine/SpeculativeDecoder.swift`
 
 ### Algorithm
 1. Draft model generates K tokens greedily
@@ -157,7 +157,7 @@ Store happens in `Task.detached` — non-blocking on generation path.
 
 ## Sampler
 
-`Sources/KLMSampler/Sampler.swift`
+`Sources/KrillSampler/Sampler.swift`
 
 ### Pipeline
 ```

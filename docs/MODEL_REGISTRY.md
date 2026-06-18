@@ -7,7 +7,7 @@ cache) remains a deliberate follow-up — see "What this does NOT do".
 
 ## Why this exists
 
-KrillLM previously answered "can this model handle X" by sprinkling
+Krill previously answered "can this model handle X" by sprinkling
 `family == .gemma4` checks across the engine, the server's media
 gating, and the Ollama-compatibility shim. That works for one
 multimodal family. It does not scale.
@@ -24,7 +24,7 @@ needs to change.
 
 ## Capability set
 
-`Capability` (`Sources/KLMRegistry/ModelCapabilities.swift`):
+`Capability` (`Sources/KrillRegistry/ModelCapabilities.swift`):
 
 ```text
 textGeneration   - causal LM
@@ -74,13 +74,13 @@ is still the right primitive there.
 
 ## The `ModelAdapter` runtime contract
 
-`ModelAdapter` (`Sources/KLMRegistry/ModelAdapter.swift`) is the single
+`ModelAdapter` (`Sources/KrillRegistry/ModelAdapter.swift`) is the single
 declarative source of truth for a family's *server-side* contract:
 
 - `chatRouting` — `.denseEngine` / `.mixtureOfExperts`.
 - `requiresImageInput` — whether a text-only turn is refused up front.
 - `chatTemplate` — `ChatTemplatePolicy` (`hermes` / `gemma4` / `llama` /
-  `qwen`); KLMServer maps this onto its concrete renderer/parser.
+  `qwen`); KrillServer maps this onto its concrete renderer/parser.
 
 Capability and support-tier facts are a separate concern and stay in
 `ModelCapabilities` (the sibling per-family table); `ModelAdapter` is

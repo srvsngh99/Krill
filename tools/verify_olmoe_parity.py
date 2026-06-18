@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build a tiny *quantized* OLMoE checkpoint with mlx-lm and record its
-reference logits, to check the native KrillLM `OLMoEForCausalLM` runtime for
+reference logits, to check the native Krill `OLMoEForCausalLM` runtime for
 logit parity against mlx-lm on identical weights.
 
 Exercises the OLMoE-specific surfaces: the whole-projection q/k RMSNorm
@@ -10,8 +10,8 @@ and the `gatherQuantizedMM` SwitchGLU. Both runtimes are MLX, so parity is
 ~bit-exact.
 
 Usage:
-    python3 tools/verify_olmoe_parity.py /tmp/krillm-olmoe-parity
-    KLM_OLMOE_PARITY_DIR=/tmp/krillm-olmoe-parity \\
+    python3 tools/verify_olmoe_parity.py /tmp/krill-olmoe-parity
+    KRILL_OLMOE_PARITY_DIR=/tmp/krill-olmoe-parity \\
         swift test -c release --filter OLMoEParityTests
 """
 import json

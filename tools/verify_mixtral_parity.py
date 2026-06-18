@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build a tiny *quantized* Mixtral checkpoint with mlx-lm and record its
-reference logits, so the native KrillLM `MixtralForCausalLM` runtime can be
+reference logits, so the native Krill `MixtralForCausalLM` runtime can be
 checked for logit parity against mlx-lm on the exact same weights.
 
 Why tiny + synthetic: a real Mixtral-8x7B (~24 GB at 4-bit) does not fit on a
@@ -11,12 +11,12 @@ SwitchGLU expert dispatch -- against mlx-lm's reference on identical packed
 4-bit expert tensors. Both runtimes use MLX, so parity should be ~bit-exact.
 
 Usage:
-    python3 tools/verify_mixtral_parity.py /tmp/krillm-mixtral-parity
+    python3 tools/verify_mixtral_parity.py /tmp/krill-mixtral-parity
 
 Writes into that dir: config.json, model.safetensors, reference_logits.json
 (the last-token logits for a fixed token sequence). Then run the gated Swift
 test against it:
-    KLM_MIXTRAL_PARITY_DIR=/tmp/krillm-mixtral-parity \\
+    KRILL_MIXTRAL_PARITY_DIR=/tmp/krill-mixtral-parity \\
         swift test -c release --filter MixtralParityTests
 """
 import json
@@ -54,7 +54,7 @@ def build(outdir: str) -> None:
     model = Model(args)
     mx.eval(model.parameters())
 
-    # Quantize uniformly (matches KrillLM's loadWeights quantize pass). The
+    # Quantize uniformly (matches Krill's loadWeights quantize pass). The
     # MoE SwitchGLU SwitchLinears become QuantizedSwitchLinear; the router
     # gate, embeddings, lm_head, and attention Linears become QuantizedLinear.
     nn.quantize(model, group_size=GROUP_SIZE, bits=BITS)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Benchmark KrillLM Gemma 4 (native Swift+MLX) against Ollama Gemma 4.
+"""Benchmark Krill Gemma 4 (native Swift+MLX) against Ollama Gemma 4.
 
-KrillLM runs via the native CLI binary or the native HTTP server; the
+Krill runs via the native CLI binary or the native HTTP server; the
 mlx-vlm Python bridge was removed in WS6 Step 4.
 
 This benchmark intentionally treats text, image, and audio as separate tasks.
@@ -38,12 +38,12 @@ from typing import Any, Optional
 
 
 
-DEFAULT_KRILL_MODEL = str(Path.home() / ".krillm/models/blobs/gemma-4-e2b")
+DEFAULT_KRILL_MODEL = str(Path.home() / ".krill/models/blobs/gemma-4-e2b")
 DEFAULT_OLLAMA_MODEL = "gemma4:e2b"
 DEFAULT_OUTPUT = ".build/benchmarks/gemma4-e2b-multimodal-4bit.json"
 
-# Mirrors the regex in tools/krillm_vs_ollama_benchmark.py:parse_krillm_result
-KRILLM_CLI_STATS_RE = re.compile(
+# Mirrors the regex in tools/krill_vs_ollama_benchmark.py:parse_krill_result
+KRILL_CLI_STATS_RE = re.compile(
     r"prompt:\s+(?P<prompt_tokens>\d+)\s+tokens,\s+"
     r"prefill:\s+(?P<prefill_tps>[0-9.]+)\s+tok/s,\s+"
     r"decode:\s+(?P<generated_tokens>\d+)\s+tokens\s+at\s+"
@@ -59,15 +59,15 @@ KRILLM_CLI_STATS_RE = re.compile(
 #
 # The release gate reads `peak_memory_gb_median` from the text task summary for
 # both engines (see tools/release_gate.py:extract_multimodal_metrics). Neither
-# the Ollama HTTP API nor the KrillLM server reports peak memory, so we sample
+# the Ollama HTTP API nor the Krill server reports peak memory, so we sample
 # each engine's process-tree memory from a background thread while a timed
 # request runs and record the peak.
 #
 # On macOS we sample `phys_footprint` from `proc_pid_rusage(RUSAGE_INFO_V2)`
 # rather than RSS. RSS only counts pages currently resident in the process's
 # private/anonymous memory; mmap'd file-backed pages (the safetensors weights
-# KrillLM relies on) are excluded, which made the first cut of this sampler
-# report KrillLM at ~50 MB while the actual model is several GB resident.
+# Krill relies on) are excluded, which made the first cut of this sampler
+# report Krill at ~50 MB while the actual model is several GB resident.
 # `phys_footprint` is the kernel's "physical memory used by this process"
 # figure — the same number `vmmap -summary` and Activity Monitor's "Memory"
 # column report — and includes resident mmap'd pages with proper apportionment.
@@ -309,11 +309,11 @@ def resolve_ollama_pids(override: Optional[str]) -> list[int]:
     return sorted(set(_pgrep("ollama", full=False)))
 
 
-def resolve_krillm_server_pids(override: Optional[str]) -> list[int]:
-    """PID(s) of a running `krillm serve` process."""
+def resolve_krill_server_pids(override: Optional[str]) -> list[int]:
+    """PID(s) of a running `krill serve` process."""
     if override:
         return sorted(set(_parse_pid_list(override)))
-    return sorted(set(_pgrep("krillm.*serve", full=True)))
+    return sorted(set(_pgrep("krill.*serve", full=True)))
 
 
 class _MemoryProbe:
@@ -324,15 +324,15 @@ class _MemoryProbe:
         self.enabled = False
         self.interval_s = 0.05
         self.ollama_override: Optional[str] = None
-        self.krillm_server_override: Optional[str] = None
-        self.observed: dict[str, set[int]] = {"krillm": set(), "ollama": set()}
+        self.krill_server_override: Optional[str] = None
+        self.observed: dict[str, set[int]] = {"krill": set(), "ollama": set()}
         self.notes: list[str] = []
 
     def configure(self, args: argparse.Namespace) -> None:
         self.enabled = args.sample_memory == "auto"
         self.interval_s = max(0.01, args.memory_sample_interval_ms / 1000.0)
         self.ollama_override = args.ollama_pids
-        self.krillm_server_override = args.krillm_server_pid
+        self.krill_server_override = args.krill_server_pid
 
     def _note_once(self, msg: str) -> None:
         if msg not in self.notes:
@@ -344,7 +344,7 @@ class _MemoryProbe:
 
     def sampler_for(self, which: str) -> MemorySampler:
         """Sampler over the resolved process tree for engine `which`
-        ('krillm' for a `krillm serve` process, or 'ollama')."""
+        ('krill' for a `krill serve` process, or 'ollama')."""
         if not self.enabled:
             return MemorySampler([], self.interval_s)
         if which == "ollama":
@@ -356,21 +356,21 @@ class _MemoryProbe:
                 )
             self._record("ollama", pids)
         else:
-            pids = resolve_krillm_server_pids(self.krillm_server_override)
+            pids = resolve_krill_server_pids(self.krill_server_override)
             if not pids:
                 self._note_once(
-                    "could not resolve a `krillm serve` PID; krillm server peak "
-                    "memory will be unavailable (pass --krillm-server-pid to override)"
+                    "could not resolve a `krill serve` PID; krill server peak "
+                    "memory will be unavailable (pass --krill-server-pid to override)"
                 )
-            self._record("krillm", pids)
+            self._record("krill", pids)
         return MemorySampler(pids, self.interval_s)
 
     def sampler_for_pids(self, pids: list[int]) -> MemorySampler:
-        """Sampler over an explicit PID list (used for the krillm CLI
+        """Sampler over an explicit PID list (used for the krill CLI
         subprocess, whose PID we already know)."""
         if not self.enabled:
             return MemorySampler([], self.interval_s)
-        self._record("krillm", pids)
+        self._record("krill", pids)
         return MemorySampler(pids, self.interval_s)
 
     def report_block(self) -> dict[str, Any]:
@@ -395,7 +395,7 @@ class _MemoryProbe:
             "basis": {
                 tree_basis_key: tree_basis_doc,
             },
-            "krillm_pids_sampled": sorted(self.observed.get("krillm", set())),
+            "krill_pids_sampled": sorted(self.observed.get("krill", set())),
             "ollama_pids_sampled": sorted(self.observed.get("ollama", set())),
             "notes": list(self.notes),
         }
@@ -411,14 +411,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ollama-bin", default="ollama")
     parser.add_argument("--ollama-host", default="http://127.0.0.1:11434")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
-    parser.add_argument("--engine", choices=["both", "krillm", "ollama"], default="both")
+    parser.add_argument("--engine", choices=["both", "krill", "ollama"], default="both")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument(
         "--num-ctx", type=int, default=None,
         help="Pin BOTH engines to the same context budget for a spec-equal "
              "memory comparison: sets Ollama options.num_ctx and is also "
-             "exported to the KrillLM server as KRILL_CONTEXT_LENGTH at boot. "
+             "exported to the Krill server as KRILL_CONTEXT_LENGTH at boot. "
              "When unset, each engine uses its own default.")
     parser.add_argument(
         "--drop-cold-run", action="store_true",
@@ -433,33 +433,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audio-max-tokens", type=int, default=24)
     parser.add_argument("--image", help="Optional image asset path.")
     parser.add_argument("--audio", help="Optional audio asset path.")
-    parser.add_argument("--krillm-url", help="KrillLM server URL for native-path benchmarking (e.g. http://127.0.0.1:57455, KrillLM's default port).")
+    parser.add_argument("--krill-url", help="Krill server URL for native-path benchmarking (e.g. http://127.0.0.1:57455, Krill's default port).")
     parser.add_argument(
-        "--krillm-image-mode",
+        "--krill-image-mode",
         choices=["native_cli", "native_server"],
         default="native_cli",
         help=(
-            "How to run KrillLM text/image tasks. 'native_cli' invokes the krillm "
+            "How to run Krill text/image tasks. 'native_cli' invokes the krill "
             "CLI binary as a subprocess (matches what users run; fastest, no server "
-            "needed). 'native_server' sends HTTP requests to --krillm-url. Audio "
-            "follows the same choice (server if --krillm-url, else native CLI). The "
+            "needed). 'native_server' sends HTTP requests to --krill-url. Audio "
+            "follows the same choice (server if --krill-url, else native CLI). The "
             "mlx-vlm bridge was removed in WS6 Step 4."
         ),
     )
     parser.add_argument(
-        "--krillm-native-audio",
+        "--krill-native-audio",
         action="store_true",
         default=True,
         help=(
             "Deprecated no-op kept for back-compat: audio is always native "
             "(the mlx-vlm bridge was removed in WS6 Step 4). Audio runs on "
-            "the server when --krillm-url is set, otherwise the native CLI."
+            "the server when --krill-url is set, otherwise the native CLI."
         ),
     )
     parser.add_argument(
-        "--krillm-bin",
-        default=".build/release/krillm",
-        help="Path to krillm CLI binary used by --krillm-image-mode native_cli.",
+        "--krill-bin",
+        default=".build/release/krill",
+        help="Path to krill CLI binary used by --krill-image-mode native_cli.",
     )
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument(
@@ -498,11 +498,11 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--krillm-server-pid",
+        "--krill-server-pid",
         help=(
-            "PID(s) of the `krillm serve` process to sample for peak memory "
-            "(only used with --krillm-url / native_server). Default: auto-detect "
-            "via `pgrep -f 'krillm.*serve'`."
+            "PID(s) of the `krill serve` process to sample for peak memory "
+            "(only used with --krill-url / native_server). Default: auto-detect "
+            "via `pgrep -f 'krill.*serve'`."
         ),
     )
     return parser.parse_args()
@@ -651,7 +651,7 @@ def run_krill_server_task(
     task: dict[str, Any],
     measured: bool,
 ) -> Optional[dict[str, Any]]:
-    """Run a benchmark request against a persistent KrillLM server using /api/generate.
+    """Run a benchmark request against a persistent Krill server using /api/generate.
 
     Supports text, image, and audio. Image is sent as base64 in the Ollama
     `images` array; audio is sent as base64 in the `audio` field with
@@ -683,13 +683,13 @@ def run_krill_server_task(
         payload["audio"] = _b64.b64encode(Path(audio_path).read_bytes()).decode("ascii")
         ext = Path(audio_path).suffix.lstrip(".").lower() or "wav"
         payload["audio_format"] = ext
-    url = args.krillm_url.rstrip("/") + "/api/generate"
+    url = args.krill_url.rstrip("/") + "/api/generate"
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
-    sampler = _MEMORY.sampler_for("krillm")
+    sampler = _MEMORY.sampler_for("krill")
     start = time.perf_counter()
     first_token_s: Optional[float] = None
     chunks: list[str] = []
@@ -708,7 +708,7 @@ def run_krill_server_task(
                     final = event
     wall_s = time.perf_counter() - start
     if final is None:
-        raise RuntimeError("KrillLM server stream ended without final stats")
+        raise RuntimeError("Krill server stream ended without final stats")
     if not measured:
         return None
 
@@ -739,13 +739,13 @@ def run_krill_native_cli_task(
     task: dict[str, Any],
     measured: bool,
 ) -> Optional[dict[str, Any]]:
-    """Invoke the krillm CLI binary for a text, image, or audio task.
+    """Invoke the krill CLI binary for a text, image, or audio task.
 
-    `krillm run --audio` is native (the mlx-vlm bridge was removed in WS6
+    `krill run --audio` is native (the mlx-vlm bridge was removed in WS6
     Step 4), so audio is handled here like image.
     """
     command: list[str] = [
-        args.krillm_bin,
+        args.krill_bin,
         "run",
         args.krill_model,
         task["prompt"],
@@ -778,15 +778,15 @@ def run_krill_native_cli_task(
     wall_s = time.perf_counter() - start
     if proc.returncode != 0:
         raise RuntimeError(
-            f"krillm CLI failed with exit {proc.returncode}: "
+            f"krill CLI failed with exit {proc.returncode}: "
             f"{stderr or stdout}"
         )
     if not measured:
         return None
 
-    match = KRILLM_CLI_STATS_RE.search(stdout)
+    match = KRILL_CLI_STATS_RE.search(stdout)
     if not match:
-        raise RuntimeError("krillm CLI output did not contain a parseable stats line")
+        raise RuntimeError("krill CLI output did not contain a parseable stats line")
     generated = stdout.split("\n---\n", 1)[0]
     generated_lines = [
         line for line in generated.splitlines()
@@ -815,7 +815,7 @@ def run_krill_native_server_task(
     task: dict[str, Any],
     measured: bool,
 ) -> Optional[dict[str, Any]]:
-    """Send a multimodal request to the KrillLM server using the Ollama /api/generate shape.
+    """Send a multimodal request to the Krill server using the Ollama /api/generate shape.
 
     Image bytes go base64-encoded in `images`; audio bytes in `audio` with
     `audio_format` set from the file extension. The server runs all
@@ -842,13 +842,13 @@ def run_krill_native_server_task(
         payload["audio"] = base64.b64encode(
             Path(audio_path).read_bytes()).decode("ascii")
         payload["audio_format"] = Path(audio_path).suffix.lstrip(".").lower() or "wav"
-    url = args.krillm_url.rstrip("/") + "/api/generate"
+    url = args.krill_url.rstrip("/") + "/api/generate"
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
-    sampler = _MEMORY.sampler_for("krillm")
+    sampler = _MEMORY.sampler_for("krill")
     start = time.perf_counter()
     first_token_s: Optional[float] = None
     chunks: list[str] = []
@@ -859,7 +859,7 @@ def run_krill_native_server_task(
         except urllib.error.HTTPError as exc:
             if exc.code == 400:
                 raise RuntimeError(
-                    "KrillLM server returned 400 for multimodal request — "
+                    "Krill server returned 400 for multimodal request — "
                     "server multimodal support has likely not landed yet "
                     f"(url={url}): {exc.read().decode('utf-8', errors='replace')}"
                 ) from exc
@@ -877,7 +877,7 @@ def run_krill_native_server_task(
                     final = event
     wall_s = time.perf_counter() - start
     if final is None:
-        raise RuntimeError("KrillLM server stream ended without final stats")
+        raise RuntimeError("Krill server stream ended without final stats")
     if not measured:
         return None
 
@@ -1100,7 +1100,7 @@ def media_signature(path: Optional[str]) -> Optional[dict[str, Any]]:
 
 
 def parity_field(
-    krillm_runs: list[dict[str, Any]],
+    krill_runs: list[dict[str, Any]],
     ollama_runs: list[dict[str, Any]],
     prompt: str,
     media_path: Optional[str],
@@ -1112,7 +1112,7 @@ def parity_field(
             return None
         return statistics.median(values)
 
-    krill_tokens = median_tokens(krillm_runs)
+    krill_tokens = median_tokens(krill_runs)
     ollama_tokens = median_tokens(ollama_runs)
     if krill_tokens and ollama_tokens:
         basis = "prompt_tokens"
@@ -1132,7 +1132,7 @@ def parity_field(
         "prompt": {
             "status": prompt_status,
             "basis": basis,
-            "krillm": a,
+            "krill": a,
             "ollama": b,
             "delta_ratio": round(delta_ratio, 4),
         },
@@ -1153,25 +1153,25 @@ def parity_field(
     if overall == "mismatch":
         result["details"] = (
             f"prompt size differs by {delta_ratio*100:.1f}% between engines "
-            f"({basis}: krillm={a}, ollama={b})"
+            f"({basis}: krill={a}, ollama={b})"
         )
     result["status"] = overall
     return result
 
 
 def krill_path_for_task(args: argparse.Namespace, task: dict[str, Any], use_server: bool) -> str:
-    """Decide which KrillLM path to use for a single task.
+    """Decide which Krill path to use for a single task.
 
-    The mlx-vlm bridge was removed in WS6 Step 4: all KrillLM modalities
+    The mlx-vlm bridge was removed in WS6 Step 4: all Krill modalities
     (text, image, audio) run natively. Audio — like text/image — uses the
-    server when --krillm-url is given, otherwise the native CLI binary.
-    --krillm-image-mode still selects the non-server text/image path.
+    server when --krill-url is given, otherwise the native CLI binary.
+    --krill-image-mode still selects the non-server text/image path.
     """
     if task.get("audio"):
         return "native_server" if use_server else "native_cli"
     if use_server:
         return "native_server"
-    return args.krillm_image_mode
+    return args.krill_image_mode
 
 
 def dispatch_krill_task(
@@ -1188,11 +1188,11 @@ def dispatch_krill_task(
         result = run_krill_native_server_task(args, task, measured=measured)
     else:
         raise RuntimeError(
-            f"unknown KrillLM path '{path}'. The mlx-vlm bridge was removed "
+            f"unknown Krill path '{path}'. The mlx-vlm bridge was removed "
             "in WS6 Step 4; valid paths are native_cli / native_server."
         )
     if result is not None:
-        result["krillm_path"] = path
+        result["krill_path"] = path
     return result
 
 
@@ -1208,13 +1208,13 @@ def main() -> int:
             "pass --sample-memory off to disable."
         )
 
-    # Validate the krillm CLI binary up-front when any task may need it.
-    if args.engine in ("both", "krillm") and args.krillm_image_mode == "native_cli":
-        bin_path = Path(args.krillm_bin)
+    # Validate the krill CLI binary up-front when any task may need it.
+    if args.engine in ("both", "krill") and args.krill_image_mode == "native_cli":
+        bin_path = Path(args.krill_bin)
         if not bin_path.exists() or not os.access(bin_path, os.X_OK):
             raise SystemExit(
-                f"krillm CLI binary not found or not executable at '{args.krillm_bin}'. "
-                "Build it with `make release` (or pass --krillm-bin <path>)."
+                f"krill CLI binary not found or not executable at '{args.krill_bin}'. "
+                "Build it with `make release` (or pass --krill-bin <path>)."
             )
 
     assets = ensure_assets(args.output, args.image, args.audio)
@@ -1238,36 +1238,36 @@ def main() -> int:
         },
     ]
 
-    include_krillm = args.engine in ("both", "krillm")
+    include_krill = args.engine in ("both", "krill")
     include_ollama = args.engine in ("both", "ollama")
-    use_server = bool(getattr(args, "krillm_url", None))
-    krill_quant = krill_quantization(args.krill_model) if include_krillm else None
+    use_server = bool(getattr(args, "krill_url", None))
+    krill_quant = krill_quantization(args.krill_model) if include_krill else None
     ollama_quant = ollama_show(args.ollama_bin, args.ollama_model, args.timeout) if include_ollama else None
 
-    # The in-process mlx-vlm bridge was removed in WS6 Step 4. All KrillLM
+    # The in-process mlx-vlm bridge was removed in WS6 Step 4. All Krill
     # paths are native (CLI or server); no Python model load is needed.
     model = None
     processor = None
     krill_load_s = None
-    if include_krillm and use_server:
+    if include_krill and use_server:
         # Verify server is reachable
         try:
-            health_req = urllib.request.Request(args.krillm_url.rstrip("/") + "/healthz")
+            health_req = urllib.request.Request(args.krill_url.rstrip("/") + "/healthz")
             with urllib.request.urlopen(health_req, timeout=10) as resp:
                 health = json.loads(resp.read())
-            print(f"KrillLM server: {health.get('status')} (model: {health.get('model')})")
+            print(f"Krill server: {health.get('status')} (model: {health.get('model')})")
         except Exception as exc:
-            raise SystemExit(f"KrillLM server not reachable at {args.krillm_url}: {exc}")
+            raise SystemExit(f"Krill server not reachable at {args.krill_url}: {exc}")
 
     results: dict[str, Any] = {}
     for task in tasks:
         krill_path = krill_path_for_task(args, task, use_server)
-        # WS6: KrillLM serves text, image, and audio natively (the mlx-vlm
-        # bridge was removed), so warm up KrillLM media the same as text —
+        # WS6: Krill serves text, image, and audio natively (the mlx-vlm
+        # bridge was removed), so warm up Krill media the same as text —
         # otherwise cold first-use cost leaks into the hard-gated media
         # wall/prefill metrics.
         for _ in range(args.warmup):
-            if include_krillm:
+            if include_krill:
                 dispatch_krill_task(args, task, model, processor, krill_path, measured=False)
             if include_ollama:
                 run_ollama_task(args, task, measured=False)
@@ -1279,9 +1279,9 @@ def main() -> int:
         }
         krill_runs_for_parity: list[dict[str, Any]] = []
         ollama_runs_for_parity: list[dict[str, Any]] = []
-        if include_krillm:
+        if include_krill:
             if use_server and (task.get("image") or task.get("audio")):
-                # Legacy --krillm-url skip-media branch (server agent owns this region).
+                # Legacy --krill-url skip-media branch (server agent owns this region).
                 krill_runs = [
                     run_krill_server_task(args, task, measured=True)
                     for _ in range(args.runs)
@@ -1289,9 +1289,9 @@ def main() -> int:
                 valid_runs = [run for run in krill_runs if run]
                 if valid_runs:
                     for run in valid_runs:
-                        run["krillm_path"] = "native_server"
+                        run["krill_path"] = "native_server"
                     group, source = apply_cache_mode(valid_runs, args.cache_mode, args.warmup, True)
-                    task_results["krillm"] = {
+                    task_results["krill"] = {
                         "runs": valid_runs,
                         "summary": summarize(valid_runs, drop_first=args.drop_cold_run),
                         "cache_mode": group,
@@ -1299,7 +1299,7 @@ def main() -> int:
                     }
                     krill_runs_for_parity = valid_runs
                 else:
-                    task_results["krillm_skipped"] = "Server mode returned no valid runs for this task"
+                    task_results["krill_skipped"] = "Server mode returned no valid runs for this task"
             else:
                 krill_runs = [
                     dispatch_krill_task(args, task, model, processor, krill_path, measured=True)
@@ -1307,12 +1307,12 @@ def main() -> int:
                 ]
                 is_cache_hitting = krill_path == "native_server"
                 group, source = apply_cache_mode(krill_runs, args.cache_mode, args.warmup, is_cache_hitting)
-                task_results["krillm"] = {
+                task_results["krill"] = {
                     "runs": krill_runs,
                     "summary": summarize([run for run in krill_runs if run], drop_first=args.drop_cold_run),
                     "cache_mode": group,
                     "cache_mode_source": source,
-                    "krillm_path": krill_path,
+                    "krill_path": krill_path,
                 }
                 krill_runs_for_parity = [run for run in krill_runs if run]
         if include_ollama:
@@ -1326,7 +1326,7 @@ def main() -> int:
             }
             ollama_runs_for_parity = [run for run in ollama_runs if run]
 
-        if include_krillm and include_ollama and krill_runs_for_parity and ollama_runs_for_parity:
+        if include_krill and include_ollama and krill_runs_for_parity and ollama_runs_for_parity:
             media_path = task.get("image") or task.get("audio")
             media_kind = "image" if task.get("image") else ("audio" if task.get("audio") else None)
             parity = parity_field(
@@ -1345,7 +1345,7 @@ def main() -> int:
 
         results[task["name"]] = task_results
 
-    # KV cache dtype is set on the KrillLM side via KRILL_KV_CACHE_DTYPE
+    # KV cache dtype is set on the Krill side via KRILL_KV_CACHE_DTYPE
     # (read by InferenceEngine at construction). Record what the harness saw
     # so the gate can call out int8 vs fp16 runs explicitly.
     kv_cache_dtype = os.environ.get("KRILL_KV_CACHE_DTYPE", "fp16")
@@ -1356,12 +1356,12 @@ def main() -> int:
             "krill_model": args.krill_model,
             "ollama_model": args.ollama_model,
             "engine": args.engine,
-            "krillm_mode": "server" if use_server else "native_cli",
-            "krillm_url": args.krillm_url if use_server else None,
-            "krillm_image_mode": args.krillm_image_mode,
+            "krill_mode": "server" if use_server else "native_cli",
+            "krill_url": args.krill_url if use_server else None,
+            "krill_image_mode": args.krill_image_mode,
             "num_ctx": args.num_ctx,
             "drop_cold_run": args.drop_cold_run,
-            "krillm_bin": args.krillm_bin if args.krillm_image_mode == "native_cli" else None,
+            "krill_bin": args.krill_bin if args.krill_image_mode == "native_cli" else None,
             "runs": args.runs,
             "warmup": args.warmup,
             "temperature": args.temperature,
@@ -1376,17 +1376,17 @@ def main() -> int:
             "audio": {"path": assets["audio"], "sha256": sha256_bytes(Path(assets["audio"]).read_bytes())},
         },
         "quantization": {
-            "krillm": krill_quant,
+            "krill": krill_quant,
             "ollama": ollama_quant,
             "comparison": quantization_comparison(krill_quant, ollama_quant),
         },
-        "krillm_model_load_s": krill_load_s,
-        "krillm_image_mode": args.krillm_image_mode,
+        "krill_model_load_s": krill_load_s,
+        "krill_image_mode": args.krill_image_mode,
         "memory_sampling": _MEMORY.report_block(),
         "results": results,
     }
-    if args.krillm_image_mode == "native_cli":
-        report["krillm_bin"] = args.krillm_bin
+    if args.krill_image_mode == "native_cli":
+        report["krill_bin"] = args.krill_bin
 
     if args.cache_mode != "auto":
         report["cache_mode"] = args.cache_mode
@@ -1394,7 +1394,7 @@ def main() -> int:
     else:
         per_task_modes: list[str] = []
         for task_data in results.values():
-            for engine in ("krillm", "ollama"):
+            for engine in ("krill", "ollama"):
                 engine_data = task_data.get(engine)
                 if isinstance(engine_data, dict) and engine_data.get("cache_mode"):
                     per_task_modes.append(engine_data["cache_mode"])
@@ -1405,17 +1405,17 @@ def main() -> int:
         report["cache_mode_source"] = "auto"
 
     if use_server:
-        # Derive media routing from the actual per-run krillm_path instead of
+        # Derive media routing from the actual per-run krill_path instead of
         # hardcoding it. The old constant ("audio": "bridge") predated native
         # Swift audio (WS6) and silently contradicted reality once native
         # landed, defeating the runbook's "confirm native, not bridge" check.
         def _media_route(task_name: str) -> str:
             task = results.get(task_name, {})
-            kr = task.get("krillm", {}) if isinstance(task, dict) else {}
+            kr = task.get("krill", {}) if isinstance(task, dict) else {}
             paths = {
-                r.get("krillm_path")
+                r.get("krill_path")
                 for r in kr.get("runs", [])
-                if isinstance(r, dict) and r.get("krillm_path")
+                if isinstance(r, dict) and r.get("krill_path")
             }
             if not paths:
                 return "unknown"
@@ -1440,7 +1440,7 @@ def main() -> int:
         compact[name] = {
             engine: engine_result["summary"]
             for engine, engine_result in value.items()
-            if engine in ("krillm", "ollama")
+            if engine in ("krill", "ollama")
         }
     print(json.dumps(compact, indent=2, sort_keys=True))
     return 0

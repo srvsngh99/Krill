@@ -18,12 +18,12 @@ case "$MODE" in
   mxfp8) GS=32; BITS=8;;
   *) echo "this gate is for the float formats (nvfp4/mxfp4/mxfp8); use verify_native_quantize_parity.sh for affine"; exit 2;;
 esac
-PY="${KRILL_PY:-$HOME/.krillm/venv/bin/python}"
+PY="${KRILL_PY:-$HOME/.krill/venv/bin/python}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-OUT="$HOME/.krillm/models/blobs/native-quant-nvfp4-paritycheck"
+OUT="$HOME/.krill/models/blobs/native-quant-nvfp4-paritycheck"
 
 rm -rf "$OUT"
-HF_HUB_OFFLINE=1 .build/release/krillm quantize "$SRC" \
+HF_HUB_OFFLINE=1 .build/release/krill quantize "$SRC" \
   --mode "$MODE" --group-size "$GS" --bits "$BITS" --dtype fp16 \
   --name native-quant-nvfp4-paritycheck || { echo "GATE: FAIL (quantize errored)"; exit 1; }
 

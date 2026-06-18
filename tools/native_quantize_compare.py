@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Byte-compare a native `krillm quantize` output against a reference synthesized
+"""Byte-compare a native `krill quantize` output against a reference synthesized
 from the SAME bf16 source via the canonical MLX op (`mx.quantize`). A match proves
 the Swift path == the canonical op, tensor for tensor.
 

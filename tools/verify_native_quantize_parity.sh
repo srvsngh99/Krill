@@ -1,6 +1,6 @@
 #!/bin/bash
-# Byte-exact parity gate for the native Swift+MLX quantizer (krillm quantize) vs
-# mlx_lm.convert. Quantizes a local bf16 source with `krillm quantize` and compares
+# Byte-exact parity gate for the native Swift+MLX quantizer (krill quantize) vs
+# mlx_lm.convert. Quantizes a local bf16 source with `krill quantize` and compares
 # every produced tensor against an mlx-community (mlx_lm.convert) 4-bit reference.
 #
 # Usage:
@@ -12,11 +12,11 @@
 #   tools/verify_native_quantize_parity.sh "$BF" "$REF"
 set -euo pipefail
 SRC="$1"; REF="$2"; BITS="${3:-4}"; GROUP="${4:-64}"
-PY="${KRILL_PY:-$HOME/.krillm/venv/bin/python}"
-OUT="$HOME/.krillm/models/blobs/native-quant-paritycheck"
+PY="${KRILL_PY:-$HOME/.krill/venv/bin/python}"
+OUT="$HOME/.krill/models/blobs/native-quant-paritycheck"
 
 rm -rf "$OUT"
-HF_HUB_OFFLINE=1 .build/release/krillm quantize "$SRC" \
+HF_HUB_OFFLINE=1 .build/release/krill quantize "$SRC" \
   --bits "$BITS" --group-size "$GROUP" --dtype fp16 --name native-quant-paritycheck
 
 "$PY" - "$REF" "$OUT" <<'PYEOF'

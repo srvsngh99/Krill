@@ -10,19 +10,19 @@ Owner: unassigned
 format (verified byte-exact against Ollama's template) and are live-benchmarked
 on the real checkpoints:
 
-| Family | Native format | KrillLM | Ollama | Verdict |
+| Family | Native format | Krill | Ollama | Verdict |
 |--|--|--|--|--|
 | Mistral | `[AVAILABLE_TOOLS][…][/AVAILABLE_TOOLS]` / `[TOOL_CALLS][…]` / `[TOOL_RESULTS]` | 4/4 valid+exact | 4/4 | PASS |
 | Phi-4-mini | `<\|tool\|>[…]<\|/tool\|>` defs / `<\|tool_call\|>[…]<\|/tool_call\|>` | 1/4 | 1/4 | PASS¹ |
 
 ¹ phi-4-mini is a weak tool-caller on **both** engines (it declines T1/T2/T4
 and emits a tool call only rarely); identical model behaviour, parity holds -
-the same pattern as the Llama-T3 note above. The KrillLM adapter parses the
+the same pattern as the Llama-T3 note above. The Krill adapter parses the
 native `<|tool_call|>` array correctly when the model does emit one.
 
 **Phi-4-mini base-runtime fixes (2026-06-01, prerequisite for the above).**
 The Phi runtime was written for Phi-3-mini and produced pure garbage on
-phi-4-mini; five distinct bugs were fixed in `Sources/KLMCore/PhiModel.swift`
+phi-4-mini; five distinct bugs were fixed in `Sources/KrillCore/PhiModel.swift`
 (+ loader/engine): (1) `partial_rotary_factor` 0.75 was ignored (full RoPE on a
 partial-rotary head); (2) `tie_word_embeddings` was ignored (random `lm_head`);
 (3) the checkpoint's **fused `qkv_proj`** was silently dropped because the model
@@ -31,14 +31,14 @@ was absent; (5) the `<|end|>` chat terminator (declared only in `config.json`'s
 `eos_token_id`, no `generation_config.json`) was not a stop token, so the
 assistant ran on. After the fixes phi-4-mini answers correctly and halts.
 
-The hard KrillLM>=Ollama tool-quality gate is `tools/tool_calling_benchmark.py`
+The hard Krill>=Ollama tool-quality gate is `tools/tool_calling_benchmark.py`
 (per family, temp 0); the server's `parity_gate.py` `T0-4` cell now additionally
 asserts any returned `tool_calls` are structurally well-formed.
 
 **Multi-family parity (2026-05-20, `tools/tool_calling_benchmark.py`,
-temp 0; KrillLM vs Ollama, same model class):**
+temp 0; Krill vs Ollama, same model class):**
 
-| Family | Models | KrillLM | Ollama | Verdict |
+| Family | Models | Krill | Ollama | Verdict |
 |--|--|--|--|--|
 | Gemma 4 | gemma-4-e2b / gemma4:e2b | 4/4 | 4/4 | PASS |
 | Llama 3.x | llama-3.2-3b / llama3.2:3b | 3/4 | 3/4 | PASS¹ |
@@ -80,10 +80,10 @@ Jinja ("not supported yet"), which is *why* per-family hand adapters
 | | T1 single | T2 select | T3 no-tool | T4 agentic | TOTAL |
 |--|--|--|--|--|--|
 | Ollama (before/after) | ✓ | ✓ | ✓ | ✓ | 4/4 |
-| KrillLM **before** | FAIL | FAIL | ✓ | FAIL | **1/4** |
-| KrillLM **after** | ✓ | ✓ | ✓ | ✓ | **4/4** |
+| Krill **before** | FAIL | FAIL | ✓ | FAIL | **1/4** |
+| Krill **after** | ✓ | ✓ | ✓ | ✓ | **4/4** |
 
-GATE: PASS (KrillLM ≥ Ollama on valid + args_exact). Artifacts
+GATE: PASS (Krill ≥ Ollama on valid + args_exact). Artifacts
 (gitignored, regenerate via §5):
 `.build/benchmarks/tool-calling-baseline-2026-05-20.json` (red),
 `.build/benchmarks/tool-calling-nativefix-2026-05-20.json` (green).
@@ -98,13 +98,13 @@ lenient native parser.
 
 This is the feature companion to `OLLAMA_MAC_PARITY_PLAN.md` and shares
 its hard/advisory/OOS gate philosophy. It targets the
-[finding] that KrillLM's agentic / function-calling output is
+[finding] that Krill's agentic / function-calling output is
 unreliable on the **same** Gemma 4 E2B weights that Ollama drives
 correctly.
 
 ## 1. Problem
 
-KrillLM's tool plumbing is mechanically complete - the OpenAI `tools`
+Krill's tool plumbing is mechanically complete - the OpenAI `tools`
 param, the Ollama `tools` param, the Anthropic `tools` param, a
 `tool_calls` response in all three shapes, and a tolerant
 `ToolCalling.extractToolCalls` parser. The plumbing is **not** the
@@ -116,7 +116,7 @@ Gemma 4 E2B weights):
 | Engine | Output |
 |--------|--------|
 | Ollama `gemma4:e2b`  | valid `{"name":"add","arguments":{"a":12,"b":30}}` |
-| KrillLM `gemma-4-e2b` | malformed `{"name":"add","arguments":{"a":{"a":12,"b":30}}}`, `finish_reason=stop`, nothing extracted |
+| Krill `gemma-4-e2b` | malformed `{"name":"add","arguments":{"a":{"a":12,"b":30}}}`, `finish_reason=stop`, nothing extracted |
 
 A multi-step agentic loop produces fully garbled output. Plain-QA
 accuracy is fine, so this is **not** a weights or decode-quality
@@ -124,7 +124,7 @@ problem.
 
 ## 2. Root cause (confirmed)
 
-`Sources/KLMServer/ToolCalling.swift` hand-rolls a generic
+`Sources/KrillServer/ToolCalling.swift` hand-rolls a generic
 Hermes/Qwen-style instruction (`injectToolSystem` ->
 `toolSystemPrompt`) that asks the model to emit:
 
@@ -132,8 +132,8 @@ Hermes/Qwen-style instruction (`injectToolSystem` ->
 <tool_call>{"name": "<tool-name>", "arguments": {<values>}}</tool_call>
 ```
 
-Gemma 4 was **never fine-tuned on that convention**. The KrillLM-side
-checkpoint (`~/.krillm/models/blobs/gemma-4-e2b/tokenizer_config.json`)
+Gemma 4 was **never fine-tuned on that convention**. The Krill-side
+checkpoint (`~/.krill/models/blobs/gemma-4-e2b/tokenizer_config.json`)
 ships *no* `chat_template`, so `TokenizerWrapper.applyChatTemplate`
 falls through to `formatGemma4TokenIds` - a hand-rolled turn-token
 format with **zero** tool awareness. The `tools` array never reaches
@@ -167,7 +167,7 @@ So the model is trained to emit, literally:
 ```
 
 not a JSON object with `name`/`arguments` keys. Ollama's gemma4 path
-uses this embedded renderer + `response_schema`; KrillLM ignores both.
+uses this embedded renderer + `response_schema`; Krill ignores both.
 
 ## 3. Workstreams
 
@@ -182,7 +182,7 @@ M4 target, mirroring the audio plan's WS6.
 block in `<|tool> … <tool|>` and feed prior `tool` role messages back
 as `<|tool_response> … <tool_response|>`. Carry `tools` through
 `InferenceEngine.generate(messages:)` (currently dropped - see
-`Sources/KLMEngine/InferenceEngine.swift:260`). Verify byte-exact
+`Sources/KrillEngine/InferenceEngine.swift:260`). Verify byte-exact
 against Ollama's rendered prompt via `/api/generate` `raw`/template
 dump for the same tools+messages.
 
@@ -213,7 +213,7 @@ renderer/parser. No endpoint-shape changes.
 ### WS5 - Tests + benchmark gate
 
 Swift unit tests for render + parse (golden strings from
-`response_schema`). Live E2E gated on `KLM_GEMMA4_MODEL_PATH`. The §5
+`response_schema`). Live E2E gated on `KRILL_GEMMA4_MODEL_PATH`. The §5
 benchmark must go green vs Ollama before WS3 flips the Gemma 4 default
 on. Then add a hard `tool_call` cell to the parity gate.
 
@@ -227,10 +227,10 @@ on the M4 target, exactly as native audio did in WS6.
 
 `tools/tool_calling_benchmark.py` (landed) is the reference harness.
 Same skip-gate (exit 77 on missing prereqs) and report-artifact
-discipline as `tools/krillm_vs_ollama_benchmark.py`.
+discipline as `tools/krill_vs_ollama_benchmark.py`.
 
 It runs both engines on the **same** Gemma 4 E2B weights
-(`gemma4:e2b` on Ollama `:11434`, `gemma-4-e2b` on a running KrillLM
+(`gemma4:e2b` on Ollama `:11434`, `gemma-4-e2b` on a running Krill
 server) over a fixed suite, temp 0, and scores each turn:
 
 - **T1 single tool** - one explicit `add(a,b)`; expect exactly one
@@ -245,17 +245,17 @@ server) over a fixed suite, temp 0, and scores each turn:
 Per engine per task: `valid_tool_call` (parsed, right name, args
 schema-valid), `args_exact` (values match), `well_formed` (no
 double-nesting / leakage), latency. The metric is the
-**KrillLM-vs-Ollama parity ratio**; the gate is "KrillLM ≥ Ollama on
+**Krill-vs-Ollama parity ratio**; the gate is "Krill ≥ Ollama on
 valid_tool_call and args_exact across the suite."
 
 Pre-fix expectation (captured as the baseline artifact): Ollama green
-across T1-T4; KrillLM red on T1 (`args` double-nested) and T4.
+across T1-T4; Krill red on T1 (`args` double-nested) and T4.
 
 Run:
 
 ```
 python3 tools/tool_calling_benchmark.py \
-  --krillm-url http://127.0.0.1:11435 \
+  --krill-url http://127.0.0.1:11435 \
   --ollama-host http://127.0.0.1:11434 \
   --krill-model gemma-4-e2b --ollama-model gemma4:e2b \
   --output .build/benchmarks/tool-calling.json

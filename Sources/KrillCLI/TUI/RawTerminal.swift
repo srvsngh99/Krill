@@ -1,0 +1,128 @@
+import Foundation
+import KrillTUI
+
+// Saved terminal state for restoration from an atexit / fatal-signal context
+// (where only async-signal-safe calls and a sig_atomic_t-style global are
+// allowed). Restores cursor + main screen + the original termios so an
+// abnormal exit (SIGTERM/SIGHUP, or a crash that still runs atexit) does not
+// leave the user's terminal stuck in raw mode on the alternate screen.
+private nonisolated(unsafe) var krillSavedTermios = termios()
+private nonisolated(unsafe) var krillTermiosValid = false
+
+private func krillRestoreTerminal() {
+    guard krillTermiosValid else { return }
+    let seq = "\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?25h\u{1B}[?1049l"
+    _ = seq.withCString { write(STDOUT_FILENO, $0, strlen($0)) }
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &krillSavedTermios)
+    krillTermiosValid = false
+}
+
+private func krillFatalSignal(_ sig: Int32) {
+    krillRestoreTerminal()
+    signal(sig, SIG_DFL)
+    raise(sig)
+}
+
+/// Owns the terminal's raw-mode lifecycle for the full-screen TUI: switches to
+/// the alternate screen buffer, puts the tty in raw mode (no echo, no canonical
+/// line editing, no terminal-generated signals so Ctrl-C arrives as a byte),
+/// hides the cursor, and restores everything on `leave()`. macOS only.
+final class RawTerminal {
+    private var original = termios()
+    private var entered = false
+
+    /// True when stdin and stdout are both interactive terminals.
+    static var isInteractive: Bool {
+        isatty(STDIN_FILENO) != 0 && isatty(STDOUT_FILENO) != 0
+    }
+
+    func enter() {
+        guard RawTerminal.isInteractive, !entered else { return }
+        tcgetattr(STDIN_FILENO, &original)
+        var raw = original
+        raw.c_iflag &= ~tcflag_t(BRKINT | ICRNL | INPCK | ISTRIP | IXON)
+        raw.c_oflag &= ~tcflag_t(OPOST)
+        raw.c_cflag |= tcflag_t(CS8)
+        // Disable echo, canonical mode, extended input, and key-generated
+        // signals (ISIG) so Ctrl-C/Ctrl-Z reach us as bytes we handle.
+        raw.c_lflag &= ~tcflag_t(ECHO | ICANON | IEXTEN | ISIG)
+        raw.c_cc.16 = 1   // VMIN  = 1: block for at least one byte
+        raw.c_cc.17 = 0   // VTIME = 0: no inter-byte timer
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw)
+
+        // Arm restoration for abnormal exits (the normal path uses leave()).
+        krillSavedTermios = original
+        krillTermiosValid = true
+        atexit(krillRestoreTerminal)
+        for sig in [SIGTERM, SIGHUP, SIGQUIT] { signal(sig, krillFatalSignal) }
+
+        // Alt screen, hide cursor, enable SGR mouse reporting (for wheel scroll),
+        // clear. (Hold Option/Fn to select text while mouse reporting is on.)
+        Output.write("\u{1B}[?1049h\u{1B}[?25l\u{1B}[?1000h\u{1B}[?1006h\u{1B}[2J")
+        entered = true
+    }
+
+    func leave() {
+        guard entered else { return }
+        // Disable mouse reporting, show cursor, leave alt screen.
+        Output.write("\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?25h\u{1B}[?1049l")
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &original)
+        krillTermiosValid = false
+        entered = false
+    }
+
+    /// Current terminal size, falling back to 24x80 if the query fails.
+    func size() -> (rows: Int, cols: Int) {
+        var ws = winsize()
+        if ioctl(STDOUT_FILENO, UInt(TIOCGWINSZ), &ws) == 0, ws.ws_row > 0, ws.ws_col > 0 {
+            return (Int(ws.ws_row), Int(ws.ws_col))
+        }
+        return (24, 80)
+    }
+
+    /// Non-blocking poll: true if input is available to read within `ms`.
+    func waitForInput(timeoutMs: Int32) -> Bool {
+        var fds = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+        return poll(&fds, 1, timeoutMs) > 0 && (fds.revents & Int16(POLLIN)) != 0
+    }
+
+    /// Best-effort query of the terminal's background color via OSC 11. Returns
+    /// the perceived luminance (0 dark .. 1 light) if the terminal answers
+    /// within a short budget, else nil. Must run in raw mode (so the reply is
+    /// not echoed / line-buffered) and before the key loop starts. Any terminal
+    /// that does not answer simply times out and yields nil.
+    func queryBackgroundLuminance() -> Double? {
+        guard RawTerminal.isInteractive, entered else { return nil }
+        Output.write("\u{1B}]11;?\u{07}")
+        var bytes = [UInt8]()
+        var waitedMs = 0
+        let budgetMs = 120
+        while waitedMs < budgetMs, bytes.count < 64 {
+            if waitForInput(timeoutMs: 20) {
+                var b: UInt8 = 0
+                if read(STDIN_FILENO, &b, 1) == 1 {
+                    bytes.append(b)
+                    if b == 0x07 || b == 0x5C { break }   // BEL or ST backslash
+                }
+            } else {
+                waitedMs += 20
+            }
+        }
+        guard let reply = String(bytes: bytes, encoding: .utf8) else { return nil }
+        return Theme.luminance(fromOSC11: reply)
+    }
+}
+
+/// Buffered stdout writer for the TUI (one syscall per frame keeps redraws from
+/// flickering). Not thread-safe; the TUI writes from a single task.
+enum Output {
+    static func write(_ s: String) {
+        var bytes = Array(s.utf8)
+        var off = 0
+        while off < bytes.count {
+            let n = bytes[off...].withUnsafeBytes { Foundation.write(STDOUT_FILENO, $0.baseAddress, $0.count) }
+            if n <= 0 { break }
+            off += n
+        }
+    }
+}

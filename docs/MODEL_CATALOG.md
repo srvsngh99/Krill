@@ -1,13 +1,13 @@
 # Remote Model Catalog
 
 The model catalog lets new models be pulled **without rebuilding the
-binary**. KrillLM ships a curated, compiled-in `AliasMap` (the
+binary**. Krill ships a curated, compiled-in `AliasMap` (the
 recommended MLX-quantized models per family); the catalog is an
 optional JSON file that supplements it.
 
 ## Resolution order
 
-`krillm pull <name>` resolves a name in this order:
+`krill pull <name>` resolves a name in this order:
 
 1. **Built-in alias** - the curated, tested `AliasMap`.
 2. **Catalog entry** - the on-disk catalog cache, when present.
@@ -19,8 +19,8 @@ curated alias with a different (or malicious) repo.
 
 ## Catalog file
 
-The cache lives at `~/.krillm/catalog.json`
-(`krillm catalog path` prints the exact location). Schema:
+The cache lives at `~/.krill/catalog.json`
+(`krill catalog path` prints the exact location). Schema:
 
 ```json
 {
@@ -47,9 +47,9 @@ build does not recognize is ignored rather than mis-decoded.
 ## CLI
 
 ```text
-krillm catalog list                 # built-in aliases + catalog models
-krillm catalog refresh --url <url>  # fetch a remote catalog, cache it
-krillm catalog path                 # print the cache file path + age
+krill catalog list                 # built-in aliases + catalog models
+krill catalog refresh --url <url>  # fetch a remote catalog, cache it
+krill catalog path                 # print the cache file path + age
 ```
 
 `refresh` also reads the `KRILL_CATALOG_URL` environment variable when
@@ -81,5 +81,5 @@ Each model carries a `source` of `builtin` or `catalog`.
 
 `ModelCatalogStore.isStale(ttl:)` reports whether the cache is older
 than a caller-supplied TTL, measured from the file's modification time.
-KrillLM does not auto-refresh today; `isStale` is exposed so a manager
+Krill does not auto-refresh today; `isStale` is exposed so a manager
 or a future scheduled refresh can decide when to call `refresh`.

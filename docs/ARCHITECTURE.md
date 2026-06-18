@@ -1,8 +1,8 @@
-# KrillLM Architecture
+# Krill Architecture
 
 ## Overview
 
-KrillLM is a Mac-native LLM inference engine for Apple Silicon built on MLX. It ships as a single CLI binary (`krillm`) with an HTTP server, supporting 7 model families with prefix caching and speculative decoding.
+Krill is a Mac-native LLM inference engine for Apple Silicon built on MLX. It ships as a single CLI binary (`krill`) with an HTTP server, supporting 7 model families with prefix caching and speculative decoding.
 
 ### Release Status
 
@@ -21,32 +21,32 @@ Native Swift covers Gemma 4 text and image (text model + SigLIP2 vision encoder)
 ## Module Dependency Graph
 
 ```
-KLMCLI (executable)
-  |-- KLMEngine        (inference orchestration)
-  |     |-- KLMCore    (model architectures)
-  |     |-- KLMCache   (KV cache, prefix cache)
-  |     |-- KLMTokenizer (tokenizer wrapper)
-  |     |-- KLMSampler (greedy, top-k, top-p)
-  |-- KLMServer        (HTTP API)
-  |     |-- KLMEngine
-  |-- KLMRegistry      (model store, HF puller)
-  |-- KLMRuntime       (Metal GPU validation)
+KrillCLI (executable)
+  |-- KrillEngine        (inference orchestration)
+  |     |-- KrillCore    (model architectures)
+  |     |-- KrillCache   (KV cache, prefix cache)
+  |     |-- KrillTokenizer (tokenizer wrapper)
+  |     |-- KrillSampler (greedy, top-k, top-p)
+  |-- KrillServer        (HTTP API)
+  |     |-- KrillEngine
+  |-- KrillRegistry      (model store, HF puller)
+  |-- KrillRuntime       (Metal GPU validation)
 ```
 
 ## Source Layout
 
 ```
 Sources/
-  KLMCLI/             CLI commands (run, serve, launch, pull, bench, etc.)
-  KLMEngine/          Inference engine, speculative decoder, Python fallback
-  KLMCore/            Model architectures (Llama, Gemma4, Qwen, etc.) + model loader
-  KLMCache/           KV cache (batched concat) + prefix cache (LRU + disk)
-  KLMServer/          HTTP server (OpenAI + Ollama APIs)
-  KLMTokenizer/       HuggingFace tokenizer wrapper
-  KLMSampler/         Token sampling (greedy, temperature, top-k, top-p)
-  KLMRegistry/        Model registry, HF puller, manifests
-  KLMRuntime/         Metal runtime validation
-  KLMKernels/         Custom Metal shaders (planned)
+  KrillCLI/             CLI commands (run, serve, launch, pull, bench, etc.)
+  KrillEngine/          Inference engine, speculative decoder, Python fallback
+  KrillCore/            Model architectures (Llama, Gemma4, Qwen, etc.) + model loader
+  KrillCache/           KV cache (batched concat) + prefix cache (LRU + disk)
+  KrillServer/          HTTP server (OpenAI + Ollama APIs)
+  KrillTokenizer/       HuggingFace tokenizer wrapper
+  KrillSampler/         Token sampling (greedy, temperature, top-k, top-p)
+  KrillRegistry/        Model registry, HF puller, manifests
+  KrillRuntime/         Metal runtime validation
+  KrillKernels/         Custom Metal shaders (planned)
 ```
 
 ## Generation Pipeline
@@ -120,9 +120,9 @@ model-agnostic `<tool_call>`/`<tool_response>` sentinel extractor
 (`ToolCalling.swift`). This is what lets a single server back agents that speak
 three different protocols.
 
-## Coding Agent Backend (`krillm launch`)
+## Coding Agent Backend (`krill launch`)
 
-`krillm launch <agent>` boots a terminal coding agent (Claude Code, Codex,
+`krill launch <agent>` boots a terminal coding agent (Claude Code, Codex,
 OpenCode, Hermes, Pi, Copilot CLI, Droid) pre-wired to the local server, the way
 `ollama launch` does. The design principle: **the adapter is an endpoint inside
 the server, not a per-agent external proxy.** Each agent speaks one of the three
@@ -136,22 +136,22 @@ endpoint.
 | OpenAI Responses | `/v1/responses` | Codex (it dropped `wire_api="chat"`) |
 
 **Layout.** Agent knowledge is a declarative table in
-`Sources/KLMCLI/AgentProfiles.swift` (one `AgentProfile` literal per agent:
+`Sources/KrillCLI/AgentProfiles.swift` (one `AgentProfile` literal per agent:
 wire protocol, env to export, config files to `write`/`mergeJSON`, setup
-`preExec` commands, binary, install hint). `Sources/KLMCLI/LaunchCommand.swift`
+`preExec` commands, binary, install hint). `Sources/KrillCLI/LaunchCommand.swift`
 stays generic over the table.
 
 **Flow.** Resolve the profile and model (`--model` or first installed) -> ensure
-a server is up with that model loaded (auto-start a detached `krillm serve` and
+a server is up with that model loaded (auto-start a detached `krill serve` and
 poll `/healthz`, or fail loud; `--no-serve` opts out) -> apply the agent's
 config files + env + setup commands -> `execvp` the agent so it inherits the
 real TTY/stdin/signals. The auto-started server survives the exec (it is a
 separate process) and keeps running after the agent exits; the keep-alive
-controller unloads its idle *model* to free memory (and `krillm stop` unloads
+controller unloads its idle *model* to free memory (and `krill stop` unloads
 it on demand), but the server *process* itself stays resident until killed.
 
-**Config safety.** `write` targets are krillm-owned paths only (e.g. Codex gets
-an isolated `config.toml` under a krillm-owned `CODEX_HOME`, so the user's real
+**Config safety.** `write` targets are krill-owned paths only (e.g. Codex gets
+an isolated `config.toml` under a krill-owned `CODEX_HOME`, so the user's real
 `~/.codex` is never touched). `mergeJSON` deep-merges only our keys into the
 user's config, keeps a `.bak`, and concatenates+dedups arrays (so e.g. Droid's
 `custom_models` never clobbers the user's existing entries).

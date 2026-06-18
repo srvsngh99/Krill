@@ -1,13 +1,13 @@
 # Interactive chat TUI
 
-`krillm run <model>` with no prompt opens KrillLM's full-screen chat in the
+`krill run <model>` with no prompt opens Krill's full-screen chat in the
 Sourav AI Labs monochrome identity: a branded masthead, a scrollable
 conversation pane, a bottom input box with a slash-command autosuggest popup,
 and a status footer (`model . tok/s . ctx N / total (%) . cwd:branch . version`).
 It is a multi-turn conversation that remembers context.
 
 The TUI is the default on an interactive terminal. When stdout is not a TTY
-(piped/redirected) KrillLM falls back to the classic libedit line REPL; force it
+(piped/redirected) Krill falls back to the classic libedit line REPL; force it
 with `--classic`. Color is disabled under `NO_COLOR`.
 
 ## Themes (light / dark terminals)
@@ -76,8 +76,8 @@ hand-written blurb per family. Esc closes it.
 
 ## Custom slash commands
 
-Drop a Markdown file at `~/.krillm/commands/<name>.md` and it becomes `/<name>`,
-the KrillLM analogue of Claude Code's `.claude/commands`. The body is a prompt
+Drop a Markdown file at `~/.krill/commands/<name>.md` and it becomes `/<name>`,
+the Krill analogue of Claude Code's `.claude/commands`. The body is a prompt
 template expanded with the text typed after the command, then sent like a normal
 message. Custom commands appear in the autosuggest popup and in `/help`.
 
@@ -88,7 +88,7 @@ Placeholders:
 - A template with no placeholder gets the arguments appended on a new line
 
 An optional `--- description: ... ---` frontmatter block sets the one-line
-summary shown in the popup. Example `~/.krillm/commands/tldr.md`:
+summary shown in the popup. Example `~/.krill/commands/tldr.md`:
 
 ```markdown
 ---
@@ -118,7 +118,7 @@ multi-image models (mllama); single-image models use the first. `--image` /
 
 ## Voice
 
-**Voice is off by default** - KrillLM is a text chat first. In the default
+**Voice is off by default** - Krill is a text chat first. In the default
 **`type`** posture Space is a typed space, Enter sends, and the footer shows no
 voice chrome. Turn voice on with **`Ctrl-V`** (which then cycles the postures) or
 set a default with the `voice_mode` config key (`off` / `dictate` / `handsfree`).
@@ -148,9 +148,9 @@ current state without changing it.
 
 - **`apple`** (default) - Apple's on-device speech-to-text. No download,
   instant, fully local, macOS-only.
-- **`whisper`** - KrillLM's own native MLX Whisper runtime. Higher accuracy and
+- **`whisper`** - Krill's own native MLX Whisper runtime. Higher accuracy and
   fully local. On the first dictation it asks consent and downloads a model
-  (default `base.en`, around 290 MB) into `~/.krillm/models/whisper-<sku>`;
+  (default `base.en`, around 290 MB) into `~/.krill/models/whisper-<sku>`;
   decline and dictation falls back to the Apple / model path. No Python or
   third-party ASR dependency.
 
@@ -162,14 +162,14 @@ current state without changing it.
 
 `/mic` records a clip and attaches it (press Enter to stop) for an explicit send.
 
-macOS attributes microphone access to the running app, so the mic needs KrillLM
+macOS attributes microphone access to the running app, so the mic needs Krill
 to run from a code-signed bundle that declares the mic-usage string:
 
 ```bash
-make app-bundle                 # produces dist/krillm.app (ad-hoc signed)
-dist/krillm.app/Contents/MacOS/krillm run gemma-4-e2b
+make app-bundle                 # produces dist/krill.app (ad-hoc signed)
+dist/krill.app/Contents/MacOS/krill run gemma-4-e2b
 ```
 
-The first mic use triggers the system permission prompt under KrillLM's identity.
-Run the bare `.build/release/krillm` binary instead and the prompt attaches to
+The first mic use triggers the system permission prompt under Krill's identity.
+Run the bare `.build/release/krill` binary instead and the prompt attaches to
 your terminal app.

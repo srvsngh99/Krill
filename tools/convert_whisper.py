@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Convert an OpenAI / mlx-community Whisper checkpoint to a KrillLM model dir.
+"""Convert an OpenAI / mlx-community Whisper checkpoint to a Krill model dir.
 
-KrillLM loads weights from safetensors only (mlx-swift cannot read .npz), so
+Krill loads weights from safetensors only (mlx-swift cannot read .npz), so
 this tool re-packs the published `weights.npz` (or an HF safetensors export)
 into `<out>/model.safetensors` with the OpenAI key layout preserved
 (`encoder.*`, `decoder.*`), alongside the original `config.json`. The native
