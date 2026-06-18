@@ -1613,7 +1613,7 @@ public final class InferenceEngine: @unchecked Sendable {
                                 break
                             }
                             let text = ProcessInfo.processInfo.environment["KRILL_BENCH_NO_DETOK"] != nil
-                                ? "" : capturedTokenizer.decode(token: cur)
+                                ? "" : capturedTokenizer.decodeForOutput(token: cur)
                             continuation.yield(TokenEvent(
                                 tokenId: cur, text: text,
                                 elapsed: CFAbsoluteTimeGetCurrent() - startTime))
@@ -1657,7 +1657,7 @@ public final class InferenceEngine: @unchecked Sendable {
                         // per-token detokenization+yield cost folded into the
                         // decode timer (a benchmarking diagnostic only).
                         let tokenText = ProcessInfo.processInfo.environment["KRILL_BENCH_NO_DETOK"] != nil
-                            ? "" : capturedTokenizer.decode(token: yieldedToken)
+                            ? "" : capturedTokenizer.decodeForOutput(token: yieldedToken)
                         continuation.yield(TokenEvent(
                             tokenId: yieldedToken, text: tokenText,
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime))
@@ -1687,7 +1687,7 @@ public final class InferenceEngine: @unchecked Sendable {
                             tokenId: nextToken, text: "",
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
                     } else {
-                        let firstText = capturedTokenizer.decode(token: nextToken)
+                        let firstText = capturedTokenizer.decodeForOutput(token: nextToken)
                         continuation.yield(TokenEvent(
                             tokenId: nextToken, text: firstText,
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime))
@@ -1720,7 +1720,7 @@ public final class InferenceEngine: @unchecked Sendable {
                                 break
                             }
 
-                            let text = capturedTokenizer.decode(token: token)
+                            let text = capturedTokenizer.decodeForOutput(token: token)
                             continuation.yield(TokenEvent(
                                 tokenId: token, text: text,
                                 elapsed: CFAbsoluteTimeGetCurrent() - startTime))
@@ -1754,7 +1754,7 @@ public final class InferenceEngine: @unchecked Sendable {
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
                     } else {
                         proposer.append([nextToken])
-                        let firstText = capturedTokenizer.decode(token: nextToken)
+                        let firstText = capturedTokenizer.decodeForOutput(token: nextToken)
                         continuation.yield(TokenEvent(
                             tokenId: nextToken, text: firstText,
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime))
@@ -1781,7 +1781,7 @@ public final class InferenceEngine: @unchecked Sendable {
                                 hitStop = true
                                 break
                             }
-                            let text = capturedTokenizer.decode(token: token)
+                            let text = capturedTokenizer.decodeForOutput(token: token)
                             continuation.yield(TokenEvent(
                                 tokenId: token, text: text,
                                 elapsed: CFAbsoluteTimeGetCurrent() - startTime))
@@ -1945,7 +1945,7 @@ public final class InferenceEngine: @unchecked Sendable {
                         guard !captures.stops.contains(token) else { return }
                         continuation.yield(TokenEvent(
                             tokenId: token,
-                            text: captures.tokenizer.decode(token: token),
+                            text: captures.tokenizer.decodeForOutput(token: token),
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime))
                     })
                 statsHolder.stats = GenerationStats(
@@ -2097,7 +2097,7 @@ public final class InferenceEngine: @unchecked Sendable {
                         guard !capturedStops.contains(token) else { return }
                         continuation.yield(TokenEvent(
                             tokenId: token,
-                            text: capturedTokenizer.decode(token: token),
+                            text: capturedTokenizer.decodeForOutput(token: token),
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime))
                     })
                 // Publish stats BEFORE the terminal event. The server
@@ -2657,7 +2657,7 @@ extension InferenceEngine {
                 // per-row prefill and the stacked decode read O(window) KV on
                 // sliding layers. nil for every other family (and int8).
                 cacheSpec: useQuantizedBatched(model) ? nil : model.cacheSpec,
-                decode: { tokenizer.decode(token: $0) },
+                decode: { tokenizer.decodeForOutput(token: $0) },
                 stopIds: stopIds,
                 // Batched n-gram speculation when enabled + fp16 (the spec round
                 // commits to fp16 KVCache). Degenerates to one token/round on
@@ -2760,7 +2760,7 @@ extension InferenceEngine {
                 done[r] = true
                 return
             }
-            let text = c.tokenizer.decode(token: current[r])
+            let text = c.tokenizer.decodeForOutput(token: current[r])
             c.conts[r].yield(TokenEvent(tokenId: current[r], text: text, elapsed: now))
             generated[r] += 1
             if generated[r] >= c.perRowMax[r] {
