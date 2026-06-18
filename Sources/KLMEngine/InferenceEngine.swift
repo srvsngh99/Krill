@@ -1691,10 +1691,16 @@ public final class InferenceEngine: @unchecked Sendable {
                             let cur = nextTokenArr.item(Int.self)
                             if stopIds.contains(cur) {
                                 // This iteration's forward already appended the stop
-                                // token's KV; the default loop stops BEFORE building
-                                // the stop token's forward, so drop that one position
-                                // to keep a reused (keep-alive) cache offset identical
-                                // to the default path.
+                                // token's KV; the serial loop stops BEFORE building the
+                                // stop token's forward, so drop that one position to
+                                // match the serial cache offset on a reused (keep-alive)
+                                // cache. Only RestorableKVCache (fp16 / rotating) is
+                                // trimmed; QuantizedKVCache (int8-KV) is not, so its
+                                // offset stays one ahead. Harmless today: decode caches
+                                // are never persisted (the prefix cache stores only the
+                                // prompt prefix at prefill, before decode), so nothing
+                                // reuses this offset. A future "store generated suffix"
+                                // must trim int8-KV too.
                                 for case let c as RestorableKVCache in caches {
                                     c.truncate(to: Swift.max(0, c.sequenceLength - 1))
                                 }
