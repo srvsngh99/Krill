@@ -334,7 +334,7 @@ final class ContinuousBatcher: @unchecked Sendable {
                 slidingLengths: hasRotating ? rows.map { $0.epochSlidingBaseLen } : nil)
             let kDtype = stacked.first?.snapshot()?.keys.dtype ?? .float16
 
-            if deps.specEnabled {
+            if epochUsesSpec(rows) {
                 // --- One n-gram speculative round (commits per-row directly;
                 //     no scatterBack — the outer loop re-stacks next round). ---
                 if decodeSpecRound(rows: rows, stacked: stacked, sMax: sMax, kDtype: kDtype) {
@@ -388,6 +388,12 @@ final class ContinuousBatcher: @unchecked Sendable {
                                 if row.decodeStartedAt == nil { row.decodeStartedAt = now }
                                 let next = Int(host[i])
                                 row.current = next
+                                // Keep the proposer's context in sync even on the
+                                // overlap path, so a greedy echo row dragged through
+                                // an overlap epoch (majority of the batch stalled)
+                                // does not gap its history and falsely stall if the
+                                // batch tips back to spec later.
+                                row.proposer?.append([next])
                                 if emit(row, token: next, now: now) { doBreak = true }
                                 if row.cancelled.isCancelled { doBreak = true }
                             }
@@ -407,6 +413,7 @@ final class ContinuousBatcher: @unchecked Sendable {
                                 if row.decodeStartedAt == nil { row.decodeStartedAt = now }
                                 let next = Int(host[i])
                                 row.current = next
+                                row.proposer?.append([next])   // keep proposer in sync (see above)
                                 _ = emit(row, token: next, now: now)
                             }
                             break
@@ -448,6 +455,7 @@ final class ContinuousBatcher: @unchecked Sendable {
                         if row.needsHistory { row.recent.append(row.current) }
                         let next = row.sampler.sample(logits[i ..< (i + 1)], recent: row.recent)
                         row.current = next
+                        row.proposer?.append([next])   // keep proposer in sync (see above)
                         if emit(row, token: next, now: now) { setChanged = true }
                         if row.cancelled.isCancelled { setChanged = true }
                     }
@@ -509,9 +517,23 @@ final class ContinuousBatcher: @unchecked Sendable {
 
         // Spec path (fp16 only): seed this row's n-gram proposer with the full
         // prompt + the prefill-sampled first token (the running context the
-        // verify forward attends to).
-        if deps.specEnabled && !deps.useQuantizedKV {
-            let prop = NgramProposer(config: .init(), eosIds: deps.stopIds)
+        // verify forward attends to). Only greedy/non-penalty rows can use the
+        // greedy-argmax-gated spec round, so non-greedy rows get no proposer
+        // (they always take the per-row-correct overlap/serial path).
+        if deps.specEnabled && !deps.useQuantizedKV
+            && p.sampler.isGreedy && !p.sampler.needsHistory {
+            // A batcher spec round is structurally heavier than a single-stream
+            // no-match step (W-wide verify forward + per-row cache snapshot/commit
+            // + a synchronous eval, and it forgoes the overlap pipeline), so the
+            // non-echo ramp before the epoch falls back to overlap costs more per
+            // round than on the single stream. Bail fast: 6 consecutive pure-miss
+            // rounds (pure non-echo) latch `stalled` immediately, and a shorter
+            // 16-round window catches the low-but-nonzero case - keeping the
+            // non-echo concurrent tax small while dense echo (which resets the
+            // miss run every match) keeps its win.
+            let prop = NgramProposer(
+                config: .init(monitorWindow: 16, maxConsecutiveMisses: 6),
+                eosIds: deps.stopIds)
             prop.reset(prompt: p.promptTokens)
             prop.append([firstTok])
             row.proposer = prop
@@ -563,6 +585,29 @@ final class ContinuousBatcher: @unchecked Sendable {
             decodeTime: max(0, decodeEnd - decodeStart))
         row.cont.finish()
         row.isFinished = true
+    }
+
+    /// Decide whether THIS epoch runs the n-gram spec round or the plain
+    /// overlap/serial decode. Spec requires all three:
+    ///   1. it is enabled at all (`deps.specEnabled`, fp16 only);
+    ///   2. EVERY live row is greedy + non-penalty - the verify is
+    ///      greedy-argmax-gated, so a temperature/penalty row must NOT be
+    ///      silently greedy-ified; a mixed batch falls to the per-row-correct
+    ///      overlap/serial path;
+    ///   3. a MAJORITY of live rows are still drafting productively (not
+    ///      `stalled`). Once most rows' prompt-lookup stops paying off
+    ///      (non-echo concurrent traffic), the batch falls back to the
+    ///      byte-exact overlap pipeline, recovering its CPU/GPU overlap win.
+    /// The check is per-epoch; `stalled` is sticky per row, so a batch that has
+    /// gone non-echo stays on the overlap path (no flapping), while a fresh
+    /// echo row joining can tip the majority back to spec.
+    private func epochUsesSpec(_ rows: [Row]) -> Bool {
+        guard deps.specEnabled else { return false }
+        let live = rows.filter { !$0.isFinished && !$0.cancelled.isCancelled }
+        guard !live.isEmpty else { return false }
+        guard live.allSatisfy({ $0.sampler.isGreedy && !$0.needsHistory }) else { return false }
+        let stalled = live.filter { $0.proposer?.stalled == true }.count
+        return stalled * 2 <= live.count
     }
 
     /// One n-gram speculative round over the stacked epoch (fp16 only): each row
@@ -660,6 +705,12 @@ final class ContinuousBatcher: @unchecked Sendable {
                 row.proposer?.recordOutcome(
                     acceptedDraft: allAccepted ? k : accepted.count - 1, proposed: k)
             }
+            // Feed the stall monitor every round (incl. no-match k==0). Extra
+            // tokens beyond the always-present verifier token = accepted.count-1,
+            // which is 0 on a no-match round and `k` on a full accept. When this
+            // averages below threshold over the window the row latches `stalled`,
+            // tipping `epochUsesSpec` toward the overlap path.
+            row.proposer?.recordRound(extraTokens: accepted.count - 1)
             row.proposer?.append(accepted)
 
             for tok in accepted where !row.isFinished {
