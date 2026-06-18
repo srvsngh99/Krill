@@ -1664,16 +1664,21 @@ public final class InferenceEngine: @unchecked Sendable {
                     // matches mlx-lm's generate_step double-buffer. Greedy /
                     // non-penalty only (penalties need the current host token
                     // before sampling the next, which cannot overlap); the trailing
-                    // over-generated forward on stop/maxTokens is discarded. Gated:
-                    // the default `else` path below is byte-for-byte unchanged.
+                    // over-generated forward on stop/maxTokens is discarded. The
+                    // default `else` path below is byte-for-byte unchanged.
                     // Also excludes grammar (grammarSession == nil): the reorder
                     // syncs the CURRENT token, so a per-step `advance(cur)` would
                     // re-advance the already-advanced token (prefill advances T0,
                     // each iter advances the token it just accepted) and shift the
                     // mask off-by-one. Grammar-constrained generations fall to the
                     // unchanged default loop.
-                    let usePipeline = ProcessInfo.processInfo.environment["KRILL_DECODE_PIPELINE"] != nil
-                        && !trackHistory && grammarSession == nil
+                    //
+                    // Default ON; disable with KRILL_DECODE_PIPELINE=0/false/off or
+                    // config.toml `decode_pipeline = false` (bridged to the env by
+                    // the CLI). An explicit env value wins over config.
+                    let pEnv = ProcessInfo.processInfo.environment["KRILL_DECODE_PIPELINE"]
+                    let pipelineEnabled = !(pEnv == "0" || pEnv == "false" || pEnv == "off")
+                    let usePipeline = pipelineEnabled && !trackHistory && grammarSession == nil
                     if usePipeline {
                         while generatedCount < maxTokens {
                             if genCancel.isCancelled { break }
@@ -1685,6 +1690,20 @@ public final class InferenceEngine: @unchecked Sendable {
                             // GPU finished it while we built the next forward above).
                             let cur = nextTokenArr.item(Int.self)
                             if stopIds.contains(cur) {
+                                // This iteration's forward already appended the stop
+                                // token's KV; the serial loop stops BEFORE building the
+                                // stop token's forward, so drop that one position to
+                                // match the serial cache offset on a reused (keep-alive)
+                                // cache. Only RestorableKVCache (fp16 / rotating) is
+                                // trimmed; QuantizedKVCache (int8-KV) is not, so its
+                                // offset stays one ahead. Harmless today: decode caches
+                                // are never persisted (the prefix cache stores only the
+                                // prompt prefix at prefill, before decode), so nothing
+                                // reuses this offset. A future "store generated suffix"
+                                // must trim int8-KV too.
+                                for case let c as RestorableKVCache in caches {
+                                    c.truncate(to: Swift.max(0, c.sequenceLength - 1))
+                                }
                                 continuation.yield(TokenEvent(
                                     tokenId: cur, text: "",
                                     elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))

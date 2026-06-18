@@ -54,6 +54,14 @@ struct RunCommand: AsyncParsableCommand {
     func run() async throws {
         let registry = Registry()
 
+        // Bridge the decode-pipeline toggle to the env the engine reads, unless an
+        // explicit env value is already set (env wins over config.toml). Default is
+        // on, so we only act when config disables it.
+        if ProcessInfo.processInfo.environment["KRILL_DECODE_PIPELINE"] == nil,
+           !KrillConfig.load().decodePipeline {
+            setenv("KRILL_DECODE_PIPELINE", "0", 1)
+        }
+
         // Resolve the model: explicit argument, else the configured default
         // (config.toml default_model / KRILL_DEFAULT_MODEL). A blank value
         // counts as unset.
