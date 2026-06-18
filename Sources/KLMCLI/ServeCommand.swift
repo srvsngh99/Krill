@@ -41,6 +41,13 @@ struct ServeCommand: AsyncParsableCommand {
         // them) into serverHost/serverPort/modelsDir; an explicit CLI flag,
         // when present, still overrides everything.
         let config = KrillConfig.load()
+        // Bridge the decode-pipeline toggle to the env the engine reads, unless an
+        // explicit env value is already set (env wins over config.toml). Default
+        // is on, so we only act when config disables it.
+        if ProcessInfo.processInfo.environment["KRILL_DECODE_PIPELINE"] == nil,
+           !config.decodePipeline {
+            setenv("KRILL_DECODE_PIPELINE", "0", 1)
+        }
         let host = self.host ?? config.serverHost
         let port = self.port ?? config.serverPort
         let registry: Registry

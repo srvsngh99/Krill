@@ -25,6 +25,12 @@ public struct KrillConfig: Sendable {
     /// Enable speculative decoding by default.
     public var speculativeDecoding: Bool
 
+    /// Overlap CPU forward-graph construction with GPU compute on the single
+    /// stream greedy decode path (the +13% double-buffer; byte-identical output).
+    /// On by default; set `decode_pipeline = false` to fall back to the serial
+    /// loop. Bridged to `KRILL_DECODE_PIPELINE` by the CLI.
+    public var decodePipeline: Bool
+
     /// Models directory override.
     public var modelsDir: String?
 
@@ -82,6 +88,7 @@ public struct KrillConfig: Sendable {
         self.prefixCacheSizeGB = 2.0
         self.prefixCacheMaxEntryGB = 4.0
         self.speculativeDecoding = false
+        self.decodePipeline = true
         self.modelsDir = nil
         self.serverPort = 57455   // "KRILL" on a phone keypad; unique vs Ollama's 11434
         self.serverHost = "127.0.0.1"
@@ -143,6 +150,8 @@ public struct KrillConfig: Sendable {
                 if let v = Double(value) { prefixCacheMaxEntryGB = v }
             case "speculative_decoding":
                 speculativeDecoding = value == "true" || value == "1"
+            case "decode_pipeline":
+                decodePipeline = value == "true" || value == "1"
             case "models_dir":
                 modelsDir = value.isEmpty ? nil : value
             case "server_port", "port":
