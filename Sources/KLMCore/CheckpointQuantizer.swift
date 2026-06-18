@@ -25,9 +25,9 @@ import MLX
 ///
 /// MoE (stacked 3-D experts), vision/multimodal (towers kept fp + Conv2d layouts),
 /// and Gemma (PLE / tied-head specifics) checkpoints need per-family handling
-/// this shape-driven pass does not do, so they are rejected up front. affine and
-/// nvfp4 are gated end-to-end; mxfp4/mxfp8 share the same path (auto group 32) but
-/// are not separately gated.
+/// this shape-driven pass does not do, so they are rejected up front. affine,
+/// nvfp4, and mxfp4 are gated end-to-end (byte-identical to the canonical op);
+/// mxfp8 shares the same path (auto group 32 / 8-bit) but is not separately gated.
 public enum CheckpointQuantizer {
 
     public enum QuantizeError: Error, CustomStringConvertible {

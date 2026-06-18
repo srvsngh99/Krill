@@ -6,10 +6,18 @@
 # byte-compares. A match proves the Swift float-format path == the canonical op.
 #
 # Usage:
-#   tools/verify_native_quantize_nvfp4.sh <bf16_source_dir> [mode] [group] [bits]
-#   mode defaults to nvfp4 (group 16, bits 4); mxfp4 -> group 32; mxfp8 -> group 32 bits 8.
+#   tools/verify_native_quantize_nvfp4.sh <bf16_source_dir> [mode]
+#   mode defaults to nvfp4. The float formats have exactly one valid shape each, so
+#   group/bits are derived from the mode (mirrors CheckpointQuantizer.effectiveParams)
+#   and passed identically to the Swift quantizer and the Python comparer.
 set -uo pipefail
-SRC="$1"; MODE="${2:-nvfp4}"; GS="${3:-16}"; BITS="${4:-4}"
+SRC="$1"; MODE="${2:-nvfp4}"
+case "$MODE" in
+  nvfp4) GS=16; BITS=4;;
+  mxfp4) GS=32; BITS=4;;
+  mxfp8) GS=32; BITS=8;;
+  *) echo "this gate is for the float formats (nvfp4/mxfp4/mxfp8); use verify_native_quantize_parity.sh for affine"; exit 2;;
+esac
 PY="${KRILL_PY:-$HOME/.krillm/venv/bin/python}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="$HOME/.krillm/models/blobs/native-quant-nvfp4-paritycheck"

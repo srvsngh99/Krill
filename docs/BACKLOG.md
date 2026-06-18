@@ -210,8 +210,9 @@ shell-out is gone, so the shipped binary has no Python anywhere. Output is
 Supports dense text families (Llama/Qwen/Mistral/Phi/GLM/Glm4); MoE / vision /
 Gemma are rejected up front (they need per-family handling the shape-driven pass
 does not do - a natural follow-up). `--mode` affine/nvfp4/mxfp4/mxfp8 (the float
-formats auto-pick their required group size; affine + nvfp4 gated end-to-end,
-mxfp4/mxfp8 share the path but not separately gated); `--dtype` default fp16.
+formats auto-pick their required group size; affine + nvfp4 + mxfp4 gated
+end-to-end byte-identical, mxfp8 shares the path but not separately gated);
+`--dtype` default fp16.
 Original write-up kept below for context.
 
 **Original write-up (deferred):** The only Python touchpoint left in the
