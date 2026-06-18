@@ -2,7 +2,7 @@
 
 `yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1` is a coding/reasoning
 fine-tune of `google/gemma-4-12B-it`. It is the **same `gemma4_unified`
-architecture KrillLM already serves natively** (`family: .gemma4Unified`,
+architecture Krill already serves natively** (`family: .gemma4Unified`,
 `Gemma4UnifiedModel`) - only the weights differ. So no engine changes are
 needed; the entire task is getting the weights into the MLX layout the Swift
 loader expects.
@@ -15,7 +15,7 @@ We deliberately **do not** ingest the GGUF:
 - GGUF k-quants are lossy. Even Q8_0 cannot recover the bf16 the fine-tuner
   trained from, so converting from GGUF would bake that loss into the MLX
   weights - the opposite of "best performance".
-- KrillLM has no GGUF runtime, and `gemma4` GGUF is not something MLX loads.
+- Krill has no GGUF runtime, and `gemma4` GGUF is not something MLX loads.
 
 Instead we start from the **NVFP4 safetensors** publication of the same model,
 e.g. `sakamakismile/gemma-4-12B-coder-fable5-composer2.5-MTP-NVFP4`. That is a
@@ -34,7 +34,7 @@ bf16 safetensors (MLX key scheme)
         │  tools/requant_gemma4_nvfp4.py  --protect o_proj
         ▼
 MLX nvfp4 (uniform 4-bit + 8-bit-protected attn o_proj + 8-bit vision/audio projectors)
-        │  krillm run <dir>
+        │  krill run <dir>
         ▼
 served natively
 ```
@@ -59,9 +59,9 @@ weight = value * weight_scale / weight_global_scale       # NVFP4 two-level scal
 
 (FP4 LUT, nibble order and the two-level formula are taken verbatim from
 `vllm-project/compressed-tensors`), and rewrites the HF keys into the
-MLX/KrillLM scheme used by the requant oracle:
+MLX/Krill scheme used by the requant oracle:
 
-| compressed-tensors (HF) | MLX / KrillLM |
+| compressed-tensors (HF) | MLX / Krill |
 | --- | --- |
 | `model.language_model.<x>` | `language_model.model.<x>` |
 | `model.embed_vision.<x>` | `embed_vision.<x>` |
@@ -100,20 +100,20 @@ via `q.effective(path)`.
 
 The fine-tune's own `chat_template.jinja` + tokenizer are carried through both
 steps, so its `<|turn>` / `<|channel>thought` prompt format and reasoning
-channels are preserved (KrillLM already strips Gemma channels via
+channels are preserved (Krill already strips Gemma channels via
 `ReasoningParser.stripGemmaChannels`).
 
 ## Serving
 
 ```sh
-krillm run ~/models/gemma-4-12b-coder-nvfp4          # by path - no registration
-krillm serve --model ~/models/gemma-4-12b-coder-nvfp4
+krill run ~/models/gemma-4-12b-coder-nvfp4          # by path - no registration
+krill serve --model ~/models/gemma-4-12b-coder-nvfp4
 ```
 
-To run it under a friendly name (`krillm run gemma-4-12b-coder`) you need it in
+To run it under a friendly name (`krill run gemma-4-12b-coder`) you need it in
 the local registry, which today means publishing the converted dir to a HF repo
-and `krillm pull`-ing it (then optionally adding an `AliasMap` entry so it is a
-known built-in). `krillm create`'s `FROM` only accepts an already-installed
+and `krill pull`-ing it (then optionally adding an `AliasMap` entry so it is a
+known built-in). `krill create`'s `FROM` only accepts an already-installed
 registry model, not a local path - so publish-then-pull is the supported route
 to a named built-in. That publish step is an explicit, public action; do it
 deliberately.

@@ -11,7 +11,7 @@ final class PrefixCacheTests: XCTestCase {
 
     private func makeTempCache() -> PrefixCache {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-prefix-test-\(UUID().uuidString)")
+            .appendingPathComponent("krill-prefix-test-\(UUID().uuidString)")
         addTeardownBlock {
             try? FileManager.default.removeItem(at: dir)
         }
@@ -173,7 +173,7 @@ final class PrefixCacheTests: XCTestCase {
     /// A temp cache with an explicit per-entry GB cap (bypasses env/default).
     private func makeCappedCache(maxEntryGB: Double) -> PrefixCache {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-prefix-cap-\(UUID().uuidString)")
+            .appendingPathComponent("krill-prefix-cap-\(UUID().uuidString)")
         addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         return PrefixCache(cacheDir: dir, maxMemoryEntries: 4, minPrefixLength: 4,
                            maxEntryGB: maxEntryGB)
@@ -383,7 +383,7 @@ final class PrefixCacheTests: XCTestCase {
 
     private func tempDir() -> URL {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-prefix-budget-\(UUID().uuidString)")
+            .appendingPathComponent("krill-prefix-budget-\(UUID().uuidString)")
         addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         return dir
     }

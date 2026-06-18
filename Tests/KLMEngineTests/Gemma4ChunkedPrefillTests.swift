@@ -9,7 +9,7 @@ import MLX
 ///      OOMs on MLX's materialized score matrix, and the model still answers a
 ///      needle planted in the long context.
 ///
-///   KLM_GEMMA4_UNIFIED_MODEL_PATH=~/.krillm/models/blobs/gemma-4-12b \
+///   KLM_GEMMA4_UNIFIED_MODEL_PATH=~/.krill/models/blobs/gemma-4-12b \
 ///     swift test --filter Gemma4ChunkedPrefillTests
 final class Gemma4ChunkedPrefillTests: XCTestCase {
 
@@ -30,7 +30,7 @@ final class Gemma4ChunkedPrefillTests: XCTestCase {
     /// Long context with a planted needle the model must echo back.
     private func longPrompt(sections: Int) -> String {
         let para = """
-        The KrillLM engine runs large language models natively on Apple Silicon \
+        The Krill engine runs large language models natively on Apple Silicon \
         using MLX. It supports continuous batching, prefix-cache reuse, grammar \
         constrained decoding, native tool calling, and multimodal input. The \
         secret pass phrase for this document is "tangerine satellite".

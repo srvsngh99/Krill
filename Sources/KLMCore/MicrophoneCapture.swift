@@ -31,7 +31,7 @@ public enum MicrophoneCaptureError: Error, CustomStringConvertible {
 ///
 /// macOS gates microphone access behind TCC keyed on the running app's bundle:
 /// a bare CLI binary run from a terminal inherits the terminal's permission,
-/// while the packaged `krillm.app` (with `NSMicrophoneUsageDescription`) prompts
+/// while the packaged `krill.app` (with `NSMicrophoneUsageDescription`) prompts
 /// under its own identity. `requestAccess()` triggers that prompt.
 public final class MicrophoneRecorder: @unchecked Sendable {
     private let lock = NSLock()

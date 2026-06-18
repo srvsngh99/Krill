@@ -7,7 +7,7 @@ cache) remains a deliberate follow-up — see "What this does NOT do".
 
 ## Why this exists
 
-KrillLM previously answered "can this model handle X" by sprinkling
+Krill previously answered "can this model handle X" by sprinkling
 `family == .gemma4` checks across the engine, the server's media
 gating, and the Ollama-compatibility shim. That works for one
 multimodal family. It does not scale.

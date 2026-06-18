@@ -2,10 +2,10 @@
 import PackageDescription
 
 let package = Package(
-    name: "KrillLM",
+    name: "Krill",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "krillm", targets: ["KLMCLI"]),
+        .executable(name: "krill", targets: ["KLMCLI"]),
     ],
     dependencies: [
         // 0.31.4+ required: earlier revisions' QuantizedLinear.init drops the

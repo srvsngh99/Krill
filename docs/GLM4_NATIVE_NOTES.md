@@ -30,9 +30,9 @@ Native Swift+MLX runtime for the GLM-4-0414 / GLM-Z1 generation (model_type
 |---|---|---|
 | GGUF (llama.cpp / Ollama) | 36.0 | 2.2 |
 | MLX-Python (mlx-lm) | 47.8 | 5.9 |
-| Native MLX-Swift (KrillLM) | 40.6 | **0.9** |
+| Native MLX-Swift (Krill) | 40.6 | **0.9** |
 
-Honest reading: KrillLM **leads cold-start** (no-Python native load) and beats
+Honest reading: Krill **leads cold-start** (no-Python native load) and beats
 llama.cpp on decode, but **trails mlx-lm on single-stream decode (~13%)**. The
 real, defensible leadership is capability (the whole GLM-4 family runs natively;
 Ollama-MLX and mlx-lm AWQ cannot) + cold-start + concurrency — NOT single-stream
@@ -61,5 +61,5 @@ decode.
   family-agnostic via flags.
 - `Tests/KLMCoreTests/QuantFidelityTests.swift` — logit-fidelity-vs-bf16 harness
   (honors per-module quant overrides; the only consistent way to compare a mixed
-  KrillLM quant against a baseline).
+  Krill quant against a baseline).
 - `.claude/skills/native-port/` — the general port skill (`families/glm4.md`).

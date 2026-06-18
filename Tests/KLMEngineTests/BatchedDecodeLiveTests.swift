@@ -333,7 +333,7 @@ final class BatchedDecodeLiveTests: XCTestCase {
     func testBatchedPartialPrefixReuseMatchesColdDecode() async throws {
         let dir = try requireModelDirectory()
         // Isolated, per-test prefix cache. The default on-disk cache
-        // (~/.krillm/cache) persists across runs and a full-match lookup hydrates
+        // (~/.krill/cache) persists across runs and a full-match lookup hydrates
         // from disk, so a stale entry from a prior run could serve this prompt and
         // mask a real partial-reuse miss. A fresh temp cache makes the
         // prime->reuse flow deterministic.

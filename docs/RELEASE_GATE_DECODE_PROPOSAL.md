@@ -33,7 +33,7 @@ strict                                    -> exit 1  (unchanged)
 ```
 
 The summary still prints `text_decode_ratio` as an advisory WARN at
-1.19x — the gate does **not** claim KrillLM hit 1.5x decode.
+1.19x — the gate does **not** claim Krill hit 1.5x decode.
 
 ## Problem
 
@@ -49,7 +49,7 @@ gate miss. Measured across 5 fresh `native_server` runs on the M4 Pro
 | `image_wall_ratio` | 0.56–0.58x (≈1.71–1.77x faster) | ≤ 0.67x | hard | ✅ |
 | `memory_ratio` | 0.32–0.84x | ≤ 1.0x | hard | ✅ |
 
-KrillLM decodes ~103–106 tok/s; Ollama ~88–95 tok/s.
+Krill decodes ~103–106 tok/s; Ollama ~88–95 tok/s.
 
 This is **not variance and not a measurement artifact** (PR #16 verified the
 loop is already two-deep GPU-pipelined, sampling is on-GPU argmax, and the
@@ -62,7 +62,7 @@ risk that is explicitly out of scope for the current baseline.
 
 ## Why this is a gate-semantics question, not just "we're slow"
 
-The product claim is: *KrillLM beats Ollama by 1.5x–3x on the accepted
+The product claim is: *Krill beats Ollama by 1.5x–3x on the accepted
 benchmark matrix, with equivalent inputs.* The question is **which metric
 substantiates that claim to a user**:
 
@@ -91,10 +91,10 @@ at ≥1.5x, unchanged):
    evaluated, reported, and printed; it just does not break the gate.
 
 2. **Add an explicit HARD non-regression floor: `text_decode_ratio ≥ 1.0`.**
-   This preserves a real, release-quality guarantee — *KrillLM must never
+   This preserves a real, release-quality guarantee — *Krill must never
    decode slower than Ollama* — even for long outputs. It is robustly met
    (1.13–1.19x across runs, with margin against documented Ollama decode
-   variance of 88–95 tok/s). If KrillLM ever regresses below Ollama parity,
+   variance of 88–95 tok/s). If Krill ever regresses below Ollama parity,
    the gate hard-fails regardless of the advisory target.
 
 This is **not** a silent relaxation:
@@ -127,11 +127,11 @@ advisory target. This contract is recorded in
 
 ## What this does and does not claim
 
-- It **does not** claim KrillLM decodes 1.5x faster than Ollama. It does
+- It **does not** claim Krill decodes 1.5x faster than Ollama. It does
   not. Release notes/README must not say so.
 - It **does** let the gate exit `0` under `release_candidate` on the
   evidence that actually backs the product claim (wall, TTFT, memory all
-  hard-pass at 1.5x+) while keeping a hard floor that KrillLM is never
+  hard-pass at 1.5x+) while keeping a hard floor that Krill is never
   slower than Ollama at decode.
 - `strict` remains the uncompromised reference and still exits `1`.
 

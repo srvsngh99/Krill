@@ -12,7 +12,7 @@ final class RerankerLoaderRejectionTests: XCTestCase {
 
     private func writeConfig(_ json: [String: Any], slug: String) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-reranker-\(slug)-\(UUID().uuidString)")
+            .appendingPathComponent("krill-reranker-\(slug)-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let data = try JSONSerialization.data(withJSONObject: json)
         try data.write(to: dir.appendingPathComponent("config.json"))

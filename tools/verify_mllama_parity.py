@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build a tiny Llama-3.2-Vision (mllama) checkpoint with mlx-vlm and record its
-reference logits, to check the native KrillLM `Llama32VisionForCausalLM` runtime
+reference logits, to check the native Krill `Llama32VisionForCausalLM` runtime
 for logit parity against mlx-vlm on identical weights + vision inputs.
 
 Exercises the full mllama path: the tiled ViT vision tower (Conv2d patch embed,
@@ -17,8 +17,8 @@ The real Llama-3.2-11B-Vision is large; a tiny synthetic mllama stands in for
 the numerics (both runtimes are MLX, so parity is ~bit-exact).
 
 Usage:
-    python3 tools/verify_mllama_parity.py /tmp/krillm-mllama
-    KLM_MLLAMA_PARITY_DIR=/tmp/krillm-mllama swift test --filter MllamaParityTests
+    python3 tools/verify_mllama_parity.py /tmp/krill-mllama
+    KLM_MLLAMA_PARITY_DIR=/tmp/krill-mllama swift test --filter MllamaParityTests
 """
 import json
 import os

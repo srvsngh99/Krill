@@ -14,8 +14,8 @@ two ways:
 We deliberately do NOT convert from GGUF (its k-quants bake in quality loss the
 fine-tuner's original bf16 never had). Instead we take the NVFP4 safetensors -
 already a clean 4-bit-FLOAT checkpoint in the same `gemma4_unified` architecture
-KrillLM serves natively - and turn it back into bf16. From there
-`tools/requant_gemma4_nvfp4.py` re-quantizes it with the proven KrillLM recipe
+Krill serves natively - and turn it back into bf16. From there
+`tools/requant_gemma4_nvfp4.py` re-quantizes it with the proven Krill recipe
 (uniform nvfp4 + 8-bit-protected attn `o_proj` + 8-bit vision/audio projectors =
 the both-axes win), emitting the exact MLX QuantizedLinear layout the Swift
 loader expects.
@@ -35,7 +35,7 @@ What this tool does
    `quantization/utils/helpers.py` - see the module docstrings there.)
 3. Passes through the genuinely-bf16 tensors (norms, embeddings, layer_scalar,
    biases, positional tables, the un-quantized projectors).
-4. Rewrites HF compressed-tensors keys into the MLX/KrillLM key scheme:
+4. Rewrites HF compressed-tensors keys into the MLX/Krill key scheme:
        model.language_model.<x>   -> language_model.model.<x>
        model.embed_vision.<x>     -> embed_vision.<x>
        model.embed_audio.<x>      -> embed_audio.<x>
@@ -54,14 +54,14 @@ Usage
       --out   ~/models/gemma-4-12b-coder-bf16 \
       --self-check                      # validate the decoder before the full run
 
-  # then re-quantize with the proven KrillLM recipe:
+  # then re-quantize with the proven Krill recipe:
   python3 tools/requant_gemma4_nvfp4.py \
       --src-bf16-dir ~/models/gemma-4-12b-coder-bf16 \
       --out          ~/models/gemma-4-12b-coder-nvfp4 \
       --protect o_proj
 
 Pure numpy - no torch, no compressed-tensors, no GGUF. Conversion-time only;
-the KrillLM runtime stays pure Swift + MLX.
+the Krill runtime stays pure Swift + MLX.
 """
 import argparse
 import json
@@ -235,7 +235,7 @@ class ShardWriter:
         return n
 
 
-# ---- key remap: HF compressed-tensors -> MLX/KrillLM (oracle) scheme --------
+# ---- key remap: HF compressed-tensors -> MLX/Krill (oracle) scheme --------
 def remap_key(k: str) -> str:
     if k.startswith("model."):
         k = k[len("model."):]

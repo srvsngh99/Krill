@@ -9,15 +9,15 @@ func jsonString(_ obj: [String: Any]) -> String {
     return s
 }
 
-/// Per-agent launch profiles for `krillm launch <agent>`. Each profile says
-/// how to wire one coding agent to the local KrillLM server: which wire
+/// Per-agent launch profiles for `krill launch <agent>`. Each profile says
+/// how to wire one coding agent to the local Krill server: which wire
 /// protocol it speaks, what env to export, what config file(s) to write or
 /// merge, any setup subcommands to run first, and the binary to exec.
 ///
 /// Adding an agent is a one-literal edit to ``AgentProfiles/all``; the
 /// ``LaunchCommand`` flow stays generic over the table.
 
-/// The HTTP surface an agent talks to, mapped to a KrillLM endpoint.
+/// The HTTP surface an agent talks to, mapped to a Krill endpoint.
 enum WireProtocol: String, Sendable {
     case anthropic        // -> POST /v1/messages
     case openAIChat       // -> POST /v1/chat/completions
@@ -28,7 +28,7 @@ enum WireProtocol: String, Sendable {
 /// the server root URL (`http://host:port`) and the model id.
 struct AgentConfigFile: Sendable {
     enum Mode: Sendable {
-        case write       // create/overwrite verbatim (krillm-owned paths)
+        case write       // create/overwrite verbatim (krill-owned paths)
         case mergeJSON   // deep-merge the rendered JSON into existing JSON
     }
     let path: String        // may start with ~, expanded at apply time
@@ -82,7 +82,7 @@ enum AgentProfiles {
         wire: .anthropic,
         env: { base, model in [
             "ANTHROPIC_BASE_URL": base,
-            "ANTHROPIC_AUTH_TOKEN": "krillm-local",
+            "ANTHROPIC_AUTH_TOKEN": "krill-local",
             "ANTHROPIC_API_KEY": "",
             "ANTHROPIC_MODEL": model,
             "ANTHROPIC_SMALL_FAST_MODEL": model,
@@ -95,33 +95,33 @@ enum AgentProfiles {
 
     // Codex: OpenAI Responses API (it dropped Chat Completions). CODEX_HOME
     // relocates Codex's config dir, so we write a complete, isolated config.toml
-    // into a krillm-owned dir and never touch the user's real ~/.codex.
+    // into a krill-owned dir and never touch the user's real ~/.codex.
     static let codex = AgentProfile(
         id: "codex",
         displayName: "Codex",
         summary: "OpenAI's open-source coding agent",
         wire: .openAIResponses,
         env: { _, _ in [
-            "CODEX_HOME": "~/.krillm/agents/codex",
-            "KRILLM_API_KEY": "krillm-local",
+            "CODEX_HOME": "~/.krill/agents/codex",
+            "KRILL_API_KEY": "krill-local",
         ] },
         configFiles: [AgentConfigFile(
-            path: "~/.krillm/agents/codex/config.toml", mode: .write,
+            path: "~/.krill/agents/codex/config.toml", mode: .write,
             render: { base, model in """
                 model = "\(model)"
-                model_provider = "krillm"
+                model_provider = "krill"
 
-                [model_providers.krillm]
-                name = "KrillLM"
+                [model_providers.krill]
+                name = "Krill"
                 base_url = "\(base)/v1"
                 wire_api = "responses"
-                env_key = "KRILLM_API_KEY"
+                env_key = "KRILL_API_KEY"
                 """ })],
         binary: "codex",
         notInstalledHint: "Install Codex:  npm i -g @openai/codex")
 
     // OpenCode: OpenAI Chat Completions via the @ai-sdk/openai-compatible
-    // provider. Deep-merge only the `krillm` provider + default model into the
+    // provider. Deep-merge only the `krill` provider + default model into the
     // user's opencode.json (a .bak is written first).
     static let opencode = AgentProfile(
         id: "opencode",
@@ -131,13 +131,13 @@ enum AgentProfiles {
         configFiles: [AgentConfigFile(
             path: "~/.config/opencode/opencode.json", mode: .mergeJSON,
             render: { base, model in jsonString([
-                "provider": ["krillm": [
+                "provider": ["krill": [
                     "npm": "@ai-sdk/openai-compatible",
-                    "name": "KrillLM",
+                    "name": "Krill",
                     "options": ["baseURL": "\(base)/v1"],
                     "models": [model: ["name": model]],
                 ]],
-                "model": "krillm/\(model)",
+                "model": "krill/\(model)",
             ]) })],
         binary: "opencode",
         notInstalledHint: "Install opencode:  npm i -g opencode-ai")
@@ -167,13 +167,13 @@ enum AgentProfiles {
         configFiles: [AgentConfigFile(
             path: "~/.pi/agent/models.json", mode: .mergeJSON,
             render: { base, model in jsonString([
-                "providers": ["krillm": [
+                "providers": ["krill": [
                     "baseUrl": "\(base)/v1",
                     "api": "openai-completions",
-                    "apiKey": "krillm-local",
+                    "apiKey": "krill-local",
                 ]],
-                "models": ["krillm/\(model)": [
-                    "provider": "krillm",
+                "models": ["krill/\(model)": [
+                    "provider": "krill",
                     "id": model,
                     "name": model,
                     "contextWindow": 65536,
@@ -210,7 +210,7 @@ enum AgentProfiles {
             path: "~/.factory/config.json", mode: .mergeJSON,
             render: { base, model in jsonString([
                 "custom_models": [[
-                    "model_display_name": "KrillLM \(model)",
+                    "model_display_name": "Krill \(model)",
                     "model": model,
                     "base_url": "\(base)/v1",
                     "api_key": "not-needed",

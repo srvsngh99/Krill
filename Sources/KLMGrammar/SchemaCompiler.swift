@@ -54,7 +54,7 @@ public extension SchemaGrammar {
             guard !relaxedKeywords.isEmpty else { return }
             let list = relaxedKeywords.sorted().joined(separator: ", ")
             FileHandle.standardError.write(Data((
-                "[KrillLM] JSON schema: unsupported keyword(s) relaxed to "
+                "[Krill] JSON schema: unsupported keyword(s) relaxed to "
                 + "\"any value\" (output stays valid JSON but is not "
                 + "constrained on these): \(list).\n").utf8))
         }

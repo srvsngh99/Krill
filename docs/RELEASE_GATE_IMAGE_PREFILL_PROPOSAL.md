@@ -18,23 +18,23 @@ this extends the same treatment to `strict`.
 
 ## Problem
 
-`strict` hard-gated `image_prefill_ratio` at `>= 1.5x` (KrillLM image
+`strict` hard-gated `image_prefill_ratio` at `>= 1.5x` (Krill image
 prefill tok/s / Ollama image prefill tok/s). On the canonical multimodal
-benchmark the metric sits at **~0.90-1.12x** — KrillLM appears *slower* at
+benchmark the metric sits at **~0.90-1.12x** — Krill appears *slower* at
 image prefill. This is a **measurement-definition artifact**, not a real
 regression:
 
-- The KrillLM vision path has a persistent vision-encoder cache. When it
+- The Krill vision path has a persistent vision-encoder cache. When it
   hits, the SigLIP2 forward and the multimodal projector cost are served
   from cache and fall **outside** the measured prefill window. The
   prefill-TPS denominator (`prompt_eval_duration`) therefore covers only the
   language-model prefill, while Ollama's number covers encoder + projector +
   language prefill in one bucket.
 - The two engines are being divided by non-comparable denominators, so the
-  ratio understates KrillLM by construction. The faster KrillLM is at moving
+  ratio understates Krill by construction. The faster Krill is at moving
   encoder work out of the prefill window, the *worse* this ratio looks.
 - The real user-visible image result is captured by **`image_wall_ratio`**,
-  which is hard-gated and consistently passes with margin (~0.50x = KrillLM
+  which is hard-gated and consistently passes with margin (~0.50x = Krill
   ~2x faster end-to-end on the image task).
 
 So `strict` could fail solely on `image_prefill_ratio` even though every
@@ -51,7 +51,7 @@ Under `strict`, for `image_prefill_ratio` **only**:
 
 2. **Add NO non-regression floor.** This is the deliberate difference from
    the `text_decode_ratio` demotion. Decode carries a hard `>= 1.0x` floor
-   because KrillLM genuinely should never decode slower than Ollama. Image
+   because Krill genuinely should never decode slower than Ollama. Image
    prefill is structurally `< 1.0x` *by design* of the measurement (the
    encoder cache lifts work out of the window), so a `>= 1.0x` floor would
    fail on a correctly-behaving build, and any floor below `1.0x` is an
@@ -69,7 +69,7 @@ This is **not** a silent relaxation:
 
 ## What this does and does not claim
 
-- It **does not** claim KrillLM prefills images 1.5x faster than Ollama on
+- It **does not** claim Krill prefills images 1.5x faster than Ollama on
   this microbenchmark metric. Release notes / README must not say so.
 - It **does** stop a metric that divides non-comparable denominators from
   being the sole hard reason `strict` fails, while keeping the genuine

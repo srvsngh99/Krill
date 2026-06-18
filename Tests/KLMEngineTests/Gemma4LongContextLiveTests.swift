@@ -4,7 +4,7 @@ import Foundation
 
 /// Live regression for Gemma 4 long-context generation. gemma-4-e2b uses a
 /// 512-token sliding window on most layers; before the windowed mask landed,
-/// KrillLM applied a plain full-causal mask to every layer, so beyond ~2x the
+/// Krill applied a plain full-causal mask to every layer, so beyond ~2x the
 /// window those layers attended out-of-distribution context and the model
 /// emitted its stop token immediately - generating NOTHING. Every prior test
 /// used short prompts, so this was invisible. This test pins it: a long prompt

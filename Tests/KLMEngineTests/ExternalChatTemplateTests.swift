@@ -62,7 +62,7 @@ final class ExternalChatTemplateTests: XCTestCase {
 
     private func makeTempDir() throws -> URL {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-tpl-test-\(UUID().uuidString)")
+            .appendingPathComponent("krill-tpl-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
             at: url, withIntermediateDirectories: true)
         return url

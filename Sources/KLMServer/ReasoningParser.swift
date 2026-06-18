@@ -4,7 +4,7 @@ import Foundation
 /// before the server formats it for any chat-completion response.
 ///
 /// Three tag shapes leak today:
-///   - `<thinking>...</thinking>` - the Anthropic-style tag KrillLM
+///   - `<thinking>...</thinking>` - the Anthropic-style tag Krill
 ///     itself injects when a request opts into `thinking` (see
 ///     `Server.swift` `/v1/messages`).
 ///   - `<think>...</think>` - emitted natively by Qwen 3 by default

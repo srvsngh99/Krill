@@ -6,19 +6,19 @@ import KLMTUI
 // allowed). Restores cursor + main screen + the original termios so an
 // abnormal exit (SIGTERM/SIGHUP, or a crash that still runs atexit) does not
 // leave the user's terminal stuck in raw mode on the alternate screen.
-private nonisolated(unsafe) var krillmSavedTermios = termios()
-private nonisolated(unsafe) var krillmTermiosValid = false
+private nonisolated(unsafe) var krillSavedTermios = termios()
+private nonisolated(unsafe) var krillTermiosValid = false
 
-private func krillmRestoreTerminal() {
-    guard krillmTermiosValid else { return }
+private func krillRestoreTerminal() {
+    guard krillTermiosValid else { return }
     let seq = "\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?25h\u{1B}[?1049l"
     _ = seq.withCString { write(STDOUT_FILENO, $0, strlen($0)) }
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &krillmSavedTermios)
-    krillmTermiosValid = false
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &krillSavedTermios)
+    krillTermiosValid = false
 }
 
-private func krillmFatalSignal(_ sig: Int32) {
-    krillmRestoreTerminal()
+private func krillFatalSignal(_ sig: Int32) {
+    krillRestoreTerminal()
     signal(sig, SIG_DFL)
     raise(sig)
 }
@@ -51,10 +51,10 @@ final class RawTerminal {
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw)
 
         // Arm restoration for abnormal exits (the normal path uses leave()).
-        krillmSavedTermios = original
-        krillmTermiosValid = true
-        atexit(krillmRestoreTerminal)
-        for sig in [SIGTERM, SIGHUP, SIGQUIT] { signal(sig, krillmFatalSignal) }
+        krillSavedTermios = original
+        krillTermiosValid = true
+        atexit(krillRestoreTerminal)
+        for sig in [SIGTERM, SIGHUP, SIGQUIT] { signal(sig, krillFatalSignal) }
 
         // Alt screen, hide cursor, enable SGR mouse reporting (for wheel scroll),
         // clear. (Hold Option/Fn to select text while mouse reporting is on.)
@@ -67,7 +67,7 @@ final class RawTerminal {
         // Disable mouse reporting, show cursor, leave alt screen.
         Output.write("\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?25h\u{1B}[?1049l")
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &original)
-        krillmTermiosValid = false
+        krillTermiosValid = false
         entered = false
     }
 

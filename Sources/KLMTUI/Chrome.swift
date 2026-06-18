@@ -58,10 +58,10 @@ public enum Chrome {
 /// line-drawing `_ | / \` style) so they sit inside the house ASCII rule and
 /// render in any terminal.
 public enum Banner {
-    /// The "KrillLM" wordmark in the classic line-drawing style, scaled up for
+    /// The "Krill" wordmark in the classic line-drawing style, scaled up for
     /// presence. All rows are the same width; ~31 columns, so callers should
     /// fall back to a plain wordmark on terminals too narrow to fit it.
-    public static let krillm: [String] = [
+    public static let krill: [String] = [
         " _  __     _ _ _ _      __  __ ",
         "| |/ /    (_) | | |    |  \\/  |",
         "| ' / _ __ _| | | |    | \\  / |",

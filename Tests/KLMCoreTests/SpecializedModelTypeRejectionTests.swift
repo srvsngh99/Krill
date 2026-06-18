@@ -85,7 +85,7 @@ final class SpecializedModelTypeRejectionTests: XCTestCase {
 
     private func writeConfig(_ json: [String: Any], slug: String) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-ws7-\(slug)-\(UUID().uuidString)")
+            .appendingPathComponent("krill-ws7-\(slug)-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let data = try JSONSerialization.data(withJSONObject: json)
         try data.write(to: dir.appendingPathComponent("config.json"))

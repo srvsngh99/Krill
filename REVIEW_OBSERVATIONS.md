@@ -1,4 +1,4 @@
-# KrillLM Repo Observations
+# Krill Repo Observations
 
 Date: 2026-05-06
 
@@ -13,7 +13,7 @@ This document captures review observations for follow-up implementation. The rep
 
 ## Summary
 
-KrillLM has a strong foundation:
+Krill has a strong foundation:
 
 - Clear SwiftPM module boundaries for core models, inference engine, cache, registry, server, CLI, tokenizer, sampler, and kernels.
 - Sensible model-family abstraction through `LoadedModel`.
@@ -260,7 +260,7 @@ Recommendation:
 
 Evidence:
 
-- `dist/krillm-0.2.0-arm64-apple-macos.tar.gz` is tracked.
+- `dist/krill-0.2.0-arm64-apple-macos.tar.gz` is tracked.
 
 Impact:
 

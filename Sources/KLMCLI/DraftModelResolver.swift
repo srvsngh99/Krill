@@ -56,7 +56,7 @@ enum DraftResolutionError: Error, CustomStringConvertible {
         case .noAutoPair(let target):
             return "no curated draft pair for target '\(target)' (see SpeculativeDecoder.draftPairs)"
         case .aliasMissing(let alias):
-            return "draft alias '\(alias)' not installed; run: krillm pull \(alias)"
+            return "draft alias '\(alias)' not installed; run: krill pull \(alias)"
         case .notFound(let spec):
             return "draft model '\(spec)' not found as alias or path"
         }

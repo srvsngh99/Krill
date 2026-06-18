@@ -66,7 +66,7 @@ internal struct ServerToolSpec: Equatable, Sendable {
 /// `.regex` carries a regular-expression pattern the output must fully match
 /// (Stage C); `.cfg` carries a context-free grammar the output must fully
 /// parse (Stage D - for unbounded nesting regex cannot express). Both `.regex`
-/// and `.cfg` are KrillLM extensions, not standard OpenAI/Ollama.
+/// and `.cfg` are Krill extensions, not standard OpenAI/Ollama.
 internal enum ResponseFormat: Equatable, Sendable {
     case json
     case schema(String)
@@ -269,7 +269,7 @@ internal enum ServerParsing {
     }
 
     /// Ollama `format`: the string `"json"`, a JSON-schema object, or (a
-    /// KrillLM extension) an object `{"regex": "<pattern>"}` to constrain the
+    /// Krill extension) an object `{"regex": "<pattern>"}` to constrain the
     /// output to a regular expression. The regex key is checked first because
     /// `{"regex": ...}` is otherwise a valid-looking schema object.
     static func parseOllamaFormat(_ raw: Any?) -> ResponseFormat? {
@@ -304,7 +304,7 @@ internal enum ServerParsing {
 
     /// OpenAI `response_format`: `{type:"json_object"}`,
     /// `{type:"json_schema", json_schema:{schema:{…}}}`, `{type:"text"}`, or
-    /// (a KrillLM extension) `{type:"regex", regex:"<pattern>"}` /
+    /// (a Krill extension) `{type:"regex", regex:"<pattern>"}` /
     /// `{type:"grammar", grammar:"<pattern>"}` to constrain the output to a
     /// regular expression (Stage C).
     static func parseOpenAIResponseFormat(_ raw: Any?) -> ResponseFormat? {

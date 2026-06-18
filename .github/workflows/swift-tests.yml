@@ -99,4 +99,4 @@ jobs:
         run: swift test -c release --skip-build
 
       - name: Print version
-        run: .build/release/krillm --version
+        run: .build/release/krill --version

@@ -93,7 +93,7 @@ The WS3 design sketch lists `detect`, `load`, `tokenizerPolicy`, and
 
 Make model support explicit, scalable, and testable.
 
-KrillLM should know the difference between:
+Krill should know the difference between:
 
 ```text
 family detected

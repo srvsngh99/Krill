@@ -1,6 +1,6 @@
-# Gemma 4 12B: nvfp4 on KrillLM vs Ollama (MLX-vs-MLX)
+# Gemma 4 12B: nvfp4 on Krill vs Ollama (MLX-vs-MLX)
 
-KrillLM runs Gemma 4 12B as a native encoder-free "unified" runtime. This note
+Krill runs Gemma 4 12B as a native encoder-free "unified" runtime. This note
 records the work to make its 4-bit-class checkpoint match-or-beat Ollama's
 `gemma4:12b-mlx` (nvfp4) across quality, speed, concurrency, and capability on a
 24 GB Apple-Silicon box, measured one 12B model resident at a time so no number
@@ -10,11 +10,11 @@ is a memory-pressure artifact.
 
 | Checkpoint (same 12B weights) | MMLU-500 | single-stream decode | source |
 | --- | --- | --- | --- |
-| **KrillLM `gemma-4-12b` (nvfp4, o_proj 8-bit)** | **77.6%** (388/500) | **27.7 tok/s** | bf16 -> nvfp4, attn o_proj kept 8-bit |
-| KrillLM nvfp4 (uniform, from bf16) | 75.6% (378/500) | 25.9 tok/s | bf16 -> nvfp4 |
+| **Krill `gemma-4-12b` (nvfp4, o_proj 8-bit)** | **77.6%** (388/500) | **27.7 tok/s** | bf16 -> nvfp4, attn o_proj kept 8-bit |
+| Krill nvfp4 (uniform, from bf16) | 75.6% (378/500) | 25.9 tok/s | bf16 -> nvfp4 |
 | Ollama `gemma4:12b-mlx` (uniform nvfp4) | 75.8% (379/500) | 27.4 tok/s | reference |
-| KrillLM mixed (4-bit attn + 8-bit MLP) | 73.6% (368/500) | 19.2 tok/s | prior default |
-| KrillLM nvfp4 (from the **4-bit** ckpt) | 71.6% (358/500) | 26.3 tok/s | the old defect |
+| Krill mixed (4-bit attn + 8-bit MLP) | 73.6% (368/500) | 19.2 tok/s | prior default |
+| Krill nvfp4 (from the **4-bit** ckpt) | 71.6% (358/500) | 26.3 tok/s | the old defect |
 
 The shipped `gemma-4-12b` is numerically best on quality and at parity-or-faster
 on single-stream speed, while winning decisively on concurrency, cold start, and
@@ -45,7 +45,7 @@ measured on a 50-question subset; the 71.6% above is the full 500-set number.)
 
 ### 2. Mixed-precision nvfp4 to push past parity
 
-KrillLM's loader threads a per-module quantization `mode` (PR #173,
+Krill's loader threads a per-module quantization `mode` (PR #173,
 `ModuleQuant.mode`), so a checkpoint can keep the bulk at nvfp4 (speed) while
 protecting a small, precision-sensitive set at 8-bit. A broad sweep over which
 modules to protect found the attention output projection (`o_proj`, 48 modules)
@@ -71,30 +71,30 @@ uniform). At ~4-bit both engines sit near the bf16 quality ceiling, so the
 defensible single-stream claim is parity-or-slightly-better, not a blowout. The
 decisive wins are elsewhere.
 
-## Where KrillLM wins decisively
+## Where Krill wins decisively
 
 ### Concurrency (the batcher)
 
 Aggregate decode throughput under N simultaneous `/api/generate` streams
-(`tools/krillm_concurrent_benchmark.py`, max_tokens 128):
+(`tools/krill_concurrent_benchmark.py`, max_tokens 128):
 
-| N | KrillLM `gemma-4-12b` | Ollama `gemma4:12b-mlx` |
+| N | Krill `gemma-4-12b` | Ollama `gemma4:12b-mlx` |
 | --- | --- | --- |
 | 1 | 18.4* | 27.7 |
 | 2 | 26.0 | 27.6 |
 | 4 | 31.1 | 27.2 |
 | 8 | **37.8** | 27.4 |
 
-KrillLM's continuous batcher scales ~2x from N=1 to N=8 (one weight read serves
+Krill's continuous batcher scales ~2x from N=1 to N=8 (one weight read serves
 many decode rows); Ollama is flat (~27.4 at every N - it serializes). At N=8
-KrillLM is **1.38x** Ollama. (*The N=1 aggregate figure is wall-clock including
+Krill is **1.38x** Ollama. (*The N=1 aggregate figure is wall-clock including
 batch-formation TTFT, and this arm ran with a small co-resident e2b daemon; the
 clean steady-state single-stream decode is ~27.7 tok/s, so the concurrency
-numbers are conservative for KrillLM.)
+numbers are conservative for Krill.)
 
 ### Cold start
 
-KrillLM cold-loads the 12B in ~1.6 s.
+Krill cold-loads the 12B in ~1.6 s.
 
 ### Capability Ollama's MLX gemma tag cannot do
 
@@ -109,15 +109,15 @@ KrillLM cold-loads the 12B in ~1.6 s.
 ## Registration
 
 The winning checkpoint is installed as **`gemma-4-12b-nvfp4`**, and the canonical
-**`gemma-4-12b`** name is promoted to it (`krillm cp`, weights referenced):
+**`gemma-4-12b`** name is promoted to it (`krill cp`, weights referenced):
 
 ```
-krillm run gemma-4-12b "..."          # nvfp4, o_proj 8-bit
-krillm run gemma-4-12b-nvfp4 "..."    # same checkpoint
+krill run gemma-4-12b "..."          # nvfp4, o_proj 8-bit
+krill run gemma-4-12b-nvfp4 "..."    # same checkpoint
 ```
 
 The `AliasMap` `repo` for `gemma-4-12b` still points at the 4-bit HF repo, so a
-fresh `krillm pull gemma-4-12b` on another machine fetches 4-bit until the nvfp4
+fresh `krill pull gemma-4-12b` on another machine fetches 4-bit until the nvfp4
 checkpoint is published to the Hub - a separate, opt-in follow-up.
 
 ## Reproduce
@@ -129,12 +129,12 @@ hf download mlx-community/gemma-4-12B-it-bf16
 # 2. requant nvfp4 from bf16, o_proj kept 8-bit (the shipped checkpoint).
 #    The vision/audio projectors are auto-protected at 8-bit (see below).
 python tools/requant_gemma4_nvfp4.py \
-    --out ~/.cache/huggingface/krillm-requant/gemma-4-12B-it-nvfp4-oproj8-vision8 \
+    --out ~/.cache/huggingface/krill-requant/gemma-4-12B-it-nvfp4-oproj8-vision8 \
     --protect o_proj
 # --no-protect-vision + omit --protect  =>  pure-uniform nvfp4 baseline
 
-# 3. serve / eval (one 12B at a time; wipe ~/.krillm/cache between runs)
-krillm serve --model <checkpoint-dir> --port 57461
+# 3. serve / eval (one 12B at a time; wipe ~/.krill/cache between runs)
+krill serve --model <checkpoint-dir> --port 57461
 
 # 4. GATE the multimodal path BEFORE registering (catches vision degradation)
 python tools/verify_gemma4_vision_color.py --url http://127.0.0.1:57461 --model <id>
@@ -169,8 +169,8 @@ is **capability** - things Ollama's MLX gemma tag cannot do at all.
 ### Performance (raw throughput) - parity-to-modest, by physics
 
 - **Single-stream decode:** ~28 tok/s, parity with Ollama (bandwidth roof).
-- **Concurrency (NUM_PARALLEL=16):** KrillLM aggregate 18.7 / 25.9 / 31.5 / 37.3 /
-  41.9 tok/s at N=1/2/4/8/16; Ollama flat ~28 (it serializes). KrillLM wins from
+- **Concurrency (NUM_PARALLEL=16):** Krill aggregate 18.7 / 25.9 / 31.5 / 37.3 /
+  41.9 tok/s at N=1/2/4/8/16; Ollama flat ~28 (it serializes). Krill wins from
   N>=4, **1.5x at N=16** - real but not 2x (the ~2x in `CONCURRENT_THROUGHPUT.md`
   is a 3B-model result; a 12B saturates compute sooner).
 - **Fused GEGLU (closed):** no decode win - decode is weight-bandwidth bound, not

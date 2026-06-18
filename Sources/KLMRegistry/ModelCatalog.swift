@@ -44,7 +44,7 @@ public struct CatalogEntry: Codable, Sendable, Equatable {
 ///
 /// This is the on-disk and over-the-wire JSON shape. It lets new models
 /// be added without rebuilding the binary: a catalog can be edited
-/// locally or fetched from a remote URL (`krillm catalog refresh`).
+/// locally or fetched from a remote URL (`krill catalog refresh`).
 public struct ModelCatalog: Codable, Sendable, Equatable {
     /// Schema version. A store rejects a catalog whose schema it does
     /// not understand rather than silently mis-decoding it.
@@ -86,7 +86,7 @@ public enum CatalogError: Error, CustomStringConvertible, Equatable {
             return "catalog payload is not valid JSON for the catalog schema: \(detail)"
         case .unsupportedSchema(let version):
             return "catalog schemaVersion \(version) is not supported by this build "
-                + "(expected \(ModelCatalog.currentSchemaVersion)); upgrade krillm"
+                + "(expected \(ModelCatalog.currentSchemaVersion)); upgrade krill"
         }
     }
 }
@@ -96,7 +96,7 @@ public enum CatalogError: Error, CustomStringConvertible, Equatable {
 /// The cache lives at `<registry baseDir>/catalog.json`. `AliasMap.resolve`
 /// consults it as a fallback after the built-in aliases, so a model that
 /// is not compiled into the binary can still be pulled by editing that
-/// file or running `krillm catalog refresh --url <url>`.
+/// file or running `krill catalog refresh --url <url>`.
 ///
 /// The type is a thin, `Sendable` value over a file path; constructing
 /// one does no I/O.
@@ -104,7 +104,7 @@ public struct ModelCatalogStore: Sendable {
     /// Absolute path of the on-disk catalog cache.
     public let catalogURL: URL
 
-    /// - Parameter baseDir: the registry base directory (e.g. `~/.krillm`).
+    /// - Parameter baseDir: the registry base directory (e.g. `~/.krill`).
     public init(baseDir: URL) {
         self.catalogURL = baseDir.appendingPathComponent("catalog.json")
     }

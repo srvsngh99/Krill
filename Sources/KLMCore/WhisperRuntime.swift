@@ -4,7 +4,7 @@ import MLXNN
 
 // MARK: - Native Whisper transcription runtime
 
-/// End-to-end native Whisper ASR: a converted KrillLM model dir
+/// End-to-end native Whisper ASR: a converted Krill model dir
 /// (`tools/convert_whisper.py`: `model.safetensors` + `config.json` +
 /// `vocab.json`) loaded into `WhisperModel` + `WhisperTokenizer`, driving the
 /// mel front-end, encoder, and a greedy autoregressive decode loop.

@@ -17,11 +17,11 @@ Detailed usage and result: [../SPECULATIVE_DECODING.md](../SPECULATIVE_DECODING.
   target. Without these, the draft cache poisons the next round.
 - Greedy-only guard on the spec path (temperature == 0, top-p >= 1,
   top-k <= 0, min-p == 0, no penalties / mirostat, fp16 KV).
-- `--draft-model <alias|path|auto>` on `krillm run` and `krillm serve`
+- `--draft-model <alias|path|auto>` on `krill run` and `krill serve`
   (also `KRILL_DRAFT_MODEL` for serve). `auto` consults `draftPairs`.
 - `GenerationStats.speculative` (rounds / accepted / final_k /
   acceptance_rate) wired into CLI stats line and the
-  `krillm_vs_ollama_benchmark.py` JSON report.
+  `krill_vs_ollama_benchmark.py` JSON report.
 - New unit tests for the greedy guard, curated-pair lookup, and
   adaptive-K reset semantics.
 
@@ -35,7 +35,7 @@ remains unreached. Benchmarked on two target sizes (3B and 8B) on
 M-series 4-bit MLX with the smallest available mlx-community drafter
 (llama-3.2-1b), bracketed by low and high acceptance prompts:
 
-| Target / prompt                | KrillLM no-spec | KrillLM spec | K | acceptance |
+| Target / prompt                | Krill no-spec | Krill spec | K | acceptance |
 | ------------------------------ | --------------- | ------------ | - | ---------- |
 | llama-3.2-3b   / story         | 104.3 tok/s     | 74.6         | 2 | 0.47       |
 | llama-3.1-8b   / story         |  50.2 tok/s     | 40.9         | 2 | 0.50       |
@@ -44,7 +44,7 @@ M-series 4-bit MLX with the smallest available mlx-community drafter
 Cross-engine Ollama numbers are tracked in
 `docs/SPECULATIVE_DECODING.md` but the prompt-tokens count differs
 across engines (39-52% delta), so the load-bearing comparison here
-is KrillLM-vs-KrillLM (spec-on vs spec-off, identical encoder).
+is Krill-vs-Krill (spec-on vs spec-off, identical encoder).
 
 Output sha256 is identical with and without spec on every pair
 (greedy parity verified); the throughput regression is empirically
@@ -74,13 +74,13 @@ WS2 follow-ups that landed):
    custom attention masks, separate workstream.
 
 The `>= 1.0x` hard `text_decode_ratio_floor` is unaffected in both gate
-profiles (`release_candidate` and, since 2026-05-22, `strict`): KrillLM
+profiles (`release_candidate` and, since 2026-05-22, `strict`): Krill
 no-spec is 1.087-1.10x faster than Ollama on both the 3b and 8b targets,
 so the floor holds with margin.
 
 ## Goal
 
-Make KrillLM consistently exceed Ollama on decode throughput while preserving
+Make Krill consistently exceed Ollama on decode throughput while preserving
 greedy output correctness.
 
 Both gate profiles now accept a hard non-regression floor
@@ -133,7 +133,7 @@ docs/RELEASE_GATE_DECODE_PROPOSAL.md
 - Cache state remains correct after accepted and rejected draft tokens.
 - Benchmark report records draft metadata.
 - `text_decode_ratio_floor >= 1.0x` holds under both gate profiles on the
-  accepted report (KrillLM never decodes slower than Ollama). The
+  accepted report (Krill never decodes slower than Ollama). The
   `>= 1.5x` target is the tracked advisory aspiration; it re-promotes to
   a hard gate per the re-promotion contract once genuinely earned.
 - No regression to text wall time, text TTFT, memory, or Gemma 4 image path.

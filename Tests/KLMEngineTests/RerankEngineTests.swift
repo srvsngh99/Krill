@@ -8,7 +8,7 @@ import KLMRuntime
 /// otherwise and we do not want CI doing that implicitly. Run locally
 /// with:
 ///
-///     KLM_RERANKER_MODEL_PATH=$HOME/.krillm/models/blobs/bge-reranker-v2-m3 \
+///     KLM_RERANKER_MODEL_PATH=$HOME/.krill/models/blobs/bge-reranker-v2-m3 \
 ///       swift test --filter RerankEngineTests
 final class RerankEngineTests: XCTestCase {
 

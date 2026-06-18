@@ -1,6 +1,6 @@
 # Gemma 4 Internals
 
-Gemma 4 is the most complex model family in KrillLM. This document explains every architectural detail needed to understand, debug, and extend the implementation.
+Gemma 4 is the most complex model family in Krill. This document explains every architectural detail needed to understand, debug, and extend the implementation.
 
 ## Architecture Overview
 

@@ -49,7 +49,7 @@ struct QuantizeCommand: AsyncParsableCommand {
         guard let sourceDir = resolveSource(source) else {
             print("Error: could not find source model '\(source)'.")
             print("  Pass a local directory, or a HuggingFace repo id already downloaded")
-            print("  into ~/.cache/huggingface/hub (pull it first with huggingface-cli or krillm).")
+            print("  into ~/.cache/huggingface/hub (pull it first with huggingface-cli or krill).")
             throw ExitCode.failure
         }
 
@@ -123,7 +123,7 @@ struct QuantizeCommand: AsyncParsableCommand {
         print()
         print("Done! Model quantized and registered.")
         print(String(format: "  Size: %.0f MB", sizeMB))
-        print("  Run with: krillm run \(outputName)")
+        print("  Run with: krill run \(outputName)")
     }
 }
 

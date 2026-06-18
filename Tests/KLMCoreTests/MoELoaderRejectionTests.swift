@@ -11,7 +11,7 @@ final class MoELoaderRejectionTests: XCTestCase {
 
     private func writeConfig(_ json: [String: Any], dirSlug: String) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-moe-\(dirSlug)-\(UUID().uuidString)")
+            .appendingPathComponent("krill-moe-\(dirSlug)-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let data = try JSONSerialization.data(withJSONObject: json)
         try data.write(to: dir.appendingPathComponent("config.json"))

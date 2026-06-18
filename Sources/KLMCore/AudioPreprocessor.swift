@@ -251,7 +251,7 @@ public enum AudioPreprocessor {
     private static func loadAudioWithAVFoundation(from data: Data) throws -> (samples: [Float], sampleRate: Int) {
         let ext = inferredAudioExtension(for: data) ?? "audio"
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-audio-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("krill-audio-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 

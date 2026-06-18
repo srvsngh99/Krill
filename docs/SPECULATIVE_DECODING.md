@@ -6,7 +6,7 @@ and the "Why 1.5x strict is empirically out of reach" section below derives
 that target is structurally unreachable on this hardware. As of 2026-05-22
 `text_decode_ratio` is therefore **advisory in both gate profiles**
 (`release_candidate` and `strict`), each carrying a hard `>= 1.0x`
-non-regression floor (KrillLM must never decode slower than Ollama). See
+non-regression floor (Krill must never decode slower than Ollama). See
 `docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md` and "Benchmark results" below.
 
 ## What this gives you
@@ -22,18 +22,18 @@ CLI:
 
 ```bash
 # explicit alias or path
-krillm run llama-3.2-3b "Explain X" --draft-model llama-3.2-1b
+krill run llama-3.2-3b "Explain X" --draft-model llama-3.2-1b
 
 # curated pair lookup (consults `draftPairs` in SpeculativeDecoder.swift)
-krillm run llama-3.2-3b "Explain X" --draft-model auto
+krill run llama-3.2-3b "Explain X" --draft-model auto
 ```
 
 Server:
 
 ```bash
-krillm serve --model llama-3.2-3b --draft-model llama-3.2-1b
+krill serve --model llama-3.2-3b --draft-model llama-3.2-1b
 # or via env:
-KRILL_DRAFT_MODEL=llama-3.2-1b krillm serve --model llama-3.2-3b
+KRILL_DRAFT_MODEL=llama-3.2-1b krill serve --model llama-3.2-3b
 ```
 
 Once a draft is loaded, `generate()` uses the spec path automatically for
@@ -124,14 +124,14 @@ finalK          // adaptive K at end of generation
 acceptanceRate  // rolling rate over last 16 rounds, in [0, 1]
 ```
 
-CLI `krillm run` prints these on the line after the standard stats:
+CLI `krill run` prints these on the line after the standard stats:
 
 ```text
 spec: rounds=64, accepted=127, final_k=2, acceptance=0.47
 ```
 
-`tools/krillm_vs_ollama_benchmark.py` parses that line into a
-`speculative` block on each KrillLM run; the comparison harness propagates
+`tools/krill_vs_ollama_benchmark.py` parses that line into a
+`speculative` block on each Krill run; the comparison harness propagates
 it into the per-run JSON report so the strict gate can read it without
 re-running the binary.
 
@@ -141,13 +141,13 @@ All numbers: M-series, 4-bit MLX target / draft, 3-5 runs after 1-2
 warmups, server-equivalent (warm) cache. Output sha256 verified
 identical with and without spec on every pair (greedy parity holds).
 
-Cross-engine caveat: the prompt-tokens count differs between KrillLM
+Cross-engine caveat: the prompt-tokens count differs between Krill
 and Ollama in the runs below (39-52% delta from tokenizer
 preprocessing differences). The reported `decode_tokens_per_second`
 is measured per-engine in the steady-state decode phase and is not
 materially affected by the prompt-tokens delta, but the TTFT column
 is omitted from the cross-engine comparison and prompt-eval throughput
-should not be compared directly. The KrillLM-vs-KrillLM (spec-on vs
+should not be compared directly. The Krill-vs-Krill (spec-on vs
 spec-off) comparison is unaffected because the same engine encodes
 both runs.
 
@@ -157,11 +157,11 @@ Prompt: `"Explain quantum computing in simple terms."`, max 128 tokens.
 
 | Engine                 | decode tok/s (median) | spec K | acceptance |
 | ---------------------- | --------------------- | ------ | ---------- |
-| KrillLM, no spec       | 104.3                 | -      | -          |
-| KrillLM, spec on (1b)  |  74.6                 | 2      | 0.47       |
+| Krill, no spec       | 104.3                 | -      | -          |
+| Krill, spec on (1b)  |  74.6                 | 2      | 0.47       |
 | Ollama llama3.2:3b     |  94.7                 | -      | -          |
 
-KrillLM no-spec: 1.10x vs Ollama. Spec on: 0.72x vs KrillLM no-spec.
+Krill no-spec: 1.10x vs Ollama. Spec on: 0.72x vs Krill no-spec.
 
 ### llama-3.1-8b / llama-3.2-1b
 
@@ -173,8 +173,8 @@ max 128 tokens.
 
 | Engine                 | decode tok/s (median) | spec K | acceptance |
 | ---------------------- | --------------------- | ------ | ---------- |
-| KrillLM, no spec       | 50.2                  | -      | -          |
-| KrillLM, spec on (1b)  | 40.9                  | 2      | 0.50       |
+| Krill, no spec       | 50.2                  | -      | -          |
+| Krill, spec on (1b)  | 40.9                  | 2      | 0.50       |
 | Ollama llama3.1:8b     | 46.2                  | -      | -          |
 
 B. Technical prompt (higher acceptance):
@@ -184,12 +184,12 @@ and the rationale for grouped-query attention."`, max 128 tokens.
 
 | Engine                 | decode tok/s (median) | spec K | acceptance |
 | ---------------------- | --------------------- | ------ | ---------- |
-| KrillLM, spec on (1b)  | 44.1                  | 5      | 0.73       |
-| KrillLM, no spec       | 50.2 (run A baseline) | -      | -          |
+| Krill, spec on (1b)  | 44.1                  | 5      | 0.73       |
+| Krill, no spec       | 50.2 (run A baseline) | -      | -          |
 | Ollama llama3.1:8b     | 46.2                  | -      | -          |
 
 The high-acceptance run (B) raises K to 5 and acceptance to 0.73 -
-strong drafter agreement - and spec still LOSES vs KrillLM no-spec
+strong drafter agreement - and spec still LOSES vs Krill no-spec
 (44.1 vs 50.2 tok/s). This is the strongest single-run evidence
 that the gap is in the per-round overhead, not in acceptance.
 
@@ -261,7 +261,7 @@ follow-ups that landed):
    from ~0.78 to ~0.55 would let `1 / (alpha + beta) ~ 1.47` at the
    r -> K+1 limit; this is the only path that does not require new
    hardware or a different algorithm, and would need an MLX-level
-   investigation (not just KrillLM-level code).
+   investigation (not just Krill-level code).
 2. **Target / draft size ratio jumps an order of magnitude
    (alpha << 1/8).** A 70B target with a 1B draft on M-series is
    RAM-infeasible at 4-bit (~40 GB just for the target). Smaller-
@@ -274,7 +274,7 @@ follow-ups that landed):
    workstream.
 
 The release_candidate gate's `text_decode_ratio_floor >= 1.0x` (hard)
-remains green and unaffected: KrillLM no-spec is 1.087-1.10x faster
+remains green and unaffected: Krill no-spec is 1.087-1.10x faster
 than Ollama on both 3b and 8b targets.
 
 ## Non-goals

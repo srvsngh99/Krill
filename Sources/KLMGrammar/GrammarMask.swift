@@ -155,7 +155,7 @@ public final class GrammarTokenMask<A: GrammarAutomaton>: GrammarLogitMask, @unc
             if !didWarnAllBlocked {
                 didWarnAllBlocked = true
                 FileHandle.standardError.write(Data((
-                    "[KrillLM] grammar mask: no token extends the current state; "
+                    "[Krill] grammar mask: no token extends the current state; "
                     + "failing open for this step (output validity then relies on "
                     + "post-extraction).\n").utf8))
             }

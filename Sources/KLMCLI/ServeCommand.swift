@@ -20,7 +20,7 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Host to bind to (default: $OLLAMA_HOST / config / 127.0.0.1)")
     var host: String?
 
-    @Option(name: .long, help: "Client compat surface: ollama | openai | both (default both). KrillLM's default port is 57455; for a drop-in Ollama replacement pass --port 11434.")
+    @Option(name: .long, help: "Client compat surface: ollama | openai | both (default both). Krill's default port is 57455; for a drop-in Ollama replacement pass --port 11434.")
     var compat: String = "both"
 
     @Option(name: .long, help: "Draft model for speculative decoding (alias, path, or 'auto'). Also reads KRILL_DRAFT_MODEL.")
@@ -80,7 +80,7 @@ struct ServeCommand: AsyncParsableCommand {
                 modelDir = URL(fileURLWithPath: model)
             } else {
                 print("Error: model '\(model)' not found.")
-                print("Install with: krillm pull \(model)")
+                print("Install with: krill pull \(model)")
                 throw ExitCode.failure
             }
 
@@ -115,7 +115,7 @@ struct ServeCommand: AsyncParsableCommand {
             if let first = registry.listModels().first {
                 base = registry.modelPath(first.name)
             } else {
-                base = URL(fileURLWithPath: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".krillm").path)
+                base = URL(fileURLWithPath: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".krill").path)
             }
             engine = InferenceEngine(modelDirectory: base,
                                      prefixCache: sharedPrefix,

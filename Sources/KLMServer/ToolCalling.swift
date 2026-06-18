@@ -3,14 +3,14 @@ import KLMRegistry
 
 /// Model-agnostic tool/function calling (WS-D D1).
 ///
-/// KrillLM does not depend on any single model's native tool-call template.
+/// Krill does not depend on any single model's native tool-call template.
 /// Instead it injects a compact instruction + the tool JSON-schemas as a
 /// system turn and asks the model to emit a sentinel-wrapped call:
 ///
 ///     <tool_call>{"name": "...", "arguments": { ... }}</tool_call>
 ///
 /// This convention (Hermes/Qwen-style) works acceptably across the Llama /
-/// Qwen / Mistral / Gemma / Phi families KrillLM serves. Parsing is tolerant
+/// Qwen / Mistral / Gemma / Phi families Krill serves. Parsing is tolerant
 /// of three shapes: `<tool_call>…</tool_call>`, the legacy Gemma
 /// `<|tool_call|>…<tool_call|>`, and a bare leading JSON object that has
 /// both `name` and `arguments`.

@@ -541,7 +541,7 @@ public final class InferenceEngine: @unchecked Sendable {
             return try GoTemplate.render(template, context)
         } catch {
             FileHandle.standardError.write(Data((
-                "[KrillLM] TEMPLATE override render failed (\(error)); "
+                "[Krill] TEMPLATE override render failed (\(error)); "
                 + "falling back to the built-in chat template.\n").utf8))
             return nil
         }
@@ -560,7 +560,7 @@ public final class InferenceEngine: @unchecked Sendable {
         for id in 0 ..< vocabSize { pieces[id] = tokenizer.decode(token: id) }
         cachedPieces = pieces
         FileHandle.standardError.write(Data((
-            "[KrillLM] built grammar token-piece table (vocab=\(vocabSize)) in "
+            "[Krill] built grammar token-piece table (vocab=\(vocabSize)) in "
             + String(format: "%.0fms", (CFAbsoluteTimeGetCurrent() - start) * 1000)
             + "\n").utf8))
         return pieces
@@ -587,7 +587,7 @@ public final class InferenceEngine: @unchecked Sendable {
             }
             guard let grammar = SchemaGrammar.compile(schema) else {
                 FileHandle.standardError.write(Data((
-                    "[KrillLM] JSON schema did not compile; falling back to the "
+                    "[Krill] JSON schema did not compile; falling back to the "
                     + "plain JSON-validity mask.\n").utf8))
                 return jsonValidityMaskLocked(pieces: pieces, stopIds: stopIds)
             }
@@ -606,7 +606,7 @@ public final class InferenceEngine: @unchecked Sendable {
             }
             guard let grammar = SchemaGrammar.compile(schema, compact: true) else {
                 FileHandle.standardError.write(Data((
-                    "[KrillLM] compact JSON schema did not compile; falling back to "
+                    "[Krill] compact JSON schema did not compile; falling back to "
                     + "the plain JSON-validity mask.\n").utf8))
                 return jsonValidityMaskLocked(pieces: pieces, stopIds: stopIds)
             }
@@ -622,7 +622,7 @@ public final class InferenceEngine: @unchecked Sendable {
             }
             guard let grammar = RegexGrammar.compile(pattern) else {
                 FileHandle.standardError.write(Data((
-                    "[KrillLM] regex did not compile; decoding unconstrained "
+                    "[Krill] regex did not compile; decoding unconstrained "
                     + "for this request.\n").utf8))
                 return nil
             }
@@ -638,7 +638,7 @@ public final class InferenceEngine: @unchecked Sendable {
             }
             guard let grammar = CFGGrammar.compile(grammarText) else {
                 FileHandle.standardError.write(Data((
-                    "[KrillLM] CFG grammar did not compile; decoding unconstrained "
+                    "[Krill] CFG grammar did not compile; decoding unconstrained "
                     + "for this request.\n").utf8))
                 return nil
             }
@@ -969,7 +969,7 @@ public final class InferenceEngine: @unchecked Sendable {
             let dropped = promptTokensBuilt.count - limit
             promptTokensBuilt = Array(promptTokensBuilt.suffix(limit))
             FileHandle.standardError.write(Data(
-                "[KrillLM] num_ctx=\(limit): prompt truncated, dropped \(dropped) leading token(s).\n".utf8))
+                "[Krill] num_ctx=\(limit): prompt truncated, dropped \(dropped) leading token(s).\n".utf8))
         }
         let promptTokens = promptTokensBuilt
 
@@ -1063,7 +1063,7 @@ public final class InferenceEngine: @unchecked Sendable {
             guard self.usesQuantizedKVCache else { return false }
             if archAdapter.kvCacheQuantization != .supportsInt8 {
                 FileHandle.standardError.write(Data(
-                    "[KrillLM] warning: int8 KV cache is supported for Gemma 4 only; falling back to fp16 for family=\(loadedModel.family).\n".utf8))
+                    "[Krill] warning: int8 KV cache is supported for Gemma 4 only; falling back to fp16 for family=\(loadedModel.family).\n".utf8))
                 return false
             }
             return true
@@ -1463,7 +1463,7 @@ public final class InferenceEngine: @unchecked Sendable {
                     // Only a genuine width mismatch disables it.
                     if m.maskWidth != logitsVocab {
                         FileHandle.standardError.write(Data((
-                            "[KrillLM] grammar mask disabled: mask width "
+                            "[Krill] grammar mask disabled: mask width "
                             + "\(m.maskWidth) != logits vocab \(logitsVocab).\n").utf8))
                     } else {
                         grammarSession = m.makeSession()

@@ -21,7 +21,7 @@ final class OutputSuppressionTests: XCTestCase {
         }
         let home = NSHomeDirectory()
         for name in ["gemma-4-12b", "gemma-4-12b-nvfp4", "gemma-4-e4b", "gemma-4-e2b"] {
-            candidates.append(URL(fileURLWithPath: "\(home)/.krillm/models/blobs/\(name)"))
+            candidates.append(URL(fileURLWithPath: "\(home)/.krill/models/blobs/\(name)"))
         }
         return candidates.first {
             fm.fileExists(atPath: $0.appendingPathComponent("tokenizer.json").path)

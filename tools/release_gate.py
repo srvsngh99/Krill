@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""KrillLM release benchmark gate.
+"""Krill release benchmark gate.
 
-Compares KrillLM and Ollama benchmark reports against configured performance
+Compares Krill and Ollama benchmark reports against configured performance
 thresholds. Produces a single JSON report and clear terminal pass/fail summary.
 
 Supports two report formats:
-  - krillm-vs-ollama.json  (flat: results.krillm / results.ollama)
+  - krill-vs-ollama.json  (flat: results.krill / results.ollama)
   - gemma4-e2b-multimodal-*.json (per-task: results.text / results.image / results.audio)
 
 Exit codes:
@@ -29,15 +29,15 @@ from typing import Any, Optional
 # Default thresholds (from OLLAMA_SPEEDUP_EXECUTION_PLAN.md)
 # ---------------------------------------------------------------------------
 DEFAULT_THRESHOLDS = {
-    "text_decode_ratio": 1.5,       # KrillLM decode tok/s / Ollama decode tok/s >= 1.5
-    "text_wall_ratio": 0.67,        # KrillLM wall / Ollama wall <= 0.67
+    "text_decode_ratio": 1.5,       # Krill decode tok/s / Ollama decode tok/s >= 1.5
+    "text_wall_ratio": 0.67,        # Krill wall / Ollama wall <= 0.67
     "image_wall_ratio": 0.67,
     "audio_wall_ratio": 0.67,
-    "text_prefill_ratio": 1.5,      # KrillLM prefill / Ollama prefill >= 1.5 or wall must win
+    "text_prefill_ratio": 1.5,      # Krill prefill / Ollama prefill >= 1.5 or wall must win
     "image_prefill_ratio": 1.5,
     "audio_prefill_ratio": 1.5,
-    "text_ttft_ratio": 0.67,        # KrillLM TTFT / Ollama TTFT <= 0.67
-    "memory_ratio": 1.0,            # KrillLM peak GB / Ollama peak GB <= 1.0
+    "text_ttft_ratio": 0.67,        # Krill TTFT / Ollama TTFT <= 0.67
+    "memory_ratio": 1.0,            # Krill peak GB / Ollama peak GB <= 1.0
 }
 
 # Metrics where lower is better (ratio should be <= threshold)
@@ -61,7 +61,7 @@ HIGHER_IS_BETTER = {
 # Hard non-regression floors applied to a metric that a profile demoted to
 # "advisory" but which must still never regress. When `text_decode_ratio`
 # is advisory, a synthetic `<metric>_floor` HARD evaluation is appended so
-# the gate still hard-fails if KrillLM ever decodes SLOWER than Ollama
+# the gate still hard-fails if Krill ever decodes SLOWER than Ollama
 # (ratio < 1.0). The advisory >= 1.5 target is still evaluated and printed;
 # it just no longer blocks. The floor applies in EVERY profile that demotes
 # the metric to advisory - keyed on the metric kind, not the profile name.
@@ -141,7 +141,7 @@ ADVISORY_DEMOTION_PROVENANCE = {
 #     dense model is per-token weight-read-bandwidth bound; on tiny 4-bit
 #     Gemma 4 e2b, llama.cpp's mature Metal kernels are at parity, and the
 #     user-visible "1.5x faster" claim is carried by text_wall/text_ttft
-#     (both hard and passing). The floor still guarantees KrillLM is never
+#     (both hard and passing). The floor still guarantees Krill is never
 #     slower than Ollama at decode. Re-promote text_decode_ratio to hard
 #     >= 1.5x when EITHER (a) Gemma 4 speculative decoding lands and sustains
 #     >= 1.5x with greedy parity, OR (b) the matrix adds a long-output decode
@@ -155,7 +155,7 @@ ADVISORY_DEMOTION_PROVENANCE = {
 # under strict — because prefill TPS on a short clip is measured over a
 # ~10-30ms window and is dominated by cold-start + Ollama-side jitter
 # (observed 1.29-2.42x run-to-run with identical setup), not a real
-# KrillLM signal. See docs/BENCHMARKING.md "audio prefill measurement".
+# Krill signal. See docs/BENCHMARKING.md "audio prefill measurement".
 GATE_PROFILES: dict[str, dict[str, str]] = {
     "strict": {
         # text_decode_ratio: advisory at >= 1.5x, with the synthetic HARD
@@ -196,7 +196,7 @@ GATE_PROFILES: dict[str, dict[str, str]] = {
         # memory_ratio is hard now that `gemma4_multimodal_benchmark.py` samples
         # peak RSS for both engines. It is still automatically downgraded to
         # advisory for any comparison whose quantization classes differ (e.g.
-        # KrillLM bf16 vs Ollama Q4_K_M) — a cross-quantization memory
+        # Krill bf16 vs Ollama Q4_K_M) — a cross-quantization memory
         # comparison cannot fairly gate a release. See `resolve_metric_kinds`.
         "memory_ratio":          "hard",
     },
@@ -217,7 +217,7 @@ def resolve_metric_kinds(profile: str, report: dict[str, Any]) -> tuple[dict[str
 
     Currently the only adjustment: `memory_ratio` is downgraded from hard to
     advisory under non-strict profiles when the two engines report different
-    quantization classes (KrillLM bf16 vs Ollama Q4_K_M, say). A peak-memory
+    quantization classes (Krill bf16 vs Ollama Q4_K_M, say). A peak-memory
     comparison across quantization classes is dominated by the weight-format
     difference, not the runtime, so it cannot fairly hard-gate a release. It
     re-promotes to hard automatically once a quantization-class-equal report is
@@ -232,7 +232,7 @@ def resolve_metric_kinds(profile: str, report: dict[str, Any]) -> tuple[dict[str
         if not comparison.get("class_equal", False):
             kinds["memory_ratio"] = "advisory"
             notes.append(
-                "memory_ratio downgraded to advisory: KrillLM and Ollama report "
+                "memory_ratio downgraded to advisory: Krill and Ollama report "
                 "different quantization classes, so the peak-memory comparison is "
                 "not apples-to-apples. It re-promotes to hard automatically once a "
                 "quantization-class-equal benchmark is run."
@@ -242,16 +242,16 @@ def resolve_metric_kinds(profile: str, report: dict[str, Any]) -> tuple[dict[str
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="KrillLM release benchmark gate."
+        description="Krill release benchmark gate."
     )
     parser.add_argument(
         "report",
         nargs="?",
-        help="Path to a combined benchmark report JSON (contains both krillm and ollama results).",
+        help="Path to a combined benchmark report JSON (contains both krill and ollama results).",
     )
     parser.add_argument(
-        "--krillm-report",
-        help="Path to a standalone KrillLM benchmark report (for sequential comparison).",
+        "--krill-report",
+        help="Path to a standalone Krill benchmark report (for sequential comparison).",
     )
     parser.add_argument(
         "--ollama-report",
@@ -316,11 +316,11 @@ def load_json(path: str) -> dict[str, Any]:
 def detect_format(report: dict[str, Any]) -> str:
     """Detect whether report is 'flat' or 'multimodal'."""
     results = report.get("results", {})
-    if "krillm" in results and "ollama" in results:
+    if "krill" in results and "ollama" in results:
         return "flat"
     if any(k in results for k in ("text", "image", "audio")):
         return "multimodal"
-    raise ValueError("Unrecognized report format: results must contain krillm/ollama or text/image/audio keys.")
+    raise ValueError("Unrecognized report format: results must contain krill/ollama or text/image/audio keys.")
 
 
 # ---------------------------------------------------------------------------
@@ -346,9 +346,9 @@ def safe_ratio(numerator: Optional[float], denominator: Optional[float]) -> Opti
 
 
 def extract_flat_metrics(report: dict[str, Any]) -> dict[str, Optional[float]]:
-    """Extract metrics from flat krillm-vs-ollama report."""
+    """Extract metrics from flat krill-vs-ollama report."""
     r = report.get("results", {})
-    ks = r.get("krillm", {}).get("summary", {})
+    ks = r.get("krill", {}).get("summary", {})
     os_ = r.get("ollama", {}).get("summary", {})
 
     return {
@@ -378,7 +378,7 @@ def extract_multimodal_metrics(report: dict[str, Any]) -> dict[str, Optional[flo
 
     for task in ("text", "image", "audio"):
         task_data = results.get(task, {})
-        ks = task_data.get("krillm", {}).get("summary", {})
+        ks = task_data.get("krill", {}).get("summary", {})
         os_ = task_data.get("ollama", {}).get("summary", {})
 
         # Decode ratio (text only for threshold, but record all)
@@ -411,7 +411,7 @@ def extract_multimodal_metrics(report: dict[str, Any]) -> dict[str, Optional[flo
             )
 
     # Memory ratio (from text task, which has peak_memory data)
-    text_ks = results.get("text", {}).get("krillm", {}).get("summary", {})
+    text_ks = results.get("text", {}).get("krill", {}).get("summary", {})
     text_os = results.get("text", {}).get("ollama", {}).get("summary", {})
     metrics["memory_ratio"] = safe_ratio(
         safe_get(text_ks, "peak_memory_gb_median"),
@@ -543,13 +543,13 @@ def geometric_mean(values: list[float]) -> float:
 
 # Metrics excluded from the geometric-mean "speedup" headline. memory_ratio is
 # a footprint ratio, not a speed ratio, and it is dominated by the weight format
-# (KrillLM bf16 vs Ollama Q4_K_M) rather than the runtime — folding it into a
+# (Krill bf16 vs Ollama Q4_K_M) rather than the runtime — folding it into a
 # perf headline would understate the speed result for reasons unrelated to speed.
 SPEEDUP_EXCLUDED_METRICS = {"memory_ratio"}
 
 
 def compute_speedup_factors(metrics: dict[str, Optional[float]]) -> list[float]:
-    """Convert speed metrics to speedup factors (>1 = KrillLM is better)."""
+    """Convert speed metrics to speedup factors (>1 = Krill is better)."""
     factors: list[float] = []
     for name, value in metrics.items():
         if value is None or name in SPEEDUP_EXCLUDED_METRICS:
@@ -587,7 +587,7 @@ def print_gate_summary(
 ) -> None:
     print()
     print(f"{BOLD}{'=' * 60}{RESET}")
-    print(f"{BOLD}  KrillLM Release Benchmark Gate{RESET}  ({CYAN}profile: {profile}, kv: {kv_cache_dtype}{RESET})")
+    print(f"{BOLD}  Krill Release Benchmark Gate{RESET}  ({CYAN}profile: {profile}, kv: {kv_cache_dtype}{RESET})")
     print(f"{BOLD}{'=' * 60}{RESET}")
     print()
 
@@ -654,26 +654,26 @@ def main() -> int:
     # Load report(s)
     if args.report:
         report = load_json(args.report)
-    elif args.krillm_report and args.ollama_report:
+    elif args.krill_report and args.ollama_report:
         # Sequential comparison: merge two single-engine reports
         # This handles the case where disk-constrained machines run one engine at a time
-        krillm = load_json(args.krillm_report)
+        krill = load_json(args.krill_report)
         ollama = load_json(args.ollama_report)
         report = {
             "status": "ok",
             "benchmark": {
-                "krillm_source": args.krillm_report,
+                "krill_source": args.krill_report,
                 "ollama_source": args.ollama_report,
                 "comparison_mode": "sequential",
             },
-            "environment": krillm.get("environment", {}),
+            "environment": krill.get("environment", {}),
             "results": {
-                "krillm": krillm.get("results", {}).get("krillm", {}),
+                "krill": krill.get("results", {}).get("krill", {}),
                 "ollama": ollama.get("results", {}).get("ollama", {}),
             },
         }
     else:
-        print("ERROR: provide a combined report path or --krillm-report and --ollama-report", file=sys.stderr)
+        print("ERROR: provide a combined report path or --krill-report and --ollama-report", file=sys.stderr)
         return 2
 
     if report.get("status") not in ("ok",):
@@ -771,7 +771,7 @@ def main() -> int:
             caveats.append(
                 f"{name} demoted to advisory under '{args.profile}' (>= "
                 f"{threshold}x target) but hard-gated by {floor_name} >= "
-                f"{floor}x: KrillLM must never decode slower than Ollama. "
+                f"{floor}x: Krill must never decode slower than Ollama. "
                 f"{provenance}; re-promotes to hard >= {threshold}x per the "
                 f"contract in OLLAMA_SPEEDUP_EXECUTION_PLAN.md §4."
             )
@@ -848,7 +848,7 @@ def main() -> int:
         "kv_cache_dtype": kv_cache_dtype,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "source_report": args.report or {
-            "krillm": args.krillm_report,
+            "krill": args.krill_report,
             "ollama": args.ollama_report,
         },
         "format": fmt,

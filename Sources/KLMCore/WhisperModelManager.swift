@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Whisper model management (consent + download)
 
 /// Resolves and (on consent) downloads the native Whisper weights. Models live
-/// under `~/.krillm/models/whisper-<sku>` as raw HuggingFace files
+/// under `~/.krill/models/whisper-<sku>` as raw HuggingFace files
 /// (model.safetensors + vocab.json + config.json); `WhisperRuntime` remaps the
 /// HF key layout at load, so no Python conversion step is needed.
 public enum WhisperModelManager {
@@ -34,10 +34,10 @@ public enum WhisperModelManager {
 
     public static func sku(_ id: String) -> SKU? { skus.first { $0.id == id } }
 
-    /// `~/.krillm/models/whisper-<sku>`.
+    /// `~/.krill/models/whisper-<sku>`.
     public static func modelDir(_ skuID: String) -> URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".krillm/models/whisper-\(skuID)")
+            .appendingPathComponent(".krill/models/whisper-\(skuID)")
     }
 
     public static func isInstalled(_ skuID: String) -> Bool {
@@ -88,7 +88,7 @@ public enum WhisperModelManager {
         progress: @escaping @Sendable (String) -> Void
     ) async throws {
         var req = URLRequest(url: url)
-        req.setValue("krillm", forHTTPHeaderField: "User-Agent")
+        req.setValue("krill", forHTTPHeaderField: "User-Agent")
         let (tempURL, response) = try await URLSession.shared.download(for: req)
         let fm = FileManager.default
         if let http = response as? HTTPURLResponse, !(200 ... 299).contains(http.statusCode) {

@@ -11,14 +11,14 @@ import MLX
 /// correct.
 ///
 /// Live test: skips when the multilingual model dir is absent (CI). Override
-/// with `KLM_WHISPER_ML_DIR`, else the default `~/.krillm/models/whisper-base`.
+/// with `KLM_WHISPER_ML_DIR`, else the default `~/.krill/models/whisper-base`.
 final class WhisperMultilingualE2ETests: XCTestCase {
 
     private func modelDir() -> URL? {
         let env = ProcessInfo.processInfo.environment
         let dir: URL = env["KLM_WHISPER_ML_DIR"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".krillm/models/whisper-base")
+                .appendingPathComponent(".krill/models/whisper-base")
         return FileManager.default.fileExists(
             atPath: dir.appendingPathComponent("model.safetensors").path) ? dir : nil
     }

@@ -19,7 +19,7 @@ public struct HardwareInfo: Equatable, Sendable, Codable {
     /// GPU core count when known. `nil` on Intel Macs where the integer
     /// is meaningless / on parse failure.
     public let gpuCores: Int?
-    /// Free disk space in bytes on the registry partition (~/.krillm).
+    /// Free disk space in bytes on the registry partition (~/.krill).
     public let freeDiskBytes: UInt64
     /// `true` iff arch is `arm64`; serves as a proxy for "the MLX/Metal
     /// fast path is available".
@@ -128,7 +128,7 @@ public extension HardwareInfo {
 
     static func defaultRegistryPath() -> URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".krillm")
+            .appendingPathComponent(".krill")
     }
 }
 
@@ -177,7 +177,7 @@ internal struct SysctlProbe: Sendable {
         },
         freeDiskBytes: { url in
             // statfs at the *parent* directory when the path itself does
-            // not exist yet (a fresh install before `~/.krillm` is created).
+            // not exist yet (a fresh install before `~/.krill` is created).
             let path = FileManager.default.fileExists(atPath: url.path)
                 ? url.path
                 : url.deletingLastPathComponent().path

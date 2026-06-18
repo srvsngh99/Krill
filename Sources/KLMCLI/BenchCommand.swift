@@ -42,7 +42,7 @@ struct BenchCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        print("KrillLM Benchmark")
+        print("Krill Benchmark")
         print("=================")
         print("Model: \(model)")
         print("Prompt: \(promptLen) tokens, Generate: \(genLen) tokens, Runs: \(runs)")

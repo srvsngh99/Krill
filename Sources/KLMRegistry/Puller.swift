@@ -11,7 +11,7 @@ public final class Puller: @unchecked Sendable {
     private let httpClient: any PullerHTTPClient
     private let tokenProvider: @Sendable () -> String?
     private let sleeper: @Sendable (UInt64) async throws -> Void
-    private let logger = Logger(label: "krillm.puller")
+    private let logger = Logger(label: "krill.puller")
 
     /// Progress callback: (bytesDownloaded, totalBytes, currentFile)
     public typealias ProgressHandler = @Sendable (Int64, Int64, String) -> Void

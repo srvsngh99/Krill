@@ -15,7 +15,7 @@ This extends the 2026-05-16 `release_candidate` decision
 
 ## Problem
 
-`strict` hard-gated `text_decode_ratio` at `>= 1.5x` (KrillLM decode tok/s
+`strict` hard-gated `text_decode_ratio` at `>= 1.5x` (Krill decode tok/s
 / Ollama decode tok/s). That target is **structurally unreachable** on
 M-series with the draft models available in mlx-community:
 
@@ -26,7 +26,7 @@ M-series with the draft models available in mlx-community:
   no-spec 59.1 tok/s vs spec 50.3 tok/s (**0.85x**). Speculative decoding
   does not raise effective decode throughput on this hardware; it lowers
   it.
-- Plain-decode `text_decode_ratio` vs Ollama sits at ~1.13-1.19x: KrillLM
+- Plain-decode `text_decode_ratio` vs Ollama sits at ~1.13-1.19x: Krill
   beats Ollama at decode, but not by 1.5x. Decode of a dense 4-bit model
   is per-token weight-read-bandwidth bound, and llama.cpp's Metal kernels
   are mature.
@@ -44,7 +44,7 @@ Under `strict`, for `text_decode_ratio` **only**:
 
 2. **Keep the HARD non-regression floor `text_decode_ratio >= 1.0`.** The
    synthetic `text_decode_ratio_floor` evaluation (already used by
-   `release_candidate`) now applies under `strict` too: KrillLM must never
+   `release_candidate`) now applies under `strict` too: Krill must never
    decode slower than Ollama, and a missing decode value hard-fails. The
    floor mechanism is keyed on the metric *kind* (`advisory`), not the
    profile name, so both profiles share one code path.
@@ -59,11 +59,11 @@ This is **not** a silent relaxation:
 
 ## What this does and does not claim
 
-- It **does not** claim KrillLM decodes 1.5x faster than Ollama. It does
+- It **does not** claim Krill decodes 1.5x faster than Ollama. It does
   not. Release notes / README must not say so.
 - It **does** stop a structurally unreachable microbenchmark target from
   being the sole hard reason `strict` fails, while keeping a hard floor
-  that KrillLM is never slower than Ollama at decode.
+  that Krill is never slower than Ollama at decode.
 - It **does not touch any other `strict` metric.** In particular the
   prefill-ratio metrics (`text_prefill_ratio`, `image_prefill_ratio`,
   `audio_prefill_ratio`) remain **hard** under `strict`. On the current

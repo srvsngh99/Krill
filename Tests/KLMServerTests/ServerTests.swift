@@ -187,7 +187,7 @@ final class ServerTests: XCTestCase {
         XCTAssertTrue(past)
     }
 
-    /// A negative default keep-alive ("never evict", used by `krillm launch`
+    /// A negative default keep-alive ("never evict", used by `krill launch`
     /// to pin a model for an agent session) must NOT hand the freshly-loaded
     /// model a deadline in the past (now + negative). Regression: without the
     /// init guard the model was evicted seconds after load, before the agent's
@@ -801,7 +801,7 @@ final class ServerTests: XCTestCase {
 
     // MARK: - Ollama compat endpoints (Phase 1: WS-A)
 
-    func testApiVersionReturnsVersionAndKrillmVersion() throws {
+    func testApiVersionReturnsVersionAndKrillVersion() throws {
         let channel = try makeChannel()
         defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
 
@@ -812,7 +812,7 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(try readResponseHead(from: channel).status, .ok)
         let json = try readJSONResponseBody(from: channel)
         XCTAssertNotNil(json["version"] as? String)
-        XCTAssertEqual(json["krillm_version"] as? String, OllamaCompat.krillVersion)
+        XCTAssertEqual(json["krill_version"] as? String, OllamaCompat.krillVersion)
         try readResponseEnd(from: channel)
     }
 
@@ -852,7 +852,7 @@ final class ServerTests: XCTestCase {
 
     func testCatalogEndpointIncludesCatalogModels() throws {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-catalog-endpoint-\(UUID().uuidString)")
+            .appendingPathComponent("krill-catalog-endpoint-\(UUID().uuidString)")
         let registry = Registry(baseDir: root)
         // Seed a catalog cache with one model not in the built-in map.
         try ModelCatalogStore(baseDir: registry.baseDir).save(
@@ -894,7 +894,7 @@ final class ServerTests: XCTestCase {
 
     func testApiShowKnownModelReturnsMetadata() throws {
         let baseDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-show-\(UUID().uuidString)")
+            .appendingPathComponent("krill-show-\(UUID().uuidString)")
         let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
         try registry.saveManifest(Self.fixtureManifest(name: "fixture-7b"))
         let channel = try makeChannel(baseDir: baseDir, registry: registry)
@@ -925,7 +925,7 @@ final class ServerTests: XCTestCase {
 
     func testApiCopyRoundTripsManifest() throws {
         let baseDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-copy-\(UUID().uuidString)")
+            .appendingPathComponent("krill-copy-\(UUID().uuidString)")
         let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
         // Seed a source whose Modelfile overrides must survive the copy
         // (PR #18 rereview: /api/copy previously dropped them).
@@ -958,7 +958,7 @@ final class ServerTests: XCTestCase {
 
     func testApiCreateFromModelfileThenShowReflectsOverrides() throws {
         let baseDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-create-srv-\(UUID().uuidString)")
+            .appendingPathComponent("krill-create-srv-\(UUID().uuidString)")
         let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
         try registry.ensureDirectories()
         try registry.saveManifest(Self.fixtureManifest(name: "qwen-base"))
@@ -1058,7 +1058,7 @@ final class ServerTests: XCTestCase {
 
     func testEmbedMissingInputReturns400() throws {
         let baseDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-emb1-\(UUID().uuidString)")
+            .appendingPathComponent("krill-emb1-\(UUID().uuidString)")
         let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
         try registry.saveManifest(Self.fixtureEmbeddingManifest(name: "bge-x"))
         let channel = try makeChannel(baseDir: baseDir, registry: registry)
@@ -1077,13 +1077,13 @@ final class ServerTests: XCTestCase {
                              body: ["model": "nope", "input": "hi"])
         XCTAssertEqual(try readResponseHead(from: channel).status, .notFound)
         let j = try readJSONResponseBody(from: channel)
-        XCTAssertTrue((j["error"] as? String)?.contains("krillm pull") ?? false)
+        XCTAssertTrue((j["error"] as? String)?.contains("krill pull") ?? false)
         try readResponseEnd(from: channel)
     }
 
     func testEmbedRejectsNonEmbeddingModelFamily() throws {
         let baseDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-emb2-\(UUID().uuidString)")
+            .appendingPathComponent("krill-emb2-\(UUID().uuidString)")
         let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
         try registry.saveManifest(Self.fixtureManifest(name: "qwen-chat"))
         let channel = try makeChannel(baseDir: baseDir, registry: registry)
@@ -1108,7 +1108,7 @@ final class ServerTests: XCTestCase {
 
     func testLegacyEmbeddingsMissingPromptReturns400() throws {
         let baseDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-emb3-\(UUID().uuidString)")
+            .appendingPathComponent("krill-emb3-\(UUID().uuidString)")
         let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
         try registry.saveManifest(Self.fixtureEmbeddingManifest(name: "bge-y"))
         let channel = try makeChannel(baseDir: baseDir, registry: registry)
@@ -1582,7 +1582,7 @@ final class ServerTests: XCTestCase {
         compat: CompatMode = .both
     ) throws -> EmbeddedChannel {
         let root = baseDir ?? FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-server-tests-\(UUID().uuidString)")
+            .appendingPathComponent("krill-server-tests-\(UUID().uuidString)")
         let engine = InferenceEngine(modelDirectory: root.appendingPathComponent("model"))
         let reg = registry ?? Registry(baseDir: root.appendingPathComponent("registry"))
         let channel = EmbeddedChannel()

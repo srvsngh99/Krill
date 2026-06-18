@@ -9,7 +9,7 @@ import MLX
 ///
 /// Two tiers:
 /// - In-memory LRU (fast, limited by `maxMemoryEntries`)
-/// - On-disk safetensors at ~/.krillm/cache/ (persistent across restarts)
+/// - On-disk safetensors at ~/.krill/cache/ (persistent across restarts)
 ///
 /// Cache key = SHA256 of the token prefix bytes + model identifier.
 public final class PrefixCache: @unchecked Sendable {
@@ -18,13 +18,13 @@ public final class PrefixCache: @unchecked Sendable {
     /// the user-interactive band but still progresses in a
     /// reasonable timeframe.
     private static let diskQueue = DispatchQueue(
-        label: "krillm.prefix-cache.disk", qos: .utility)
+        label: "krill.prefix-cache.disk", qos: .utility)
 
     private let cacheDir: URL
     private let maxMemoryEntries: Int
     private let minPrefixLength: Int
 
-    /// Byte budget for the on-disk tier (`~/.krillm/cache/`). Enforced by LRU
+    /// Byte budget for the on-disk tier (`~/.krill/cache/`). Enforced by LRU
     /// eviction after every disk write so a run of unique prompts (each writing
     /// a full, never-reused KV state) cannot grow the cache without bound and
     /// ENOSPC-crash `serve` (issue #177). Semantics:
@@ -128,7 +128,7 @@ public final class PrefixCache: @unchecked Sendable {
 
     static func defaultCacheDir() -> URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".krillm")
+            .appendingPathComponent(".krill")
             .appendingPathComponent("cache")
     }
 
@@ -725,7 +725,7 @@ extension PrefixCache {
         let gb = Double(bytes) / 1_000_000_000
         let capGB = Double(maxEntryBytes) / 1_000_000_000
         FileHandle.standardError.write(Data((
-            "[KrillLM] prefix-cache: not caching a "
+            "[Krill] prefix-cache: not caching a "
             + String(format: "%.1f", gb) + "GB KV prefix (over the "
             + String(format: "%.1f", capGB)
             + "GB per-entry cap; raise KRILL_PREFIX_CACHE_MAX_ENTRY_GB or set it "

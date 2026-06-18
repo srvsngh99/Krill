@@ -7,7 +7,7 @@ tier); their native runtimes remain future work.
 
 ## Goal
 
-Decide which non-chat model types KrillLM should support, and add them as
+Decide which non-chat model types Krill should support, and add them as
 separate product tracks instead of forcing them through the LLM generation
 loop.
 
@@ -36,7 +36,7 @@ least fail with an explicit error rather than being mis-handled. That
 foundation has landed for every WS7 type that is not yet runnable:
 
 - `SpecializedModelType` (`Sources/KLMCore/SpecializedModelTypes.swift`)
-  enumerates the specialized types KrillLM does not run as a causal LM:
+  enumerates the specialized types Krill does not run as a causal LM:
   speech recognition, speech synthesis, image generation,
   video-language, document OCR.
 - `detectSpecializedModelType(arch:modelType:)` recognizes them from a
@@ -69,8 +69,8 @@ Benchmark on M-series, 8 (query, document) pairs, BGE Reranker v2-m3:
 
 | Engine                              | Median latency |
 | ----------------------------------- | -------------- |
-| KrillLM `/v1/rerank` (per-pair, batch=1, original) | 104 ms |
-| KrillLM `/v1/rerank` (single batched forward) | ~46 ms |
+| Krill `/v1/rerank` (per-pair, batch=1, original) | 104 ms |
+| Krill `/v1/rerank` (single batched forward) | ~46 ms |
 | sentence-transformers `CrossEncoder` (Python, batched) | 34 ms |
 
 Ollama does not natively ship cross-encoder rerankers; the reference

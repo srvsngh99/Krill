@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build a tiny *quantized* Qwen2-MoE checkpoint with mlx-lm and record its
-reference logits, to check the native KrillLM `Qwen2MoEForCausalLM` runtime
+reference logits, to check the native Krill `Qwen2MoEForCausalLM` runtime
 for logit parity against mlx-lm on identical weights.
 
 Real Qwen1.5-MoE-A2.7B fits on this host, but a tiny synthetic model is
@@ -11,8 +11,8 @@ faster and exercises the same easy-to-miss surfaces: the Qwen2-MoE router
 ~bit-exact.
 
 Usage:
-    python3 tools/verify_qwen2_moe_parity.py /tmp/krillm-qwen2moe-parity
-    KLM_QWEN2_MOE_PARITY_DIR=/tmp/krillm-qwen2moe-parity \\
+    python3 tools/verify_qwen2_moe_parity.py /tmp/krill-qwen2moe-parity
+    KLM_QWEN2_MOE_PARITY_DIR=/tmp/krill-qwen2moe-parity \\
         swift test -c release --filter Qwen2MoEParityTests
 """
 import json

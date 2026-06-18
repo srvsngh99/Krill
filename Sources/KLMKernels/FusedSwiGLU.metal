@@ -1,4 +1,4 @@
-// KrillLM - Fused SwiGLU Metal Kernel
+// Krill - Fused SwiGLU Metal Kernel
 //
 // Computes: output = silu(gate) * up in a single pass.
 // Saves one full activation tensor read/write compared to separate ops.

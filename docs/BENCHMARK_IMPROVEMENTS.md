@@ -42,16 +42,16 @@ wins are technically confounded.
 
 Single-stream decode is memory-bandwidth-bound for BOTH engines (a structural
 M-series ceiling - see `docs/CEILINGS_AND_REATTEMPTS.md`), so chasing it is low
-yield. Benchmark the axes where KrillLM has features Ollama lacks.
+yield. Benchmark the axes where Krill has features Ollama lacks.
 
 ### 2a. Long-context agentic (16-32k shared context)  - PLANNED
 - The prefix-reuse payoff is largest with a LONG reused scaffold. Today's agentic
   test uses ~1300 tokens; push the shared context to 16-32k tokens.
-- Expect a large KrillLM win (reuse the long prefix vs re-prefill it), not parity.
+- Expect a large Krill win (reuse the long prefix vs re-prefill it), not parity.
 - Deliverable: extend `tools/agentic_benchmark.py` with a long-context preset.
 
 ### 2b. Structured / JSON output  - PLANNED
-- KrillLM has grammar-constrained decode; measure speed AND validity rate vs
+- Krill has grammar-constrained decode; measure speed AND validity rate vs
   Ollama's `format: json` mode. Likely a correctness AND speed win.
 - Deliverable: a structured-output section (the agentic tool already toggles JSON
   mode and counts validity; make it a first-class axis with a strict-schema case).
@@ -63,7 +63,7 @@ yield. Benchmark the axes where KrillLM has features Ollama lacks.
   with the n-gram-spec arm on.
 
 ### 2d. Embeddings  - PLANNED
-- KrillLM ships a full native embedding stack; benchmark throughput AND quality
+- Krill ships a full native embedding stack; benchmark throughput AND quality
   (cosine vs a reference) - an axis Ollama barely covers.
 
 ---

@@ -1,12 +1,12 @@
 import Foundation
 import KLMTUI
 
-/// Sourav AI Labs / KrillLM brand surface for the TUI, rendered in the brand's
+/// Sourav AI Labs / Krill brand surface for the TUI, rendered in the brand's
 /// monochrome (ink-on-paper) identity: bold for the wordmark, dim for secondary
 /// text, an inverse-video bar for the masthead. The `>_` device that wraps the
-/// wordmark is the SAI mark (see assets/krillm-lockup-ink.png).
+/// wordmark is the SAI mark (see assets/krill-lockup-ink.png).
 enum Brand {
-    static let product = "KrillLM"
+    static let product = "Krill"
     static let lab = "Sourav AI Labs"
     static let labMark = "> SAI_"            // the SAI lockup device (matches the brand lockup)
     static let labTagline = "INDEPENDENT AI LAB"
@@ -14,7 +14,7 @@ enum Brand {
     static let site = "souravailabs.ai"
     static let chips = ["text \u{00B7} vision \u{00B7} audio", "agentic", "macOS-native"]
 
-    /// The `>_ KrillLM` wordmark (plain text; caller styles it).
+    /// The `>_ Krill` wordmark (plain text; caller styles it).
     static var wordmark: String { ">_ \(product)" }
 
     // MARK: - Masthead (persistent top bar)
@@ -25,7 +25,7 @@ enum Brand {
     /// terminals so the line never overflows onto the rule row: drop the model
     /// (still shown in the footer) when there is no room, then clip the wordmark.
     static func header(width: Int, model: String) -> String {
-        // Product-only masthead: the `>_ KrillLM` wordmark on the left, the loaded
+        // Product-only masthead: the `>_ Krill` wordmark on the left, the loaded
         // model dim on the right. The full Sourav AI Labs lockup lives on the
         // launch splash, not the persistent bar.
         let leftPlain = "  \(wordmark)"
@@ -56,13 +56,13 @@ enum Brand {
 
     // MARK: - Launch splash
 
-    /// The KrillLM wordmark as a scaled-up line-drawing ASCII banner (figlet
+    /// The Krill wordmark as a scaled-up line-drawing ASCII banner (figlet
     /// "big", pure ASCII so it stays inside the house ASCII rule). The hero of
     /// the splash, echoing the wordmark on the social-preview brand asset.
-    static let banner: [String] = Banner.krillm
+    static let banner: [String] = Banner.krill
 
     /// Centered launch splash in the brand identity: the block wordmark (or a
-    /// plain `>_ KrillLM` fallback on terminals too narrow for the banner), a
+    /// plain `>_ Krill` fallback on terminals too narrow for the banner), a
     /// terminal-style tagline (the `>_` device typing the brand line, with "Mac"
     /// reverse-highlighted exactly as the social preview highlights it),
     /// capability chips, and the lab/site line.
@@ -71,7 +71,7 @@ enum Brand {
             String(repeating: " ", count: Chrome.centerPad(visibleWidth: vis, totalWidth: width)) + s
         }
         // Hero = the krill mascot beside the block wordmark, centered as one
-        // unit. Falls back to the plain `>_ KrillLM` line on terminals too
+        // unit. Falls back to the plain `>_ Krill` line on terminals too
         // narrow to fit the pair.
         let mascot = Banner.krillMascot
         let mascotWidth = Banner.width(mascot)

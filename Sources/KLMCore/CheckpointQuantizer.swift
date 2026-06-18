@@ -2,7 +2,7 @@ import Foundation
 import MLX
 
 /// Native Swift+MLX checkpoint quantizer: converts a dense (bf16/fp16) HuggingFace
-/// / MLX-format checkpoint to a k-bit MLX-format checkpoint that KrillLM's own
+/// / MLX-format checkpoint to a k-bit MLX-format checkpoint that Krill's own
 /// loader reads back, with no Python / mlx-lm shell-out.
 ///
 /// Two modes of operation, picked by whether a `referenceDir` is supplied:
@@ -26,11 +26,11 @@ import MLX
 ///    chosen modules to a higher precision (the Gemma vision/audio projectors are
 ///    auto-protected at 8-bit affine, matching the recipe) and is recorded as
 ///    per-module overrides in `config.quantization` - the exact `q.effective(path)`
-///    keys KrillLM's loader resolves. Stacked 3-D expert weights are always
+///    keys Krill's loader resolves. Stacked 3-D expert weights are always
 ///    quantized affine at the config's TOP-LEVEL group (the MoE runtime
 ///    reconstructs them affine from the top-level group and reads no override).
 ///
-/// IMPORTANT vs the loader: KrillLM's loader reconstructs quantized layers with
+/// IMPORTANT vs the loader: Krill's loader reconstructs quantized layers with
 /// mlx-swift `quantize(model:)`, which only turns `Linear`/`Embedding` leaves into
 /// quantized leaves; `strictVerify` then crashes on any extra/missing `.scales`.
 /// The checkpoint must therefore ship `weight`+`scales`(+`biases`) for EXACTLY the
@@ -63,7 +63,7 @@ public enum CheckpointQuantizer {
                     + "quantized build, so there is no module set to learn."
             case .nonDivisibleWeight(let name, let dim, let groupSize):
                 return "weight '\(name)' inner dim \(dim) is not divisible by group size "
-                    + "\(groupSize); KrillLM's loader quantizes every Linear uniformly, so "
+                    + "\(groupSize); Krill's loader quantizes every Linear uniformly, so "
                     + "it cannot load a checkpoint with this layer left dense. Use a group "
                     + "size that divides \(dim)."
             case .expertGroupUnsupported(let group):

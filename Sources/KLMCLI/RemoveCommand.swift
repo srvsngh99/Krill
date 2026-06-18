@@ -16,7 +16,7 @@ struct RemoveCommand: ParsableCommand {
 
         guard registry.hasModel(model) else {
             print("Error: model '\(model)' not found")
-            print("Run 'krillm list' to see installed models.")
+            print("Run 'krill list' to see installed models.")
             throw ExitCode.failure
         }
 

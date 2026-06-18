@@ -8,8 +8,8 @@
 # projectors (8-bit affine) and any 3-D experts (forced affine).
 #
 # Usage:
-#   tools/verify_native_quantize_reference.sh <bf16_source_dir> <reference_4bit_dir> [mode] [extra krillm flags...]
-#   mode defaults to nvfp4. Extra flags pass straight to `krillm quantize`
+#   tools/verify_native_quantize_reference.sh <bf16_source_dir> <reference_4bit_dir> [mode] [extra krill flags...]
+#   mode defaults to nvfp4. Extra flags pass straight to `krill quantize`
 #   (e.g. --protect o_proj --no-protect-vision).
 #
 # Example (Gemma 4 12B, both already in the HF cache):
@@ -26,12 +26,12 @@ case "$MODE" in
   affine) GS=64; BITS=4;;
   *) echo "unknown mode $MODE"; exit 2;;
 esac
-PY="${KRILL_PY:-$HOME/.krillm/venv/bin/python}"
+PY="${KRILL_PY:-$HOME/.krill/venv/bin/python}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-OUT="$HOME/.krillm/models/blobs/native-quant-ref-paritycheck"
+OUT="$HOME/.krill/models/blobs/native-quant-ref-paritycheck"
 
 rm -rf "$OUT"
-HF_HUB_OFFLINE=1 .build/release/krillm quantize "$SRC" \
+HF_HUB_OFFLINE=1 .build/release/krill quantize "$SRC" \
   --reference "$REF" --mode "$MODE" --group-size "$GS" --bits "$BITS" --dtype fp16 \
   ${EXTRA[@]+"${EXTRA[@]}"} --name native-quant-ref-paritycheck \
   || { echo "GATE: FAIL (quantize errored)"; exit 1; }

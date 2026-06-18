@@ -1,8 +1,8 @@
-# KrillLM Architecture
+# Krill Architecture
 
 ## Overview
 
-KrillLM is a Mac-native LLM inference engine for Apple Silicon built on MLX. It ships as a single CLI binary (`krillm`) with an HTTP server, supporting 7 model families with prefix caching and speculative decoding.
+Krill is a Mac-native LLM inference engine for Apple Silicon built on MLX. It ships as a single CLI binary (`krill`) with an HTTP server, supporting 7 model families with prefix caching and speculative decoding.
 
 ### Release Status
 
@@ -120,9 +120,9 @@ model-agnostic `<tool_call>`/`<tool_response>` sentinel extractor
 (`ToolCalling.swift`). This is what lets a single server back agents that speak
 three different protocols.
 
-## Coding Agent Backend (`krillm launch`)
+## Coding Agent Backend (`krill launch`)
 
-`krillm launch <agent>` boots a terminal coding agent (Claude Code, Codex,
+`krill launch <agent>` boots a terminal coding agent (Claude Code, Codex,
 OpenCode, Hermes, Pi, Copilot CLI, Droid) pre-wired to the local server, the way
 `ollama launch` does. The design principle: **the adapter is an endpoint inside
 the server, not a per-agent external proxy.** Each agent speaks one of the three
@@ -142,16 +142,16 @@ wire protocol, env to export, config files to `write`/`mergeJSON`, setup
 stays generic over the table.
 
 **Flow.** Resolve the profile and model (`--model` or first installed) -> ensure
-a server is up with that model loaded (auto-start a detached `krillm serve` and
+a server is up with that model loaded (auto-start a detached `krill serve` and
 poll `/healthz`, or fail loud; `--no-serve` opts out) -> apply the agent's
 config files + env + setup commands -> `execvp` the agent so it inherits the
 real TTY/stdin/signals. The auto-started server survives the exec (it is a
 separate process) and keeps running after the agent exits; the keep-alive
-controller unloads its idle *model* to free memory (and `krillm stop` unloads
+controller unloads its idle *model* to free memory (and `krill stop` unloads
 it on demand), but the server *process* itself stays resident until killed.
 
-**Config safety.** `write` targets are krillm-owned paths only (e.g. Codex gets
-an isolated `config.toml` under a krillm-owned `CODEX_HOME`, so the user's real
+**Config safety.** `write` targets are krill-owned paths only (e.g. Codex gets
+an isolated `config.toml` under a krill-owned `CODEX_HOME`, so the user's real
 `~/.codex` is never touched). `mergeJSON` deep-merges only our keys into the
 user's config, keeps a `.bak`, and concatenates+dedups arrays (so e.g. Droid's
 `custom_models` never clobbers the user's existing entries).

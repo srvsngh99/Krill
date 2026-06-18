@@ -65,7 +65,7 @@ public actor KeepAliveController {
 
     public init(defaultSeconds: Int) {
         self.defaultSeconds = defaultSeconds
-        // A negative default means "never evict" (e.g. `krillm launch` pins the
+        // A negative default means "never evict" (e.g. `krill launch` pins the
         // model for an agent session). Mirror `touch()`'s semantics at init so a
         // freshly-loaded model with a negative default isn't handed a deadline
         // in the past (now + negative) and evicted before its first request.

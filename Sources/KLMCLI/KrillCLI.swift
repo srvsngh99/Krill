@@ -2,19 +2,19 @@ import ArgumentParser
 import KLMRegistry
 
 @main
-struct Krillm: AsyncParsableCommand {
+struct Krill: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "krillm",
-        abstract: "KrillLM - a fast, lean LLM runtime, built for Mac.",
+        commandName: "krill",
+        abstract: "Krill - a fast, lean LLM runtime, built for Mac.",
         discussion: """
             A Mac-native LLM runtime on Apple's MLX framework: run open models \
             locally with Metal acceleration - chat, a full-screen TUI with voice, \
             an Ollama/OpenAI-compatible server, and native multimodal.
 
-            Run `krillm run <model>` to chat, or set default_model in
-            ~/.krillm/config.toml and just run `krillm`. A Sourav AI Labs project.
+            Run `krill run <model>` to chat, or set default_model in
+            ~/.krill/config.toml and just run `krill`. A Sourav AI Labs project.
             """,
-        version: KrillLMVersion,
+        version: KrillVersion,
         subcommands: [
             RunCommand.self,
             PullCommand.self,

@@ -9,9 +9,9 @@ struct VersionCommand: ParsableCommand {
     )
 
     func run() throws {
-        print("KrillLM \(KrillLMVersionTag)")
+        print("Krill \(KrillVersionTag)")
         print("By Sourav Singh / Sourav AI Labs")
-        print("https://github.com/srvsngh99/KrillLM")
+        print("https://github.com/srvsngh99/Krill")
         print()
         print("Backend: mlx-swift (Apple MLX)")
         print("Platform: \(platform())")

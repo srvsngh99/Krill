@@ -23,7 +23,7 @@ final class ChatHistoryTests: XCTestCase {
 
         // Engine without a loaded model should return empty stream, not crash
         let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-chat-test-\(UUID().uuidString)")
+            .appendingPathComponent("krill-chat-test-\(UUID().uuidString)")
         let engine = InferenceEngine(modelDirectory: tempDir)
 
         let (stream, getStats) = engine.generate(
@@ -50,7 +50,7 @@ final class ChatHistoryTests: XCTestCase {
     func testGeneratePromptConvenienceWrapsMessages() {
         // The prompt-based convenience should be equivalent to wrapping in messages
         let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-chat-test-\(UUID().uuidString)")
+            .appendingPathComponent("krill-chat-test-\(UUID().uuidString)")
         let engine = InferenceEngine(modelDirectory: tempDir)
 
         // Both should produce the same result (empty stream, no model)

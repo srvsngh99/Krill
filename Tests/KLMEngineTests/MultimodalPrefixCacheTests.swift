@@ -18,7 +18,7 @@ final class MultimodalPrefixCacheTests: XCTestCase {
 
     private func makeTempCache() -> PrefixCache {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-mm-prefix-test-\(UUID().uuidString)")
+            .appendingPathComponent("krill-mm-prefix-test-\(UUID().uuidString)")
         addTeardownBlock {
             try? FileManager.default.removeItem(at: dir)
         }

@@ -383,7 +383,7 @@ let architectureRules: [ArchitectureRule] = [
         action: .load { try loadPhi(configData: $0, directory: $1) }),
 
     // WS7 specialized model types (ASR / TTS / diffusion / video / OCR).
-    // KrillLM has no native runtime for these; rejecting here with a specific
+    // Krill has no native runtime for these; rejecting here with a specific
     // error is the roadmap's "Unsupported tier" - far better than mis-loading
     // them via the Llama fallback below and emitting a garbage forward pass.
     ArchitectureRule(
@@ -393,11 +393,11 @@ let architectureRules: [ArchitectureRule] = [
             let specialized = detectSpecializedModelType(arch: arch, modelType: mt)
             let name = specialized?.displayName ?? "specialized"
             return .specializedModelUnsupported(
-                "KrillLM does not support \(name) models. "
+                "Krill does not support \(name) models. "
                 + "These are WS7 specialized model types with no native "
                 + "runtime in this build (of the WS7 types, only rerankers "
                 + "have shipped - use POST /v1/rerank for those; see "
-                + "docs/workstreams/WS7_SPECIALIZED_MODEL_TYPES.md). KrillLM "
+                + "docs/workstreams/WS7_SPECIALIZED_MODEL_TYPES.md). Krill "
                 + "serves causal text LMs, Gemma 4 vision/audio, embeddings, "
                 + "and rerankers. Detected arch=\(arch), model_type=\(mt).")
         }),

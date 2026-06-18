@@ -5,7 +5,7 @@ import MLX
 /// Quant-quality measurement: how faithfully does a quantized checkpoint
 /// reproduce the FULL-PRECISION (bf16) output distribution? This is the honest,
 /// runtime-consistent way to compare our mixed-nvfp4 (o_proj @ 8-bit) against a
-/// naive uniform 4-bit checkpoint -- both loaded through the SAME KrillLM
+/// naive uniform 4-bit checkpoint -- both loaded through the SAME Krill
 /// runtime, so our per-module overrides are actually honored (mlx-lm would
 /// silently evaluate the mixed checkpoint as uniform nvfp4 and misreport it).
 ///

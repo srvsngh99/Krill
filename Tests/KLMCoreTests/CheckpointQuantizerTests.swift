@@ -119,7 +119,7 @@ final class CheckpointQuantizerTests: XCTestCase {
 
     func testThrowsOnNonDivisibleWeight() throws {
         // A 2-D weight whose inner dim is not group-divisible cannot be uniformly
-        // loaded by KrillLM, so the quantizer must fail loudly rather than leave it
+        // loaded by Krill, so the quantizer must fail loudly rather than leave it
         // dense.
         let src = try makeSource(
             ["model.layers.0.mlp.down_proj.weight": MLXRandom.normal([8, 30])],

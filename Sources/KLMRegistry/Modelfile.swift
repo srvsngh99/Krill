@@ -129,7 +129,7 @@ public enum ModelCreateError: Error, CustomStringConvertible {
     public var description: String {
         switch self {
         case .baseNotInstalled(let n):
-            return "Base model '\(n)' is not installed. Pull it first: krillm pull \(n)"
+            return "Base model '\(n)' is not installed. Pull it first: krill pull \(n)"
         }
     }
 }
@@ -140,7 +140,7 @@ extension Registry {
     /// weight copy - with the Modelfile overrides recorded on the manifest.
     @discardableResult
     public func createModel(name: String, from modelfile: Modelfile) throws -> ModelManifest {
-        let logger = Logger(label: "krillm.create")
+        let logger = Logger(label: "krill.create")
         try Registry.requireValidName(name)
         let baseName = modelfile.from
         try Registry.requireValidName(baseName)

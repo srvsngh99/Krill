@@ -36,7 +36,7 @@ final class AudioPreprocessorTests: XCTestCase {
 #if canImport(AVFoundation)
     private func makeM4A(_ samples: [Float], sampleRate: Int = 16_000) throws -> Data {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-audio-test-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("krill-audio-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let url = dir.appendingPathComponent("tone.m4a")

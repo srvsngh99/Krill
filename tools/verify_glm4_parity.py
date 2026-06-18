@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Build a tiny *quantized* GLM-4 (`Glm4ForCausalLM`, model_type "glm4")
-checkpoint with mlx-lm and record its reference logits, so the native KrillLM
+checkpoint with mlx-lm and record its reference logits, so the native Krill
 `Glm4ForCausalLM` runtime can be checked for logit parity against mlx-lm on the
 exact same weights.
 
 This is the OFFLINE TEST ORACLE only -- it never runs at inference time and is
-not part of the KrillLM engine. The runtime itself is pure Swift + MLX
+not part of the Krill engine. The runtime itself is pure Swift + MLX
 (Sources/KLMCore/Glm4Model.swift); this Python fixture only exists to gate it,
 exactly like tools/verify_mixtral_parity.py gates the native Mixtral runtime.
 
@@ -29,12 +29,12 @@ Sources/KLMCore/GLMModel.swift (transformer.encoder.layers.*.self_attention.
 query_key_value / dense_h_to_4h / word_embeddings / output_layer).
 
 Usage:
-    python3 tools/verify_glm4_parity.py /tmp/krillm-glm4-parity
+    python3 tools/verify_glm4_parity.py /tmp/krill-glm4-parity
 
 Writes into that dir: config.json, model.safetensors, reference_logits.json
 (the last-token logits for a fixed token sequence). Then run the gated Swift
 test against it:
-    KLM_GLM4_PARITY_DIR=/tmp/krillm-glm4-parity \\
+    KLM_GLM4_PARITY_DIR=/tmp/krill-glm4-parity \\
         swift test -c release --filter Glm4ParityTests
 """
 import json
@@ -74,7 +74,7 @@ def build(outdir: str) -> None:
     model = Model(args)
     mx.eval(model.parameters())
 
-    # Quantize uniformly (matches KrillLM's loadWeights quantize pass): every
+    # Quantize uniformly (matches Krill's loadWeights quantize pass): every
     # Linear (q/k/v/o, gate_up, down, lm_head) + the embedding become
     # QuantizedLinear / QuantizedEmbedding on identical packed tensors.
     nn.quantize(model, group_size=GROUP_SIZE, bits=BITS)

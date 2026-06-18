@@ -1,6 +1,6 @@
 # Follow-ups: Native-Path Bugs Blocking Agent Dogfood
 
-Discovered 2026-05-27/28 while wiring KrillLM as the backend for an external
+Discovered 2026-05-27/28 while wiring Krill as the backend for an external
 agent harness (Claude Code via `ANTHROPIC_BASE_URL` + `/v1/messages`). The
 Anthropic shim, native tool calling, and SSE streaming all work end-to-end
 on **Qwen 2.5 14B Instruct** (`.qwen` family, dense engine). Larger /
@@ -60,7 +60,7 @@ Q/K/V projections at `Gemma4Model.swift:213, 228-229`.
 
 ## 2. AliasMap points at non-existent `gemma-4-12b` and `gemma-4-27b` repos
 
-**Symptom.** `krillm pull gemma-4-12b` and `krillm pull gemma-4-27b`
+**Symptom.** `krill pull gemma-4-12b` and `krill pull gemma-4-27b`
 both fail with `HTTP 401: Failed to list repo files`.
 
 **Root cause.** `Sources/KLMRegistry/AliasMap.swift:185-190`:
@@ -94,7 +94,7 @@ appropriately in `Recommender`.
 
 ## 3. Puller's file allowlist drops files the Qwen 3 tokenizer needs
 
-**Symptom.** After `krillm pull mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`,
+**Symptom.** After `krill pull mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`,
 the local blob is missing `chat_template.jinja`, `added_tokens.json`,
 `merges.txt`, `vocab.json`, and `model.safetensors.index.json`. Loading
 the tokenizer fails with "chat_template is not set."
@@ -136,7 +136,7 @@ images). Inversion is more future-proof - every new HF convention so
 far has added files, not removed them.
 
 Add a tokenizer-load smoke test that asserts `chat_template` is present
-(either inline or via the separate jinja file) after `krillm pull`.
+(either inline or via the separate jinja file) after `krill pull`.
 
 ---
 
@@ -193,14 +193,14 @@ orthogonal - the runtime can ship now and optimize dispatch later.
 
 Not a bug per se, but project direction: the `MoEEngine` /
 `PythonSidecar` bridge in `Sources/KLMEngine/MoEEngine.swift` is the
-last `~/.krillm/venv` consumer in the chat path. WS5 already retired
+last `~/.krill/venv` consumer in the chat path. WS5 already retired
 the Qwen 2.5-VL bridge for the same reason. Once §3 and §4 land:
 
 - Drop `MoEEngine` to native-only (rename `mixtureOfExperts`
   ChatRouting → `denseEngine` or merge cases; the `.moe` family no
   longer needs a separate router enum value).
-- Delete `tools/moe_bridge.py` and the `KRILLM_MOE_PYTHON` /
-  `KRILLM_MOE_BRIDGE` env overrides.
+- Delete `tools/moe_bridge.py` and the `KRILL_MOE_PYTHON` /
+  `KRILL_MOE_BRIDGE` env overrides.
 - Update the "compatible_fallback tier" language in
   `ModelCapabilities.swift` to reflect that MoE is now first-class.
 - Remove the "opt-in until scatter-dispatch lands" gate referenced in
@@ -210,8 +210,8 @@ the Qwen 2.5-VL bridge for the same reason. Once §3 and §4 land:
 
 ## Verification path once §1-§4 land
 
-1. `krillm pull mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`
-2. `krillm serve --model Qwen3-Coder-30B-A3B-Instruct-4bit`
+1. `krill pull mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit`
+2. `krill serve --model Qwen3-Coder-30B-A3B-Instruct-4bit`
 3. Plain-text smoke against `/v1/messages` (Anthropic shape).
 4. Tool-calling smoke with one `tools` entry - assert the response
    `content[0].type == "tool_use"` with parsed `input`.

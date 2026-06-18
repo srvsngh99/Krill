@@ -44,7 +44,7 @@ final class KLMRegistryTests: XCTestCase {
 
     func testCreateModelRejectsTraversalName() throws {
         let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-trav-\(UUID().uuidString)")
+            .appendingPathComponent("krill-trav-\(UUID().uuidString)")
         let reg = Registry(baseDir: base)
         try reg.ensureDirectories()
         try reg.saveManifest(ModelManifest(
@@ -85,7 +85,7 @@ final class KLMRegistryTests: XCTestCase {
 
     func testCreateModelReferencesBaseAndStoresOverrides() throws {
         let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-create-\(UUID().uuidString)")
+            .appendingPathComponent("krill-create-\(UUID().uuidString)")
         let reg = Registry(baseDir: base)
         try reg.ensureDirectories()
         // Seed a base model + a blob dir to symlink.
@@ -122,7 +122,7 @@ final class KLMRegistryTests: XCTestCase {
 
     func testCreateModelRejectsMissingBase() {
         let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-create2-\(UUID().uuidString)")
+            .appendingPathComponent("krill-create2-\(UUID().uuidString)")
         let reg = Registry(baseDir: base)
         let mf = try! ModelfileParser.parse("FROM not-installed\nSYSTEM hi")
         XCTAssertThrowsError(try reg.createModel(name: "x", from: mf))
@@ -156,14 +156,14 @@ final class KLMRegistryTests: XCTestCase {
         // manifests/blobs must root there exactly (Ollama drop-in layout),
         // not under `<dir>/models`.
         let md = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-md-\(UUID().uuidString)")
+            .appendingPathComponent("krill-md-\(UUID().uuidString)")
         let reg = Registry(modelsDir: md)
         XCTAssertEqual(reg.modelsDir, md)
         XCTAssertEqual(reg.manifestsDir, md.appendingPathComponent("manifests"))
         XCTAssertEqual(reg.blobsDir, md.appendingPathComponent("blobs"))
         // Default path (no override) still derives `<base>/models`.
         let base = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-base-\(UUID().uuidString)")
+            .appendingPathComponent("krill-base-\(UUID().uuidString)")
         let def = Registry(baseDir: base)
         XCTAssertEqual(def.modelsDir, base.appendingPathComponent("models"))
     }
@@ -208,7 +208,7 @@ final class KLMRegistryTests: XCTestCase {
 
     func testRegistryEmptyList() {
         let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-test-\(UUID().uuidString)")
+            .appendingPathComponent("krill-test-\(UUID().uuidString)")
         let registry = Registry(baseDir: tempDir)
         XCTAssertTrue(registry.listModels().isEmpty)
         // Cleanup
@@ -217,7 +217,7 @@ final class KLMRegistryTests: XCTestCase {
 
     func testManifestSaveAndLoad() throws {
         let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-test-\(UUID().uuidString)")
+            .appendingPathComponent("krill-test-\(UUID().uuidString)")
         let registry = Registry(baseDir: tempDir)
 
         let manifest = ModelManifest(
@@ -247,7 +247,7 @@ final class KLMRegistryTests: XCTestCase {
 
     func testRegistryRemoveModel() throws {
         let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-test-\(UUID().uuidString)")
+            .appendingPathComponent("krill-test-\(UUID().uuidString)")
         let registry = Registry(baseDir: tempDir)
 
         let manifest = ModelManifest(

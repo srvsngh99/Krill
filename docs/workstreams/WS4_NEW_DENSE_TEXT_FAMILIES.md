@@ -43,16 +43,16 @@ All inherit the qwen family's WS3 capability set
 
 Qwen 3 1.7B, max 64 tokens, 3 runs / 1 warmup, M-series:
 
-- KrillLM: 144.0 tok/s
+- Krill: 144.0 tok/s
 - Ollama:  135.1 tok/s
 
-KrillLM is 1.07x faster than Ollama on this pair. Plain decode; no
+Krill is 1.07x faster than Ollama on this pair. Plain decode; no
 speculative decoding.
 
 ## Acceptance status
 
-- `krillm pull <alias>` resolves to the new entries.
-- `krillm run qwen3-1.7b "..."` loads and produces coherent output
+- `krill pull <alias>` resolves to the new entries.
+- `krill run qwen3-1.7b "..."` loads and produces coherent output
   including Qwen 3's `<think>` chain-of-thought trace.
 - Server `/api/generate`, `/api/chat`, OpenAI chat paths inherit the
   Qwen family handling without further changes.
@@ -68,7 +68,7 @@ speculative decoding.
 
 ## Goal
 
-Keep KrillLM current with popular dense text model families while preserving
+Keep Krill current with popular dense text model families while preserving
 Mac-native speed, memory discipline, and honest support claims.
 
 Priority examples:
@@ -118,8 +118,8 @@ Sources/KLMTokenizer/TokenizerWrapper.swift
 
 ## Acceptance
 
-- `krillm pull <alias>` resolves to a known native adapter.
-- `krillm run <alias>` produces coherent deterministic output.
+- `krill pull <alias>` resolves to a known native adapter.
+- `krill run <alias>` produces coherent deterministic output.
 - Server `/api/generate`, `/api/chat`, and OpenAI chat paths work.
 - Tool/structured-output behavior is documented as model-quality dependent.
 - Benchmark report is attached for production-native promotion.

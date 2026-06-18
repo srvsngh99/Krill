@@ -1,5 +1,5 @@
-# KrillLM Build System
-BINARY_NAME = krillm
+# Krill Build System
+BINARY_NAME = krill
 BUILD_DIR = .build/release
 PREFIX ?= /usr/local
 VERSION = $(shell cat VERSION 2>/dev/null || echo "0.2.0")
@@ -13,14 +13,14 @@ BENCH_PROMPT ?= Explain quantum computing in simple terms.
 BENCH_MAX_TOKENS ?= 32
 BENCH_RUNS ?= 5
 BENCH_WARMUP ?= 2
-BENCH_OUTPUT ?= .build/benchmarks/krillm-vs-ollama.json
+BENCH_OUTPUT ?= .build/benchmarks/krill-vs-ollama.json
 GEMMA4_BENCH_OUTPUT ?= .build/benchmarks/gemma4-e2b-multimodal-4bit.json
-GEMMA4_KRILL_MODEL ?= $(HOME)/.krillm/models/blobs/gemma-4-e2b
+GEMMA4_KRILL_MODEL ?= $(HOME)/.krill/models/blobs/gemma-4-e2b
 GEMMA4_OLLAMA_MODEL ?= gemma4:e2b
 GEMMA4_BENCH_RUNS ?= 3
 GEMMA4_BENCH_WARMUP ?= 1
-KRILLM_PYTHON ?= $(HOME)/.krillm/venv/bin/python3
-KRILLM_VENV_PYTHON ?= python3
+KRILL_PYTHON ?= $(HOME)/.krill/venv/bin/python3
+KRILL_VENV_PYTHON ?= python3
 
 .PHONY: build release install uninstall clean test bench bench-compare bench-concurrent bench-gemma4-multimodal bench-release-gate parity-gate metallib dist dist-app app-bundle version
 
@@ -46,7 +46,7 @@ metallib:
 		echo "ERROR: Metal Toolchain not installed. Run: xcodebuild -downloadComponent MetalToolchain"; \
 		exit $${REQUIRE_METALLIB:-0}; \
 	fi; \
-	AIR_DIR=$$(mktemp -d "$${TMPDIR:-/tmp}/krillm-metallib.XXXXXX"); \
+	AIR_DIR=$$(mktemp -d "$${TMPDIR:-/tmp}/krill-metallib.XXXXXX"); \
 	trap 'rm -rf "$$AIR_DIR"' EXIT; \
 	find "$$METAL_DIR" -type f -name '*.metal' -print | while IFS= read -r f; do \
 		REL=$${f#$$METAL_DIR/}; \
@@ -110,14 +110,14 @@ bench:
 	fi
 	$(BUILD_DIR)/$(BINARY_NAME) bench $(MODEL) --runs 3
 
-KRILLM_URL ?=
+KRILL_URL ?=
 
 # Reproducible local comparison against Ollama. Exits 77 when prerequisites are missing.
-# Use KRILLM_URL to benchmark against a running KrillLM server (warm-server mode).
+# Use KRILL_URL to benchmark against a running Krill server (warm-server mode).
 bench-compare:
-	@if [ -n "$(KRILLM_URL)" ]; then \
-		python3 tools/krillm_vs_ollama_benchmark.py \
-			--krillm-url "$(KRILLM_URL)" \
+	@if [ -n "$(KRILL_URL)" ]; then \
+		python3 tools/krill_vs_ollama_benchmark.py \
+			--krill-url "$(KRILL_URL)" \
 			--krill-model "$(KRILL_MODEL)" \
 			--ollama-model "$(OLLAMA_MODEL)" \
 			--prompt "$(BENCH_PROMPT)" \
@@ -126,8 +126,8 @@ bench-compare:
 			--warmup $(BENCH_WARMUP) \
 			--output "$(BENCH_OUTPUT)"; \
 	else \
-		python3 tools/krillm_vs_ollama_benchmark.py \
-			--krillm-bin $(BUILD_DIR)/$(BINARY_NAME) \
+		python3 tools/krill_vs_ollama_benchmark.py \
+			--krill-bin $(BUILD_DIR)/$(BINARY_NAME) \
 			--krill-model "$(KRILL_MODEL)" \
 			--ollama-model "$(OLLAMA_MODEL)" \
 			--prompt "$(BENCH_PROMPT)" \
@@ -138,17 +138,17 @@ bench-compare:
 	fi
 
 # Concurrent-throughput sweep (aggregate tok/s under N simultaneous streams),
-# the axis where KrillLM's continuous batcher beats Ollama. Server-mode only:
-# point at a running KrillLM server (launch with KRILL_NUM_PARALLEL>=16, and
+# the axis where Krill's continuous batcher beats Ollama. Server-mode only:
+# point at a running Krill server (launch with KRILL_NUM_PARALLEL>=16, and
 # KRILL_NGRAM_SPEC=1 for the low-concurrency n-gram win) and/or an Ollama daemon.
-# A serial-vs-batched A/B (find the crossover N*) is two runs with the KrillLM
+# A serial-vs-batched A/B (find the crossover N*) is two runs with the Krill
 # server launched at KRILL_NUM_PARALLEL=1 then =16, passing SERVER_ARM=serial/batched.
 CONCURRENCY_SWEEP ?= 1,2,4,8,16
 BENCH_CONCURRENT_OUTPUT ?= .build/benchmarks/concurrent-throughput.json
 SERVER_ARM ?= unspecified
 bench-concurrent:
-	@python3 tools/krillm_concurrent_benchmark.py \
-		$(if $(KRILLM_URL),--krillm-url "$(KRILLM_URL)" --krill-model "$(KRILL_MODEL)",) \
+	@python3 tools/krill_concurrent_benchmark.py \
+		$(if $(KRILL_URL),--krill-url "$(KRILL_URL)" --krill-model "$(KRILL_MODEL)",) \
 		$(if $(OLLAMA_HOST),--ollama-host "$(OLLAMA_HOST)" --ollama-model "$(OLLAMA_MODEL)",) \
 		--concurrency-sweep "$(CONCURRENCY_SWEEP)" \
 		--max-tokens $(BENCH_MAX_TOKENS) \
@@ -156,16 +156,16 @@ bench-concurrent:
 		--server-arm "$(SERVER_ARM)" \
 		--output "$(BENCH_CONCURRENT_OUTPUT)"
 
-# Gemma 4 text/image/audio comparison against Ollama. All KrillLM paths are
+# Gemma 4 text/image/audio comparison against Ollama. All Krill paths are
 # native (the mlx-vlm bridge was removed in WS6 Step 4): native_cli runs the
 # release binary per request — no server or Python deps. Requires `make
-# release` first (uses .build/release/krillm). For server-mode numbers, run
-# the script directly with --krillm-url + --krillm-image-mode native_server.
+# release` first (uses .build/release/krill). For server-mode numbers, run
+# the script directly with --krill-url + --krill-image-mode native_server.
 bench-gemma4-multimodal: release
-	$(KRILLM_PYTHON) tools/gemma4_multimodal_benchmark.py \
+	$(KRILL_PYTHON) tools/gemma4_multimodal_benchmark.py \
 		--krill-model "$(GEMMA4_KRILL_MODEL)" \
 		--ollama-model "$(GEMMA4_OLLAMA_MODEL)" \
-		--krillm-image-mode native_cli \
+		--krill-image-mode native_cli \
 		--runs $(GEMMA4_BENCH_RUNS) \
 		--warmup $(GEMMA4_BENCH_WARMUP) \
 		--output "$(GEMMA4_BENCH_OUTPUT)"
@@ -177,12 +177,12 @@ GATE_ALLOW_FLAGS ?=
 # Usage:
 #   make bench-release-gate                                  # uses default multimodal report
 #   make bench-release-gate GATE_INPUT=path/to/report.json   # custom combined report
-#   make bench-release-gate GATE_KRILLM=k.json GATE_OLLAMA=o.json  # sequential comparison
+#   make bench-release-gate GATE_KRILL=k.json GATE_OLLAMA=o.json  # sequential comparison
 #   make bench-release-gate GATE_ALLOW_FLAGS="--allow-dtype-mismatch"
 bench-release-gate:
-	@if [ -n "$(GATE_KRILLM)" ] && [ -n "$(GATE_OLLAMA)" ]; then \
+	@if [ -n "$(GATE_KRILL)" ] && [ -n "$(GATE_OLLAMA)" ]; then \
 		python3 tools/release_gate.py \
-			--krillm-report "$(GATE_KRILLM)" \
+			--krill-report "$(GATE_KRILL)" \
 			--ollama-report "$(GATE_OLLAMA)" \
 			--output "$(GATE_REPORT)" \
 			$(GATE_ALLOW_FLAGS); \
@@ -193,7 +193,7 @@ bench-release-gate:
 			$(GATE_ALLOW_FLAGS); \
 	fi
 
-# macOS Ollama parity gate. Boots `krillm serve` and asserts Ollama-client
+# macOS Ollama parity gate. Boots `krill serve` and asserts Ollama-client
 # response-shape parity per docs/OLLAMA_MAC_PARITY_PLAN.md.
 # Usage:
 #   make parity-gate                          # mac_parity profile
@@ -212,19 +212,19 @@ clean:
 # Build release tarball for distribution
 dist: release
 	mkdir -p dist
-	tar -czf dist/krillm-$(VERSION)-arm64-apple-macos.tar.gz \
+	tar -czf dist/krill-$(VERSION)-arm64-apple-macos.tar.gz \
 		-C $(BUILD_DIR) $(BINARY_NAME) mlx.metallib mlx-swift_Cmlx.bundle
-	@echo "Tarball at dist/krillm-$(VERSION)-arm64-apple-macos.tar.gz"
-	shasum -a 256 dist/krillm-$(VERSION)-arm64-apple-macos.tar.gz
+	@echo "Tarball at dist/krill-$(VERSION)-arm64-apple-macos.tar.gz"
+	shasum -a 256 dist/krill-$(VERSION)-arm64-apple-macos.tar.gz
 
 # macOS .app bundle. Live microphone capture (`/mic` in interactive chat) needs
-# the OS to attribute mic access to KrillLM rather than the parent terminal,
+# the OS to attribute mic access to Krill rather than the parent terminal,
 # which requires running inside a code-signed bundle that declares
 # NSMicrophoneUsageDescription. This target produces that bundle: the release
 # binary + adjacent metallib (the MLX loader searches the executable directory
 # first) + Info.plist, ad-hoc signed for local TCC.
-APP_DIR ?= dist/krillm.app
-BUNDLE_ID ?= io.github.srvsngh99.krillm
+APP_DIR ?= dist/krill.app
+BUNDLE_ID ?= io.github.srvsngh99.krill
 CODESIGN_ID ?= -
 MLX_BUNDLE ?= mlx-swift_Cmlx.bundle
 
@@ -254,19 +254,19 @@ app-bundle: release
 		'<plist version="1.0">' \
 		'<dict>' \
 		'  <key>CFBundleIdentifier</key><string>$(BUNDLE_ID)</string>' \
-		'  <key>CFBundleName</key><string>KrillLM</string>' \
+		'  <key>CFBundleName</key><string>Krill</string>' \
 		'  <key>CFBundleExecutable</key><string>$(BINARY_NAME)</string>' \
 		'  <key>CFBundlePackageType</key><string>APPL</string>' \
 		'  <key>CFBundleShortVersionString</key><string>$(VERSION)</string>' \
 		'  <key>CFBundleVersion</key><string>$(VERSION)</string>' \
 		'  <key>LSMinimumSystemVersion</key><string>14.0</string>' \
-		'  <key>NSMicrophoneUsageDescription</key><string>KrillLM records microphone audio for local voice input to on-device speech and multimodal models.</string>' \
-		'  <key>NSSpeechRecognitionUsageDescription</key><string>KrillLM transcribes your voice input on-device using Apple Speech, for dictation in the chat.</string>' \
+		'  <key>NSMicrophoneUsageDescription</key><string>Krill records microphone audio for local voice input to on-device speech and multimodal models.</string>' \
+		'  <key>NSSpeechRecognitionUsageDescription</key><string>Krill transcribes your voice input on-device using Apple Speech, for dictation in the chat.</string>' \
 		'</dict>' \
 		'</plist>' > "$(APP_DIR)/Contents/Info.plist"
 	@codesign --force --deep --sign "$(CODESIGN_ID)" --identifier "$(BUNDLE_ID)" "$(APP_DIR)" \
 		&& echo "Signed $(APP_DIR) (identity=$(CODESIGN_ID))" \
-		|| echo "WARNING: codesign failed - /mic permission may attribute to the terminal instead of KrillLM."
+		|| echo "WARNING: codesign failed - /mic permission may attribute to the terminal instead of Krill."
 	@echo "App bundle at $(APP_DIR)"
 	@echo "Run interactive chat (mic enabled):"
 	@echo "  $(APP_DIR)/Contents/MacOS/$(BINARY_NAME) run gemma-4-e2b"
@@ -274,9 +274,9 @@ app-bundle: release
 # Zip the .app bundle for distribution.
 dist-app: app-bundle
 	@mkdir -p dist
-	@cd dist && zip -qry "krillm-$(VERSION)-arm64-apple-macos-app.zip" "krillm.app"
-	@echo "Tarball at dist/krillm-$(VERSION)-arm64-apple-macos-app.zip"
-	@shasum -a 256 "dist/krillm-$(VERSION)-arm64-apple-macos-app.zip"
+	@cd dist && zip -qry "krill-$(VERSION)-arm64-apple-macos-app.zip" "krill.app"
+	@echo "Tarball at dist/krill-$(VERSION)-arm64-apple-macos-app.zip"
+	@shasum -a 256 "dist/krill-$(VERSION)-arm64-apple-macos-app.zip"
 
 # Print version
 version:

@@ -5,11 +5,11 @@ Status: planning handoff
 
 ## Objective
 
-Grow KrillLM from a fast, focused Mac-native runtime into a broader
+Grow Krill from a fast, focused Mac-native runtime into a broader
 Ollama-compatible runtime without losing the core product constraint:
 
 ```text
-KrillLM must remain faster, lighter, and more explicit than Ollama on Mac
+Krill must remain faster, lighter, and more explicit than Ollama on Mac
 for every workflow it claims as production-supported.
 ```
 
@@ -152,7 +152,7 @@ docs and support matrix updated
 Near-term honest claim:
 
 ```text
-KrillLM is a Mac-native, lightweight, Ollama-compatible runtime optimized
+Krill is a Mac-native, lightweight, Ollama-compatible runtime optimized
 for selected high-value local models, with native text and Gemma 4 vision
 today, and native audio / broader multimodal support in progress.
 ```
@@ -160,7 +160,7 @@ today, and native audio / broader multimodal support in progress.
 Do not claim:
 
 ```text
-KrillLM supports every Ollama model.
+Krill supports every Ollama model.
 ```
 
 That claim would force breadth-first compatibility and would likely make the

@@ -1,15 +1,15 @@
-# KrillLM Backlog
+# Krill Backlog
 
 Deferred-but-tracked engineering items. Each entry is something we consciously chose
 *not* to do in the PR that surfaced it, with enough context to pick it up later. This is
 the in-repo companion to the owner's out-of-repo board
-(`~/.claude/plans/krillm-pending-work.md`), scoped to code-level follow-ups.
+(`~/.claude/plans/krill-pending-work.md`), scoped to code-level follow-ups.
 
 ---
 
-## `krillm launch` roster: remaining agents + live verification
+## `krill launch` roster: remaining agents + live verification
 
-**Status:** core DONE (PRs #161-#164). `krillm launch <agent>` ships with
+**Status:** core DONE (PRs #161-#164). `krill launch <agent>` ships with
 claude, codex, opencode, hermes, pi, copilot, droid. Follow-ups consciously
 deferred:
 
@@ -199,9 +199,9 @@ bigger box.
 
 ---
 
-## Native Swift+MLX `krillm quantize` (drop the Python shell-out)
+## Native Swift+MLX `krill quantize` (drop the Python shell-out)
 
-**Status:** DONE. `krillm quantize` is now pure Swift+MLX
+**Status:** DONE. `krill quantize` is now pure Swift+MLX
 (`Sources/KLMCore/CheckpointQuantizer.swift`) - the python3/mlx_lm.convert
 shell-out is gone, so the shipped binary has no Python anywhere. Output is
 **byte-identical to the canonical MLX op** (affine: 1007/1007 vs mlx-community
@@ -235,7 +235,7 @@ Original write-up kept below for context.
 embedding / audio / vision path is already pure Swift+MLX with no sidecar; the
 historical mlx-lm bridge was fully retired.
 
-**Context.** `Sources/KLMCLI/QuantizeCommand.swift` implements `krillm quantize`
+**Context.** `Sources/KLMCLI/QuantizeCommand.swift` implements `krill quantize`
 by shelling out to `python3 -c "import mlx_lm; mlx_lm.convert(...)"`. It is an
 optional, offline, manually-invoked model-prep utility -- it is NEVER auto-called
 by load or serve (only registered as a CLI subcommand in `KrillCLI.swift`), and

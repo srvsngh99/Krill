@@ -2,17 +2,17 @@ import XCTest
 import Foundation
 @testable import KLMRegistry
 
-/// Pins the Swift `KrillLMVersion` constant to the value in the
+/// Pins the Swift `KrillVersion` constant to the value in the
 /// repo-root `VERSION` file. The CLI, server, and Ollama-compat
-/// payload all read from `KrillLMVersion`, so any drift between
+/// payload all read from `KrillVersion`, so any drift between
 /// the file and the constant produces an inconsistent advertised
 /// version. This test runs in regular CI and fails loudly on
 /// release-prep PRs that forget to update one of the two surfaces.
 ///
 /// Failure mode: bump VERSION without updating
-/// `Sources/KLMRegistry/KrillLMVersion.swift` (or vice versa) and
+/// `Sources/KLMRegistry/KrillVersion.swift` (or vice versa) and
 /// this test reports the exact mismatch.
-final class KrillLMVersionTests: XCTestCase {
+final class KrillVersionTests: XCTestCase {
 
     /// Walk upward from the test file location to find the repo
     /// root - the directory that contains `VERSION` and
@@ -34,25 +34,25 @@ final class KrillLMVersionTests: XCTestCase {
         return nil
     }
 
-    func testKrillLMVersionMatchesVersionFile() throws {
+    func testKrillVersionMatchesVersionFile() throws {
         guard let onDisk = repoVersion() else {
             throw XCTSkip("VERSION file not reachable from test location")
         }
         XCTAssertEqual(
-            KrillLMVersion, onDisk,
-            "Swift `KrillLMVersion` (\(KrillLMVersion)) disagrees with "
+            KrillVersion, onDisk,
+            "Swift `KrillVersion` (\(KrillVersion)) disagrees with "
             + "repo-root `VERSION` (\(onDisk)). Update both at the "
             + "same time when cutting a release - bump VERSION and "
-            + "Sources/KLMRegistry/KrillLMVersion.swift together.")
+            + "Sources/KLMRegistry/KrillVersion.swift together.")
     }
 
-    func testKrillLMVersionTagHasVPrefix() {
+    func testKrillVersionTagHasVPrefix() {
         XCTAssertTrue(
-            KrillLMVersionTag.hasPrefix("v"),
-            "KrillLMVersionTag must be a git-tag-shaped string "
-            + "(`v<version>`); got `\(KrillLMVersionTag)`.")
+            KrillVersionTag.hasPrefix("v"),
+            "KrillVersionTag must be a git-tag-shaped string "
+            + "(`v<version>`); got `\(KrillVersionTag)`.")
         XCTAssertEqual(
-            KrillLMVersionTag.dropFirst(), Substring(KrillLMVersion),
-            "KrillLMVersionTag must be exactly `v` + KrillLMVersion.")
+            KrillVersionTag.dropFirst(), Substring(KrillVersion),
+            "KrillVersionTag must be exactly `v` + KrillVersion.")
     }
 }

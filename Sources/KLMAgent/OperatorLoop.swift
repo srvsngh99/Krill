@@ -1,6 +1,6 @@
 import Foundation
 
-/// The ReAct-style driver behind `krillm agent`.
+/// The ReAct-style driver behind `krill agent`.
 ///
 /// Each step:
 ///   1. Build a fresh message list (system prompt + transcript so far).

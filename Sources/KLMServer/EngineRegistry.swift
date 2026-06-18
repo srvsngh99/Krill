@@ -96,7 +96,7 @@ public actor EngineRegistry {
     private let numParallel: Int
     /// `KRILL_BATCH_WINDOW_MS`: coalescing window for each batch scheduler.
     private let batchWindowMs: Int
-    private let logger = Logger(label: "krillm.engine-registry")
+    private let logger = Logger(label: "krill.engine-registry")
 
     /// - Parameters:
     ///   - preloaded: an already-loaded engine (from `serve --model`) to

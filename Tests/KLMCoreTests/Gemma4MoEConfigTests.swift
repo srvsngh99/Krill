@@ -4,7 +4,7 @@ import MLX
 
 /// Config + loader unpacker tests for the Gemma 4 26B-A4B text MoE
 /// path (issue #80). The full MoE forward is exercised end-to-end by
-/// `krillm serve --model gemma-4-26b-a4b-it-4bit`; these tests pin
+/// `krill serve --model gemma-4-26b-a4b-it-4bit`; these tests pin
 /// the config parsing and the `switch_glu` key-rewrite without
 /// needing the 15 GB checkpoint.
 final class Gemma4MoEConfigTests: XCTestCase {

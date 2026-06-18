@@ -12,7 +12,7 @@ struct RunCommand: AsyncParsableCommand {
         abstract: "Load a model and run interactive chat or single-shot generation"
     )
 
-    @Argument(help: "Model name (from registry) or path to model directory. Optional: falls back to default_model in ~/.krillm/config.toml (or KRILL_DEFAULT_MODEL).")
+    @Argument(help: "Model name (from registry) or path to model directory. Optional: falls back to default_model in ~/.krill/config.toml (or KRILL_DEFAULT_MODEL).")
     var modelPath: String?
 
     @Argument(help: "Optional prompt for single-shot mode (omit for interactive REPL)")
@@ -77,8 +77,8 @@ struct RunCommand: AsyncParsableCommand {
         }
         let defaultModel = nonEmpty(KrillConfig.load().defaultModel)
 
-        // Disambiguate the leading positional. `krillm run <model> [prompt]` is
-        // the canonical form, but with a default model set, `krillm run "<text>"`
+        // Disambiguate the leading positional. `krill run <model> [prompt]` is
+        // the canonical form, but with a default model set, `krill run "<text>"`
         // should run the default on that text rather than mistake the prompt for
         // a model name. So when the sole positional is clearly NOT a model (not a
         // known alias, installed model, or path) and a default exists, treat it
@@ -106,14 +106,14 @@ struct RunCommand: AsyncParsableCommand {
         // Validate directory exists
         guard FileManager.default.fileExists(atPath: modelDir.path) else {
             print("Error: model '\(model)' not found.")
-            print("Install with: krillm pull \(model)")
+            print("Install with: krill pull \(model)")
             print("Or provide a full path to a model directory.")
             throw ExitCode.failure
         }
 
         // Validate unsupported flags early
         if tools != nil {
-            print("Error: --tools is not yet supported. Tool definitions are not loaded, sent to the model, or executed by krillm run yet.")
+            print("Error: --tools is not yet supported. Tool definitions are not loaded, sent to the model, or executed by krill run yet.")
             throw ExitCode.failure
         }
 
@@ -124,7 +124,7 @@ struct RunCommand: AsyncParsableCommand {
             try validateInputFile(audio, flagName: "--audio")
         }
 
-        // Detect-only daemon mode (ladder rung 1): if a krillm serve is
+        // Detect-only daemon mode (ladder rung 1): if a krill serve is
         // already up on the configured port AND has this model loaded
         // AND the request is text-only single-shot with no draft model,
         // route through HTTP and skip the per-call model load entirely.
@@ -141,7 +141,7 @@ struct RunCommand: AsyncParsableCommand {
         // server's /v1/chat/completions path applies
         // applyModelSystemOverride / applyModelParams (so SYSTEM /
         // PARAMETER from the Modelfile take effect), but the
-        // in-process krillm run path below does not. Routing only
+        // in-process krill run path below does not. Routing only
         // when both paths would produce identical behaviour keeps the
         // optimisation observability-free.
         let aliasHasOverrides = registry.getModel(model)?.overrides != nil
@@ -291,7 +291,7 @@ struct RunCommand: AsyncParsableCommand {
             || FileManager.default.fileExists(atPath: s)
     }
 
-    /// Guidance when `krillm run` is invoked with no model and no configured
+    /// Guidance when `krill run` is invoked with no model and no configured
     /// default. On a fresh install (nothing installed) this is the branded
     /// first-run welcome; otherwise it lists installed models and how to set a
     /// default.
@@ -301,8 +301,8 @@ struct RunCommand: AsyncParsableCommand {
         print("No model specified, and no default is set.\n")
         print("Installed models:")
         for name in installed { print("  \(name)") }
-        print("\nRun one:        krillm run \(installed[0])")
-        print("Set a default:  echo 'default_model = \"\(installed[0])\"' >> ~/.krillm/config.toml")
+        print("\nRun one:        krill run \(installed[0])")
+        print("Set a default:  echo 'default_model = \"\(installed[0])\"' >> ~/.krill/config.toml")
         print("            or:  export KRILL_DEFAULT_MODEL=\(installed[0])")
     }
 
@@ -315,11 +315,11 @@ struct RunCommand: AsyncParsableCommand {
         print("  " + Ansi.dim(Brand.tagline))
         print("")
         print("  Get started:")
-        print("    krillm pull gemma-4-e2b      " + Ansi.dim("# a small, fast model to begin"))
-        print("    krillm run gemma-4-e2b       " + Ansi.dim("# open the chat"))
+        print("    krill pull gemma-4-e2b      " + Ansi.dim("# a small, fast model to begin"))
+        print("    krill run gemma-4-e2b       " + Ansi.dim("# open the chat"))
         print("")
-        print("  Browse models:   " + Ansi.dim("krillm catalog"))
-        print("  Set a default:   " + Ansi.dim("default_model in ~/.krillm/config.toml"))
+        print("  Browse models:   " + Ansi.dim("krill catalog"))
+        print("  Set a default:   " + Ansi.dim("default_model in ~/.krill/config.toml"))
         print("")
         print("  " + Ansi.bold(Brand.labMark) + "  " + Ansi.dim("\(Brand.labTagline)  \u{00B7}  \(Brand.site)"))
         print("")

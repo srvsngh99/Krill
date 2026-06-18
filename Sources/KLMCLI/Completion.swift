@@ -7,7 +7,7 @@ import Foundation
 /// all complete files).
 enum ReplCompletion {
     static func install() {
-        krillm_set_attempted_completion(krillAttemptedCompletion)
+        krill_set_attempted_completion(krillAttemptedCompletion)
     }
 }
 
@@ -42,10 +42,10 @@ private func krillAttemptedCompletion(
     // A "/command" at the very start of the line -> complete command names and
     // suppress the default filename fallback.
     if start == 0, word.hasPrefix("/") {
-        krillm_set_completion_over(1)
+        krill_set_completion_over(1)
         return rl_completion_matches(text, krillCommandGenerator)
     }
     // Anywhere else, let libedit run its built-in filename completion.
-    krillm_set_completion_over(0)
+    krill_set_completion_over(0)
     return nil
 }

@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""Concurrent-throughput benchmark: KrillLM vs Ollama under N simultaneous streams.
+"""Concurrent-throughput benchmark: Krill vs Ollama under N simultaneous streams.
 
 Single-stream decode on Apple silicon is memory-bandwidth bound, so neither
 engine can out-decode the other by much on one request. The lever is
-CONCURRENCY: one weight read can serve many decode rows. KrillLM's continuous
+CONCURRENCY: one weight read can serve many decode rows. Krill's continuous
 batcher amortizes weights across rows; Ollama serializes/limits concurrent
 generates. This harness drives N simultaneous `/api/generate` streams against
 each engine, sweeps N, and reports AGGREGATE decode tok/s — the axis where the
 batcher wins.
 
 Both engines must already be running and speak the Ollama `/api/generate`
-protocol (KrillLM serves it natively). Server-mode only — concurrent throughput
+protocol (Krill serves it natively). Server-mode only — concurrent throughput
 is meaningless for a CLI subprocess.
 
 Examples:
-    # KrillLM server with n-gram + batching enabled vs Ollama daemon
-    KRILL_NUM_PARALLEL=16 KRILL_NGRAM_SPEC=1 krillm serve &   # (started separately)
-    python3 tools/krillm_concurrent_benchmark.py \
-        --krillm-url http://127.0.0.1:57455 --krill-model llama-3.2-3b \
+    # Krill server with n-gram + batching enabled vs Ollama daemon
+    KRILL_NUM_PARALLEL=16 KRILL_NGRAM_SPEC=1 krill serve &   # (started separately)
+    python3 tools/krill_concurrent_benchmark.py \
+        --krill-url http://127.0.0.1:57455 --krill-model llama-3.2-3b \
         --ollama-host http://127.0.0.1:11434 --ollama-model llama3.2:3b \
         --concurrency-sweep 1,2,4,8,16 --max-tokens 128
 
     # Baseline arm labeling (run twice against servers launched with
     # KRILL_NUM_PARALLEL=1 then =16) to find the batched-vs-serial crossover:
-    python3 tools/krillm_concurrent_benchmark.py ... --server-arm serial
-    python3 tools/krillm_concurrent_benchmark.py ... --server-arm batched
+    python3 tools/krill_concurrent_benchmark.py ... --server-arm serial
+    python3 tools/krill_concurrent_benchmark.py ... --server-arm batched
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 # At least as many DISTINCT prompts as the largest swept concurrency, so a high-N
-# run does not reuse a prompt — duplicate prompts hit KrillLM's prefix cache,
+# run does not reuse a prompt — duplicate prompts hit Krill's prefix cache,
 # which shrinks wall time and inflates the wall-based aggregate tok/s (a
 # measurement artifact, not real decode scaling). The harness also warns if the
 # sweep exceeds the prompt-set size.
@@ -77,8 +77,8 @@ DEFAULT_PROMPTS = [
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--krillm-url", help="KrillLM server base URL (e.g. http://127.0.0.1:57455).")
-    p.add_argument("--krill-model", default="llama-3.2-3b", help="KrillLM model name.")
+    p.add_argument("--krill-url", help="Krill server base URL (e.g. http://127.0.0.1:57455).")
+    p.add_argument("--krill-model", default="llama-3.2-3b", help="Krill model name.")
     p.add_argument("--ollama-host", help="Ollama API base URL (e.g. http://127.0.0.1:11434).")
     p.add_argument("--ollama-model", default="llama3.2:3b", help="Ollama model name.")
     p.add_argument("--concurrency-sweep", default="1,2,4,8,16",
@@ -93,7 +93,7 @@ def parse_args() -> argparse.Namespace:
                    "Defaults to a built-in set of distinct prompts.")
     p.add_argument("--server-arm", choices=["serial", "batched", "unspecified"],
                    default="unspecified",
-                   help="Label only — describes how the KrillLM server was launched "
+                   help="Label only — describes how the Krill server was launched "
                         "(KRILL_NUM_PARALLEL=1 vs >=16), so a serial-vs-batched A/B "
                         "lands in one comparable report.")
     p.add_argument("--output", default=".build/benchmarks/concurrent-throughput.json")
@@ -232,8 +232,8 @@ def environment() -> dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
-    if not args.krillm_url and not args.ollama_host:
-        print("error: pass --krillm-url and/or --ollama-host (server-mode only).", file=sys.stderr)
+    if not args.krill_url and not args.ollama_host:
+        print("error: pass --krill-url and/or --ollama-host (server-mode only).", file=sys.stderr)
         return 77
     sweep = [int(x) for x in args.concurrency_sweep.split(",") if x.strip()]
     ps = prompts(args)
@@ -246,8 +246,8 @@ def main() -> int:
                               "max_tokens": args.max_tokens, "engines": {}}
 
     engines: list[tuple[str, str, str]] = []
-    if args.krillm_url:
-        engines.append(("krillm", args.krillm_url, args.krill_model))
+    if args.krill_url:
+        engines.append(("krill", args.krill_url, args.krill_model))
     if args.ollama_host:
         engines.append(("ollama", args.ollama_host, args.ollama_model))
 
@@ -261,11 +261,11 @@ def main() -> int:
         report["engines"][name] = rows
 
     # Print a comparison table.
-    hdr = f"{'N':>3} | {'krillm agg tok/s':>17} | {'ollama agg tok/s':>17} | {'ratio':>6} | {'krillm p99 TTFT':>16} | {'ollama p99 TTFT':>16}"
+    hdr = f"{'N':>3} | {'krill agg tok/s':>17} | {'ollama agg tok/s':>17} | {'ratio':>6} | {'krill p99 TTFT':>16} | {'ollama p99 TTFT':>16}"
     print(f"\nConcurrent throughput (arm={args.server_arm}, max_tokens={args.max_tokens})")
     print(hdr)
     print("-" * len(hdr))
-    k_rows = {r["concurrency"]: r for r in report["engines"].get("krillm", []) if "concurrency" in r}
+    k_rows = {r["concurrency"]: r for r in report["engines"].get("krill", []) if "concurrency" in r}
     o_rows = {r["concurrency"]: r for r in report["engines"].get("ollama", []) if "concurrency" in r}
     saw_failure = False
     for n in sweep:
@@ -292,7 +292,7 @@ def main() -> int:
               "measurement. See per-level `failed` in the JSON.")
 
     # Disambiguate a blank TTFT cell: distinguish "engine arm not run" from "arm
-    # ran but first-token timing was not captured". Both KrillLM and Ollama
+    # ran but first-token timing was not captured". Both Krill and Ollama
     # `/api/generate` stream NDJSON with a per-chunk `response`, so a streamed arm
     # should always populate TTFT; a 0-sample arm signals a parse gap (e.g. a
     # non-streaming or differently-shaped response), the silent failure that made

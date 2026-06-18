@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproducible KrillLM vs Ollama benchmark harness.
+"""Reproducible Krill vs Ollama benchmark harness.
 
 The harness intentionally records inputs and environment rather than publishing
 fixed claims. It exits 77 when local prerequisites are missing.
@@ -39,11 +39,11 @@ STATS_RE = re.compile(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a reproducible KrillLM vs Ollama local benchmark."
+        description="Run a reproducible Krill vs Ollama local benchmark."
     )
-    parser.add_argument("--krillm-bin", help="Path to krillm binary. Defaults to .build/release/krillm or PATH.")
+    parser.add_argument("--krill-bin", help="Path to krill binary. Defaults to .build/release/krill or PATH.")
     parser.add_argument("--ollama-bin", default="ollama", help="Path to ollama binary.")
-    parser.add_argument("--krill-model", default="llama-3.2-1b", help="KrillLM registry model name or model directory.")
+    parser.add_argument("--krill-model", default="llama-3.2-1b", help="Krill registry model name or model directory.")
     parser.add_argument("--ollama-model", default="llama3.2:1b", help="Ollama model name.")
     parser.add_argument("--prompt", default=DEFAULT_PROMPT, help="Prompt text used for both engines.")
     parser.add_argument("--prompt-file", help="Read prompt text from this file.")
@@ -53,13 +53,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0, help="Sampling seed passed to both engines.")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature passed to both engines.")
     parser.add_argument("--top-p", type=float, default=1.0, help="Top-p passed to both engines.")
-    parser.add_argument("--krillm-url", help="KrillLM server URL (e.g. http://127.0.0.1:57455). When set, benchmarks against a running KrillLM server instead of CLI subprocess.")
+    parser.add_argument("--krill-url", help="Krill server URL (e.g. http://127.0.0.1:57455). When set, benchmarks against a running Krill server instead of CLI subprocess.")
     parser.add_argument("--ollama-host", default="http://127.0.0.1:11434", help="Ollama API host.")
     parser.add_argument("--timeout", type=float, default=600.0, help="Per-run timeout in seconds.")
-    parser.add_argument("--krillm-draft-model", default=None, help="Enable speculative decoding by loading this draft model (alias, path, or 'auto'). KrillLM only.")
+    parser.add_argument("--krill-draft-model", default=None, help="Enable speculative decoding by loading this draft model (alias, path, or 'auto'). Krill only.")
     parser.add_argument(
         "--output",
-        default=".build/benchmarks/krillm-vs-ollama.json",
+        default=".build/benchmarks/krill-vs-ollama.json",
         help="JSON report path.",
     )
     parser.add_argument(
@@ -88,13 +88,13 @@ def run_cmd(command: list[str], timeout: float = 30.0) -> subprocess.CompletedPr
     )
 
 
-def find_krillm_binary(value: Optional[str]) -> Optional[str]:
+def find_krill_binary(value: Optional[str]) -> Optional[str]:
     if value:
         return value if os.access(value, os.X_OK) else None
-    repo_binary = Path(".build/release/krillm")
+    repo_binary = Path(".build/release/krill")
     if repo_binary.exists() and os.access(repo_binary, os.X_OK):
         return str(repo_binary)
-    return shutil.which("krillm")
+    return shutil.which("krill")
 
 
 def prompt_text(args: argparse.Namespace) -> str:
@@ -107,7 +107,7 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def parse_krillm_list(output: str) -> set[str]:
+def parse_krill_list(output: str) -> set[str]:
     models: set[str] = set()
     for line in output.splitlines():
         stripped = line.strip()
@@ -117,21 +117,21 @@ def parse_krillm_list(output: str) -> set[str]:
     return models
 
 
-def krillm_model_ok(krillm_bin: str, model: str) -> Tuple[bool, Optional[str], dict[str, Any]]:
+def krill_model_ok(krill_bin: str, model: str) -> Tuple[bool, Optional[str], dict[str, Any]]:
     if Path(model).expanduser().exists():
         return True, None, {"source": "path", "path": str(Path(model).expanduser())}
 
-    completed = run_cmd([krillm_bin, "list"], timeout=30.0)
+    completed = run_cmd([krill_bin, "list"], timeout=30.0)
     detail = {
-        "command": [krillm_bin, "list"],
+        "command": [krill_bin, "list"],
         "returncode": completed.returncode,
         "stdout": completed.stdout,
         "stderr": completed.stderr,
     }
     if completed.returncode != 0:
-        return False, f"could not list KrillLM models; run `{krillm_bin} list` for details", detail
-    if model not in parse_krillm_list(completed.stdout):
-        return False, f"KrillLM model `{model}` is not installed; run `{krillm_bin} pull {model}`", detail
+        return False, f"could not list Krill models; run `{krill_bin} list` for details", detail
+    if model not in parse_krill_list(completed.stdout):
+        return False, f"Krill model `{model}` is not installed; run `{krill_bin} pull {model}`", detail
     return True, None, detail
 
 
@@ -158,7 +158,7 @@ def ollama_model_ok(ollama_bin: str, model: str, timeout: float) -> Tuple[bool, 
     return False, False, f"`{' '.join(command)}` failed; inspect report diagnostics", detail
 
 
-def environment(krillm_bin: Optional[str], ollama_bin: str) -> dict[str, Any]:
+def environment(krill_bin: Optional[str], ollama_bin: str) -> dict[str, Any]:
     def output_or_none(command: list[str]) -> Optional[str]:
         try:
             completed = run_cmd(command, timeout=15.0)
@@ -179,16 +179,16 @@ def environment(krillm_bin: Optional[str], ollama_bin: str) -> dict[str, Any]:
         "chip": chip,
         "python": sys.version.split()[0],
         "swift": output_or_none(["swift", "--version"]),
-        "krillm_version": output_or_none([krillm_bin, "version"]) if krillm_bin else None,
+        "krill_version": output_or_none([krill_bin, "version"]) if krill_bin else None,
         "ollama_version": output_or_none([ollama_bin, "--version"]),
         "git_commit": output_or_none(["git", "rev-parse", "HEAD"]),
         "git_status": output_or_none(["git", "status", "--short"]),
     }
 
 
-def krillm_command(args: argparse.Namespace, krillm_bin: str, prompt: str) -> list[str]:
+def krill_command(args: argparse.Namespace, krill_bin: str, prompt: str) -> list[str]:
     cmd = [
-        krillm_bin,
+        krill_bin,
         "run",
         args.krill_model,
         prompt,
@@ -201,8 +201,8 @@ def krillm_command(args: argparse.Namespace, krillm_bin: str, prompt: str) -> li
         "--seed",
         str(args.seed),
     ]
-    if args.krillm_draft_model:
-        cmd += ["--draft-model", args.krillm_draft_model]
+    if args.krill_draft_model:
+        cmd += ["--draft-model", args.krill_draft_model]
     return cmd
 
 
@@ -212,10 +212,10 @@ SPEC_RE = re.compile(
 )
 
 
-def parse_krillm_result(stdout: str, wall_s: float, command: list[str]) -> dict[str, Any]:
+def parse_krill_result(stdout: str, wall_s: float, command: list[str]) -> dict[str, Any]:
     match = STATS_RE.search(stdout)
     if not match:
-        raise RuntimeError("KrillLM output did not contain a parseable stats line")
+        raise RuntimeError("Krill output did not contain a parseable stats line")
     generated = stdout.split("\n---\n", 1)[0]
     # Strip operational lines that precede the generated text. `spec:` is
     # belt-and-braces: today it lives in the stats section after `---`
@@ -254,18 +254,18 @@ def parse_krillm_result(stdout: str, wall_s: float, command: list[str]) -> dict[
     return result
 
 
-def run_krillm(args: argparse.Namespace, krillm_bin: str, prompt: str, measured: bool) -> Optional[dict[str, Any]]:
-    command = krillm_command(args, krillm_bin, prompt)
+def run_krill(args: argparse.Namespace, krill_bin: str, prompt: str, measured: bool) -> Optional[dict[str, Any]]:
+    command = krill_command(args, krill_bin, prompt)
     start = time.perf_counter()
     completed = run_cmd(command, timeout=args.timeout)
     wall_s = time.perf_counter() - start
     if completed.returncode != 0:
         raise RuntimeError(
-            f"KrillLM command failed with exit {completed.returncode}: {completed.stderr or completed.stdout}"
+            f"Krill command failed with exit {completed.returncode}: {completed.stderr or completed.stdout}"
         )
     if not measured:
         return None
-    return parse_krillm_result(completed.stdout, wall_s, command)
+    return parse_krill_result(completed.stdout, wall_s, command)
 
 
 def ollama_payload(args: argparse.Namespace, prompt: str, stream: bool) -> dict[str, Any]:
@@ -335,7 +335,7 @@ def run_ollama(args: argparse.Namespace, prompt: str, measured: bool) -> Optiona
     }
 
 
-def krillm_server_payload(args: argparse.Namespace, prompt: str, stream: bool) -> dict[str, Any]:
+def krill_server_payload(args: argparse.Namespace, prompt: str, stream: bool) -> dict[str, Any]:
     return {
         "model": args.krill_model,
         "prompt": prompt,
@@ -349,11 +349,11 @@ def krillm_server_payload(args: argparse.Namespace, prompt: str, stream: bool) -
     }
 
 
-def run_krillm_server(args: argparse.Namespace, prompt: str, measured: bool) -> Optional[dict[str, Any]]:
-    """Run a benchmark request against a persistent KrillLM server."""
-    payload = krillm_server_payload(args, prompt, stream=measured)
+def run_krill_server(args: argparse.Namespace, prompt: str, measured: bool) -> Optional[dict[str, Any]]:
+    """Run a benchmark request against a persistent Krill server."""
+    payload = krill_server_payload(args, prompt, stream=measured)
     data = json.dumps(payload).encode("utf-8")
-    url = args.krillm_url.rstrip("/") + "/api/generate"
+    url = args.krill_url.rstrip("/") + "/api/generate"
     request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     start = time.perf_counter()
     try:
@@ -376,10 +376,10 @@ def run_krillm_server(args: argparse.Namespace, prompt: str, measured: bool) -> 
                     final = event
             wall_s = time.perf_counter() - start
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"KrillLM server request failed: {exc}") from exc
+        raise RuntimeError(f"Krill server request failed: {exc}") from exc
 
     if final is None:
-        raise RuntimeError("KrillLM server stream ended without final stats")
+        raise RuntimeError("Krill server stream ended without final stats")
 
     prompt_eval_count = int(final.get("prompt_eval_count") or 0)
     eval_count = int(final.get("eval_count") or 0)
@@ -473,7 +473,7 @@ def apply_cache_mode(
 
 
 def check_input_parity(
-    krillm_runs: list[dict[str, Any]],
+    krill_runs: list[dict[str, Any]],
     ollama_runs: list[dict[str, Any]],
     prompt: str,
 ) -> dict[str, Any]:
@@ -484,7 +484,7 @@ def check_input_parity(
             return None
         return statistics.median(values)
 
-    krill_tokens = median_tokens(krillm_runs)
+    krill_tokens = median_tokens(krill_runs)
     ollama_tokens = median_tokens(ollama_runs)
     if krill_tokens and ollama_tokens:
         basis = "prompt_tokens"
@@ -493,20 +493,20 @@ def check_input_parity(
         basis = "prompt_chars"
         a = b = float(len(prompt))
     if max(a, b) == 0:
-        return {"status": "ok", "basis": basis, "krillm": a, "ollama": b, "delta_ratio": 0.0}
+        return {"status": "ok", "basis": basis, "krill": a, "ollama": b, "delta_ratio": 0.0}
     delta_ratio = abs(a - b) / max(a, b)
     status = "ok" if delta_ratio <= 0.10 else "mismatch"
     details = {
         "status": status,
         "basis": basis,
-        "krillm": a,
+        "krill": a,
         "ollama": b,
         "delta_ratio": round(delta_ratio, 4),
     }
     if status == "mismatch":
         details["details"] = (
             f"prompt size differs by {delta_ratio*100:.1f}% between engines "
-            f"({basis}: krillm={a}, ollama={b}); results may not be comparable"
+            f"({basis}: krill={a}, ollama={b}); results may not be comparable"
         )
     return details
 
@@ -530,8 +530,8 @@ def main() -> int:
         return 2
 
     prompt = prompt_text(args)
-    use_server = bool(args.krillm_url)
-    krillm_bin = None if use_server else find_krillm_binary(args.krillm_bin)
+    use_server = bool(args.krill_url)
+    krill_bin = None if use_server else find_krill_binary(args.krill_bin)
     report: dict[str, Any] = {
         "status": "pending",
         "benchmark": {
@@ -547,45 +547,45 @@ def main() -> int:
             "seed": args.seed,
             "cache_mode_requested": args.cache_mode,
         },
-        "environment": environment(krillm_bin, args.ollama_bin),
+        "environment": environment(krill_bin, args.ollama_bin),
         "preflight": {},
         "results": {},
     }
 
     if use_server:
-        report["benchmark"]["krillm_url"] = args.krillm_url
+        report["benchmark"]["krill_url"] = args.krill_url
         report["benchmark"]["mode"] = "server"
 
     skips: list[str] = []
     failures: list[str] = []
 
     if use_server:
-        # Server mode: verify KrillLM server is reachable
-        health_url = args.krillm_url.rstrip("/") + "/healthz"
+        # Server mode: verify Krill server is reachable
+        health_url = args.krill_url.rstrip("/") + "/healthz"
         try:
             req = urllib.request.Request(health_url)
             with urllib.request.urlopen(req, timeout=10) as resp:
                 health = json.loads(resp.read())
-            report["preflight"]["krillm"] = {
+            report["preflight"]["krill"] = {
                 "ok": True,
                 "mode": "server",
-                "url": args.krillm_url,
+                "url": args.krill_url,
                 "health": health,
             }
         except Exception as exc:
-            skips.append(f"KrillLM server not reachable at {args.krillm_url}: {exc}")
-            report["preflight"]["krillm"] = {
+            skips.append(f"Krill server not reachable at {args.krill_url}: {exc}")
+            report["preflight"]["krill"] = {
                 "ok": False,
                 "mode": "server",
-                "url": args.krillm_url,
+                "url": args.krill_url,
                 "error": str(exc),
             }
     else:
-        if krillm_bin is None:
-            skips.append("KrillLM binary not found; run `make release` or pass `--krillm-bin`")
+        if krill_bin is None:
+            skips.append("Krill binary not found; run `make release` or pass `--krill-bin`")
         else:
-            ok, reason, detail = krillm_model_ok(krillm_bin, args.krill_model)
-            report["preflight"]["krillm"] = {"ok": ok, "binary": krillm_bin, "detail": detail}
+            ok, reason, detail = krill_model_ok(krill_bin, args.krill_model)
+            report["preflight"]["krill"] = {"ok": ok, "binary": krill_bin, "detail": detail}
             if not ok and reason:
                 skips.append(reason)
 
@@ -613,17 +613,17 @@ def main() -> int:
         if use_server:
             # Server mode: warm server is already running, just do warmup requests
             for _ in range(args.warmup):
-                run_krillm_server(args, prompt, measured=False)
+                run_krill_server(args, prompt, measured=False)
                 run_ollama(args, prompt, measured=False)
 
-            krillm_runs = [run_krillm_server(args, prompt, measured=True) for _ in range(args.runs)]
+            krill_runs = [run_krill_server(args, prompt, measured=True) for _ in range(args.runs)]
         else:
-            assert krillm_bin is not None
+            assert krill_bin is not None
             for _ in range(args.warmup):
-                run_krillm(args, krillm_bin, prompt, measured=False)
+                run_krill(args, krill_bin, prompt, measured=False)
                 run_ollama(args, prompt, measured=False)
 
-            krillm_runs = [run_krillm(args, krillm_bin, prompt, measured=True) for _ in range(args.runs)]
+            krill_runs = [run_krill(args, krill_bin, prompt, measured=True) for _ in range(args.runs)]
 
         ollama_runs = [run_ollama(args, prompt, measured=True) for _ in range(args.runs)]
     except Exception as exc:
@@ -636,13 +636,13 @@ def main() -> int:
 
     report["status"] = "ok"
 
-    krill_group, krill_source = apply_cache_mode(krillm_runs, args.cache_mode, args.warmup, use_server)
+    krill_group, krill_source = apply_cache_mode(krill_runs, args.cache_mode, args.warmup, use_server)
     ollama_group, ollama_source = apply_cache_mode(ollama_runs, args.cache_mode, args.warmup, False)
 
     report["results"] = {
-        "krillm": {
-            "runs": krillm_runs,
-            "summary": summarize([run for run in krillm_runs if run]),
+        "krill": {
+            "runs": krill_runs,
+            "summary": summarize([run for run in krill_runs if run]),
             "cache_mode": krill_group,
             "cache_mode_source": krill_source,
         },
@@ -667,7 +667,7 @@ def main() -> int:
     report["cache_mode_source"] = top_source
 
     parity = check_input_parity(
-        [r for r in krillm_runs if r],
+        [r for r in krill_runs if r],
         [r for r in ollama_runs if r],
         prompt,
     )
@@ -682,15 +682,15 @@ def main() -> int:
             "audio": "bridge",
         }
 
-    # Detect prefix cache influence: if KrillLM prefill speed varies >3x between
+    # Detect prefix cache influence: if Krill prefill speed varies >3x between
     # runs, later runs likely hit the prefix cache.
     if use_server:
-        valid_krillm = [r for r in krillm_runs if r and r.get("prefill_tokens_per_second")]
-        if len(valid_krillm) >= 2:
-            prefills = [r["prefill_tokens_per_second"] for r in valid_krillm]
+        valid_krill = [r for r in krill_runs if r and r.get("prefill_tokens_per_second")]
+        if len(valid_krill) >= 2:
+            prefills = [r["prefill_tokens_per_second"] for r in valid_krill]
             if max(prefills) > 3 * min(prefills):
                 report["cache_warning"] = (
-                    "KrillLM prefill speed varies >3x across runs, indicating prefix cache hits "
+                    "Krill prefill speed varies >3x across runs, indicating prefix cache hits "
                     "on repeated prompts. Later runs may show near-zero prefill cost. "
                     "Use distinct prompts or --warmup 0 to measure cold prefill."
                 )

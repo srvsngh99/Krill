@@ -9,14 +9,14 @@ import KLMSampler
 /// where the width-K verify forward's argmax disagrees with the width-1 decode
 /// forward's argmax — an fp16 tie-flip. Every accepted token is the target
 /// model's own greedy argmax at that position, so output is bit-identical except
-/// at near-ties, exactly the nondeterminism KrillLM's batched decoder already
+/// at near-ties, exactly the nondeterminism Krill's batched decoder already
 /// exhibits (see `BatchedDecodeLiveTests`). We therefore assert PREFIX
 /// consistency (one sequence is a prefix of the other — `LCP == min length`),
 /// which a structural bug would break (early mid-stream disagreement) while a
 /// boundary tie-flip does not.
 ///
 /// Skipped unless `KLM_NGRAM_MODEL_PATH` points at a plain-causal checkpoint
-/// (e.g. `~/.krillm/models/blobs/llama-3.2-3b`), matching the live-test gating
+/// (e.g. `~/.krill/models/blobs/llama-3.2-3b`), matching the live-test gating
 /// convention used elsewhere in this target.
 final class NgramLiveParityTests: XCTestCase {
 

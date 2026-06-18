@@ -2,8 +2,8 @@ import Foundation
 
 /// A model manifest describes an installed model in the local registry.
 ///
-/// Manifests live at ~/.krillm/models/manifests/<name>.json and reference
-/// content-addressed blobs in ~/.krillm/models/blobs/.
+/// Manifests live at ~/.krill/models/manifests/<name>.json and reference
+/// content-addressed blobs in ~/.krill/models/blobs/.
 public struct ModelManifest: Codable, Sendable {
     /// Human-friendly name (e.g., "llama-3.1-8b")
     public let name: String

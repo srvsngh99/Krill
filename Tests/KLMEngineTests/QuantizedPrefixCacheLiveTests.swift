@@ -27,7 +27,7 @@ final class QuantizedPrefixCacheLiveTests: XCTestCase {
 
     private func makeTempCache() -> PrefixCache {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-q8-prefix-live-\(UUID().uuidString)")
+            .appendingPathComponent("krill-q8-prefix-live-\(UUID().uuidString)")
         addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         return PrefixCache(cacheDir: dir, maxMemoryEntries: 4, minPrefixLength: 4)
     }

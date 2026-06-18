@@ -89,7 +89,7 @@ final class InteractiveSession {
     func run() async throws {
         ReplCompletion.install()
         installReplySigint()
-        print(Ansi.bold("\nKrillLM interactive chat") + " " + Ansi.dim("(\(modelName))"))
+        print(Ansi.bold("\nKrill interactive chat") + " " + Ansi.dim("(\(modelName))"))
         print(Ansi.dim("Type a message. /help for commands, Tab to complete, Up/Down for history, /quit to exit.\n"))
         if !pendingImages.isEmpty || pendingAudio != nil { printPending() }
 
@@ -277,7 +277,7 @@ final class InteractiveSession {
     private func switchModel(to name: String) async {
         let dir: URL = registry.hasModel(name) ? registry.modelPath(name) : URL(fileURLWithPath: name)
         guard FileManager.default.fileExists(atPath: dir.path) else {
-            print("Model not found: \(name). Install with: krillm pull \(name)")
+            print("Model not found: \(name). Install with: krill pull \(name)")
             return
         }
         print(Ansi.dim("Loading \(name)..."))
@@ -437,7 +437,7 @@ final class InteractiveSession {
     }
 
     private func saveTranscript(to arg: String) {
-        let path = arg.isEmpty ? "krillm-transcript.txt" : MediaAttachment.normalizePath(arg)
+        let path = arg.isEmpty ? "krill-transcript.txt" : MediaAttachment.normalizePath(arg)
         var text = ""
         if let system, !system.isEmpty { text += "system: \(system)\n\n" }
         for turn in history { text += "\(turn.role): \(turn.content)\n\n" }

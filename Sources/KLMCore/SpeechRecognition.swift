@@ -49,7 +49,7 @@ public final class SpeechRecognizer: @unchecked Sendable {
         guard let recognizer = SFSpeechRecognizer(), recognizer.isAvailable else { return nil }
         // SFSpeech consumes a file URL; stage the clip in a temp wav.
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-voice-\(UUID().uuidString).wav")
+            .appendingPathComponent("krill-voice-\(UUID().uuidString).wav")
         guard (try? wav.write(to: url)) != nil else { return nil }
         defer { try? FileManager.default.removeItem(at: url) }
 

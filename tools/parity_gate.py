@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""KrillLM <-> Ollama macOS parity gate.
+"""Krill <-> Ollama macOS parity gate.
 
 Sibling to ``release_gate.py``. Where the release gate tracks *speed*
 parity, this tracks *feature / configuration* parity: it boots
-``krillm serve`` and fires real Ollama-client-shaped requests at it,
+``krill serve`` and fires real Ollama-client-shaped requests at it,
 asserting response-shape parity per the gap matrix in
 ``docs/OLLAMA_MAC_PARITY_PLAN.md``.
 
@@ -88,7 +88,7 @@ class Gate:
             j = json.loads(raw)
             if "version" not in j:
                 return "FAIL", "missing 'version'"
-            return "PASS", f"version={j['version']} krillm={j.get('krillm_version')}"
+            return "PASS", f"version={j['version']} krill={j.get('krill_version')}"
 
         self.check("T0-3", "H", "GET /api/version", api_version)
 
@@ -221,7 +221,7 @@ class Gate:
             # name and a JSON-object `arguments` string) - not merely that the
             # request was "not rejected". A model that declines to call (only
             # `content`) still passes: tool *selection* quality is the job of
-            # the KrillLM-vs-Ollama gate in tools/tool_calling_benchmark.py
+            # the Krill-vs-Ollama gate in tools/tool_calling_benchmark.py
             # (the hard >= assertion); this cell guards the response *shape*.
             if code == 400 and b"not supported" in raw:
                 return "FAIL", "tools rejected at parse time"
@@ -452,7 +452,7 @@ class Gate:
 
 
 def find_binary() -> Optional[Path]:
-    candidates = [REPO / ".build" / cfg / "krillm"
+    candidates = [REPO / ".build" / cfg / "krill"
                   for cfg in ("release", "debug")]
     existing = [p for p in candidates if p.exists()]
     if not existing:
@@ -463,11 +463,11 @@ def find_binary() -> Optional[Path]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="KrillLM macOS parity gate")
+    ap = argparse.ArgumentParser(description="Krill macOS parity gate")
     ap.add_argument("--profile", choices=["mac_parity", "strict_parity"],
                     default="mac_parity")
     ap.add_argument("--port", type=int, default=11534,
-                    help="ephemeral port for the gate's krillm serve")
+                    help="ephemeral port for the gate's krill serve")
     ap.add_argument("--base-url", default=None,
                     help="test an already-running server instead of spawning one")
     args = ap.parse_args()
@@ -479,7 +479,7 @@ def main() -> int:
 
     binary = find_binary()
     if not binary:
-        print("error: krillm binary not found; run `swift build` first",
+        print("error: krill binary not found; run `swift build` first",
               file=sys.stderr)
         return 2
 

@@ -2,12 +2,12 @@ import Foundation
 
 /// A single operator-agent tool.
 ///
-/// The operator agent's tool surface is **deliberately scoped to KrillLM
+/// The operator agent's tool surface is **deliberately scoped to Krill
 /// itself** - no shell, no file_read, no file_write, no web_fetch. Every
 /// conforming tool wraps an existing CLI command or HTTP endpoint (the
 /// registry, the catalog, the running server). New tools that would touch
 /// the user's filesystem or shell do NOT belong here; users who want a
-/// coding agent point Aider / gptme / OpenHands at KrillLM's `/v1/*`
+/// coding agent point Aider / gptme / OpenHands at Krill's `/v1/*`
 /// endpoints instead.
 public protocol OperatorTool: Sendable {
     /// Stable tool name the model emits in `<tool_call>` JSON. Must be

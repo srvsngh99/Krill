@@ -6,7 +6,7 @@ DerivedData/
 dist/
 xcuserdata/
 *.metallib
-~/.krillm/
+~/.krill/
 tools/telegram-manager/.venv/
 __pycache__/
 *.pyc

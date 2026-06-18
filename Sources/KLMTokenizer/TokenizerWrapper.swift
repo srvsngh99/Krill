@@ -185,7 +185,7 @@ public final class KLMTokenizer: @unchecked Sendable {
         }
 
         let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-tok-\(UUID().uuidString)")
+            .appendingPathComponent("krill-tok-\(UUID().uuidString)")
         do {
             try FileManager.default.createDirectory(
                 at: tmp, withIntermediateDirectories: true)
@@ -315,7 +315,7 @@ public final class KLMTokenizer: @unchecked Sendable {
         // tokenizer.json (huge file) and write a modified
         // tokenizer_config.json next to it.
         let stagingDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-tokenizer-\(UUID().uuidString)")
+            .appendingPathComponent("krill-tokenizer-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
             at: stagingDir, withIntermediateDirectories: true)
         defer {
@@ -406,7 +406,7 @@ public final class KLMTokenizer: @unchecked Sendable {
     ///
     /// Cross-encoders consume the two strings as a single sequence with
     /// special-token separators between them. Two layouts cover all
-    /// rerankers KrillLM currently ships:
+    /// rerankers Krill currently ships:
     ///
     /// - XLMRoberta-class (BGE Reranker, etc.):
     ///   `<s> query </s></s> document </s>`
@@ -784,7 +784,7 @@ public final class KLMTokenizer: @unchecked Sendable {
     ///
     /// Qwen 2.5-VL's stock chat template only emits a single
     /// `<|image_pad|>` and relies on a separate image processor to
-    /// expand it; KrillLM's native runtime instead injects the full
+    /// expand it; Krill's native runtime instead injects the full
     /// `<|vision_start|>` + `imagePadCount` × `<|image_pad|>` +
     /// `<|vision_end|>` run directly (the processor already produced
     /// `imagePadCount = gridH * gridW` merged vision tokens). The

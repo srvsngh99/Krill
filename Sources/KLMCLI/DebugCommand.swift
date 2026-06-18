@@ -19,7 +19,7 @@ struct DebugCommand: AsyncParsableCommand {
     func run() async throws {
         let dir = URL(fileURLWithPath: modelPath)
 
-        print("=== KrillLM Debug ===")
+        print("=== Krill Debug ===")
         print()
 
         // 1. Load model

@@ -217,7 +217,7 @@ final class PullerTests: XCTestCase {
 
     private func makeTempDir() throws -> URL {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-puller-test-\(UUID().uuidString)")
+            .appendingPathComponent("krill-puller-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }

@@ -102,7 +102,7 @@ public struct LlavaConfig: Codable, Sendable {
 /// omit most Llama dims and lean on transformers' `LlamaConfig` class defaults
 /// (which match vicuna-7b); a 13b checkpoint instead spells the dims out, and
 /// `decodeIfPresent` honors those. The defaults below are the HF `LlamaConfig`
-/// base defaults (NOT KrillLM's Llama-3-oriented `rope_theta=500000` /
+/// base defaults (NOT Krill's Llama-3-oriented `rope_theta=500000` /
 /// `max_position_embeddings=131072`, which would be wrong for vicuna).
 struct LlavaTextConfig: Codable, Sendable {
     let hiddenSize: Int

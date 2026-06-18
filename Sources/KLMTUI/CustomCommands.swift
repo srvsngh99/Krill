@@ -1,7 +1,7 @@
 import Foundation
 
-/// A user-authored slash command, the KrillLM analogue of Claude Code's
-/// `.claude/commands/*.md`. Each file under `~/.krillm/commands/<name>.md`
+/// A user-authored slash command, the Krill analogue of Claude Code's
+/// `.claude/commands/*.md`. Each file under `~/.krill/commands/<name>.md`
 /// becomes a `/<name>` command whose body is a prompt template expanded with
 /// the text the user typed after the command.
 ///

@@ -16,7 +16,7 @@ declare -a PROMPTS=(
 )
 
 start_serve() {  # $1 = extra env assignment, $2 = tag
-  env $1 KRILL_NUM_PARALLEL=4 .build/release/krillm serve --model "$MODEL" --port $PORT >/tmp/ngserve_$2.log 2>&1 &
+  env $1 KRILL_NUM_PARALLEL=4 .build/release/krill serve --model "$MODEL" --port $PORT >/tmp/ngserve_$2.log 2>&1 &
   echo $!
 }
 wait_ready() {
@@ -42,12 +42,12 @@ fire() {  # $1 = tag
 echo "=== n-gram spec ON (default) ==="
 PID=$(start_serve "" on); wait_ready || { echo "serve(on) not ready"; kill $PID 2>/dev/null; exit 1; }
 sleep 1; fire on
-kill $PID 2>/dev/null; sleep 3; pkill -f "krillm serve" 2>/dev/null; sleep 2
+kill $PID 2>/dev/null; sleep 3; pkill -f "krill serve" 2>/dev/null; sleep 2
 
 echo "=== n-gram spec OFF (KRILL_NGRAM_SPEC=0) ==="
 PID=$(start_serve "KRILL_NGRAM_SPEC=0" off); wait_ready || { echo "serve(off) not ready"; kill $PID 2>/dev/null; exit 1; }
 sleep 1; fire off
-kill $PID 2>/dev/null; sleep 3; pkill -f "krillm serve" 2>/dev/null; sleep 2
+kill $PID 2>/dev/null; sleep 3; pkill -f "krill serve" 2>/dev/null; sleep 2
 
 echo "=== byte-exact on-vs-off per request ==="
 FAIL=0

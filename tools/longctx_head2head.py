@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Long-context head-to-head: KrillLM vs Ollama, same prompt, same box.
+"""Long-context head-to-head: Krill vs Ollama, same prompt, same box.
 
 Mirrors Tests/KLMEngineTests/Gemma4DecodeSweepTests.swift's prompt builder:
 repeated ~55-token structured sections with a needle ("tangerine satellite")
@@ -12,7 +12,7 @@ CRITICAL Ollama trap: it silently TRUNCATES the prompt to options.num_ctx
 num_ctx >= target+512 and verify the returned prompt_eval_count.
 
 Run one engine at a time (24GB box):
-  python3 tools/longctx_head2head.py --engine krillm --port 57455 \
+  python3 tools/longctx_head2head.py --engine krill --port 57455 \
       --model gemma-4-12b --ctx 2000,16000,32000,53000,99000
   python3 tools/longctx_head2head.py --engine ollama --port 11434 \
       --model gemma4:12b-mlx --ctx 2000,16000,32000,53000,99000
@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 
 PARA = (
-    "The KrillLM engine runs large language models natively on Apple Silicon "
+    "The Krill engine runs large language models natively on Apple Silicon "
     "using MLX. It supports continuous batching, prefix-cache reuse, grammar "
     "constrained decoding, native tool calling, and multimodal input. The "
     'secret pass phrase for this document is "tangerine satellite".'
@@ -54,7 +54,7 @@ def build_prompt(target_tokens: int, nonce: str, question: str) -> str:
         # per-token decode rate. Ends with the phrase so needle still checks.
         blocks.append(
             "\nQuestion: Describe in detail, over several paragraphs, what the "
-            "KrillLM engine supports and how its features help local "
+            "Krill engine supports and how its features help local "
             "deployment. End your answer by stating the secret pass phrase. "
             "Answer:"
         )
@@ -143,7 +143,7 @@ def one_run(base: str, model: str, prompt: str, num_ctx: int,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--engine", required=True, choices=["krillm", "ollama"])
+    ap.add_argument("--engine", required=True, choices=["krill", "ollama"])
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--model", required=True)
     ap.add_argument("--ctx", default="2000,16000,32000,53000,99000")
@@ -154,7 +154,7 @@ def main():
     args = ap.parse_args()
 
     base = f"http://127.0.0.1:{args.port}"
-    rss_pattern = "ollama" if args.engine == "ollama" else "krillm"
+    rss_pattern = "ollama" if args.engine == "ollama" else "krill"
     ctxs = [int(c) for c in args.ctx.split(",")]
 
     print(f"\n===== longctx head2head: engine={args.engine} model={args.model} "

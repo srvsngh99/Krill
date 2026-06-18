@@ -172,7 +172,7 @@ actor BatchScheduler {
         guard !didNoteSpecBatchExclusion else { return }
         didNoteSpecBatchExclusion = true
         FileHandle.standardError.write(Data(
-            ("[KrillLM] speculative decode requested with KRILL_NUM_PARALLEL=\(numParallel): "
+            ("[Krill] speculative decode requested with KRILL_NUM_PARALLEL=\(numParallel): "
              + "speculative and batched decode are not composable, so this request runs "
              + "serially (no batching). Unset useSpeculative to batch concurrent requests.\n").utf8))
     }

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to KrillLM are recorded here. Entries are in
+All notable changes to Krill are recorded here. Entries are in
 reverse chronological order. Versioning follows
 [SemVer](https://semver.org/).
 
@@ -14,13 +14,13 @@ reverse chronological order. Versioning follows
   (model_type `glm4`) runs natively with no Python, gated argmax-exact against
   an mlx-lm logit oracle. New aliases `glm-4-9b-0414`, `glm-z1-9b`,
   `glm-4-32b-0414` resolve to the mlx-community 4-bit builds.
-- **`krillm quantize` is now 100% Swift+MLX - the python3/mlx_lm.convert
+- **`krill quantize` is now 100% Swift+MLX - the python3/mlx_lm.convert
   shell-out is gone**, so the shipped binary has no Python anywhere. The dense
   pass quantizes every 2-D group-divisible weight (Llama/Qwen/Mistral/Phi/GLM)
   byte-identical to the canonical MLX op (1007/1007 vs mlx-community affine,
   765/765 vs `mx.quantize` nvfp4). `--mode affine|nvfp4|mxfp4|mxfp8` (the float
   formats auto-pick their required group size); `--dtype` default fp16.
-- **`krillm quantize --reference <a 4-bit build>` extends the native quantizer
+- **`krill quantize --reference <a 4-bit build>` extends the native quantizer
   to MoE / vision / Gemma.** It learns the exact quantized-module set from the
   reference checkpoint's `.scales` tensors, so it reproduces the proven coverage
   for any family with no per-family code: MoE (stacked experts quantized affine
@@ -59,11 +59,11 @@ reverse chronological order. Versioning follows
 ### Added
 
 - **Thinking on by default in interactive chat, with a toggle and a config
-  default.** A new session of `krillm run` (full-screen TUI or classic REPL)
+  default.** A new session of `krill run` (full-screen TUI or classic REPL)
   now turns the reasoning channel ON by default for models that have one (a
   no-op for models without one). Toggle it per session with `/think on|off` or
   **Ctrl-T**; a `think` indicator shows in the TUI footer when on. Set the
-  default with `thinking = true|false` in `~/.krillm/config.toml` (or
+  default with `thinking = true|false` in `~/.krill/config.toml` (or
   `KRILL_ENABLE_THINKING`). The **server/API and single-shot generation are
   unchanged** (they make no explicit decision, so the template default is kept),
   so no API behavior changes silently. Resolution order: per-call/toggle >
@@ -108,7 +108,7 @@ reverse chronological order. Versioning follows
   gate chain-of-thought on their chat template; with it off they answer without
   reasoning. The engine now renders the `<|turn>` / `<|channel>thought` channel
   prompt faithfully for both modes and exposes a `KRILL_ENABLE_THINKING` toggle
-  (and a per-call flag) so `krillm run gemma-4-12b-coder` can reason. Stock
+  (and a per-call flag) so `krill run gemma-4-12b-coder` can reason. Stock
   Gemma-4 prompting is unchanged.
 - **Standalone capability-eval harnesses** (no Ollama): `tools/coding_eval_standalone.py`
   (HumanEval pass@1, optional `--think`) and `tools/agentic_eval_standalone.py`
@@ -133,17 +133,17 @@ reverse chronological order. Versioning follows
 
 ### Added
 
-- **Full-screen chat TUI (default for `krillm run`).** An opencode-style
+- **Full-screen chat TUI (default for `krill run`).** An opencode-style
   alternate-screen interface in the Sourav AI Labs monochrome identity: branded
   masthead, scrollable conversation pane, bottom input box, status footer. Type
   `/` for a slash-command autosuggest popup you cycle with Up/Down and run with
   Enter (Tab to fill and add arguments). Streaming markdown, PgUp/PgDn scroll,
   Ctrl-C cancel, Ctrl-D quit, resize-aware. Built raw (termios + ANSI, no TUI
-  dependency). `--classic` selects the libedit line REPL, and KrillLM
+  dependency). `--classic` selects the libedit line REPL, and Krill
   auto-falls-back to it when stdout is not a TTY. Pure logic (key decoding, text
   wrap, slash menu) lives in a new unit-tested `KLMTUI` library.
 
-- **Polished interactive chat REPL.** `krillm run <model>` (no prompt) is now a
+- **Polished interactive chat REPL.** `krill run <model>` (no prompt) is now a
   real multi-turn conversation (it previously discarded history between turns).
   Backed by macOS libedit (no third-party dependency): Up/Down history, in-line
   editing, and Tab completion of slash commands and file paths. Streamed output
@@ -154,7 +154,7 @@ reverse chronological order. Versioning follows
   `/history`, `/save`, `/reset`, plus `/attach` previews (kind, name, image
   dimensions, size) and `/remove <n>`.
 
-- **Interactive multimodal chat input.** The `krillm run <model>` REPL now
+- **Interactive multimodal chat input.** The `krill run <model>` REPL now
   accepts images and audio mid-conversation, three ways: a `/image` / `/audio`
   command, a path dragged into the terminal (escaped spaces, quotes and `~`
   handled), or an inline `@path` inside the message. Attachments apply to the
@@ -177,10 +177,10 @@ reverse chronological order. Versioning follows
   brand splash wordmark, lighter masthead, and a richer status footer
   (model, tok/s, context use, cwd:branch, version).
 - **Branded onboarding.** First-run welcome, pull, caveats, and help screens,
-  plus a default-model fallback so `krillm run` with no argument is friendly.
-- **`make app-bundle` / `make dist-app`.** Builds a code-signed `krillm.app`
+  plus a default-model fallback so `krill run` with no argument is friendly.
+- **`make app-bundle` / `make dist-app`.** Builds a code-signed `krill.app`
   with `NSMicrophoneUsageDescription` so macOS attributes `/mic` permission to
-  KrillLM rather than the parent terminal. The metallib ships as a signed
+  Krill rather than the parent terminal. The metallib ships as a signed
   nested resource bundle.
 
 ### Changed
@@ -261,9 +261,9 @@ embedding model and a generation model resident at once.
 
 ## [0.5.0] - 2026-06-09
 
-Headline: **Gemma 4 12B, natively.** KrillLM gains a native, encoder-free Gemma 4
+Headline: **Gemma 4 12B, natively.** Krill gains a native, encoder-free Gemma 4
 12B "unified" multimodal runtime (text + vision + audio) running in 4-bit-float
-nvfp4, plus one-command coding-agent launch (`krillm launch`) wiring Claude Code,
+nvfp4, plus one-command coding-agent launch (`krill launch`) wiring Claude Code,
 Codex, OpenCode, Copilot, Droid, Hermes, and Pi to your local server. The wins
 over Ollama on Mac are now primarily on **capability** - constrained tool calls,
 structured output, native multimodal, and native voice that Ollama's MLX Gemma
@@ -288,7 +288,7 @@ box; raw-throughput chasing is explicitly closed (see
   8-bit (mixed precision): MMLU-500 **77.6% at ~27.7 tok/s** single-stream -
   Ollama-parity quality at nvfp4 speed, a both-axes result. Reproduce with
   `tools/requant_gemma4_nvfp4.py`; details in `docs/GEMMA4_12B_NVFP4.md`. (#173, #176)
-- **`krillm launch <agent>` - boot a coding agent wired to KrillLM.** One command
+- **`krill launch <agent>` - boot a coding agent wired to Krill.** One command
   resolves the agent profile, ensures the server is up with the chosen model
   loaded and **pinned for the session**, writes/merges the agent's config + env,
   and execs it. Supports Claude Code, Codex, OpenCode, GitHub Copilot, Droid,
@@ -330,7 +330,7 @@ box; raw-throughput chasing is explicitly closed (see
   are auto-protected at 8-bit in the requant tool. (#182)
 - **Thinking-channel marker leak** - Gemma `<|channel>thought` markers are stripped
   from all responses on every server + CLI path. (#183)
-- **`krillm launch` keep-alive and `stream_options`.** The launched server now pins
+- **`krill launch` keep-alive and `stream_options`.** The launched server now pins
   the model so a slow agent init can't trip the idle evictor, and the OpenAI chat
   path accepts `stream_options` (additive telemetry) instead of rejecting it -
   which had broken OpenCode and the OpenAI SDK before their first turn. (#185)
@@ -339,19 +339,19 @@ box; raw-throughput chasing is explicitly closed (see
 
 ### Changed
 
-- **Default serve port is `57455`** ("KRILL" on a phone keypad) so KrillLM coexists
+- **Default serve port is `57455`** ("KRILL" on a phone keypad) so Krill coexists
   with Ollama instead of colliding on `11434`. `--port` / `KRILL_PORT` override;
   run `--port 11434` for a drop-in Ollama replacement. (#147)
 
 ## [0.4.0] - 2026-06-01
 
-Headline: KrillLM is now a fully native Swift+MLX inference stack with no
+Headline: Krill is now a fully native Swift+MLX inference stack with no
 Python dependency. Every mixture-of-experts family (Mixtral, Qwen2-MoE,
 OLMoE, DeepSeek-V2, alongside the already-native Qwen3 and Gemma 4
 26B-A4B) runs natively; grammar-constrained decoding (JSON, JSON-schema,
 regex, and full CFG) and continuous batched serving land; the embedding
 stack grows to ~15 encoder families; and the default port flips to
-`11434` for a zero-config Ollama drop-in. KrillLM beats Ollama on every
+`11434` for a zero-config Ollama drop-in. Krill beats Ollama on every
 published Gemma 4 SKU (decode, prefill, and total wall time).
 
 ### Added
@@ -522,8 +522,8 @@ published Gemma 4 SKU (decode, prefill, and total wall time).
   `OperatorEvent`, `HardwareInfo`, and `Recommender` land the structural
   foundation for agent mode (slice 3 sub-PR A). Tool wiring + CLI follow
   in later sub-PRs.
-- **Daemon-mode CLI routing for `krillm run`** (#63): when a `krillm
-  serve` daemon is already running, `krillm run` detects it (probes
+- **Daemon-mode CLI routing for `krill run`** (#63): when a `krill
+  serve` daemon is already running, `krill run` detects it (probes
   `/v1/status`), routes the request through `/v1/chat/completions`, and
   skips the per-call model load. TTFT drops from seconds to tens of
   milliseconds (~5x warm-daemon speedup). Text-only single-shot
@@ -569,7 +569,7 @@ published Gemma 4 SKU (decode, prefill, and total wall time).
   (#79): the SigLIP2 tower shapes are parsed from the model's own
   config instead of hardcoded, so checkpoints with different vision
   dimensions load correctly.
-- **Default server port flipped `11435` -> `11434`** (#83): KrillLM now
+- **Default server port flipped `11435` -> `11434`** (#83): Krill now
   listens on the same port stock Ollama uses, so existing Ollama
   clients connect with no configuration. The previous default `11435`
   still works for one release when set explicitly (`--port 11435` or
@@ -625,7 +625,7 @@ published Gemma 4 SKU (decode, prefill, and total wall time).
 ### Fixed
 
 - **Qwen3-MoE coherence** (#78): mlx-community ships stacked
-  `switch_mlp` expert weights; KrillLM now unpacks them into per-expert
+  `switch_mlp` expert weights; Krill now unpacks them into per-expert
   keys, so Qwen3-Coder-30B-A3B serves coherent text and tool calls
   instead of garbage.
 - **Gemma 4 e4b / 26B-A4B crash on load** (#72): `layer_types` is now
@@ -645,11 +645,11 @@ published Gemma 4 SKU (decode, prefill, and total wall time).
 ### Performance vs Ollama
 
 Median across 5 runs, warmed servers, 128-token generation, on the M4
-target (full report + raw JSONs archived with the release). KrillLM
+target (full report + raw JSONs archived with the release). Krill
 wins decode, prefill, and total wall time on every published Gemma 4
 SKU:
 
-| Variant | KrillLM decode | Ollama decode | KrillLM total | Ollama total | Total delta |
+| Variant | Krill decode | Ollama decode | Krill total | Ollama total | Total delta |
 |---|---:|---:|---:|---:|---:|
 | e2b (dense, ~2B, 4-bit) | 110.1 tok/s | 88.4 tok/s | 1.18s | 1.65s | +40% |
 | e4b (dense, ~4B, 4-bit) | 62.6 tok/s | 55.2 tok/s | 2.07s | 2.53s | +22% |
@@ -688,9 +688,9 @@ project's first Swift CI workflow.
   `Package.resolved`, metallib step gated by `REQUIRE_METALLIB=1`.
   The repo previously only ran the Python tools-tests workflow; the
   entire Swift core had no automated coverage.
-- **`KrillLMVersion` constant** in `Sources/KLMRegistry/KrillLMVersion.swift`
+- **`KrillVersion` constant** in `Sources/KLMRegistry/KrillVersion.swift`
   (#56) replaces four hardcoded "0.3.0" string literals across CLI,
-  server, and Ollama-compat. `KrillLMVersionMatchesVersionFile` test
+  server, and Ollama-compat. `KrillVersionMatchesVersionFile` test
   asserts agreement with the repo-root `VERSION` file at build time.
 - **Per-family `lastTokenOnly` slice-equivalence tests** (#57): pin
   the bit-exact property of PRs #50 and #53 against a future
@@ -716,7 +716,7 @@ project's first Swift CI workflow.
 ### Fixed
 
 - **Homebrew install was broken on v0.2.0** (#55): the formula
-  installed only the bare `krillm` binary, but the MLX runtime
+  installed only the bare `krill` binary, but the MLX runtime
   needs `mlx.metallib` adjacent to the executable to initialize
   Metal. No user hit it because source builds dominate on a small
   project; now correct from v0.3.0 onward.
@@ -806,7 +806,7 @@ faster wall-time).
 
 ### Performance vs Ollama (median of 5 warm runs)
 
-| family | KrillLM | Ollama | ratio |
+| family | Krill | Ollama | ratio |
 | --- | ---: | ---: | --- |
 | Qwen 2.5-VL 3B (224x224 image) | 28 ms | 77 ms | 0.36x (2.75x faster) |
 | Llama 3.2 3B (text) | 343 ms | 399 ms | 0.86x (14 percent faster) |
@@ -824,5 +824,5 @@ work tracked against the WS5 plan's "next hotspots" list.
 Initial public release with Apple branding (Sourav Singh /
 Sourav AI Labs). Established Llama / Qwen / Mistral / Phi / Gemma
 families on a Swift+MLX backend with an Ollama-compatible API
-surface; Homebrew formula at `srvsngh99/KrillLM`. See the v0.2.0
+surface; Homebrew formula at `srvsngh99/Krill`. See the v0.2.0
 tag for details.

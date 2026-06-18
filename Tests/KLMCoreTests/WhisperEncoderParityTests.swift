@@ -13,14 +13,14 @@ import MLXNN
 /// `whisper-small.en-mlx` blob in the HF cache.
 final class WhisperEncoderParityTests: XCTestCase {
 
-    /// A converted KrillLM whisper model dir (`tools/convert_whisper.py`
+    /// A converted Krill whisper model dir (`tools/convert_whisper.py`
     /// output): `model.safetensors` + `config.json`. Override with
-    /// `KLM_WHISPER_DIR`, else the default `~/.krillm/whisper-small.en`.
+    /// `KLM_WHISPER_DIR`, else the default `~/.krill/whisper-small.en`.
     private func modelDir() -> URL? {
         let env = ProcessInfo.processInfo.environment
         let dir: URL = env["KLM_WHISPER_DIR"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".krillm/whisper-small.en")
+                .appendingPathComponent(".krill/whisper-small.en")
         return FileManager.default.fileExists(
             atPath: dir.appendingPathComponent("model.safetensors").path) ? dir : nil
     }

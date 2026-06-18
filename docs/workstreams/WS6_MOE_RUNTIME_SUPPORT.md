@@ -210,11 +210,11 @@ verify text-only generation and that the bridge preserves the
 system prompt through mlx-lm's `apply_chat_template`.
 
 Benchmark vs Ollama: omitted by design. On Mac, Ollama itself
-calls into mlx-lm for MoE inference; the KrillLM bridge calls
+calls into mlx-lm for MoE inference; the Krill bridge calls
 into the same mlx-lm. Per-token throughput and output quality
 are at parity by construction (same Python, same model, same
 MLX kernels). The cold-start cost of the sidecar (~1-3 s
-depending on model size) is the only KrillLM-specific addition,
+depending on model size) is the only Krill-specific addition,
 and it amortizes over the server lifetime.
 
 ## Acceptance status
@@ -242,7 +242,7 @@ From the workstream's acceptance bar:
 
 ## Goal
 
-Support mixture-of-experts LLMs without giving up KrillLM's Mac-native
+Support mixture-of-experts LLMs without giving up Krill's Mac-native
 memory and latency goals.
 
 MoE is not just another alias. It requires router, expert, memory, and

@@ -1,7 +1,7 @@
 # Benchmark Issues — found 2026-06-04, to revisit/fix
 
-Open gaps surfaced while running the fresh KrillLM-vs-Ollama benchmark suite
-(`docs/BENCHMARKS.md`) on Apple M4 Pro, KrillLM `9a21941`, Ollama 0.24.0. None
+Open gaps surfaced while running the fresh Krill-vs-Ollama benchmark suite
+(`docs/BENCHMARKS.md`) on Apple M4 Pro, Krill `9a21941`, Ollama 0.24.0. None
 are merge-blocking for what shipped; they are the punch-list for "best inference
 engine on macOS." Ordered by impact on that goal.
 
@@ -15,7 +15,7 @@ gemma-4-e2b returned EMPTY output (`eval_count=0`) for any prompt above ~1024
 tokens, while Ollama answered fine.
 
 **Root cause.** gemma-4-e2b uses a 512-token sliding window on 28 of 35 layers
-(`sliding_attention`), but KrillLM applied a plain FULL-causal mask to every
+(`sliding_attention`), but Krill applied a plain FULL-causal mask to every
 layer. Past ~2x the window those layers attend out-of-distribution context and
 the model emits its stop token immediately. The cliff was sharp at ~1024 tokens
 (2x512). Invisible until now because every test/benchmark used short prompts.
@@ -52,7 +52,7 @@ unwindowed - a niche follow-up). Gate: `Gemma4BatchedLongContextLiveTests`
 **Severity: critical.** The agentic/RAG moat (reuse a long shared context -
 system prompt, tool schemas, retrieved docs - across calls) was not working: a
 request that shared a long prefix with a recent one re-prefilled the ENTIRE
-context every time, so KrillLM was at a large prefill disadvantage on the exact
+context every time, so Krill was at a large prefill disadvantage on the exact
 workload agents hammer.
 
 **Corrected diagnosis (it is NOT model-size-dependent).** Controlled
@@ -129,10 +129,10 @@ fixed on both the serial and the concurrent batched paths.
 
 ## 0b. [BOX LIMIT confirmed on retry] 30B-A3B MoE not viable on 24GB
 
-KrillLM runs `Qwen3-Coder-30B-A3B-Instruct-4bit` natively and produces excellent
+Krill runs `Qwen3-Coder-30B-A3B-Instruct-4bit` natively and produces excellent
 code, but the 16 GB (4-bit) weights leave no headroom on a 24 GB host. **Re-tested
 2026-06-04 on latest `main`, both paths:**
-- **CLI** (`krillm run`): generates correct code, but **segfaults mid-generation
+- **CLI** (`krill run`): generates correct code, but **segfaults mid-generation
   ~1 in 5** longer runs under repeated load (exit 139; RAM-free collapses just
   before the crash). The earlier `failed assertion _status <
   MTLCommandBufferStatusCommitted` is the same memory-pressure failure surfacing
@@ -153,7 +153,7 @@ solo-only-and-flaky / thrashes when served. Revisit on a 36 GB+ Mac.
 ## 1. [RESOLVED - not reproducible] Server HTTP API audio ingestion
 
 **Status: NOT A BUG on current `main`.** Re-checked 2026-06-04 against a freshly
-built `.build/release/krillm` (and, separately, the Homebrew v0.4.0 binary):
+built `.build/release/krill` (and, separately, the Homebrew v0.4.0 binary):
 audio **is** ingested over HTTP. The original benchmark probe must have hit an
 environmental error (stale/other binary, wrong port, or a server with no model
 loaded); the code path threads `audioData` end-to-end on every handler.
@@ -163,7 +163,7 @@ audio"):
 
 | Path                                            | prompt_eval_count | response |
 |-------------------------------------------------|-------------------|----------|
-| CLI `krillm run --audio`                        | 110               | exact transcript |
+| CLI `krill run --audio`                        | 110               | exact transcript |
 | `/api/generate` top-level `"audio"`+`audio_format` | 110            | exact transcript |
 | `/api/chat` message-level `"audio"`             | 110               | exact transcript |
 | text-only baseline (same prompt, no audio)      | 13                | - |
@@ -204,10 +204,10 @@ best-of-3 total latency):
 
 | | total latency | answer |
 |---|---|---|
-| KrillLM `Qwen2.5-VL-3B-Instruct-4bit` | 607 ms | correct (recognizes red) |
+| Krill `Qwen2.5-VL-3B-Instruct-4bit` | 607 ms | correct (recognizes red) |
 | Ollama `qwen2.5vl:3b` | 660 ms | correct (NOT empty) |
 
-KrillLM is ~1.09x on single-stream total latency here - near parity, the same
+Krill is ~1.09x on single-stream total latency here - near parity, the same
 memory-bandwidth-bound story as text decode, with the dramatic multimodal win
 remaining the Gemma-4 correctness case (Ollama empty). The point is that the
 comparison now holds on a model where Ollama actually answers, removing the "you
@@ -222,7 +222,7 @@ model when the baseline returns nothing. Reproduce:
 
 **The harness already captures Ollama p99 TTFT.** `one_request` streams both arms
 (`stream:true`) and records the first chunk carrying a `response` field; both
-KrillLM and Ollama `/api/generate` emit NDJSON with per-chunk `response`, so the
+Krill and Ollama `/api/generate` emit NDJSON with per-chunk `response`, so the
 same parser populates both. Re-run against Ollama qwen2.5:14b: p99 TTFT 189 ms at
 N=1, 621 ms at N=2: populated, not blank. The original blank cell was the Ollama
 arm not being run (or its streams failing), not a parser gap.
@@ -234,7 +234,7 @@ TTFT samples, so a blank TTFT cell is now always either a populated number, an a
 that was not run, or an explained parse gap, never a silent blank.
 
 To quote the tail-latency comparison fresh, run with BOTH arms, e.g.:
-`tools/krillm_concurrent_benchmark.py --krillm-url URL --ollama-host URL --concurrency-sweep 1,2,4,8`.
+`tools/krill_concurrent_benchmark.py --krill-url URL --ollama-host URL --concurrency-sweep 1,2,4,8`.
 
 ## 4. [Partly addressed via #6, otherwise model-bound] Multi-step agentic tool-call decision on 3B models
 
@@ -242,7 +242,7 @@ To quote the tail-latency comparison fresh, run with BOTH arms, e.g.:
 
 - On a 2-tool agentic prompt ("weather in Tokyo, in Fahrenheit" -> get_weather ->
   convert), small models are decision-sensitive. Part of the qwen2.5-3b
-  divergence was a KrillLM tool-prompt mismatch, now fixed (see #6): with the
+  divergence was a Krill tool-prompt mismatch, now fixed (see #6): with the
   official Qwen tool format, qwen2.5-3b picks the correct first call
   (`get_weather`) on these prompts where the old generic prompt jumped straight
   to the converter.
@@ -274,12 +274,12 @@ rejection cases).
 
 ## 6. [RESOLVED] Tool-call *decision* divergence was a tool-prompt mismatch on Qwen
 
-**Root cause found and fixed.** For Qwen 2.5/3, KrillLM was injecting a generic
+**Root cause found and fixed.** For Qwen 2.5/3, Krill was injecting a generic
 Hermes tool prompt ("You can call tools. The available tools are listed as JSON
 schemas...") instead of the **official Qwen tool block the model was fine-tuned
 on** - the chat template's `# Tools` section with the schemas inside
 `<tools></tools>` XML tags. swift-transformers drops the `tools` Jinja variable,
-so KrillLM has to reproduce that block as message text (the Llama and Mistral
+so Krill has to reproduce that block as message text (the Llama and Mistral
 paths already do this for their families); the Qwen path was still on the
 generic prompt. Ollama renders the official block, so the two engines were
 feeding the model materially different tool instructions, which can flip a
@@ -303,6 +303,6 @@ Direct single-tool prompts stayed 4/4 (no regression). Gated by
 
 ## Quick repro pointers
 - Suite: `tools/bench_suite.py` (text/vision/voice/tools, hot+cold).
-- Concurrency: `tools/krillm_concurrent_benchmark.py`.
+- Concurrency: `tools/krill_concurrent_benchmark.py`.
 - Assets used: `/tmp/klmbench/red.png` (red box), `/tmp/klmbench/speech.wav`
   (macOS `say` → `afconvert`). Regenerate per `docs/BENCHMARKS.md`.

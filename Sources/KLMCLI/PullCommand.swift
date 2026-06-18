@@ -25,12 +25,12 @@ struct PullCommand: AsyncParsableCommand {
                 print("  \(name.padding(toLength: 20, withPad: " ", startingAt: 0)) \(info.params) \(info.family.rawValue)")
             }
             if let extra = catalog.load()?.models, !extra.isEmpty {
-                print("\nFrom catalog (krillm catalog list):")
+                print("\nFrom catalog (krill catalog list):")
                 for entry in extra.sorted(by: { $0.alias < $1.alias }) {
                     print("  \(entry.alias.padding(toLength: 20, withPad: " ", startingAt: 0)) \(entry.params) \(entry.family.rawValue)")
                 }
             }
-            print("\nOr use a full HuggingFace repo path: krillm pull org/model-name")
+            print("\nOr use a full HuggingFace repo path: krill pull org/model-name")
             throw ExitCode.failure
         }
 
@@ -63,6 +63,6 @@ struct PullCommand: AsyncParsableCommand {
         print(Ansi.bold("Done.") + " \(manifest.name) installed.")
         print(Ansi.dim(String(format: "   %.0f MB \u{00B7} %.1fs", sizeMB, elapsed)))
         print(Ansi.dim("   \(registry.modelPath(manifest.name).path)"))
-        print("\nRun with: " + Ansi.bold("krillm run \(manifest.name)"))
+        print("\nRun with: " + Ansi.bold("krill run \(manifest.name)"))
     }
 }

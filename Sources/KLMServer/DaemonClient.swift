@@ -1,7 +1,7 @@
 import Foundation
 
-/// Thin HTTP client that talks to a locally running `krillm serve`
-/// daemon. Used by `krillm run` to detect an already-running daemon
+/// Thin HTTP client that talks to a locally running `krill serve`
+/// daemon. Used by `krill run` to detect an already-running daemon
 /// and route single-shot text generation through it (avoiding a fresh
 /// in-process model load + Metal JIT spike per CLI invocation).
 ///

@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """Three-way single-box inference benchmark: GGUF (llama.cpp/Ollama) vs
-MLX-Python (mlx-lm) vs Native MLX-Swift (KrillLM), on the SAME model + prompt.
+MLX-Python (mlx-lm) vs Native MLX-Swift (Krill), on the SAME model + prompt.
 
 This is the honest "rebuff" harness. It compares RUNTIMES, not weights -- the
 .safetensors / .gguf files are runtime-agnostic; what differs is how each engine
 loads and serves them. For an apples-to-apples runtime comparison, point all
 three rows at the SAME logical model at a comparable quant (e.g. a 4-bit GGUF vs
-the mlx-community 4-bit MLX vs KrillLM loading that same 4-bit MLX).
+the mlx-community 4-bit MLX vs Krill loading that same 4-bit MLX).
 
 What it measures, per runtime:
   - cold-start: process launch -> model ready / first token (seconds)
   - decode tok/s: single-stream steady-state generation rate (median of N runs)
   - concurrency: aggregate tok/s across C parallel streams (serveable runtimes
-    only: KrillLM batcher vs mlx-lm; Ollama/llama.cpp serialize by default)
+    only: Krill batcher vs mlx-lm; Ollama/llama.cpp serialize by default)
 
 Honest-claim guardrails (see docs / the model-card story):
   - Single-stream DECODE is typically ~parity across MLX runtimes (bandwidth
-    roof). Do NOT expect or report a KrillLM decode "win" there.
-  - KrillLM's real, measurable wins are COLD-START and CONCURRENCY (the native
+    roof). Do NOT expect or report a Krill decode "win" there.
+  - Krill's real, measurable wins are COLD-START and CONCURRENCY (the native
     Swift engine: no Python import, continuous batcher) plus capability
     (multimodal / structured output / tools) that the others lack here.
   - The weights are NOT "faster because native" -- only the serving path is.
@@ -41,8 +41,8 @@ import subprocess
 import sys
 import time
 
-KRILL = os.path.expanduser("~/Desktop/playground/KrillLM/.build/release/krillm")
-VENV = os.path.expanduser("~/.krillm/venv/bin")
+KRILL = os.path.expanduser("~/Desktop/playground/Krill/.build/release/krill")
+VENV = os.path.expanduser("~/.krill/venv/bin")
 
 
 def run(cmd, timeout=600):
@@ -61,7 +61,7 @@ def first(patterns, text):
 
 
 def bench_krill(alias, prompt, max_tokens, raw):
-    """KrillLM native Swift+MLX. Prints 'Ready (Xs load time)' and
+    """Krill native Swift+MLX. Prints 'Ready (Xs load time)' and
     'decode: N tokens at Y tok/s'."""
     elapsed, out = run([KRILL, "run", "--max-tokens", str(max_tokens), alias, prompt])
     if raw:
@@ -145,8 +145,8 @@ def main():
         results["MLX-Python (mlx-lm)"] = median_decode(
             bench_mlxlm, args.runs, args.mlx_repo, args.prompt, args.max_tokens, args.raw)
     if args.krill_alias:
-        print(f"[Native MLX-Swift/KrillLM] {args.krill_alias} ...", file=sys.stderr)
-        results["Native MLX-Swift (KrillLM)"] = median_decode(
+        print(f"[Native MLX-Swift/Krill] {args.krill_alias} ...", file=sys.stderr)
+        results["Native MLX-Swift (Krill)"] = median_decode(
             bench_krill, args.runs, args.krill_alias, args.prompt, args.max_tokens, args.raw)
 
     # Markdown table for the model card.
@@ -159,7 +159,7 @@ def main():
         print(f"| {name} | {r['decode_tps'] or '—'} | {cold} |")
     print("\n*cold-start shown as full wall time when the tool does not report a "
           "load duration separately. Single-stream decode is bandwidth-bound and "
-          "expected to be ~parity across MLX runtimes; KrillLM's wins are "
+          "expected to be ~parity across MLX runtimes; Krill's wins are "
           "cold-start, concurrency, and capability — not single-stream decode.")
 
 

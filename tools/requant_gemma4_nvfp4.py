@@ -22,7 +22,7 @@ almost nothing. Pass --no-protect-vision for a pure-uniform research baseline.
 
 config.json gets a top-level nvfp4 block plus per-module override entries (keyed
 by full module path, e.g. "language_model.model.layers.0.mlp.down_proj") for the
-protected set - the exact format KrillLM's loader resolves via q.effective(path).
+protected set - the exact format Krill's loader resolves via q.effective(path).
 
 Usage:
   requant_gemma4_nvfp4.py --out <dir> [--protect down_proj --protect o_proj]

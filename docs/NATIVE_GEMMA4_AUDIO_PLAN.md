@@ -53,7 +53,7 @@ Ollama.
 
 The current release-candidate scope is text + vision. Voice/audio is
 explicitly out of scope because it still routes through `mlx-vlm` and does
-not satisfy the strict release gate. Native audio is required before KrillLM
+not satisfy the strict release gate. Native audio is required before Krill
 can claim production readiness for voice workflows.
 
 ## Current State
@@ -117,7 +117,7 @@ release_candidate: PASS
 strict:            FAIL
 
 audio_wall_ratio:  3.6610x slower than Ollama
-audio_prefill:     unavailable for KrillLM audio path
+audio_prefill:     unavailable for Krill audio path
 ```
 
 The strict failure is expected until native audio lands.
@@ -142,7 +142,7 @@ Tasks:
 1. Inspect the local checkpoint:
 
    ```text
-   /Users/sourav/.krillm/models/blobs/gemma-4-e2b
+   /Users/sourav/.krill/models/blobs/gemma-4-e2b
    ```
 
 2. Extract and document:
@@ -334,7 +334,7 @@ KRILL_AUDIO_BRIDGE_ONLY=1   # force old bridge path for comparison/debug
 
 Acceptance:
 
-- `krillm run gemma-4-e2b "What sound is this?" --audio fixture.wav`
+- `krill run gemma-4-e2b "What sound is this?" --audio fixture.wav`
   does not instantiate `PythonFallback` when native audio is enabled.
 - Server `/api/generate`, `/api/chat`, and `/v1/chat/completions` route
   audio requests natively when possible.
@@ -358,7 +358,7 @@ ServerAudioRoutingTests
 Live tests, gated by:
 
 ```text
-KLM_GEMMA4_MODEL_PATH=/Users/sourav/.krillm/models/blobs/gemma-4-e2b
+KLM_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b
 ```
 
 Required live checks:
@@ -394,17 +394,17 @@ make release
 Start server:
 
 ```text
-.build/release/krillm serve --model gemma-4-e2b --host 127.0.0.1 --port 11435 --compat both
+.build/release/krill serve --model gemma-4-e2b --host 127.0.0.1 --port 11435 --compat both
 ```
 
 Run multimodal benchmark:
 
 ```text
-/Users/sourav/.krillm/venv/bin/python3 tools/gemma4_multimodal_benchmark.py \
-  --krill-model /Users/sourav/.krillm/models/blobs/gemma-4-e2b \
+/Users/sourav/.krill/venv/bin/python3 tools/gemma4_multimodal_benchmark.py \
+  --krill-model /Users/sourav/.krill/models/blobs/gemma-4-e2b \
   --ollama-model gemma4:e2b \
-  --krillm-url http://127.0.0.1:11435 \
-  --krillm-image-mode native_server \
+  --krill-url http://127.0.0.1:11435 \
+  --krill-image-mode native_server \
   --runs 4 \
   --warmup 2 \
   --output .build/benchmarks/native-audio-mm.json
@@ -431,7 +431,7 @@ Acceptance:
 - Audio metrics are present, not `N/A`.
 - `audio_wall_ratio <= 0.67x`, or a revised threshold is justified in a
   separate release-gate proposal and accepted.
-- Benchmark report identifies the KrillLM audio path as native, not bridge.
+- Benchmark report identifies the Krill audio path as native, not bridge.
 
 ## WS6 Runbook (execute on the M4 target)
 
@@ -444,7 +444,7 @@ Gemma 4 E2B checkpoint + `mlx-vlm` + Ollama; it is gated/skipped in CI.
    semantically equivalent to the bridge on the deterministic fixture:
 
    ```text
-   KLM_GEMMA4_MODEL_PATH=/Users/sourav/.krillm/models/blobs/gemma-4-e2b \
+   KLM_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b \
    KLM_BENCH_ASSETS_DIR=.build/benchmarks/assets \
    swift test --filter Gemma4SmokeTests/testWS6NativeAudioMatchesBridgeOracleOnSineTone
    ```
@@ -455,19 +455,19 @@ Gemma 4 E2B checkpoint + `mlx-vlm` + Ollama; it is gated/skipped in CI.
 
 2. **Native-audio benchmark + gates.** Boot the server with native audio
    and run the multimodal benchmark through it (the script now supports
-   this via `--krillm-native-audio` / `KRILL_NATIVE_AUDIO=1`, which routes
+   this via `--krill-native-audio` / `KRILL_NATIVE_AUDIO=1`, which routes
    audio to `native_server` instead of the bridge):
 
    ```text
    make release
-   KRILL_NATIVE_AUDIO=1 .build/release/krillm serve \
-     --model /Users/sourav/.krillm/models/blobs/gemma-4-e2b \
+   KRILL_NATIVE_AUDIO=1 .build/release/krill serve \
+     --model /Users/sourav/.krill/models/blobs/gemma-4-e2b \
      --host 127.0.0.1 --port 11435 --compat both &
 
-   /Users/sourav/.krillm/venv/bin/python3 tools/gemma4_multimodal_benchmark.py \
-     --krill-model /Users/sourav/.krillm/models/blobs/gemma-4-e2b \
-     --ollama-model gemma4:e2b --krillm-url http://127.0.0.1:11435 \
-     --krillm-image-mode native_server --krillm-native-audio \
+   /Users/sourav/.krill/venv/bin/python3 tools/gemma4_multimodal_benchmark.py \
+     --krill-model /Users/sourav/.krill/models/blobs/gemma-4-e2b \
+     --ollama-model gemma4:e2b --krill-url http://127.0.0.1:11435 \
+     --krill-image-mode native_server --krill-native-audio \
      --runs 4 --warmup 2 \
      --output .build/benchmarks/native-audio-mm.json
 
@@ -477,7 +477,7 @@ Gemma 4 E2B checkpoint + `mlx-vlm` + Ollama; it is gated/skipped in CI.
      GATE_ALLOW_FLAGS="--profile strict"
    ```
 
-   Confirm the report's audio rows show `krillm_path = native_server`
+   Confirm the report's audio rows show `krill_path = native_server`
    (not `mlx-vlm-bridge`) and audio metrics are present, not `N/A`.
 
 3. **Flip the default.** Only after 1 and 2 pass: make
@@ -525,7 +525,7 @@ Native audio is done only when all are true:
 Use this prompt when dispatching an implementation agent:
 
 ```text
-Implement native Gemma 4 audio for KrillLM.
+Implement native Gemma 4 audio for Krill.
 
 Start by reading docs/NATIVE_GEMMA4_AUDIO_PLAN.md,
 docs/GEMMA4_INTERNALS.md, Sources/KLMCore/Gemma4Model.swift,

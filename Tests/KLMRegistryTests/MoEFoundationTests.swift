@@ -90,7 +90,7 @@ final class MoEFoundationTests: XCTestCase {
     /// directory (and for `nil`), matching the family-level tier.
     func testSupportTierAtDirectoryIsProductionNativeForMoE() {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-moe-tier-\(UUID().uuidString)")
+            .appendingPathComponent("krill-moe-tier-\(UUID().uuidString)")
         XCTAssertEqual(
             ModelCapabilities.supportTier(for: .moe, at: dir), .productionNative)
         XCTAssertEqual(

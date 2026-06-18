@@ -17,7 +17,7 @@ final class WhisperDecoderParityTests: XCTestCase {
         let env = ProcessInfo.processInfo.environment
         let dir: URL = env["KLM_WHISPER_DIR"].map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".krillm/whisper-small.en")
+                .appendingPathComponent(".krill/whisper-small.en")
         return FileManager.default.fileExists(
             atPath: dir.appendingPathComponent("model.safetensors").path) ? dir : nil
     }

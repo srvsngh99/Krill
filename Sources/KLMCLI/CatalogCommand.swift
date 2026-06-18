@@ -2,9 +2,9 @@ import ArgumentParser
 import Foundation
 import KLMRegistry
 
-/// `krillm catalog` - inspect and refresh the model catalog.
+/// `krill catalog` - inspect and refresh the model catalog.
 ///
-/// The catalog is a JSON file (`~/.krillm/catalog.json`) of model
+/// The catalog is a JSON file (`~/.krill/catalog.json`) of model
 /// aliases that supplements the curated, compiled-in `AliasMap`. It
 /// lets new models be pulled without rebuilding the binary: `pull`
 /// resolves a name against the built-in map first, then the catalog.
@@ -32,7 +32,7 @@ private func printRow(_ alias: String, _ params: String, _ family: String) {
         + family)
 }
 
-/// `krillm catalog list` - show built-in aliases and catalog entries.
+/// `krill catalog list` - show built-in aliases and catalog entries.
 struct CatalogList: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "list",
@@ -49,7 +49,7 @@ struct CatalogList: ParsableCommand {
         }
 
         guard let catalog = store.load() else {
-            print("\nNo catalog cached. Add one with: krillm catalog refresh --url <url>")
+            print("\nNo catalog cached. Add one with: krill catalog refresh --url <url>")
             return
         }
         guard !catalog.models.isEmpty else {
@@ -64,7 +64,7 @@ struct CatalogList: ParsableCommand {
     }
 }
 
-/// `krillm catalog refresh` - fetch a catalog from a remote URL.
+/// `krill catalog refresh` - fetch a catalog from a remote URL.
 struct CatalogRefresh: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "refresh",
@@ -108,7 +108,7 @@ struct CatalogRefresh: AsyncParsableCommand {
     }
 }
 
-/// `krillm catalog path` - print the catalog cache location.
+/// `krill catalog path` - print the catalog cache location.
 struct CatalogPath: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "path",

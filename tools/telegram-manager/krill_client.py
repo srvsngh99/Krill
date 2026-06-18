@@ -1,4 +1,4 @@
-"""HTTP + CLI client for interacting with KrillLM."""
+"""HTTP + CLI client for interacting with Krill."""
 
 from __future__ import annotations
 
@@ -9,13 +9,13 @@ from collections.abc import AsyncGenerator, AsyncIterator
 
 import httpx
 
-from config import KRILLM_BASE_URL, KRILLM_BIN
+from config import KRILL_BASE_URL, KRILL_BIN
 
 
-class KrillLMClient:
-    """Async wrapper around the KrillLM HTTP API and CLI."""
+class KrillClient:
+    """Async wrapper around the Krill HTTP API and CLI."""
 
-    def __init__(self, base_url: str = KRILLM_BASE_URL) -> None:
+    def __init__(self, base_url: str = KRILL_BASE_URL) -> None:
         self.base_url = base_url
         self._http = httpx.AsyncClient(base_url=base_url, timeout=300)
 
@@ -115,10 +115,10 @@ class KrillLMClient:
 
     @staticmethod
     def _find_cli() -> str:
-        path = shutil.which(KRILLM_BIN)
+        path = shutil.which(KRILL_BIN)
         if not path:
             raise FileNotFoundError(
-                f"krillm CLI not found. Set KRILLM_BIN or install to PATH."
+                f"krill CLI not found. Set KRILL_BIN or install to PATH."
             )
         return path
 

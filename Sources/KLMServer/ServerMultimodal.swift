@@ -166,7 +166,7 @@ internal enum ServerMultimodal {
         let ext = preferredExtension
             ?? (sniffImage ? sniffImageExtension(data) : "bin")
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-\(field)-\(UUID().uuidString).\(ext)")
+            .appendingPathComponent("krill-\(field)-\(UUID().uuidString).\(ext)")
         do {
             try data.write(to: url)
         } catch {

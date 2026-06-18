@@ -1,11 +1,11 @@
 import Foundation
 import Logging
 
-/// Local model registry managing ~/.krillm/models.
+/// Local model registry managing ~/.krill/models.
 ///
 /// Layout:
 /// ```
-/// ~/.krillm/
+/// ~/.krill/
 ///   models/
 ///     manifests/       # <name>.json manifest files
 ///     blobs/           # model weight directories (named by model identifier)
@@ -18,7 +18,7 @@ public final class Registry: Sendable {
     public let manifestsDir: URL
     public let blobsDir: URL
 
-    private let logger = Logger(label: "krillm.registry")
+    private let logger = Logger(label: "krill.registry")
 
     /// Initialize registry at the default or custom location.
     ///
@@ -39,10 +39,41 @@ public final class Registry: Sendable {
         self.blobsDir = self.modelsDir.appendingPathComponent("blobs")
     }
 
-    /// Default base directory: ~/.krillm
+    /// Default base directory: ~/.krill
     public static func defaultBaseDir() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".krillm")
+        let base = home.appendingPathComponent(".krill")
+        migrateLegacyHomeIfNeeded(home: home, newBase: base)
+        return base
+    }
+
+    /// One-time rename migration for the KrillLM → Krill rebrand.
+    ///
+    /// Pre-rename installs kept everything (models/blobs, prefix cache, config,
+    /// agent state) under `~/.krillm`. If the new `~/.krill` home doesn't exist
+    /// yet but the legacy `~/.krillm` does, move the whole tree across in a
+    /// single rename so nothing has to be re-downloaded. Idempotent (no-op once
+    /// `~/.krill` exists) and best-effort (falls back to a symlink if the move
+    /// fails, e.g. across volumes).
+    @discardableResult
+    public static func migrateLegacyHomeIfNeeded(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        newBase: URL? = nil
+    ) -> Bool {
+        let fm = FileManager.default
+        let new = newBase ?? home.appendingPathComponent(".krill")
+        let legacy = home.appendingPathComponent(".krillm")
+        guard !fm.fileExists(atPath: new.path),
+              fm.fileExists(atPath: legacy.path) else { return false }
+        do {
+            try fm.moveItem(at: legacy, to: new)
+            Logger(label: "krill.registry").info(
+                "Migrated legacy home ~/.krillm → ~/.krill")
+            return true
+        } catch {
+            try? fm.createSymbolicLink(at: new, withDestinationURL: legacy)
+            return false
+        }
     }
 
     /// Ensure the directory structure exists.

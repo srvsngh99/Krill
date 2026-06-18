@@ -106,7 +106,7 @@ final class LlavaImageServingTests: XCTestCase {
         XCTAssertEqual(cfg.textConfig.numKeyValueHeads, 32)
         XCTAssertEqual(cfg.textConfig.numHiddenLayers, 32)
         // rope_theta must default to the vicuna/Llama-2 value (10000), NOT
-        // KrillLM's Llama-3 default (500000).
+        // Krill's Llama-3 default (500000).
         XCTAssertEqual(cfg.textConfig.ropeTheta, 10_000.0)
         // Present keys are honored.
         XCTAssertEqual(cfg.textConfig.maxPositionEmbeddings, 4096)

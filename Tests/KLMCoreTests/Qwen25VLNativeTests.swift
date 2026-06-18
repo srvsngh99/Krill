@@ -750,7 +750,7 @@ final class Qwen25VLLoaderTests: XCTestCase {
 
     private func writeConfig(_ json: [String: Any], dirSlug: String) throws -> URL {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-qwen25vl-\(dirSlug)-\(UUID().uuidString)")
+            .appendingPathComponent("krill-qwen25vl-\(dirSlug)-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let data = try JSONSerialization.data(withJSONObject: json)
         try data.write(to: dir.appendingPathComponent("config.json"))

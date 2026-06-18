@@ -6,12 +6,12 @@
 # Build release binary
 make release
 
-# Text-only KrillLM vs Ollama (CLI subprocess mode)
+# Text-only Krill vs Ollama (CLI subprocess mode)
 make bench-compare KRILL_MODEL=llama-3.2-1b OLLAMA_MODEL=llama3.2:1b
 
 # Server-mode (warm vs warm, eliminates process startup)
-krillm serve --model llama-3.2-1b --port 57455 &
-make bench-compare KRILLM_URL=http://127.0.0.1:57455
+krill serve --model llama-3.2-1b --port 57455 &
+make bench-compare KRILL_URL=http://127.0.0.1:57455
 
 # Gemma4 multimodal (text/image/audio — all native, no Python bridge)
 make bench-gemma4-multimodal
@@ -23,22 +23,22 @@ make bench-release-gate
 ## Benchmark Modes
 
 ### CLI Mode (default)
-- Spawns `krillm run` subprocess per request
+- Spawns `krill run` subprocess per request
 - Includes process startup, model loading overhead
 - Use for: measuring end-user experience
 
-### Server Mode (`--krillm-url` / `KRILLM_URL`)
-- Benchmarks against a running KrillLM HTTP server
+### Server Mode (`--krill-url` / `KRILL_URL`)
+- Benchmarks against a running Krill HTTP server
 - Model stays loaded, no process startup
 - Use for: fair comparison against Ollama daemon (both warm)
 
 ## Tools
 
-### krillm_vs_ollama_benchmark.py
-Reproducible KrillLM vs Ollama comparison.
+### krill_vs_ollama_benchmark.py
+Reproducible Krill vs Ollama comparison.
 
 **Key flags:**
-- `--krillm-url URL` — server mode (no subprocess)
+- `--krill-url URL` — server mode (no subprocess)
 - `--runs N` — measured runs (default 5)
 - `--warmup N` — warmup runs (default 2)
 - `--max-tokens N` — tokens per run (default 32)
@@ -58,8 +58,8 @@ Reproducible KrillLM vs Ollama comparison.
 Gemma4 text/image/audio comparison.
 
 **Key flags:**
-- `--krillm-url URL` — server mode (text, image, and audio supported on Gemma 4)
-- `--engine both|krillm|ollama` — single-engine or comparison
+- `--krill-url URL` — server mode (text, image, and audio supported on Gemma 4)
+- `--engine both|krill|ollama` — single-engine or comparison
 - `--runs N` / `--warmup N`
 
 **Server mode notes:** image and audio payloads are sent as base64 in the standard Ollama shape. Audio runs on the native Swift+MLX USM path — no Python/`mlx-vlm` dependency (the bridge was removed in WS6 Step 4).
@@ -96,13 +96,13 @@ profile is recorded in the gate report so audit trails are unambiguous.
 
 | Metric | Kind | Rationale |
 |--------|------|-----------|
-| text_decode_ratio   | **advisory** (>=1.5x) + synthetic **hard `text_decode_ratio_floor` >=1.0x** in BOTH profiles | Owner-accepted for `release_candidate` 2026-05-16 (`docs/RELEASE_GATE_DECODE_PROPOSAL.md`) and for `strict` 2026-05-22 (`docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`). Dense decode is per-token weight-read-bandwidth bound; on tiny 4-bit Gemma 4 e2b llama.cpp's Metal kernels are at parity, and the user-visible "1.5x faster" claim is carried by text_wall/text_ttft (hard). The floor still guarantees KrillLM never decodes slower than Ollama (a missing decode value hard-fails too). The >=1.5x target is structurally unreachable on M-series (see `docs/SPECULATIVE_DECODING.md`); it re-promotes to hard >=1.5x when speculative decoding sustains >=1.5x with greedy parity OR a long-output decode task is added. |
+| text_decode_ratio   | **advisory** (>=1.5x) + synthetic **hard `text_decode_ratio_floor` >=1.0x** in BOTH profiles | Owner-accepted for `release_candidate` 2026-05-16 (`docs/RELEASE_GATE_DECODE_PROPOSAL.md`) and for `strict` 2026-05-22 (`docs/RELEASE_GATE_STRICT_DECODE_PROPOSAL.md`). Dense decode is per-token weight-read-bandwidth bound; on tiny 4-bit Gemma 4 e2b llama.cpp's Metal kernels are at parity, and the user-visible "1.5x faster" claim is carried by text_wall/text_ttft (hard). The floor still guarantees Krill never decodes slower than Ollama (a missing decode value hard-fails too). The >=1.5x target is structurally unreachable on M-series (see `docs/SPECULATIVE_DECODING.md`); it re-promotes to hard >=1.5x when speculative decoding sustains >=1.5x with greedy parity OR a long-output decode task is added. |
 | text_wall_ratio     | hard | User-visible total latency. |
 | text_ttft_ratio     | hard | User-visible first-token latency. |
 | text_prefill_ratio  | advisory | Wall time and TTFT already gate user latency; prefill TPS is noisy on short prompts. |
 | image_wall_ratio    | hard | User-visible total latency on image prompts. |
 | image_prefill_ratio | **advisory in BOTH profiles, no floor** | Owner-accepted for `strict` 2026-05-22 (`docs/RELEASE_GATE_IMAGE_PREFILL_PROPOSAL.md`); already advisory under `release_candidate`. The vision-encoder cache lifts SigLIP2 forward + projector cost out of the measured prefill window, so this prefill-TPS bucket divides non-comparable denominators and is structurally `< 1.0x` by design — a measurement artifact, not a regression. Unlike `text_decode_ratio` it carries **no `<metric>_floor`** (a `>= 1.0x` floor would be meaningless here); the hard `image_wall_ratio` carries the user-visible image guarantee. Re-promotes to hard `>= 1.5x` once the benchmark separates vision-encoder time from language-model prefill time. |
-| memory_ratio        | hard (auto-downgraded to advisory when quantization classes differ) | The benchmark now samples each engine's process-tree memory; the gate hard-gates the ratio so KrillLM cannot quietly regress its footprint. When the comparison crosses quantization classes (e.g. one engine bf16 vs the other Q4_K_M) the metric is dominated by the weight format, not the runtime, so the gate auto-downgrades it to advisory and records the downgrade in `scope.memory_ratio` and the caveats. The canonical Gemma 4 e2b comparison is class-equal (KrillLM affine 4-bit MLX vs Ollama Q4_K_M GGUF, both `4-bit` class), so memory is hard-gated on it. |
+| memory_ratio        | hard (auto-downgraded to advisory when quantization classes differ) | The benchmark now samples each engine's process-tree memory; the gate hard-gates the ratio so Krill cannot quietly regress its footprint. When the comparison crosses quantization classes (e.g. one engine bf16 vs the other Q4_K_M) the metric is dominated by the weight format, not the runtime, so the gate auto-downgrades it to advisory and records the downgrade in `scope.memory_ratio` and the caveats. The canonical Gemma 4 e2b comparison is class-equal (Krill affine 4-bit MLX vs Ollama Q4_K_M GGUF, both `4-bit` class), so memory is hard-gated on it. |
 | audio_wall_ratio    | hard | WS6: native Swift+MLX audio is the only audio path and benchmarks faster than Ollama (~0.53× wall). |
 | audio_prefill_ratio | hard | WS6: native audio prefill ~2.4× Ollama. |
 
@@ -112,14 +112,14 @@ while every measured request runs and records the peak. On macOS the
 per-PID number is `phys_footprint` from
 `proc_pid_rusage(RUSAGE_INFO_V2)` — the same figure Activity Monitor's
 "Memory" column and `vmmap -summary` report, which counts resident
-mmap'd pages (the safetensors weights KrillLM relies on) with proper
+mmap'd pages (the safetensors weights Krill relies on) with proper
 apportionment. Non-Darwin platforms fall back to RSS from `ps`, which
 under-counts mmap'd pages but is the best portable substitute. Ollama
 is sampled via `pgrep ollama` (covers the daemon plus the `ollama runner`
-child); the KrillLM server is sampled via `pgrep -f 'krillm.*serve'`;
-the krillm CLI subprocess is sampled by its own PID. Pass `--ollama-pids`
-/ `--krillm-server-pid` to override auto-detection, or `--sample-memory
-off` to skip it. The KrillLM bridge path keeps using mlx-vlm's
+child); the Krill server is sampled via `pgrep -f 'krill.*serve'`;
+the krill CLI subprocess is sampled by its own PID. Pass `--ollama-pids`
+/ `--krill-server-pid` to override auto-detection, or `--sample-memory
+off` to skip it. The Krill bridge path keeps using mlx-vlm's
 `GenerationResult.peak_memory` (MLX Metal allocator peak). All three bases
 are documented under `memory_sampling.basis` in the report and the actual
 basis used for each run appears in `peak_memory_basis`. Values are decimal
@@ -160,7 +160,7 @@ mlx-swift recycles freed intermediate buffers in a pool sized from Metal's
 resident and counted by `phys_footprint` / `RSIZE` — the figure the
 benchmark samples for `memory_ratio` — even though MLX treats them as
 "free", so an uncapped pool can grow into the multi-GB range under
-sustained load. KrillLM caps it on every native model load via
+sustained load. Krill caps it on every native model load via
 `MLXMemoryConfig` (`Sources/KLMCore/MLXMemoryConfig.swift`):
 
 - Default: **256 MB** — covers Gemma 4 e2b's fixed-size decode-step buffers
@@ -169,11 +169,11 @@ sustained load. KrillLM caps it on every native model load via
 - `KRILL_MLX_CACHE_LIMIT_MB=0` disables the cap (legacy unbounded
   behavior).
 
-When benchmarking memory, always pass the clean `--krillm-server-pid`
+When benchmarking memory, always pass the clean `--krill-server-pid`
 override (see the memory-sampling section). The historical v5 ~9.6 GB
-KrillLM reading was the combination of an *uncapped* pool and a
-*contaminated* (non-`--krillm-server-pid`) process-tree sample; with the
-cap and clean sampling, KrillLM text/image phys_footprint is ~2.85–3.0 GB.
+Krill reading was the combination of an *uncapped* pool and a
+*contaminated* (non-`--krill-server-pid`) process-tree sample; with the
+cap and clean sampling, Krill text/image phys_footprint is ~2.85–3.0 GB.
 
 ## Release Readiness Status
 
@@ -186,7 +186,7 @@ release-candidate path, not yet a production release.
   wall ~1.77x faster) and
   class-equal `memory_ratio` (0.32–0.84) hard-pass, plus the hard
   `text_decode_ratio_floor ≥1.0x`. `text_decode_ratio`'s ≥1.5x target is
-  advisory (printed as WARN at ~1.19x — **no claim KrillLM hit 1.5x
+  advisory (printed as WARN at ~1.19x — **no claim Krill hit 1.5x
   decode**). Voice/audio is native (WS6) and `hard` in both profiles —
   faster than Ollama (~0.53× wall, ~2.4× prefill). Prefill is advisory.
 - **`strict` gate** (default) exits `0` on the post-native-audio multimodal
@@ -214,7 +214,7 @@ the full plan, the per-metric promotion contract, and acceptance criteria.
 Key release gaps as of the last reviewed run:
 
 - `text_decode_ratio` (~1.19x on v6-mm) is advisory under BOTH profiles
-  (with the hard >=1.0x floor). KrillLM decodes ~102 tok/s
+  (with the hard >=1.0x floor). Krill decodes ~102 tok/s
   vs Ollama's ~86 tok/s on the accepted Gemma 4 E2B report, where
   llama.cpp's hand-tuned Metal decode kernels are genuinely competitive.
   Closing it to ≥1.5x is owned by Workstream 2 (Gemma 4-compatible
@@ -234,12 +234,12 @@ Key release gaps as of the last reviewed run:
   runs; canonical 0.322). PR #16 root-caused the historical 1.14x / ~9.6
   GB reading to an uncapped MLX buffer pool plus contaminated sampling;
   with `KRILL_MLX_CACHE_LIMIT_MB` (default 256 MB) and clean
-  `--krillm-server-pid` sampling, KrillLM text/image phys_footprint is
+  `--krill-server-pid` sampling, Krill text/image phys_footprint is
   ~2.85–3.0 GB vs Ollama's ~8.2–8.4 GB. Both engines remain 4-bit class
   so the comparison is genuinely hard-gated.
 - Audio benchmarks run on the native Swift+MLX USM path (WS6; the
   `mlx-vlm` bridge was removed). `audio_*` is `hard` in both profiles:
-  on the WS6 native-audio report KrillLM audio wall ~0.15 s vs Ollama
+  on the WS6 native-audio report Krill audio wall ~0.15 s vs Ollama
   ~0.29 s and prefill ~2.4× Ollama — faster, not at-parity-only.
 - Server multimodal benchmarks exercise real media payloads (image and
   audio both native).
@@ -261,7 +261,7 @@ Release criteria must state which `cache_mode` is being compared. At least one c
 ## Apples-to-Apples Comparison Rules
 
 - Do not compare text-only placeholder runs against real-media runs. Server-mode multimodal comparisons must send real media payloads to both engines (image via the native Swift SigLIP2 path, audio via the native Swift+MLX USM path). Any metric that the harness skips, or that the active gate profile classifies as `out_of_scope`, must be surfaced explicitly in the gate report (`scope_skipped_metrics` with reason) — never silently substituted with text-only numbers.
-- KrillLM and Ollama runs in the same report must use the same prompts, media assets, max-token budgets, sampling settings, `cache_mode`, and `kv_cache_dtype` (recorded in the report under `benchmark.kv_cache_dtype`).
+- Krill and Ollama runs in the same report must use the same prompts, media assets, max-token budgets, sampling settings, `cache_mode`, and `kv_cache_dtype` (recorded in the report under `benchmark.kv_cache_dtype`).
 
 ## Non-Negotiable Rules
 
@@ -274,6 +274,6 @@ Release criteria must state which `cache_mode` is being compared. At least one c
 
 ## Known Limitations
 
-- **Prefill**: MLX Swift prefill is 3-5x slower than Ollama's llama.cpp Metal kernels. This is a framework limitation, not a KrillLM bug.
+- **Prefill**: MLX Swift prefill is 3-5x slower than Ollama's llama.cpp Metal kernels. This is a framework limitation, not a Krill bug.
 - **Server overhead**: HTTP streaming adds ~17% overhead vs CLI (reduced by direct JSON formatting).
 - **Prefix cache**: Repeated-prompt benchmarks show inflated TTFT improvement. Label cache-hit results explicitly.

@@ -36,7 +36,7 @@ struct CreateCommand: AsyncParsableCommand {
             if !(m.overrides?.parameters.isEmpty ?? true) {
                 print("  PARAMETERS: \(m.overrides!.parameters)")
             }
-            print("Run with: krillm run \(m.name)")
+            print("Run with: krill run \(m.name)")
         } catch {
             print("Error: \(error)")
             throw ExitCode.failure

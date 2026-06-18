@@ -11,7 +11,7 @@ import KLMTUI
 private nonisolated(unsafe) var tuiWinchFlag: sig_atomic_t = 0
 private func tuiWinchHandler(_ sig: Int32) { tuiWinchFlag = 1 }
 
-/// Full-screen opencode-style chat TUI for KrillLM, in the Sourav AI Labs
+/// Full-screen opencode-style chat TUI for Krill, in the Sourav AI Labs
 /// monochrome identity: a branded masthead, a scrollable conversation pane, a
 /// bottom input box with a slash-command autosuggest popup (Up/Down to cycle),
 /// and a status footer. Falls back to the line REPL when not on a TTY.
@@ -56,11 +56,11 @@ final class ChatTUI {
     //   .send      hold Space -> send the clip as audio the model answers.
     // Engine (Apple vs Whisper) is a separate setting (`/voice engine`).
     private enum VoiceMode: CaseIterable { case type, dictate, handsfree, send }
-    // Default OFF: KrillLM is a text chat first. Voice is opt-in via Ctrl-V or the
+    // Default OFF: Krill is a text chat first. Voice is opt-in via Ctrl-V or the
     // `voiceMode` config key; in `.type` the footer shows no voice chrome at all.
     private var voiceMode: VoiceMode = .type
     // Which speech-to-text engine dictation uses. `.apple` (default) is Apple's
-    // on-device recognizer (no download). `.whisper` is KrillLM's native MLX
+    // on-device recognizer (no download). `.whisper` is Krill's native MLX
     // Whisper runtime (best accuracy; downloads an English model on first use).
     private enum VoiceEngine { case apple, whisper }
     private var voiceEngine: VoiceEngine = .apple
@@ -92,7 +92,7 @@ final class ChatTUI {
     private var contextWindow = 0          // model's max context (tokens), 0 = unknown
     private var shouldQuit = false
 
-    // Working-directory label for the footer (e.g. "KrillLM:main"). Computed once.
+    // Working-directory label for the footer (e.g. "Krill:main"). Computed once.
     private lazy var cwdLabel: String = {
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).lastPathComponent
         guard let head = try? String(contentsOfFile: ".git/HEAD", encoding: .utf8),
@@ -130,10 +130,10 @@ final class ChatTUI {
         if let initialAudio { pendingAudio = makeAtt(.audio, initialAudio, "audio") }
     }
 
-    /// Where user-authored slash commands live: `~/.krillm/commands/<name>.md`.
+    /// Where user-authored slash commands live: `~/.krill/commands/<name>.md`.
     private static var commandsDir: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".krillm").appendingPathComponent("commands")
+            .appendingPathComponent(".krill").appendingPathComponent("commands")
     }
 
     /// Pick the shade palette for the terminal background so turns stay readable
@@ -765,7 +765,7 @@ final class ChatTUI {
         let speakTag = speakReplies ? "\u{25CF} speak\(sep)" : ""
         // Reasoning indicator: a mono dot when the thinking channel is on.
         let thinkTag = thinkingOn ? "\u{25CF} think\(sep)" : ""
-        let cleanRight = "\(thinkTag)\(speakTag)\(cwdLabel)\(sep)\(KrillLMVersionTag)"
+        let cleanRight = "\(thinkTag)\(speakTag)\(cwdLabel)\(sep)\(KrillVersionTag)"
         // Voice OFF (text mode) or a non-audio model: no voice chrome at all - the
         // footer is just the generation status and cwd/version (plus speak tag).
         guard engine.canUseNativeAudio, voiceMode != .type || !voiceActivity.isEmpty else {
@@ -783,7 +783,7 @@ final class ChatTUI {
             case .type:      left = ""   // unreachable (guarded above)
             }
         }
-        let right = lastStatus.isEmpty ? cleanRight : "\(speakTag)\(lastStatus)\(sep)\(KrillLMVersionTag)"
+        let right = lastStatus.isEmpty ? cleanRight : "\(speakTag)\(lastStatus)\(sep)\(KrillVersionTag)"
         return (left, right)
     }
 
@@ -966,7 +966,7 @@ final class ChatTUI {
     private func switchModel(_ name: String) async {
         let dir = registry.hasModel(name) ? registry.modelPath(name) : URL(fileURLWithPath: name)
         guard FileManager.default.fileExists(atPath: dir.path) else {
-            note("Model not found: \(name). Install with: krillm pull \(name)"); return
+            note("Model not found: \(name). Install with: krill pull \(name)"); return
         }
         note("Loading \(name)...")
         render()
@@ -991,7 +991,7 @@ final class ChatTUI {
         render()
         guard await MicrophoneRecorder.requestAccess() else {
             voiceActivity = ""
-            note("Microphone access denied. Enable KrillLM under System Settings > Privacy & Security > Microphone (and Speech Recognition), then try again.")
+            note("Microphone access denied. Enable Krill under System Settings > Privacy & Security > Microphone (and Speech Recognition), then try again.")
             return
         }
         let rec = MicrophoneRecorder()
@@ -1368,7 +1368,7 @@ final class ChatTUI {
     /// labels: the user's own words read bright white; the model's reply reads
     /// dim gray so the user's turn clearly stands out. A faint rule opens each
     /// new exchange (before every user turn but the first) so the back-and-forth
-    /// groups visually without any "you"/"krilllm" name tags. Vertical placement
+    /// groups visually without any "you"/"krill" name tags. Vertical placement
     /// (bottom-anchor vs. centered splash) is handled by `render`.
     private func paneLines(width: Int) -> [String] {
         guard !view.isEmpty else { return Brand.splash(width: width) }
@@ -1579,7 +1579,7 @@ final class ChatTUI {
         if !customCommands.isEmpty {
             let cpad = (customCommands.commands.map { $0.name.count + 1 }.max() ?? 8) + 2
             lines.append("")
-            lines.append("Custom commands  (~/.krillm/commands/*.md)")
+            lines.append("Custom commands  (~/.krill/commands/*.md)")
             for c in customCommands.commands {
                 lines.append("  " + "/\(c.name)".padding(toLength: cpad, withPad: " ", startingAt: 0) + c.description)
             }
@@ -1606,7 +1606,7 @@ final class ChatTUI {
     }
 
     private func saveTranscript(_ arg: String) {
-        let path = arg.isEmpty ? "krillm-transcript.txt" : MediaAttachment.normalizePath(arg)
+        let path = arg.isEmpty ? "krill-transcript.txt" : MediaAttachment.normalizePath(arg)
         var text = ""
         if let system, !system.isEmpty { text += "system: \(system)\n\n" }
         for t in modelTurns { text += "\(t.role): \(t.content)\n\n" }

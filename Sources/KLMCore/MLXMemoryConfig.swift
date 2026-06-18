@@ -44,7 +44,7 @@ public enum MLXMemoryConfig {
         }
         guard let parsed = Int(raw), parsed >= 0 else {
             FileHandle.standardError.write(Data(
-                "[KrillLM] ignoring invalid \(envVar)=\(raw); using default \(defaultCacheLimitMB) MB\n".utf8))
+                "[Krill] ignoring invalid \(envVar)=\(raw); using default \(defaultCacheLimitMB) MB\n".utf8))
             return defaultCacheLimitMB
         }
         return parsed == 0 ? nil : parsed

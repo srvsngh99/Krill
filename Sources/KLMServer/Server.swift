@@ -7,7 +7,7 @@ import KLMEngine
 import KLMRegistry
 import KLMSampler
 
-/// KrillLM HTTP server providing OpenAI-compatible and Ollama-compatible endpoints.
+/// Krill HTTP server providing OpenAI-compatible and Ollama-compatible endpoints.
 ///
 /// Endpoints:
 ///   POST /v1/chat/completions   - OpenAI chat API (streaming SSE)
@@ -31,7 +31,7 @@ public final class KLMServer: Sendable {
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
-    private let logger = Logger(label: "krillm.server")
+    private let logger = Logger(label: "krill.server")
 
     private let corsOrigins: [String]
     private let defaultContextLimit: Int?
@@ -106,8 +106,8 @@ public final class KLMServer: Sendable {
             .childChannelOption(.maxMessagesPerRead, value: 1)
 
         let channel = try await bootstrap.bind(host: host, port: port).get()
-        logger.info("KrillLM server listening on http://\(host):\(port)")
-        print("KrillLM server listening on http://\(host):\(port)  (compat: \(compat.rawValue))")
+        logger.info("Krill server listening on http://\(host):\(port)")
+        print("Krill server listening on http://\(host):\(port)  (compat: \(compat.rawValue))")
         if compat.openAIEnabled {
             print("OpenAI API: http://\(host):\(port)/v1/chat/completions")
         }
@@ -115,9 +115,9 @@ public final class KLMServer: Sendable {
             print("Ollama API: http://\(host):\(port)/api/chat")
         }
         if port == 57455 {
-            print("Tip: 57455 is KrillLM's default port (\"KRILL\" on a keypad); it coexists with Ollama on 11434. For a drop-in Ollama replacement, run with --port 11434 (or set OLLAMA_HOST).")
+            print("Tip: 57455 is Krill's default port (\"KRILL\" on a keypad); it coexists with Ollama on 11434. For a drop-in Ollama replacement, run with --port 11434 (or set OLLAMA_HOST).")
         } else if port == 11434 {
-            print("Note: 11434 is Ollama's default port; if Ollama is running this will conflict. KrillLM's own default is 57455.")
+            print("Note: 11434 is Ollama's default port; if Ollama is running this will conflict. Krill's own default is 57455.")
         }
         print("Press Ctrl+C to stop.")
 
@@ -174,7 +174,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
-    private let logger = Logger(label: "krillm.http")
+    private let logger = Logger(label: "krill.http")
     private let startedAt = Date()
 
     private let maxBodySize: Int
@@ -332,7 +332,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
             routeGenerate(context: context, body: body) { self.handleResponses(context: $0, body: $1) }
 
-        // Model management (KrillLM-native, available in any compat mode)
+        // Model management (Krill-native, available in any compat mode)
         case (.POST, "/v1/models/load"):
             handleLoadModel(context: context, body: body)
         case (.POST, "/v1/models/unload"):
@@ -685,7 +685,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     /// behaving as if the server simply doesn't speak that protocol.
     private func sendCompatDisabled(context: ChannelHandlerContext, path: String) {
         sendJSON(context: context, status: .notFound, body: [
-            "error": "Endpoint \(path) is disabled in compat mode '\(compat.rawValue)'. Restart krillm serve with --compat both."
+            "error": "Endpoint \(path) is disabled in compat mode '\(compat.rawValue)'. Restart krill serve with --compat both."
         ])
     }
 
@@ -1251,7 +1251,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     // the client gets the prose with no tool_calls.
                     calls = []; cleaned = postReasoning
                     FileHandle.standardError.write(Data((
-                        "[KrillLM] tool_choice forced a call but the constrained "
+                        "[Krill] tool_choice forced a call but the constrained "
                         + "output did not parse as {name,arguments}; returning "
                         + "content with no tool_calls.\n").utf8))
                 }
@@ -1672,18 +1672,18 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let residentMB = Double(info.resident_size) / 1_048_576
 
         let body = """
-        # HELP krillm_up Whether the server is up
-        # TYPE krillm_up gauge
-        krillm_up 1
-        # HELP krillm_model_loaded Whether a model is loaded
-        # TYPE krillm_model_loaded gauge
-        krillm_model_loaded \(displayEngine.isLoaded ? 1 : 0)
-        # HELP krillm_resident_memory_mb Process resident memory in MB
-        # TYPE krillm_resident_memory_mb gauge
-        krillm_resident_memory_mb \(String(format: "%.1f", residentMB))
-        # HELP krillm_uptime_seconds Process uptime in seconds
-        # TYPE krillm_uptime_seconds counter
-        krillm_uptime_seconds \(String(format: "%.0f", uptime))
+        # HELP krill_up Whether the server is up
+        # TYPE krill_up gauge
+        krill_up 1
+        # HELP krill_model_loaded Whether a model is loaded
+        # TYPE krill_model_loaded gauge
+        krill_model_loaded \(displayEngine.isLoaded ? 1 : 0)
+        # HELP krill_resident_memory_mb Process resident memory in MB
+        # TYPE krill_resident_memory_mb gauge
+        krill_resident_memory_mb \(String(format: "%.1f", residentMB))
+        # HELP krill_uptime_seconds Process uptime in seconds
+        # TYPE krill_uptime_seconds counter
+        krill_uptime_seconds \(String(format: "%.0f", uptime))
         """
 
         var headers = HTTPHeaders()
@@ -2188,13 +2188,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         guard let manifest = registry.getModel(name) else {
             sendJSON(context: context, status: .notFound, body: [
-                "error": "reranker model '\(name)' not found. Install with: krillm pull \(name)"
+                "error": "reranker model '\(name)' not found. Install with: krill pull \(name)"
             ])
             return
         }
         guard manifest.family == .reranker else {
             sendJSON(context: context, status: .badRequest, body: [
-                "error": "'\(name)' (family \(manifest.family.rawValue)) is not a reranker. Use a dedicated cross-encoder reranker, e.g. krillm pull bge-reranker-v2-m3"
+                "error": "'\(name)' (family \(manifest.family.rawValue)) is not a reranker. Use a dedicated cross-encoder reranker, e.g. krill pull bge-reranker-v2-m3"
             ])
             return
         }
@@ -2313,7 +2313,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         guard let manifest = registry.getModel(name) else {
             sendJSON(context: context, status: .notFound, body: [
-                "error": "embedding model '\(name)' not found. Install with: krillm pull \(name)"
+                "error": "embedding model '\(name)' not found. Install with: krill pull \(name)"
             ])
             return
         }
@@ -2324,7 +2324,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         guard manifest.family == .bert
                 || EmbeddingEngine.isDecoderEmbedder(directory: dir) else {
             sendJSON(context: context, status: .badRequest, body: [
-                "error": "'\(name)' (family \(manifest.family.rawValue)) is not a sentence-embedding model. Use a dedicated embedding model, e.g. krillm pull bge-small-en"
+                "error": "'\(name)' (family \(manifest.family.rawValue)) is not a sentence-embedding model. Use a dedicated embedding model, e.g. krill pull bge-small-en"
             ])
             return
         }
@@ -2517,7 +2517,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 chatTemplate: srcManifest.chatTemplate,
                 sizeBytes: srcManifest.sizeBytes, pulledAt: Date(),
                 // Preserve the source's Modelfile PARAMETER/TEMPLATE/SYSTEM
-                // overrides — `/api/copy` must match `krillm cp` (PR #18
+                // overrides — `/api/copy` must match `krill cp` (PR #18
                 // rereview); dropping them silently de-customized the copy.
                 overrides: srcManifest.overrides)
             try registry.saveManifest(copied)
@@ -2576,7 +2576,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         let stream = (json["stream"] as? Bool) ?? true
         // Consult the model catalog as a fallback, exactly like the
-        // `krillm pull` CLI - so a catalog-only model discoverable via
+        // `krill pull` CLI - so a catalog-only model discoverable via
         // GET /v1/catalog is also installable over HTTP.
         let catalog = ModelCatalogStore(baseDir: registry.baseDir)
         guard let resolved = AliasMap.resolve(name, catalog: catalog) else {
@@ -2727,13 +2727,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         // Only allow loading models from the registry — no arbitrary filesystem paths.
         guard registry.hasModel(modelName) else {
             sendJSON(context: context, status: .notFound,
-                     body: ["error": "Model '\(modelName)' not found. Install with: krillm pull \(modelName)"])
+                     body: ["error": "Model '\(modelName)' not found. Install with: krill pull \(modelName)"])
             return
         }
 
         // Optional `keep_alive` (Ollama-compatible): pin/evict the model for
         // the rest of its resident life. `< 0` keeps it loaded indefinitely —
-        // used by `krillm launch` so an attached agent's multi-minute init can
+        // used by `krill launch` so an attached agent's multi-minute init can
         // never trip the idle evictor mid-session.
         let keepAlive = KeepAliveParse.seconds(from: json["keep_alive"])
 
@@ -2817,7 +2817,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             "uptime_seconds": Int(serverUptime),
             "memory_mb": Int(residentMB),
             "installed_models": installed,
-            "version": KrillLMVersion
+            "version": KrillVersion
         ]
 
         if active.isLoaded {
@@ -2836,7 +2836,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     /// Return the catalog of pullable models: the built-in curated
     /// aliases plus any models from the on-disk catalog cache. Lets
-    /// external tooling (managers, bots) discover what `krillm pull`
+    /// external tooling (managers, bots) discover what `krill pull`
     /// accepts without rebuilding the binary or shelling out to the
     /// CLI. Each model carries a `source` of `builtin` or `catalog`.
     private func handleCatalog(context: ChannelHandlerContext) {

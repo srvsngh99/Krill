@@ -4,7 +4,7 @@ import KLMEngine
 /// Structured output (WS-D D2 / T1-1): `format:"json"` / JSON-schema and
 /// the OpenAI `response_format` equivalent.
 ///
-/// KrillLM uses guided prompting + a tolerant post-extraction pass rather
+/// Krill uses guided prompting + a tolerant post-extraction pass rather
 /// than true grammar-constrained decoding (the latter is the highest-
 /// uncertainty item in the parity plan §8 and is tracked as a follow-up
 /// because it must not regress the prefix/int8-KV decode path). In

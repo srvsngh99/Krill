@@ -1,6 +1,6 @@
 # Ceilings and re-attempts
 
-A running index of levers KrillLM has **tried and hit a ceiling on** -- where the
+A running index of levers Krill has **tried and hit a ceiling on** -- where the
 work landed as a probe / gated path / negative result rather than a shipped win.
 The point of this doc is twofold:
 
@@ -51,7 +51,7 @@ linked detail doc.
   the batched decoder). The single-stream lever's marginal value shrinks under
   concurrency, so a load-adaptive gate (`KRILL_SPEC_CONCURRENCY_MAX`, default 1)
   uses n-gram solo and **continuous batching** above the crossover (N*=2), where
-  KrillLM already beats Ollama 1.9-2.3x on aggregate throughput
+  Krill already beats Ollama 1.9-2.3x on aggregate throughput
   (`docs/CONCURRENT_THROUGHPUT.md`).
 - **Still open:** the strict >= 1.5x gate for the *general* (non-echo) case, and
   tree-attention / Medusa heads (multiple candidate continuations verified in one
@@ -172,7 +172,7 @@ linked detail doc.
 
 **Cross-cutting read:** five M-series decode levers have now closed the same way
 (spec-decode, compiled-decode, fused-Q4, fused-GEGLU, int8-KV). The consistent
-signal is that MLX puts KrillLM near the hardware bandwidth limit for decode, so
+signal is that MLX puts Krill near the hardware bandwidth limit for decode, so
 raw-throughput tuning has low ROI. Direct future effort at **coverage/capability**
 (more models, VLM serving, structured output, tool/agentic) - NOT at out-tuning
 MLX's core decode ops. (Op fusion's demonstrated wins are prefill/large-batch
@@ -339,7 +339,7 @@ unified memory** (rule of thumb: >= 2x the fp16 footprint for headroom).
 - The Gemma `DecoderEmbedder` + the `embed_tokens` fp32-upcast path (both on
   `main`, #115) should serve it. Re-attempt: pull `BAAI/bge-multilingual-gemma2`,
   confirm cosine vs transformers + a retrieval check, add the alias (family
-  `.gemma`). Detail: `~/.claude/plans/krillm-embeddings-handover.md`.
+  `.gemma`). Detail: `~/.claude/plans/krill-embeddings-handover.md`.
 
 ### 5. DeepSeek-V3 671B real-checkpoint run
 

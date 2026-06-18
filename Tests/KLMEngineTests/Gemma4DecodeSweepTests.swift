@@ -11,7 +11,7 @@ import MLX
 /// layers ~ 448KB/token of KV) still leaves the partial table.
 ///
 ///   KLM_RUN_DECODE_SWEEP=1 \
-///   KLM_GEMMA4_UNIFIED_MODEL_PATH=~/.krillm/models/blobs/gemma-4-12b \
+///   KLM_GEMMA4_UNIFIED_MODEL_PATH=~/.krill/models/blobs/gemma-4-12b \
 ///     swift test --filter Gemma4DecodeSweepTests
 ///
 /// Optional: KLM_SWEEP_CTX="512,2048,6656" overrides the context list;
@@ -48,7 +48,7 @@ final class Gemma4DecodeSweepTests: XCTestCase {
     /// the end. ~55 tokens per section.
     private func prompt(sections: Int) -> String {
         let para = """
-        The KrillLM engine runs large language models natively on Apple Silicon \
+        The Krill engine runs large language models natively on Apple Silicon \
         using MLX. It supports continuous batching, prefix-cache reuse, grammar \
         constrained decoding, native tool calling, and multimodal input. The \
         secret pass phrase for this document is "tangerine satellite".
@@ -62,7 +62,7 @@ final class Gemma4DecodeSweepTests: XCTestCase {
         if ProcessInfo.processInfo.environment["KLM_SWEEP_DIRECT_Q"] == "1" {
             blocks.append("\nQuestion: What is the secret pass phrase mentioned above? Answer:")
         } else {
-            blocks.append("\nQuestion: Summarize what the KrillLM engine supports, then state the secret pass phrase. Answer:")
+            blocks.append("\nQuestion: Summarize what the Krill engine supports, then state the secret pass phrase. Answer:")
         }
         return blocks.joined(separator: "\n")
     }

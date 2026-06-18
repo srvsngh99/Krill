@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Controlled KrillLM vs Ollama tool-calling benchmark.
+"""Controlled Krill vs Ollama tool-calling benchmark.
 
-Companion to ``krillm_vs_ollama_benchmark.py``. Drives BOTH engines over
-the Ollama-compatible ``/api/chat`` endpoint (KrillLM has parity here) on
+Companion to ``krill_vs_ollama_benchmark.py``. Drives BOTH engines over
+the Ollama-compatible ``/api/chat`` endpoint (Krill has parity here) on
 the *same* Gemma 4 E2B weights and scores tool-call correctness, not
-speed. The metric is the KrillLM-vs-Ollama parity ratio; the gate is
-"KrillLM is no worse than Ollama on valid+exact tool calls".
+speed. The metric is the Krill-vs-Ollama parity ratio; the gate is
+"Krill is no worse than Ollama on valid+exact tool calls".
 
 Skip discipline mirrors the sibling harness: exit 77 when a local
 prerequisite (a reachable engine, the model) is missing, so CI can
@@ -116,8 +116,8 @@ SUITE: list[dict[str, Any]] = [
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--krillm-url", default="http://127.0.0.1:57455",
-                   help="Running KrillLM server base URL (KrillLM default port 57455).")
+    p.add_argument("--krill-url", default="http://127.0.0.1:57455",
+                   help="Running Krill server base URL (Krill default port 57455).")
     p.add_argument("--ollama-host", default="http://127.0.0.1:11434",
                    help="Ollama API host.")
     p.add_argument("--krill-model", default="gemma-4-e2b")
@@ -263,7 +263,7 @@ def main() -> int:
     args = parse_args()
 
     for label, base in (("ollama", args.ollama_host),
-                        ("krillm", args.krillm_url)):
+                        ("krill", args.krill_url)):
         if not reachable(base, args.timeout):
             print(f"SKIP: {label} not reachable at {base} "
                   f"(start it, then re-run)", file=sys.stderr)
@@ -286,26 +286,26 @@ def main() -> int:
     try:
         ollama = run_engine("ollama", args.ollama_host, args.ollama_model,
                             args.temperature, args.timeout)
-        krillm = run_engine("krillm", args.krillm_url, args.krill_model,
+        krill = run_engine("krill", args.krill_url, args.krill_model,
                             args.temperature, args.timeout)
     except urllib.error.URLError as exc:
         print(f"SKIP: engine request failed mid-run: {exc}", file=sys.stderr)
         return SKIP_EXIT_CODE
 
     report["ollama"] = ollama
-    report["krillm"] = krillm
-    o_agg, k_agg = aggregate(ollama), aggregate(krillm)
-    report["summary"] = {"ollama": o_agg, "krillm": k_agg}
+    report["krill"] = krill
+    o_agg, k_agg = aggregate(ollama), aggregate(krill)
+    report["summary"] = {"ollama": o_agg, "krill": k_agg}
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2))
 
-    print(f"\nTool-calling parity ({krillm['model']} vs {ollama['model']}, "
+    print(f"\nTool-calling parity ({krill['model']} vs {ollama['model']}, "
           f"temp {args.temperature})")
-    print(f"  {'task':<22} {'ollama':>16} {'krillm':>16}")
+    print(f"  {'task':<22} {'ollama':>16} {'krill':>16}")
     for tid in (t["id"] for t in SUITE):
-        os_, ks = ollama["tasks"][tid]["score"], krillm["tasks"][tid]["score"]
+        os_, ks = ollama["tasks"][tid]["score"], krill["tasks"][tid]["score"]
         def cell(s: dict[str, Any]) -> str:
             return ("valid" if s["valid_tool_call"] else "FAIL") + (
                 "+exact" if s["args_exact"] else "")
@@ -319,9 +319,9 @@ def main() -> int:
     gate = (k_agg["valid"] >= o_agg["valid"]
             and k_agg["args_exact"] >= o_agg["args_exact"])
     if gate:
-        print("GATE: PASS (KrillLM >= Ollama)")
+        print("GATE: PASS (Krill >= Ollama)")
         return 0
-    print("GATE: FAIL (KrillLM behind Ollama - expected pre-fix; "
+    print("GATE: FAIL (Krill behind Ollama - expected pre-fix; "
           "see docs/NATIVE_TOOL_CALLING_PLAN.md)")
     return 1
 

@@ -8,7 +8,7 @@ checkpoint, so this shipped silently in the registered nvfp4 model. This tool is
 the gate that would have caught it: it asks the model to name six solid colors
 and FAILS if any is wrong. Run it against any requant before registering.
 
-Requires a running KrillLM (or Ollama-compatible) server with the model loaded.
+Requires a running Krill (or Ollama-compatible) server with the model loaded.
 
   tools/verify_gemma4_vision_color.py --url http://127.0.0.1:57455 --model gemma-4-12b
 

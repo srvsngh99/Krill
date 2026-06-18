@@ -114,7 +114,7 @@ K/V arrays: `[B, numKVHeads, seqLen, headDim]` — sequence on axis 2.
 ### Two-Tier Architecture
 
 1. **Memory LRU** (default 8 entries): fast, no I/O
-2. **Disk** (`~/.krillm/cache/`): safetensors, persistent across restarts
+2. **Disk** (`~/.krill/cache/`): safetensors, persistent across restarts
 
 ### Cache Key
 FNV-1a hash of `modelId + token_bytes`. Not cryptographic, just for keying.

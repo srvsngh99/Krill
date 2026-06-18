@@ -346,7 +346,7 @@ final class MultimodalEndpointsTests: XCTestCase {
     /// user message's content.
     func testChatPathInjectsImagePlaceholdersIntoFirstUserMessage() {
         let baseDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-mm-placeholder-\(UUID().uuidString)")
+            .appendingPathComponent("krill-mm-placeholder-\(UUID().uuidString)")
         let engine = InferenceEngine(modelDirectory: baseDir.appendingPathComponent("model"))
 
         let pngData = makeTinyPNG(width: 4, height: 4, r: 200, g: 50, b: 50)
@@ -376,7 +376,7 @@ final class MultimodalEndpointsTests: XCTestCase {
 
     func testChatPathInjectsAudioPlaceholderIntoFirstUserMessage() {
         let baseDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-mm-audio-placeholder-\(UUID().uuidString)")
+            .appendingPathComponent("krill-mm-audio-placeholder-\(UUID().uuidString)")
         let engine = InferenceEngine(modelDirectory: baseDir.appendingPathComponent("model"))
 
         let messages: [[String: String]] = [["role": "user", "content": "transcribe"]]
@@ -391,7 +391,7 @@ final class MultimodalEndpointsTests: XCTestCase {
 
     func testChatPathLeavesMessagesUnchangedWithoutMedia() {
         let baseDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-mm-nomedia-\(UUID().uuidString)")
+            .appendingPathComponent("krill-mm-nomedia-\(UUID().uuidString)")
         let engine = InferenceEngine(modelDirectory: baseDir.appendingPathComponent("model"))
         let messages: [[String: String]] = [["role": "user", "content": "hello"]]
         let prepared = engine.injectMediaPlaceholders(
@@ -405,7 +405,7 @@ final class MultimodalEndpointsTests: XCTestCase {
     /// the regression where a text-only checkpoint claimed image capability.
     func testSupportsNativeImageFalseWhenNoModelLoaded() {
         let baseDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-mm-cap-\(UUID().uuidString)")
+            .appendingPathComponent("krill-mm-cap-\(UUID().uuidString)")
         let engine = InferenceEngine(modelDirectory: baseDir.appendingPathComponent("model"))
         XCTAssertFalse(engine.supportsNativeImage,
                        "No model loaded -> no image capability")
@@ -422,7 +422,7 @@ final class MultimodalEndpointsTests: XCTestCase {
         // covered by testOllamaGenerateRejectsImageWhenModelNotLoaded above.
         // Here we additionally verify the engine-level capability is false.
         let baseDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-mm-cap2-\(UUID().uuidString)")
+            .appendingPathComponent("krill-mm-cap2-\(UUID().uuidString)")
         let engine = InferenceEngine(modelDirectory: baseDir.appendingPathComponent("model"))
         XCTAssertFalse(engine.supportsNativeImage)
     }
@@ -509,7 +509,7 @@ final class MultimodalEndpointsTests: XCTestCase {
 
     private func makeChannel(maxBodySizeOverride: Int? = nil) throws -> EmbeddedChannel {
         let baseDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-server-mm-tests-\(UUID().uuidString)")
+            .appendingPathComponent("krill-server-mm-tests-\(UUID().uuidString)")
         let engine = InferenceEngine(modelDirectory: baseDir.appendingPathComponent("model"))
         let registry = Registry(baseDir: baseDir.appendingPathComponent("registry"))
         let channel = EmbeddedChannel()
@@ -575,7 +575,7 @@ final class MultimodalEndpointsTests: XCTestCase {
     /// `<|image|>` tokens.
     func testLoadImagesReturnsFirstAndAll() throws {
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-loadimages-\(UUID().uuidString)")
+            .appendingPathComponent("krill-loadimages-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
 

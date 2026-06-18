@@ -1,6 +1,6 @@
 import Foundation
 
-/// State for the `krillm launch` roster picker: a selectable list of every
+/// State for the `krill launch` roster picker: a selectable list of every
 /// launchable coding agent, each flagged as installed (on PATH, launches now) or
 /// not (needs an install step first). Pure and unit-tested; the launch command
 /// renders it and feeds it key events (Up/Down cycle), exactly like

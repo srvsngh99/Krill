@@ -14,7 +14,7 @@ struct ListCommand: ParsableCommand {
 
         if models.isEmpty {
             print("No models installed.")
-            print("\nPull a model with: krillm pull llama-3.2-3b")
+            print("\nPull a model with: krill pull llama-3.2-3b")
             return
         }
 

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Anthropic Messages API compatibility (WS-F / T2-9) so Claude Code and
-/// the Anthropic SDK work when pointed at KrillLM via `ANTHROPIC_BASE_URL`.
+/// the Anthropic SDK work when pointed at Krill via `ANTHROPIC_BASE_URL`.
 ///
 /// Pure request→internal and internal→Anthropic mapping (Sendable,
 /// unit-testable). Transport/streaming lives in ``Server``. Tool calling

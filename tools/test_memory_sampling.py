@@ -2,7 +2,7 @@
 tools/gemma4_multimodal_benchmark.py.
 
 Run with `python3 -m unittest tools.test_memory_sampling` from the repo root.
-These tests do not require mlx-vlm, Pillow, or a running Ollama/KrillLM
+These tests do not require mlx-vlm, Pillow, or a running Ollama/Krill
 server — they exercise the sampler against short-lived python subprocesses.
 """
 
@@ -19,7 +19,7 @@ from pathlib import Path
 
 
 _SPEC = importlib.util.spec_from_file_location(
-    "krillm_bm", str(Path(__file__).resolve().parent / "gemma4_multimodal_benchmark.py")
+    "krill_bm", str(Path(__file__).resolve().parent / "gemma4_multimodal_benchmark.py")
 )
 bm = importlib.util.module_from_spec(_SPEC)
 assert _SPEC.loader is not None
@@ -35,7 +35,7 @@ class PidParsingTests(unittest.TestCase):
 
     def test_pgrep_excludes_self(self):
         # Whatever pgrep matches, it must never include this process's PID.
-        for pattern in ("python", "ollama", "krillm"):
+        for pattern in ("python", "ollama", "krill"):
             for full in (False, True):
                 self.assertNotIn(os.getpid(), bm._pgrep(pattern, full=full))
 
@@ -48,7 +48,7 @@ class PidParsingTests(unittest.TestCase):
         # When the operator passes explicit PIDs, we honor them verbatim
         # rather than running pgrep.
         self.assertEqual(bm.resolve_ollama_pids("11,22, 33"), [11, 22, 33])
-        self.assertEqual(bm.resolve_krillm_server_pids("7"), [7])
+        self.assertEqual(bm.resolve_krill_server_pids("7"), [7])
 
 
 class ProcessTreeFootprintTests(unittest.TestCase):
@@ -137,7 +137,7 @@ class MemoryProbeTests(unittest.TestCase):
             sample_memory="auto",
             memory_sample_interval_ms=50.0,
             ollama_pids=None,
-            krillm_server_pid=None,
+            krill_server_pid=None,
         )
         defaults.update(overrides)
         return argparse.Namespace(**defaults)
@@ -155,20 +155,20 @@ class MemoryProbeTests(unittest.TestCase):
 
     def test_enabled_uses_overrides(self):
         probe = bm._MemoryProbe()
-        probe.configure(self._args(ollama_pids="123 456", krillm_server_pid="789"))
+        probe.configure(self._args(ollama_pids="123 456", krill_server_pid="789"))
         self.assertTrue(probe.enabled)
         # Sampler for ollama uses the override directly (no pgrep needed).
         ollama_sampler = probe.sampler_for("ollama")
         self.assertEqual(ollama_sampler._roots, {123, 456})
-        krillm_sampler = probe.sampler_for("krillm")
-        self.assertEqual(krillm_sampler._roots, {789})
+        krill_sampler = probe.sampler_for("krill")
+        self.assertEqual(krill_sampler._roots, {789})
 
     def test_sampler_for_pids_records_observed(self):
         probe = bm._MemoryProbe()
         probe.configure(self._args())
         sampler = probe.sampler_for_pids([os.getpid()])
         self.assertEqual(sampler._roots, {os.getpid()})
-        self.assertIn(os.getpid(), probe.observed["krillm"])
+        self.assertIn(os.getpid(), probe.observed["krill"])
 
     def test_report_block_shape(self):
         probe = bm._MemoryProbe()
@@ -183,7 +183,7 @@ class MemoryProbeTests(unittest.TestCase):
         # basis was removed with the mlx-vlm bridge (WS6 Step 4).
         self.assertIn(bm.MemorySampler.basis, block["basis"])
         self.assertEqual(block["ollama_pids_sampled"], [42])
-        self.assertEqual(block["krillm_pids_sampled"], [])
+        self.assertEqual(block["krill_pids_sampled"], [])
 
 
 if __name__ == "__main__":

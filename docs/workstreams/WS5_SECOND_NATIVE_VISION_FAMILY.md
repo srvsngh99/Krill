@@ -199,16 +199,16 @@ M-series, Qwen 2.5-VL-3B-Instruct-4bit, 3 warm runs of
 
 | Engine                              | Median warm latency |
 | ----------------------------------- | ------------------- |
-| KrillLM `/api/chat` (bridge)        | 300 ms              |
+| Krill `/api/chat` (bridge)        | 300 ms              |
 | Ollama `/api/chat` (qwen2.5vl:3b)   | 277 ms              |
 
-KrillLM is 8% slower than Ollama's native C++ + mlx-vlm path,
+Krill is 8% slower than Ollama's native C++ + mlx-vlm path,
 despite going through a Python sidecar. The cold-start cost
 (first request after server boot) is ~2.9 s on both (model load
 into mlx-vlm + first prefill); subsequent requests reuse the
 loaded model.
 
-Quality is at parity by construction: KrillLM's bridge invokes
+Quality is at parity by construction: Krill's bridge invokes
 the same `mlx_vlm.generate` Ollama wraps internally on Mac.
 
 ## What landed in this PR

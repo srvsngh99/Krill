@@ -236,9 +236,9 @@ let line = "{\"model\":\"\(name)\",\"response\":\"\(escaped)\",\"done\":false}\n
 
 ## 11. Benchmark Equivalence: Don't Compare Different Workloads
 
-**Bug**: Server multimodal benchmark compared KrillLM text-only prompts against Ollama processing real images.
+**Bug**: Server multimodal benchmark compared Krill text-only prompts against Ollama processing real images.
 
-**Root cause**: `--krillm-url` server path only sent text prompts to KrillLM but Ollama received base64-encoded images. Different work, invalid comparison.
+**Root cause**: `--krill-url` server path only sent text prompts to Krill but Ollama received base64-encoded images. Different work, invalid comparison.
 
 **Fix**: Server benchmark skips image/audio tasks with explicit message.
 

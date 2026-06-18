@@ -4,7 +4,7 @@ import KLMTUI
 import Darwin
 #endif
 
-/// The branded roster shown by `krillm launch` with no agent argument. On an
+/// The branded roster shown by `krill launch` with no agent argument. On an
 /// interactive terminal it arrow-selects a coding agent to launch (the pure
 /// ``AgentPicker`` drives selection; this layer renders + reads keys). On a
 /// non-TTY (piped / redirected) it prints a static branded list and returns nil,
@@ -47,7 +47,7 @@ enum AgentRosterPrompt {
         [
             margin + Ansi.bold(Brand.wordmark),
             Ansi.chrome(String(repeating: "\u{2500}", count: max(0, width))),
-            margin + Ansi.chrome("Launch a coding agent wired to your local KrillLM server."),
+            margin + Ansi.chrome("Launch a coding agent wired to your local Krill server."),
             "",
         ]
     }
@@ -85,7 +85,7 @@ enum AgentRosterPrompt {
         let nameW = max(10, entries.map { $0.displayName.count }.max() ?? 10)
         for e in entries { print(row(e, selected: false, idW: idW, nameW: nameW, width: width)) }
         print("")
-        print(margin + Ansi.chrome("Usage:  krillm launch <agent> [--model <name>] [--port <port>] [-- <agent args>]"))
+        print(margin + Ansi.chrome("Usage:  krill launch <agent> [--model <name>] [--port <port>] [-- <agent args>]"))
     }
 
     // MARK: - Interactive driver

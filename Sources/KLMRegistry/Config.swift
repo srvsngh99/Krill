@@ -1,6 +1,6 @@
 import Foundation
 
-/// KrillLM configuration loaded from ~/.krillm/config.toml.
+/// Krill configuration loaded from ~/.krill/config.toml.
 ///
 /// Precedence: CLI flags > environment variables (KRILL_*) > config.toml > defaults.
 public struct KrillConfig: Sendable {

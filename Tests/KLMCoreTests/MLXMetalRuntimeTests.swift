@@ -3,7 +3,7 @@ import KLMRuntime
 
 final class MLXMetalRuntimeTests: XCTestCase {
     func testCandidateURLsMatchMLXLoaderOrder() {
-        let root = URL(fileURLWithPath: "/tmp/krillm-runtime-test")
+        let root = URL(fileURLWithPath: "/tmp/krill-runtime-test")
         let executableDirectory = root.appendingPathComponent("bin")
         let mainBundleURL = root.appendingPathComponent("Main.xctest")
         let bundleResourceURL = root.appendingPathComponent("Main.xctest/Contents/Resources")
@@ -19,18 +19,18 @@ final class MLXMetalRuntimeTests: XCTestCase {
 
         let paths = MLXMetalResourceLocator.candidateURLs(context: context).map(\.path)
 
-        XCTAssertEqual(paths[0], "/tmp/krillm-runtime-test/bin/mlx.metallib")
-        XCTAssertEqual(paths[1], "/tmp/krillm-runtime-test/bin/Resources/mlx.metallib")
-        XCTAssertTrue(paths.contains("/tmp/krillm-runtime-test/Main.xctest/mlx-swift_Cmlx.bundle/default.metallib"))
-        XCTAssertTrue(paths.contains("/tmp/krillm-runtime-test/Main.xctest/Contents/Resources/mlx-swift_Cmlx.bundle/default.metallib"))
-        XCTAssertTrue(paths.contains("/tmp/krillm-runtime-test/Cmlx.framework/Resources/default.metallib"))
-        XCTAssertTrue(paths.contains("/tmp/krillm-runtime-test/bin/Resources/default.metallib"))
-        XCTAssertEqual(paths.last, "/tmp/krillm-runtime-test/default.metallib")
+        XCTAssertEqual(paths[0], "/tmp/krill-runtime-test/bin/mlx.metallib")
+        XCTAssertEqual(paths[1], "/tmp/krill-runtime-test/bin/Resources/mlx.metallib")
+        XCTAssertTrue(paths.contains("/tmp/krill-runtime-test/Main.xctest/mlx-swift_Cmlx.bundle/default.metallib"))
+        XCTAssertTrue(paths.contains("/tmp/krill-runtime-test/Main.xctest/Contents/Resources/mlx-swift_Cmlx.bundle/default.metallib"))
+        XCTAssertTrue(paths.contains("/tmp/krill-runtime-test/Cmlx.framework/Resources/default.metallib"))
+        XCTAssertTrue(paths.contains("/tmp/krill-runtime-test/bin/Resources/default.metallib"))
+        XCTAssertEqual(paths.last, "/tmp/krill-runtime-test/default.metallib")
     }
 
     func testFirstAvailableResourceUsesPreciseSearchPaths() throws {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("krillm-runtime-test-\(UUID().uuidString)")
+            .appendingPathComponent("krill-runtime-test-\(UUID().uuidString)")
         let executableDirectory = root.appendingPathComponent("bin")
         let bundleDirectory = root
             .appendingPathComponent("Main.xctest/Contents/Resources")

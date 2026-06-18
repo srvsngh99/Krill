@@ -3,7 +3,7 @@ import Foundation
 /// Curated alias map: short model names -> HuggingFace repos.
 ///
 /// These are the recommended MLX-quantized models from mlx-community
-/// for each supported family. krillm pull <alias> resolves through
+/// for each supported family. krill pull <alias> resolves through
 /// this map before falling back to treating the input as a raw HF repo path.
 public struct AliasMap: Sendable {
     /// Resolve a model name to a HuggingFace repo path.
@@ -27,7 +27,7 @@ public struct AliasMap: Sendable {
             return entry
         }
 
-        // Catalog fallback: a model added via `krillm catalog` without
+        // Catalog fallback: a model added via `krill catalog` without
         // a binary rebuild. Only consulted when a store is supplied.
         if let fromCatalog = catalog?.resolve(normalized) {
             return fromCatalog

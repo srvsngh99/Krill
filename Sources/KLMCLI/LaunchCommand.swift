@@ -6,8 +6,8 @@ import KLMServer
 import Darwin
 #endif
 
-/// `krillm launch <agent>` - boot a coding agent (Claude Code, Codex,
-/// OpenCode, Hermes, Pi, ...) pre-wired to the local KrillLM server, with no
+/// `krill launch <agent>` - boot a coding agent (Claude Code, Codex,
+/// OpenCode, Hermes, Pi, ...) pre-wired to the local Krill server, with no
 /// manual env/config fiddling. Mirrors Ollama's `ollama launch`.
 ///
 /// Flow: resolve the agent profile -> ensure the server is up (auto-start if
@@ -17,9 +17,9 @@ import Darwin
 struct LaunchCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "launch",
-        abstract: "Boot a coding agent (Claude Code, Codex, OpenCode, ...) wired to KrillLM")
+        abstract: "Boot a coding agent (Claude Code, Codex, OpenCode, ...) wired to Krill")
 
-    @Argument(help: "Agent to launch (run `krillm launch` with no agent to list).")
+    @Argument(help: "Agent to launch (run `krill launch` with no agent to list).")
     var agent: String?
 
     @Argument(parsing: .postTerminator,
@@ -44,7 +44,7 @@ struct LaunchCommand: AsyncParsableCommand {
     func run() async throws {
         // No agent -> show the branded roster. On a TTY this arrow-selects an
         // agent to launch; on a pipe it prints the static list and returns nil
-        // (we just exit, like the old `krillm launch` listing screen).
+        // (we just exit, like the old `krill launch` listing screen).
         let agentId: String
         if let a = agent {
             agentId = a
@@ -73,7 +73,7 @@ struct LaunchCommand: AsyncParsableCommand {
         // Pick the model: explicit flag, else first installed.
         guard let modelName = model ?? registry.listModels().first?.name else {
             print(Ansi.yellow("No models installed.") + " "
-                  + Ansi.chrome("Pull one first, e.g.:  krillm pull gemma-4-e2b"))
+                  + Ansi.chrome("Pull one first, e.g.:  krill pull gemma-4-e2b"))
             throw ExitCode.failure
         }
 
@@ -134,7 +134,7 @@ struct LaunchCommand: AsyncParsableCommand {
                 await spinner.stop()
                 guard ok else {
                     print(Ansi.yellow("Error: server could not load '\(model)'. ")
-                          + "Check `krillm list` and the server log.")
+                          + "Check `krill list` and the server log.")
                     throw ExitCode.failure
                 }
                 print("  " + Ansi.chrome("Loaded '\(model)'."))
@@ -148,14 +148,14 @@ struct LaunchCommand: AsyncParsableCommand {
         }
 
         guard !noServe else {
-            print(Ansi.yellow("No KrillLM server reachable at \(baseURL)."))
-            print("  " + Ansi.chrome("Start one in another terminal:  krillm serve --model \(model) --port \(port)"))
+            print(Ansi.yellow("No Krill server reachable at \(baseURL)."))
+            print("  " + Ansi.chrome("Start one in another terminal:  krill serve --model \(model) --port \(port)"))
             throw ExitCode.failure
         }
 
         // Auto-start a detached server, then wait for it to become healthy.
-        print("  " + Ansi.chrome("Starting KrillLM server at \(baseURL) with '\(model)'."))
-        let logPath = expandTilde("~/.krillm/agents/\(model.replacingOccurrences(of: "/", with: "_"))-serve.log")
+        print("  " + Ansi.chrome("Starting Krill server at \(baseURL) with '\(model)'."))
+        let logPath = expandTilde("~/.krill/agents/\(model.replacingOccurrences(of: "/", with: "_"))-serve.log")
         try? FileManager.default.createDirectory(
             atPath: (logPath as NSString).deletingLastPathComponent,
             withIntermediateDirectories: true)
@@ -165,9 +165,9 @@ struct LaunchCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        let krillm = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        let krill = Bundle.main.executablePath ?? CommandLine.arguments[0]
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: krillm)
+        proc.executableURL = URL(fileURLWithPath: krill)
         proc.arguments = ["serve", "--model", model, "--port", "\(port)", "--host", host]
         proc.standardOutput = logHandle
         proc.standardError = logHandle

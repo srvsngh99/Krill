@@ -307,7 +307,7 @@ public final class WhisperDecoder: Module {
 }
 
 /// Native Whisper model: audio encoder + text decoder. Loaded from a converted
-/// KrillLM model dir (`tools/convert_whisper.py`) with top-level `encoder.*`
+/// Krill model dir (`tools/convert_whisper.py`) with top-level `encoder.*`
 /// and `decoder.*` keys.
 public final class WhisperModel: Module {
     @ModuleInfo(key: "encoder") var encoder: WhisperEncoder

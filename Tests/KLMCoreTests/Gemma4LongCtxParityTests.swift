@@ -28,7 +28,7 @@ final class Gemma4LongCtxParityTests: XCTestCase {
 
         // TEACHER-FORCED decode through the KV cache (the real generation path,
         // which engages KV sharing). Feeding the oracle's own tokens keeps every
-        // step on the identical prefix, so KrillLM's argmax at step i must equal
+        // step on the identical prefix, so Krill's argmax at step i must equal
         // the oracle's greedy_ids[i]. This is the gate that the KV-shared decode
         // RoPE-offset bug fails: rotating shared-layer Q at offset 0 instead of
         // the donor's true position degrades long-context decode into garbage.

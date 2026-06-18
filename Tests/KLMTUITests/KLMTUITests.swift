@@ -231,7 +231,7 @@ final class ChromeBorderTests: XCTestCase {
 
 final class BannerTests: XCTestCase {
     func testRowsEqualWidthAndPureAscii() {
-        let rows = Banner.krillm
+        let rows = Banner.krill
         let w = Banner.width(rows)
         XCTAssertGreaterThan(w, 0)
         for row in rows {

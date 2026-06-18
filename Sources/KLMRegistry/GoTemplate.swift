@@ -5,7 +5,7 @@ import Foundation
 /// A from-scratch evaluator for the Go `text/template` language, enough
 /// to render Ollama `Modelfile` `TEMPLATE` directives. Ollama prompts
 /// are Go templates -- `{{ .System }}`, `{{ range .Messages }}`,
-/// `{{ if .Tools }}`, `{{- -}}` whitespace trimming -- whereas KrillLM's
+/// `{{ if .Tools }}`, `{{- -}}` whitespace trimming -- whereas Krill's
 /// built-in chat formatting goes through HF Jinja templates. When a
 /// created model carries a `TEMPLATE` override we must render with the
 /// Go-template semantics the author wrote against, so this engine is the
@@ -204,10 +204,10 @@ public struct GoTemplate {
 // MARK: - Ollama chat context
 
 /// Builds the render context an Ollama chat `TEMPLATE` expects from a
-/// KrillLM message list. Ollama templates address `.Messages` (a list
+/// Krill message list. Ollama templates address `.Messages` (a list
 /// of `{Role, Content}`), `.System` (the system text), and `.Prompt`
 /// (the latest user turn, for legacy single-turn templates); `.Response`
-/// is empty at prompt-build time. This is the bridge from KrillLM's
+/// is empty at prompt-build time. This is the bridge from Krill's
 /// `[[String: String]]` chat messages to the `GoValue` tree the engine
 /// evaluates against.
 public enum OllamaTemplateContext {

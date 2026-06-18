@@ -1,7 +1,7 @@
 import Foundation
 
 /// OpenAI Responses API compatibility so OpenAI Codex (and any client using
-/// `wire_api = "responses"`) works when pointed at KrillLM. Codex removed
+/// `wire_api = "responses"`) works when pointed at Krill. Codex removed
 /// Chat Completions support, so the Responses surface is the only way the
 /// current Codex can talk to a local server.
 ///

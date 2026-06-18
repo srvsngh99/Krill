@@ -228,9 +228,9 @@ final class Qwen25VLRuntimeTests: XCTestCase {
             grid = nil
         }
         // Isolate the cache to a temp directory so the test cannot
-        // race against a real `~/.krillm/cache`.
+        // race against a real `~/.krill/cache`.
         let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("krillm-vlcache-\(UUID().uuidString)")
+            .appendingPathComponent("krill-vlcache-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(
             at: tmpDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmpDir) }

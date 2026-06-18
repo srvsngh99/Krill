@@ -1,10 +1,10 @@
 import Foundation
 
-/// A non-chat model type KrillLM does not run as a causal LM.
+/// A non-chat model type Krill does not run as a causal LM.
 ///
 /// These are the WS7 "specialized model types": speech recognition,
 /// speech synthesis, image generation, video-language, and document
-/// OCR. KrillLM has no native runtime for them in this build (only
+/// OCR. Krill has no native runtime for them in this build (only
 /// rerankers have shipped). Loading one as a dense causal LM would
 /// silently produce a garbage forward pass.
 ///

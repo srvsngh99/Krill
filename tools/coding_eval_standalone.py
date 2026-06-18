@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone HumanEval pass@1 for a KrillLM-served model. No Ollama, no
+"""Standalone HumanEval pass@1 for a Krill-served model. No Ollama, no
 comparison - a single-engine capability + throughput number.
 
 Drives the OpenAI-compatible /v1/chat/completions endpoint: for each HumanEval
@@ -29,7 +29,7 @@ _THINK_TMPL = None  # lazily-compiled jinja chat template (think mode)
 
 
 def _think_prompt(template_path, user):
-    """Render the model's own chat template with enable_thinking=True. KrillLM's
+    """Render the model's own chat template with enable_thinking=True. Krill's
     /v1/chat path does not thread enable_thinking, so to benchmark the model as a
     *reasoning* model we render the prompt ourselves and use raw /v1/completions."""
     global _THINK_TMPL
