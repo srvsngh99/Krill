@@ -123,7 +123,7 @@ public final class KLMTokenizer: @unchecked Sendable {
         // tokenizers). Computed eagerly so the streaming decode path stays
         // lock-free under concurrent generation.
         self.outputSuppressedTokenIDs = Self.resolveOutputSuppressedTokenIDs(
-            tokenizer: self.tokenizer, bos: self.tokenizer.bosTokenId ?? -1)
+            tokenizer: self.tokenizer)
     }
 
     /// Normalize a tokenizer.json for swift-transformers when it trips one of two
@@ -524,18 +524,24 @@ public final class KLMTokenizer: @unchecked Sendable {
     ]
 
     /// Resolve `outputSuppressedTokenIDs` from `gemmaMediaMarkerLiterals`: a
-    /// literal contributes its id only when it encodes to a single token that
-    /// round-trips back to the same literal, so tokenizers without these as
-    /// dedicated special tokens (every non-Gemma family) contribute nothing and
-    /// `decodeForOutput` stays a transparent pass-through for them.
+    /// literal contributes the id of the single token that, decoded on its own,
+    /// reproduces the literal exactly. Matching on each token's standalone
+    /// decode (rather than the whole encoding) makes this independent of any
+    /// BOS/EOS/metaspace tokens the tokenizer wraps around the literal, so it
+    /// neither misses the marker when a checkpoint appends specials nor fires on
+    /// a non-Gemma tokenizer that splits the literal into prose sub-pieces
+    /// (none of which decode back to the literal). Ambiguous cases (zero or more
+    /// than one matching token) are skipped, keeping `decodeForOutput` a
+    /// transparent pass-through everywhere it is not unambiguously a marker.
     private static func resolveOutputSuppressedTokenIDs(
-        tokenizer: Tokenizer, bos: Int
+        tokenizer: Tokenizer
     ) -> Set<Int> {
         var ids = Set<Int>()
         for literal in gemmaMediaMarkerLiterals {
-            let core = tokenizer.encode(text: literal).filter { $0 != bos }
-            if core.count == 1, tokenizer.decode(tokens: core) == literal {
-                ids.insert(core[0])
+            let matches = tokenizer.encode(text: literal)
+                .filter { tokenizer.decode(tokens: [$0]) == literal }
+            if matches.count == 1 {
+                ids.insert(matches[0])
             }
         }
         return ids
