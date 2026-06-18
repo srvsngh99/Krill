@@ -84,7 +84,7 @@ public enum ModelCapabilities {
     /// promotion.
     public static func capabilities(for family: ModelFamily) -> Set<Capability> {
         switch family {
-        case .mistral, .gemma, .phi, .glm, .deepseek:
+        case .mistral, .gemma, .phi, .glm, .glm4, .deepseek:
             return [.textGeneration]
         case .llama, .qwen:
             return [.textGeneration, .tools]
@@ -140,7 +140,7 @@ public enum ModelCapabilities {
     /// The support tier for a model family in this build.
     public static func supportTier(for family: ModelFamily) -> SupportTier {
         switch family {
-        case .llama, .qwen, .mistral, .gemma, .phi, .glm, .deepseek,
+        case .llama, .qwen, .mistral, .gemma, .phi, .glm, .glm4, .deepseek,
              .gemma4, .bert, .qwen25vl:
             // Production-native: native Swift + MLX/Metal load+run
             // path, deterministic smoke tests, and a benchmark
