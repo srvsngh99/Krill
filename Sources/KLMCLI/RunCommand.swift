@@ -61,6 +61,12 @@ struct RunCommand: AsyncParsableCommand {
            !KrillConfig.load().decodePipeline {
             setenv("KRILL_DECODE_PIPELINE", "0", 1)
         }
+        // Same bridge for n-gram speculative decode (default on; only act when
+        // config disables it and the env hasn't already spoken).
+        if ProcessInfo.processInfo.environment["KRILL_NGRAM_SPEC"] == nil,
+           !KrillConfig.load().ngramSpec {
+            setenv("KRILL_NGRAM_SPEC", "0", 1)
+        }
 
         // Resolve the model: explicit argument, else the configured default
         // (config.toml default_model / KRILL_DEFAULT_MODEL). A blank value

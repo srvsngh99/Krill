@@ -31,6 +31,14 @@ public struct KrillConfig: Sendable {
     /// loop. Bridged to `KRILL_DECODE_PIPELINE` by the CLI.
     public var decodePipeline: Bool
 
+    /// N-gram (prompt-lookup) speculative decode on the single stream. On by
+    /// default with a per-generation stall monitor that hands off to the plain
+    /// pipeline loop on non-echo workloads, so the floor holds while echo-heavy
+    /// workloads (RAG, code, structured output) keep the win. Set
+    /// `ngram_spec = false` to force the plain loop everywhere. Bridged to
+    /// `KRILL_NGRAM_SPEC` by the CLI.
+    public var ngramSpec: Bool
+
     /// Models directory override.
     public var modelsDir: String?
 
@@ -89,6 +97,7 @@ public struct KrillConfig: Sendable {
         self.prefixCacheMaxEntryGB = 4.0
         self.speculativeDecoding = false
         self.decodePipeline = true
+        self.ngramSpec = true
         self.modelsDir = nil
         self.serverPort = 57455   // "KRILL" on a phone keypad; unique vs Ollama's 11434
         self.serverHost = "127.0.0.1"
@@ -152,6 +161,8 @@ public struct KrillConfig: Sendable {
                 speculativeDecoding = value == "true" || value == "1"
             case "decode_pipeline":
                 decodePipeline = value == "true" || value == "1"
+            case "ngram_spec":
+                ngramSpec = value == "true" || value == "1"
             case "models_dir":
                 modelsDir = value.isEmpty ? nil : value
             case "server_port", "port":

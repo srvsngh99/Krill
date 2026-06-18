@@ -26,14 +26,15 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Draft model for speculative decoding (alias, path, or 'auto'). Also reads KRILL_DRAFT_MODEL.")
     var draftModel: String?
 
-    @Flag(name: .long, help: "Enable n-gram (prompt-lookup) speculative decode for greedy requests. No draft model needed; wins on repetitive workloads (RAG, code, structured output). Also reads KRILL_NGRAM_SPEC.")
+    @Flag(name: .long, help: "Force-enable n-gram (prompt-lookup) speculative decode, including on the concurrent batcher (single-stream is already on by default). No draft model needed; wins on repetitive workloads (RAG, code, structured output). Also reads KRILL_NGRAM_SPEC.")
     var ngramSpec: Bool = false
 
     func run() async throws {
         // An n-gram opt-in must reach EVERY engine the server builds (the
         // pre-loaded one AND the on-demand pool), so set the env the engine
         // reads at init before any engine is constructed. A bare `--ngram-spec`
-        // flag and `KRILL_NGRAM_SPEC=1` are equivalent.
+        // flag and `KRILL_NGRAM_SPEC=1` are equivalent: both force the batcher
+        // spec path on too (single-stream is on by default regardless).
         if ngramSpec { setenv("KRILL_NGRAM_SPEC", "1", 1) }
 
         // Precedence (CLI flag > env > config.toml > default): KrillConfig.load()
@@ -47,6 +48,12 @@ struct ServeCommand: AsyncParsableCommand {
         if ProcessInfo.processInfo.environment["KRILL_DECODE_PIPELINE"] == nil,
            !config.decodePipeline {
             setenv("KRILL_DECODE_PIPELINE", "0", 1)
+        }
+        // Same bridge for n-gram speculative decode (default on; only act when
+        // config disables it and neither the env nor the --ngram-spec flag spoke).
+        if ProcessInfo.processInfo.environment["KRILL_NGRAM_SPEC"] == nil,
+           !config.ngramSpec {
+            setenv("KRILL_NGRAM_SPEC", "0", 1)
         }
         let host = self.host ?? config.serverHost
         let port = self.port ?? config.serverPort
