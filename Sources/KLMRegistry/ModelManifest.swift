@@ -126,6 +126,10 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     case gemma4Unified = "gemma4_unified"
     case phi
     case glm
+    /// GLM-4-0414 / GLM-Z1 generation (arch `Glm4ForCausalLM`, model_type
+    /// "glm4"). Distinct native runtime from the legacy ChatGLM `.glm`: separate
+    /// q/k/v/o projections, four-RMSNorm sandwich, partial RoPE, fused gate_up.
+    case glm4
     case deepseek
     /// Dedicated sentence-embedding encoder (BERT/RoBERTa/MiniLM/BGE/E5).
     /// Not a causal LM - served only via the embeddings endpoints.
@@ -260,6 +264,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         case "mllama": return .llamaVision
         case "mixtral", "qwen3_moe", "qwen2_moe", "olmoe": return .moe
         case "phi", "phi3": return .phi
+        case "glm4": return .glm4
         case "chatglm", "glm", "glm4_moe": return .glm
         case "deepseek_v3": return .deepseek
         case "bert", "roberta", "xlm-roberta", "mpnet", "distilbert": return .bert

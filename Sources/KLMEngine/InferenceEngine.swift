@@ -1686,7 +1686,11 @@ public final class InferenceEngine: @unchecked Sendable {
 
                         // While GPU is busy with iteration N+1, decode and yield N.
                         let yieldedToken = nextToken
-                        let tokenText = capturedTokenizer.decode(token: yieldedToken)
+                        // KRILL_BENCH_NO_DETOK isolates compute-rate from the
+                        // per-token detokenization+yield cost folded into the
+                        // decode timer (a benchmarking diagnostic only).
+                        let tokenText = ProcessInfo.processInfo.environment["KRILL_BENCH_NO_DETOK"] != nil
+                            ? "" : capturedTokenizer.decode(token: yieldedToken)
                         continuation.yield(TokenEvent(
                             tokenId: yieldedToken, text: tokenText,
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime))

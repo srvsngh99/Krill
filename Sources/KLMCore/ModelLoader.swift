@@ -277,6 +277,19 @@ let architectureRules: [ArchitectureRule] = [
         },
         action: .load { try loadGemma4(configData: $0, directory: $1) }),
 
+    // GLM-4-0414 / GLM-Z1 generation (arch Glm4ForCausalLM, model_type "glm4").
+    // A WHOLLY DIFFERENT architecture from the legacy ChatGLM `glm` rule below:
+    // separate q/k/v/o projections (bias on q/k/v only), a four-RMSNorm sandwich
+    // (input / post_self_attn / post_attention / post_mlp), partial RoPE, fused
+    // gate_up MLP, and standard `model.layers.*` naming. MUST precede the `glm`
+    // rule: that rule matches `arch.contains("glm")`, so a Glm4 checkpoint would
+    // otherwise fall into the legacy ChatGLM loader and emit garbage. First
+    // match wins.
+    ArchitectureRule(
+        id: "glm4",
+        matches: { arch, mt in arch.contains("glm4") || mt == "glm4" },
+        action: .load { try loadGlm4(configData: $0, directory: $1) }),
+
     ArchitectureRule(
         id: "glm",
         matches: { arch, mt in
@@ -1239,6 +1252,27 @@ private func loadGLM(configData: Data, directory: URL) throws -> LoadedModel {
         module: model,
         numLayers: config.numHiddenLayers,
         family: "glm",
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
+        multimodalForward: nil,
+        vocabSize: config.vocabSize
+    )
+}
+
+/// GLM-4-0414 / GLM-Z1 (`Glm4ForCausalLM`, model_type "glm4"). Native Swift+MLX
+/// runtime in `Glm4Model.swift` - distinct from the legacy ChatGLM `loadGLM`
+/// above (separate q/k/v/o, sandwich norm, partial RoPE, fused gate_up).
+private func loadGlm4(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(Glm4Config.self, from: configData)
+    let model = Glm4ForCausalLM(config)
+    try loadWeights(into: model, from: directory, quantization: config.quantization)
+
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "glm4",
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
         prefillForward: { tokens, caches in
             model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)

@@ -56,6 +56,14 @@ final class ArchitectureDetectionTests: XCTestCase {
         XCTAssertEqual(id(modelType: "chatglm"), "glm")
     }
 
+    func testGLM4Detection() {
+        // GLM-4-0414 / GLM-Z1 must route to the new glm4 rule, NOT the legacy
+        // glm rule (whose `arch.contains("glm")` matcher would otherwise claim
+        // it first). The glm4 rule is ordered before glm for exactly this.
+        XCTAssertEqual(id(arch: "Glm4ForCausalLM"), "glm4")
+        XCTAssertEqual(id(modelType: "glm4"), "glm4")
+    }
+
     func testMoEFamilies() {
         XCTAssertEqual(id(arch: "Qwen3MoeForCausalLM"), "qwen3_moe")
         XCTAssertEqual(id(modelType: "qwen3_moe"), "qwen3_moe")
