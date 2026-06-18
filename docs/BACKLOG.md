@@ -201,7 +201,17 @@ bigger box.
 
 ## Native Swift+MLX `krillm quantize` (drop the Python shell-out)
 
-**Status:** deferred (owner decision). The only Python touchpoint left in the
+**Status:** DONE. `krillm quantize` is now pure Swift+MLX
+(`Sources/KLMCore/CheckpointQuantizer.swift`) - the python3/mlx_lm.convert
+shell-out is gone, so the shipped binary has no Python anywhere. Output is
+**byte-identical to mlx_lm.convert** (verified 1007/1007 tensors on
+GLM-4-9B-0414 vs the mlx-community 4-bit; `tools/verify_native_quantize_parity.sh`).
+Supports dense text families (Llama/Qwen/Mistral/Phi/GLM/Glm4); MoE / vision /
+Gemma are rejected up front (they need per-family handling the shape-driven pass
+does not do - a natural follow-up). `--dtype` (default fp16, mlx-community
+convention), `--mode` (affine/nvfp4/...). Original write-up kept below for context.
+
+**Original write-up (deferred):** The only Python touchpoint left in the
 *shipped binary*. Everything in the inference / serving / model-load /
 embedding / audio / vision path is already pure Swift+MLX with no sidecar; the
 historical mlx-lm bridge was fully retired.
