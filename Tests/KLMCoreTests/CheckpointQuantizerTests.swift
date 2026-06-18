@@ -133,6 +133,142 @@ final class CheckpointQuantizerTests: XCTestCase {
                 sourceDir: src, outputDir: out, bits: 4, groupSize: 64))
     }
 
+    /// Write a synthetic "reference" 4-bit checkpoint: just the `.scales` tensors
+    /// for the modules we want the learner to pick up (it only reads names).
+    private func makeReference(scalesFor modules: [String]) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("klm-quant-ref-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var arrays: [String: MLXArray] = [:]
+        for m in modules { arrays["\(m).scales"] = MLXArray.ones([1]) }
+        try save(arrays: arrays, url: dir.appendingPathComponent("model.safetensors"))
+        return dir
+    }
+
+    func testReferenceSetSelectsExactlyTheReferencedModules() throws {
+        // A "VL" config that the dense pass would REJECT loads fine with a reference,
+        // and only the referenced modules are quantized (the vision tower passes
+        // through as float, mirroring Qwen2.5-VL's loader).
+        let src = try makeSource([
+            "language_model.model.layers.0.mlp.down_proj.weight": MLXRandom.normal([256, 128]),
+            "language_model.model.embed_tokens.weight": MLXRandom.normal([128, 256]),
+            "visual.blocks.0.attn.qkv.weight": MLXRandom.normal([192, 64]),   // vision tower: float
+            "model.norm.weight": MLXArray.ones([256]),
+        ], config: ["model_type": "qwen2_5_vl", "vision_config": ["x": 1]])
+        defer { try? FileManager.default.removeItem(at: src) }
+        let ref = try makeReference(scalesFor: [
+            "language_model.model.layers.0.mlp.down_proj",
+            "language_model.model.embed_tokens",
+        ])
+        defer { try? FileManager.default.removeItem(at: ref) }
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("klm-quant-ref-out-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: out) }
+
+        let n = try CheckpointQuantizer.quantize(
+            sourceDir: src, outputDir: out, bits: 4, groupSize: 64, referenceDir: ref)
+        XCTAssertEqual(n, 2, "exactly the two referenced modules are quantized")
+
+        let w = try loadArrays(url: out.appendingPathComponent("model.safetensors"))
+        XCTAssertEqual(w["language_model.model.layers.0.mlp.down_proj.weight"]?.dtype, .uint32)
+        XCTAssertNotNil(w["language_model.model.embed_tokens.scales"])
+        // Vision tower stays float (not in the reference set), no scales emitted.
+        XCTAssertEqual(w["visual.blocks.0.attn.qkv.weight"]?.dtype, .float16)
+        XCTAssertNil(w["visual.blocks.0.attn.qkv.scales"])
+    }
+
+    func testProtectedModuleGetsHigherPrecisionOverride() throws {
+        // Top-level nvfp4; a protected module is quantized at 8-bit affine and
+        // recorded as a per-module override the loader resolves via effective(for:).
+        let src = try makeSource([
+            "language_model.model.layers.0.mlp.down_proj.weight": MLXRandom.normal([256, 128]),
+            "vision_embedder.patch_dense.weight": MLXRandom.normal([128, 256]),
+        ], config: ["model_type": "gemma4"])
+        defer { try? FileManager.default.removeItem(at: src) }
+        let ref = try makeReference(scalesFor: [
+            "language_model.model.layers.0.mlp.down_proj",
+            "vision_embedder.patch_dense",
+        ])
+        defer { try? FileManager.default.removeItem(at: ref) }
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("klm-quant-prot-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: out) }
+
+        // patch_dense is auto-protected by default (vision projector).
+        try CheckpointQuantizer.quantize(
+            sourceDir: src, outputDir: out, bits: 4, groupSize: 64, mode: "nvfp4",
+            referenceDir: ref)
+        let w = try loadArrays(url: out.appendingPathComponent("model.safetensors"))
+
+        // The dense LM module is nvfp4 (no biases); the protected projector is
+        // 8-bit affine (has biases).
+        XCTAssertNil(w["language_model.model.layers.0.mlp.down_proj.biases"], "nvfp4: no biases")
+        XCTAssertNotNil(w["vision_embedder.patch_dense.biases"], "8-bit affine: biases")
+
+        let cfg = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: out.appendingPathComponent("config.json"))) as? [String: Any]
+        let q = cfg?["quantization"] as? [String: Any]
+        XCTAssertEqual(q?["mode"] as? String, "nvfp4", "top-level stays nvfp4")
+        let ov = q?["vision_embedder.patch_dense"] as? [String: Any]
+        XCTAssertEqual(ov?["bits"] as? Int, 8, "protected module override present")
+        XCTAssertEqual(ov?["mode"] as? String, "affine")
+        XCTAssertEqual(ov?["group_size"] as? Int, 64)
+    }
+
+    func test3DExpertForcedAffineUnderFloatTopLevel() throws {
+        // Stacked 3-D experts must be quantized affine (the MoE runtime is
+        // affine-only) even when the top-level format is nvfp4.
+        let src = try makeSource([
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight": MLXRandom.normal([4, 64, 128]),
+            "model.layers.0.self_attn.q_proj.weight": MLXRandom.normal([128, 128]),
+        ], config: ["model_type": "qwen3_moe", "num_experts": 4])
+        defer { try? FileManager.default.removeItem(at: src) }
+        let ref = try makeReference(scalesFor: [
+            "model.layers.0.mlp.switch_mlp.gate_proj",
+            "model.layers.0.self_attn.q_proj",
+        ])
+        defer { try? FileManager.default.removeItem(at: ref) }
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("klm-quant-moe-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: out) }
+
+        try CheckpointQuantizer.quantize(
+            sourceDir: src, outputDir: out, bits: 4, groupSize: 64, mode: "nvfp4",
+            referenceDir: ref)
+        let w = try loadArrays(url: out.appendingPathComponent("model.safetensors"))
+
+        // Expert: 3-D packed weight + 3-D scales + biases (affine).
+        let eg = "model.layers.0.mlp.switch_mlp.gate_proj"
+        XCTAssertEqual(w["\(eg).weight"]?.ndim, 3, "experts stay 3-D")
+        XCTAssertNotNil(w["\(eg).biases"], "expert is affine -> has biases")
+        // Attn q_proj follows the top-level nvfp4 (no biases).
+        XCTAssertNil(w["model.layers.0.self_attn.q_proj.biases"], "nvfp4: no biases")
+
+        let cfg = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: out.appendingPathComponent("config.json"))) as? [String: Any]
+        let ov = (cfg?["quantization"] as? [String: Any])?[eg] as? [String: Any]
+        XCTAssertEqual(ov?["mode"] as? String, "affine", "experts overridden to affine")
+        XCTAssertEqual(ov?["bits"] as? Int, 4)
+    }
+
+    func testReferenceWithoutScalesThrows() throws {
+        let src = try makeSource(
+            ["model.layers.0.mlp.down_proj.weight": MLXRandom.normal([256, 128])],
+            config: ["model_type": "llama"])
+        defer { try? FileManager.default.removeItem(at: src) }
+        // A reference dir with no `.scales` tensors is not a quantized build.
+        let ref = try makeSource(
+            ["model.layers.0.mlp.down_proj.weight": MLXRandom.normal([256, 128])],
+            config: ["model_type": "llama"])
+        defer { try? FileManager.default.removeItem(at: ref) }
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("klm-quant-noref-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: out) }
+        XCTAssertThrowsError(
+            try CheckpointQuantizer.quantize(
+                sourceDir: src, outputDir: out, bits: 4, groupSize: 64, referenceDir: ref))
+    }
+
     func testRejectsUnsupportedFamilies() throws {
         for badConfig in [
             ["model_type": "qwen2_moe", "num_experts": 60] as [String: Any],

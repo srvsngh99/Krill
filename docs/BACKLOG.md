@@ -207,12 +207,23 @@ shell-out is gone, so the shipped binary has no Python anywhere. Output is
 **byte-identical to the canonical MLX op** (affine: 1007/1007 vs mlx-community
 4-bit, `tools/verify_native_quantize_parity.sh`; nvfp4: 765/765 vs
 `mx.quantize(mode:"nvfp4")`, `tools/verify_native_quantize_nvfp4.sh`).
-Supports dense text families (Llama/Qwen/Mistral/Phi/GLM/Glm4); MoE / vision /
-Gemma are rejected up front (they need per-family handling the shape-driven pass
-does not do - a natural follow-up). `--mode` affine/nvfp4/mxfp4/mxfp8 (the float
-formats auto-pick their required group size; affine + nvfp4 + mxfp4 gated
-end-to-end byte-identical, mxfp8 shares the path but not separately gated);
-`--dtype` default fp16.
+The dense (no-reference) pass supports dense text families
+(Llama/Qwen/Mistral/Phi/GLM/Glm4) by quantizing every 2-D divisible `.weight`.
+**MoE / vision / Gemma are now supported via `--reference <a 4-bit build>`**: the
+quantizer learns the EXACT quantized-module set from the reference checkpoint's
+`.scales` (the generalization of `tools/requant_gemma4_nvfp4.py`), so it
+reproduces the proven mlx-community coverage for any family without
+reverse-engineering each loader predicate - stacked 3-D experts (forced affine),
+DeepSeek's float router gate, the Qwen2.5-VL float vision tower, and the Gemma
+PLE/tied-head all fall out automatically. `--protect <substr>` raises chosen
+modules to a higher precision (the Gemma vision/audio projectors auto-protect at
+8-bit affine, the color-fidelity fix), recorded as per-module overrides the
+loader resolves via `q.effective(path)`. Gated byte-identical vs a fresh
+`mx.quantize` recomputed from the same bf16 source at each module's effective
+precision (`tools/verify_native_quantize_reference.sh`; gemma-4-12b nvfp4 + 8-bit
+projectors). `--mode` affine/nvfp4/mxfp4/mxfp8 (the float formats auto-pick their
+required group size). `--dtype` default fp16. Remaining: real-MoE byte-gating
+needs a bf16 MoE source downloaded (the path is unit-tested synthetically).
 Original write-up kept below for context.
 
 **Original write-up (deferred):** The only Python touchpoint left in the
