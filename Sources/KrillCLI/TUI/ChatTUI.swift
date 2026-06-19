@@ -1,6 +1,7 @@
 import Foundation
 import KrillCore
 import KrillEngine
+import KrillHarness
 import KrillRegistry
 import KrillSampler
 import KrillServer
@@ -11,6 +12,22 @@ import KrillTUI
 // the size. A signal handler may only touch a sig_atomic_t global.
 private nonisolated(unsafe) var tuiWinchFlag: sig_atomic_t = 0
 private func tuiWinchHandler(_ sig: Int32) { tuiWinchFlag = 1 }
+
+/// Thread-safe hand-off of `AgentEvent`s from the background agent-run Task to
+/// the main render loop (the run Task only ever touches this; all UI state lives
+/// on the main task). Mirrors the code TUI's queue.
+private final class EventQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [AgentEvent] = []
+    private var done = false
+    func push(_ e: AgentEvent) { lock.lock(); events.append(e); lock.unlock() }
+    func markDone() { lock.lock(); done = true; lock.unlock() }
+    func drain() -> [AgentEvent] {
+        lock.lock(); defer { lock.unlock() }
+        let out = events; events.removeAll(); return out
+    }
+    var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return done && events.isEmpty }
+}
 
 /// Full-screen opencode-style chat TUI for Krill, in the Sourav AI Labs
 /// monochrome identity: a branded masthead, a scrollable conversation pane, a
@@ -26,9 +43,31 @@ final class ChatTUI {
     private let registry: Registry
 
     // Conversation
-    private struct Msg { enum Role { case user, assistant, note, pre }; let role: Role; var text: String }
+    private struct Msg {
+        enum Role { case user, assistant, note, pre, toolCall, toolResult }
+        let role: Role
+        var text: String
+        // Tool-chip payload (used by .toolCall / .toolResult only).
+        var toolName: String = ""
+        var toolError: Bool = false
+    }
     private var view: [Msg] = []
     private var modelTurns: [(role: String, content: String)] = []
+
+    // Agent mode: the same surface with tools + file edits turned on. `surface`
+    // is the chat/agent toggle (`/agent`); `posture` is the permission leash
+    // cycled with Shift+Tab. The agent thread keeps its own model-facing history
+    // (`agentMessages`, carried across turns via AgentLoop's priorMessages seam),
+    // separate from chat's `modelTurns`. The on-screen `view` is shared so the
+    // transcript reads continuously across both modes.
+    private enum Surface { case chat, agent }
+    private var surface: Surface = .chat
+    private var posture: PermissionMode = .plan
+    private var agentMessages: [[String: String]] = []
+    private var agentSeeded = false
+    private var agentChipShown = false          // a chip was emitted for the in-flight call
+    private let approver = TUIApprover()
+    private var initialAgentTask: String?       // auto-run once on launch (krill code "task")
 
     // Attachments
     private struct Att { let kind: MediaKind; let data: Data; let name: String; let dims: (Int, Int)? }
@@ -111,7 +150,9 @@ final class ChatTUI {
          params: SamplingParams, maxTokens: Int, registry: Registry,
          initialImage: Data?, initialAudio: Data?, theme: String? = nil,
          voiceModeSetting: String = "off", speakRepliesSetting: Bool = false,
-         thinkingSetting: Bool = true) {
+         thinkingSetting: Bool = true,
+         modeSetting: String = "chat", agentPostureSetting: String = "plan",
+         initialAgentTask: String? = nil) {
         self.engine = engine
         self.modelName = modelName
         self.system = system
@@ -122,6 +163,9 @@ final class ChatTUI {
         self.voiceMode = Self.parseVoiceMode(voiceModeSetting)
         self.speakReplies = speakRepliesSetting
         self.thinkingOn = thinkingSetting
+        self.surface = modeSetting.lowercased() == "agent" ? .agent : .chat
+        self.posture = PermissionMode.parse(agentPostureSetting) ?? .plan
+        self.initialAgentTask = initialAgentTask
         self.contextWindow = AliasMap.resolve(modelName)?.context ?? 0
         self.customCommands = CustomCommandStore.load(from: Self.commandsDir)
         menu.extra = customCommands.commands.map {
@@ -168,6 +212,17 @@ final class ChatTUI {
             view.append(Msg(role: .note, text: attachSummary()))
         }
         render()
+
+        // Launched in agent mode (config default or `krill code`): prime the
+        // tool context and auto-run the initial task if one was given.
+        if surface == .agent {
+            ensureAgentSeed()
+            if let task = initialAgentTask, !task.isEmpty {
+                initialAgentTask = nil
+                await runAgentTurn(task)
+                render()
+            }
+        }
 
         while !shouldQuit {
             if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize(); render() }
@@ -218,6 +273,14 @@ final class ChatTUI {
             return nil
         case .ctrlT:
             setThinking(!thinkingOn)   // Ctrl-T: toggle the reasoning channel
+            return nil
+        case .backTab:
+            // Shift+Tab cycles the agent permission posture; no-op in chat mode
+            // (there is no leash to set when the model has no hands).
+            if surface == .agent {
+                posture = posture.next
+                note("Posture: \(posture.postureNote)")
+            }
             return nil
         case .ctrlL:
             return nil   // render() runs after each batch
@@ -577,6 +640,16 @@ final class ChatTUI {
             if !atts.isEmpty { view.append(Msg(role: .note, text: attachSummary())); render() }
             return
         }
+        if surface == .agent {
+            // Agent mode is text-driven (tools, not multimodal); drop any
+            // pending media so it is not silently lost.
+            if !pendingImages.isEmpty || pendingAudio != nil {
+                pendingImages.removeAll(); pendingAudio = nil
+                note("(agent mode is text-only; attachments dropped)")
+            }
+            await runAgentTurn(prompt)
+            return
+        }
         await generate(prompt: prompt)
     }
 
@@ -598,9 +671,23 @@ final class ChatTUI {
         switch cmd {
         case "/quit", "/exit", "/q": shouldQuit = true
         case "/help": showOverlay("Help", helpText())
+        case "/agent":
+            // Toggle hands on/off. Entering agent mode primes the tool context
+            // (carrying the chat so far); the posture (Shift+Tab) governs how
+            // much the model can do without asking.
+            surface = surface == .agent ? .chat : .agent
+            if surface == .agent {
+                ensureAgentSeed()
+                note("Agent mode ON - tools enabled (read · edit · bash). "
+                    + "Posture: \(posture.label) (\(posture.postureNote)). "
+                    + "Shift+Tab cycles posture; /agent to exit.")
+            } else {
+                note("Agent mode OFF - back to plain chat.")
+            }
         case "/drop": pendingImages.removeAll(); pendingAudio = nil; note("Dropped pending attachments.")
         case "/clear", "/reset":   // /reset kept as an alias for clearing the chat
             modelTurns.removeAll(); view.removeAll(); pendingImages.removeAll(); pendingAudio = nil
+            agentMessages.removeAll(); agentSeeded = false; approver.reset()
             note("Conversation cleared.")
         case "/history":
             showOverlay("Conversation", modelTurns.isEmpty ? "No conversation yet."
@@ -691,6 +778,164 @@ final class ChatTUI {
 
     private func note(_ s: String) { view.append(Msg(role: .note, text: s)) }
 
+    // MARK: - Agent mode
+
+    /// The agent toolset: read-only explorers + file edits + bash. The permission
+    /// posture - not this list - governs what actually runs.
+    private func agentTools() -> ToolRegistry {
+        ToolRegistry([
+            ReadTool(), ListTool(), GlobTool(), GrepTool(),
+            EditTool(), MultiEditTool(), WriteTool(), BashTool(),
+        ])
+    }
+
+    /// Prime the agent thread once, carrying the chat so far so context is not
+    /// lost when hands turn on. Injects the tool system over `[system] + chat
+    /// history`; subsequent turns continue from the loop's returned transcript.
+    private func ensureAgentSeed() {
+        guard !agentSeeded else { return }
+        agentSeeded = true
+        var msgs: [[String: String]] = []
+        if let system, !system.isEmpty { msgs.append(["role": "system", "content": system]) }
+        for t in modelTurns { msgs.append(["role": t.role, "content": t.content]) }
+        let format = ToolCalling.ToolFormat.forFamily(engine.family)
+        agentMessages = ToolCalling.injectToolSystem(
+            into: msgs, tools: agentTools().specs(), format: format)
+    }
+
+    /// Run one agent turn live: spawn the loop on a background Task, drain its
+    /// events into the transcript, and poll keys for cancel / scroll / approval.
+    /// Mirrors the code TUI's run loop, adapted to the chat surface.
+    private func runAgentTurn(_ task: String) async {
+        view.append(Msg(role: .user, text: task))
+        scrollOffset = 0
+        agentChipShown = false
+
+        // Plan posture: steer the model up front (the permission layer also
+        // hard-denies mutating tools, so this is a nudge, not the enforcement).
+        let runTask = posture == .plan
+            ? "(Plan mode: read-only. Investigate with the read-only tools and propose a clear, "
+              + "step-by-step plan. Do not edit files or run commands.)\n\n\(task)"
+            : task
+
+        let loop = AgentLoop(
+            generator: EngineGenerator(engine: engine, maxTokens: maxTokens),
+            tools: agentTools(),
+            permission: PermissionPolicy(mode: posture),
+            gate: approver)
+
+        let queue = EventQueue()
+        let prior = agentMessages
+        let theLoop = loop
+        let bgTask = Task {
+            let t = await theLoop.run(
+                user: runTask, priorMessages: prior, onEvent: { ev in queue.push(ev) })
+            queue.markDone()
+            return t
+        }
+
+        let dots = ["\u{2839}", "\u{2838}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}", "\u{2819}"]
+        var spin = 0
+        while true {
+            if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize() }
+            for ev in queue.drain() { applyAgentEvent(ev) }
+            let finished = queue.isFinished
+            if finished {
+                lastStatus = ""
+            } else if approver.pending() != nil {
+                lastStatus = "awaiting approval"
+            } else {
+                lastStatus = "\(dots[spin % dots.count]) working"
+            }
+            render()
+            if finished { break }
+            spin += 1
+            if raw.waitForInput(timeoutMs: 120), let keys = reader.read() {
+                for key in keys { handleAgentRunKey(key, bgTask: bgTask) }
+            }
+        }
+
+        let transcript = await bgTask.value
+        agentMessages = transcript.messages
+        lastStatus = transcript.wasCancelled ? "cancelled"
+            : (transcript.hitIterationLimit ? "iteration limit" : "")
+        render()
+    }
+
+    /// Keys handled while an agent run is in flight: answer a pending approval
+    /// (y/n/a), or cancel / scroll the live transcript.
+    private func handleAgentRunKey(_ key: Key, bgTask: Task<AgentTranscript, Never>) {
+        if approver.pending() != nil {
+            switch key {
+            case .char("y"), .char("Y"), .enter: approver.resolve(true)
+            case .char("a"), .char("A"): approver.resolve(true, always: true)
+            case .char("n"), .char("N"), .escape: approver.resolve(false)
+            case .ctrlC: approver.resolve(false); bgTask.cancel(); lastStatus = "cancelling"
+            default: break
+            }
+            return
+        }
+        switch key {
+        case .ctrlC: bgTask.cancel(); lastStatus = "cancelling"
+        case .pageUp: scrollOffset += paneHeight() - 1
+        case .pageDown: scrollOffset = max(0, scrollOffset - (paneHeight() - 1))
+        case .scrollUp, .up: scrollOffset += 3
+        case .scrollDown, .down: scrollOffset = max(0, scrollOffset - 3)
+        default: break
+        }
+    }
+
+    /// Fold one agent event into the shared transcript view.
+    private func applyAgentEvent(_ event: AgentEvent) {
+        switch event {
+        case .assistantTurn(let text):
+            let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { view.append(Msg(role: .assistant, text: t)) }
+        case .toolStarted(let name, let args):
+            view.append(Msg(role: .toolCall, text: args, toolName: name))
+            agentChipShown = true
+        case .toolFinished(let inv):
+            // Denied / unknown tools never emit toolStarted, so add their chip
+            // here so the observation is never orphaned.
+            if !agentChipShown {
+                view.append(Msg(role: .toolCall, text: inv.argumentsJSON, toolName: inv.name))
+            }
+            view.append(Msg(role: .toolResult, text: inv.result.content, toolError: inv.result.isError))
+            agentChipShown = false
+        case .finalAnswer(let text):
+            view.append(Msg(role: .assistant, text: text))
+        case .iterationLimitReached:
+            note("[stopped at the iteration limit without a final answer]")
+        case .cancelled:
+            note("(cancelled)")
+        }
+        scrollOffset = 0
+    }
+
+    /// The y/n/a approval prompt for a pending tool call (shown above the input
+    /// box while an agent run is paused on the permission gate).
+    private func approvalPrompt(_ req: TUIApprover.Request) -> String {
+        let args = req.argumentsJSON.replacingOccurrences(of: "\n", with: " ")
+        let shown = args.count > 60 ? String(args.prefix(57)) + "..." : args
+        return "Run \(req.toolName) \(shown)?   [y]es   [n]o   [a]lways   (Esc = no)"
+    }
+
+    /// Map a `CodeView` line to a styled terminal string (tool chips / diffs /
+    /// results). Shared rendering with what the code TUI used.
+    private func styledCode(_ line: CodeLine) -> String {
+        switch line.style {
+        case .user: return Ansi.user(line.text)
+        case .assistant: return Ansi.model(line.text)
+        case .toolName: return Ansi.cyan(line.text)
+        case .toolOk: return Ansi.dim(line.text)
+        case .toolError: return Ansi.red(line.text)
+        case .diffAdd: return Ansi.green(line.text)
+        case .diffDel: return Ansi.red(line.text)
+        case .note: return Ansi.yellow(line.text)
+        case .dim: return Ansi.dim(line.text)
+        }
+    }
+
     /// Map the `voice_mode` config string to a posture (default off/text).
     private static func parseVoiceMode(_ s: String) -> VoiceMode {
         switch s.lowercased() {
@@ -766,7 +1011,9 @@ final class ChatTUI {
         let speakTag = speakReplies ? "\u{25CF} speak\(sep)" : ""
         // Reasoning indicator: a mono dot when the thinking channel is on.
         let thinkTag = thinkingOn ? "\u{25CF} think\(sep)" : ""
-        let cleanRight = "\(thinkTag)\(speakTag)\(cwdLabel)\(sep)\(KrillVersionTag)"
+        // Agent posture chip: shows the leash state whenever hands are on.
+        let agentTag = surface == .agent ? "\u{25CF} agent:\(posture.label)\(sep)" : ""
+        let cleanRight = "\(agentTag)\(thinkTag)\(speakTag)\(cwdLabel)\(sep)\(KrillVersionTag)"
         // Voice OFF (text mode) or a non-audio model: no voice chrome at all - the
         // footer is just the generation status and cwd/version (plus speak tag).
         guard engine.canUseNativeAudio, voiceMode != .type || !voiceActivity.isEmpty else {
@@ -784,7 +1031,7 @@ final class ChatTUI {
             case .type:      left = ""   // unreachable (guarded above)
             }
         }
-        let right = lastStatus.isEmpty ? cleanRight : "\(speakTag)\(lastStatus)\(sep)\(KrillVersionTag)"
+        let right = lastStatus.isEmpty ? cleanRight : "\(agentTag)\(speakTag)\(lastStatus)\(sep)\(KrillVersionTag)"
         return (left, right)
     }
 
@@ -807,6 +1054,10 @@ final class ChatTUI {
     /// it is off). Empty on non-audio models, where there is nothing to hint.
     private func composerHint() -> String {
         let sep = " \u{00B7} "
+        // In agent mode the leash + how to change it is the most useful hint.
+        if surface == .agent {
+            return "agent:\(posture.label)\(sep)Shift+Tab posture\(sep)/agent to exit"
+        }
         guard engine.canUseNativeAudio else { return "" }
         switch voiceMode {
         case .type:      return "activate voice mode: Ctrl-V"
@@ -1312,8 +1563,13 @@ final class ChatTUI {
         let modal = picker != nil || overlay != nil
         let menuLines = menu.isActive ? renderMenu(width: width) : []
         // A faded, italic, right-aligned hint sits on the row just above the input
-        // box (hidden while the slash popup or a modal screen owns that space).
-        let hintText = (menu.isActive || modal) ? "" : composerHint()
+        // box (hidden while the slash popup or a modal screen owns that space). A
+        // pending agent approval takes that row instead, drawn prominently.
+        let approval = surface == .agent ? approver.pending() : nil
+        let hintText: String
+        if let approval { hintText = approvalPrompt(approval) }
+        else if menu.isActive || modal { hintText = "" }
+        else { hintText = composerHint() }
         let hintRows = hintText.isEmpty ? 0 : 1
         let availRows = max(0, boxTop - paneTop)     // rows paneTop .. boxTop-1
         let convHeight = max(0, availRows - menuLines.count - hintRows)
@@ -1345,11 +1601,16 @@ final class ChatTUI {
         for (i, line) in menuLines.enumerated() {
             frame += positioned(paneTop + convHeight + i, line)
         }
-        // Faded italic hint, right-aligned on the row just above the input box.
+        // Faded italic hint, right-aligned on the row just above the input box -
+        // OR a pending approval prompt, left-aligned and bold so it can't be missed.
         if hintRows > 0 {
             let clipped = String(hintText.prefix(max(0, width - 2)))
-            let pad = max(0, width - clipped.count - 2)
-            frame += positioned(boxTop - 1, String(repeating: " ", count: pad) + Ansi.hint(clipped))
+            if approval != nil {
+                frame += positioned(boxTop - 1, "  " + Ansi.bold(clipped))
+            } else {
+                let pad = max(0, width - clipped.count - 2)
+                frame += positioned(boxTop - 1, String(repeating: " ", count: pad) + Ansi.hint(clipped))
+            }
         }
         // Input box, then the footer (which carries the voice posture on its left).
         for (i, line) in box.enumerated() {
@@ -1390,6 +1651,14 @@ final class ChatTUI {
                 for l in TUIMarkdown.render(msg.text, width: w) { lines.append(margin + Ansi.model(l)) }
             case .note:
                 for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.chrome(l)) }
+            case .toolCall:
+                for l in CodeView.toolCall(name: msg.toolName, argumentsJSON: msg.text, width: w) {
+                    lines.append(margin + styledCode(l))
+                }
+            case .toolResult:
+                for l in CodeView.toolResult(content: msg.text, isError: msg.toolError, width: w, maxLines: 14) {
+                    lines.append(margin + styledCode(l))
+                }
             case .pre:
                 // Preformatted (help / transcript): keep spacing verbatim - no
                 // word-wrap that would collapse aligned columns. A non-indented,
@@ -1590,6 +1859,7 @@ final class ChatTUI {
         let keys: [(String, String)] = [
             ("Up / Down", "History, or cycle the slash menu"),
             ("Tab", "Accept the highlighted command"),
+            ("Shift+Tab", "Agent mode: cycle posture (plan/ask/accept-edits/auto)"),
             ("Enter", "Send the message"),
             ("Hold Space", "Push-to-talk (dictate/handsfree/send postures)"),
             ("Ctrl-V", "Cycle voice posture: type/dictate/handsfree/send"),
