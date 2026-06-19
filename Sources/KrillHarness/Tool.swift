@@ -54,5 +54,12 @@ public struct ToolRegistry: Sendable {
 
     public func tool(named name: String) -> (any Tool)? { byName[name] }
 
+    /// The `ServerToolSpec` for one tool (for schema checks / arg-repair prompts).
+    public func spec(named name: String) -> ServerToolSpec? {
+        byName[name].map {
+            ServerToolSpec(name: $0.name, description: $0.description, parametersJSON: $0.parametersJSON)
+        }
+    }
+
     public var isEmpty: Bool { order.isEmpty }
 }
