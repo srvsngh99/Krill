@@ -94,7 +94,7 @@ struct CodeCommand: AsyncParsableCommand {
     }
 
     private func render(_ t: AgentTranscript) {
-        for (i, step) in t.steps.enumerated() {
+        for step in t.steps {
             if !step.assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && !step.toolCalls.isEmpty {
                 print(step.assistantText)
@@ -102,13 +102,10 @@ struct CodeCommand: AsyncParsableCommand {
             for call in step.toolCalls {
                 let marker = call.result.isError ? "x" : "*"
                 print("  [\(marker)] \(call.name)(\(call.argumentsJSON))")
-                let body = call.result.content.split(separator: "\n", omittingEmptySubsequences: false)
-                    .prefix(20).joined(separator: "\n")
-                for line in body.split(separator: "\n", omittingEmptySubsequences: false) {
-                    print("      \(line)")
-                }
+                let lines = call.result.content
+                    .split(separator: "\n", omittingEmptySubsequences: false).prefix(20)
+                for line in lines { print("      \(line)") }
             }
-            _ = i
         }
         if t.hitIterationLimit {
             print("\n[stopped at iteration limit (\(maxIterations)) without a final answer]")

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import KrillTooling
 
@@ -39,7 +40,17 @@ public struct BashTool: Tool {
                 content: "Error: bash requires a non-empty 'command' string argument.",
                 isError: true)
         }
+        // Offload the blocking Process work to a background thread so it never
+        // blocks the cooperative executor (and so the synchronous semaphore wait
+        // is legal).
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: execute(command))
+            }
+        }
+    }
 
+    private func execute(_ command: String) -> ToolResult {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/sh")
         proc.arguments = ["-c", command]
@@ -55,27 +66,55 @@ public struct BashTool: Tool {
                 isError: true)
         }
 
-        // Watchdog: terminate if it runs past the timeout. The flag is shared
-        // between the timeout queue and this function, so guard it with a lock.
-        let timeoutQueue = DispatchQueue(label: "krill.bash.timeout")
-        let timedOut = TimeoutFlag()
-        let deadline = DispatchTime.now() + timeout
-        timeoutQueue.asyncAfter(deadline: deadline) { [weak proc] in
-            if let proc, proc.isRunning {
-                timedOut.set()
-                proc.terminate()
+        // Collect output incrementally off a background queue so we never have
+        // to block on pipe EOF (a SIGTERM-ignoring child or an orphaned
+        // grandchild can hold the write end open indefinitely).
+        let handle = pipe.fileHandleForReading
+        let box = OutputBox()
+        let eof = DispatchSemaphore(value: 0)
+        handle.readabilityHandler = { h in
+            let chunk = h.availableData
+            if chunk.isEmpty {
+                h.readabilityHandler = nil
+                eof.signal()
+            } else {
+                box.append(chunk)
             }
         }
 
-        // Read to EOF BEFORE waiting, so a large output can't deadlock the pipe.
-        let outData = pipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
+        // Watchdog: SIGTERM at the timeout, then escalate to SIGKILL so even a
+        // TERM-ignoring shell is reaped and `waitUntilExit` returns.
+        let timeoutQueue = DispatchQueue(label: "krill.bash.timeout")
+        let timedOut = TimeoutFlag()
+        timeoutQueue.asyncAfter(deadline: .now() + timeout) { [weak proc] in
+            guard let proc, proc.isRunning else { return }
+            timedOut.set()
+            let pid = proc.processIdentifier
+            proc.terminate()  // SIGTERM
+            timeoutQueue.asyncAfter(deadline: .now() + 1) { [weak proc] in
+                if let proc, proc.isRunning { kill(pid, SIGKILL) }
+            }
+        }
 
-        var output = String(data: outData, encoding: .utf8) ?? ""
+        proc.waitUntilExit()
+        // Prefer a clean EOF (full output), but cap the wait: if an orphaned
+        // grandchild still holds the pipe after the shell is gone, stop reading
+        // rather than hang the loop.
+        if eof.wait(timeout: .now() + 2) == .timedOut {
+            handle.readabilityHandler = nil
+        }
+        let outData = box.data()
+
+        // Lossy decode so invalid UTF-8 (or a byte-boundary cut) never silently
+        // drops the whole output - it becomes U+FFFD instead.
+        var output = String(decoding: outData, as: UTF8.self)
         if output.utf8.count > maxOutputBytes {
-            let tail = Data(output.utf8.suffix(maxOutputBytes))
+            var tailBytes = Array(output.utf8.suffix(maxOutputBytes))
+            // Advance past any leading UTF-8 continuation bytes so the kept tail
+            // starts on a character boundary and no glyph is mangled.
+            while let first = tailBytes.first, first & 0xC0 == 0x80 { tailBytes.removeFirst() }
             output = "[output truncated to last \(maxOutputBytes) bytes]\n"
-                + (String(data: tail, encoding: .utf8) ?? "")
+                + String(decoding: tailBytes, as: UTF8.self)
         }
         if output.isEmpty { output = "(no output)" }
 
@@ -100,4 +139,13 @@ private final class TimeoutFlag: @unchecked Sendable {
     private var value = false
     func set() { lock.lock(); value = true; lock.unlock() }
     var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+}
+
+/// Lock-guarded output accumulator, appended from the pipe's readability queue
+/// and read back once the command is done.
+private final class OutputBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buf = Data()
+    func append(_ d: Data) { lock.lock(); buf.append(d); lock.unlock() }
+    func data() -> Data { lock.lock(); defer { lock.unlock() }; return buf }
 }

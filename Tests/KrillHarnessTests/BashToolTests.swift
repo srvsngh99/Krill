@@ -30,4 +30,32 @@ final class BashToolTests: XCTestCase {
         XCTAssertFalse(r.isError)
         XCTAssertTrue(r.content.contains("err"))
     }
+
+    func testTimeoutTerminatesLongCommand() async {
+        let r = await BashTool(timeout: 1).run(argumentsJSON: #"{"command":"sleep 5"}"#)
+        XCTAssertTrue(r.isError)
+        XCTAssertTrue(r.content.contains("timed out"), "got: \(r.content)")
+    }
+
+    func testTimeoutKillsTermIgnoringChild() async {
+        // The child traps SIGTERM, so only SIGKILL escalation can stop it.
+        // Must return well before the child's own sleep would finish.
+        let start = Date()
+        let r = await BashTool(timeout: 1).run(
+            argumentsJSON: #"{"command":"trap '' TERM; sleep 10"}"#)
+        XCTAssertTrue(r.isError)
+        XCTAssertTrue(r.content.contains("timed out"))
+        XCTAssertLessThan(
+            Date().timeIntervalSince(start), 6,
+            "SIGKILL escalation must stop a TERM-ignoring child")
+    }
+
+    func testTruncationKeepsTailOnCharacterBoundary() async {
+        // Emit more than the cap of a multibyte char; the tail must decode
+        // cleanly (no dropped output, no mojibake) and carry the marker.
+        let tool = BashTool(maxOutputBytes: 64)
+        let r = await tool.run(argumentsJSON: #"{"command":"for i in $(seq 1 200); do printf 'é'; done"}"#)
+        XCTAssertTrue(r.content.contains("truncated"))
+        XCTAssertTrue(r.content.contains("é"), "kept tail must be valid UTF-8")
+    }
 }
