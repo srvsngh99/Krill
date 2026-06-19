@@ -221,6 +221,52 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(calls, 0)
     }
 
+    func testReasoningIsStrippedFromFinalAnswer() async {
+        let gen = MockGenerator(responses: [
+            "<think>2+2 is basic arithmetic, the result is 4.</think>The answer is 4.",
+        ])
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([StubTool()]))
+        let t = await loop.run(user: "What is 2+2?")
+
+        XCTAssertEqual(t.finalText, "The answer is 4.", "reasoning must not leak into the final answer")
+        XCTAssertEqual(t.steps[0].assistantText, "The answer is 4.")
+    }
+
+    func testReasoningIsStrippedFromToolCallStepButRawIsFedBack() async {
+        let gen = MockGenerator(responses: [
+            "<think>I should run the command first.</think>Checking.\n"
+                + hermesCall("bash", #"{"command":"echo hi"}"#),
+            "<think>The output looks right.</think>Done.",
+        ])
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([StubTool(reply: "hi")]))
+        let t = await loop.run(user: "go")
+
+        // Display text is stripped of reasoning on both the tool step and the final.
+        XCTAssertEqual(t.steps[0].assistantText, "Checking.")
+        XCTAssertEqual(t.finalText, "Done.")
+        // But the raw assistant turn (with reasoning) is preserved in history so
+        // the model keeps its own context.
+        XCTAssertTrue(
+            t.messages.contains {
+                $0["role"] == "assistant" && ($0["content"] ?? "").contains("<think>")
+            },
+            "raw model output (including reasoning) must remain in the message history")
+    }
+
+    func testMultipleReasoningBlocksAreAllStripped() async {
+        // Small local models can emit several reasoning blocks in one turn;
+        // every block must be stripped from the displayed answer, not just the
+        // first (the shared parser strips only the first block per call).
+        let gen = MockGenerator(responses: [
+            "<think>first thought</think>Part one. <think>second thought</think>Part two.",
+        ])
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([StubTool()]))
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.finalText, "Part one. Part two.")
+        XCTAssertFalse(t.finalText.contains("thought"), "no reasoning block may leak")
+    }
+
     func testRegistrySpecsPreserveOrderAndDedupe() {
         let reg = ToolRegistry([
             StubTool(name: "read"),
