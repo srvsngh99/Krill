@@ -82,6 +82,18 @@ public struct KrillConfig: Sendable {
     /// talk/listen loop. `speak_replies` in config; `KRILL_SPEAK_REPLIES` env.
     public var speakReplies: Bool
 
+    /// Which surface the interactive TUI launches in: "chat" (default, pure
+    /// inference) or "agent" (tools + file edits, the unified coding mode).
+    /// `default_mode` in config. `krill code` always starts in agent mode
+    /// regardless of this default.
+    public var defaultMode: String
+
+    /// Which permission posture agent mode opens on: "plan" (default, read-only),
+    /// "ask" (confirm each mutating tool), "accept-edits" (auto-apply edits, ask
+    /// for commands), or "auto"/"accept-all" (run everything). Shift+Tab cycles
+    /// it live in the TUI. `default_agent_posture` in config.
+    public var defaultAgentPosture: String
+
     /// Default reasoning ("thinking") state for new sessions: when true and the
     /// model has a thinking channel, the engine turns it on so the model reasons
     /// before answering. ON by default (it is a no-op for models with no thinking
@@ -111,6 +123,8 @@ public struct KrillConfig: Sendable {
         self.flashAttention = false
         self.voiceMode = "off"
         self.speakReplies = false
+        self.defaultMode = "chat"
+        self.defaultAgentPosture = "plan"
         self.thinking = true
     }
 
@@ -180,6 +194,10 @@ public struct KrillConfig: Sendable {
                 voiceMode = value
             case "speak_replies":
                 speakReplies = value == "true" || value == "1"
+            case "default_mode":
+                defaultMode = value
+            case "default_agent_posture":
+                defaultAgentPosture = value
             case "thinking", "enable_thinking":
                 thinking = value == "true" || value == "1" || value == "on" || value == "yes"
             case "keep_alive":

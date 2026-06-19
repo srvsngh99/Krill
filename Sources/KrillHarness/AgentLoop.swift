@@ -226,7 +226,8 @@ public struct AgentLoop: Sendable {
                 // Permission gate: decide BEFORE repairing/running so a denied
                 // tool costs no extra generation. A denial is fed back so the
                 // model can adapt (e.g. switch to read-only investigation).
-                let decision = permission.decision(toolName: call.name, isReadOnly: tool.isReadOnly)
+                let decision = permission.decision(
+                    toolName: call.name, isReadOnly: tool.isReadOnly, isFileEdit: tool.isFileEdit)
                 if case .deny(let reason) = decision {
                     record(args: call.argumentsJSON,
                            ToolResult(content: "Permission denied: \(reason)", isError: true))

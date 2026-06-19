@@ -5,6 +5,8 @@ public enum Key: Equatable {
     case char(Character)
     case enter
     case tab
+    /// Shift+Tab (back-tab), `ESC [ Z`. Used to cycle the agent permission posture.
+    case backTab
     case backspace
     case escape
     case up, down, left, right
@@ -158,6 +160,7 @@ public enum KeyDecoder {
             case 0x44: return .left
             case 0x48: return .home
             case 0x46: return .end
+            case 0x5a: return .backTab   // ESC [ Z  = Shift+Tab (back-tab)
             default: return nil
             }
         }

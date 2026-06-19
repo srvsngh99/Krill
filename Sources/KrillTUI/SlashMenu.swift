@@ -22,6 +22,7 @@ public struct SlashMenu {
     /// Canonical command list shown in the popup (and accepted by the TUI).
     public static let all: [Item] = [
         Item(name: "/help", summary: "Show keys and commands"),
+        Item(name: "/agent", summary: "Toggle agent mode (tools + file edits); Shift+Tab cycles posture"),
         Item(name: "/image", summary: "Attach an image to your next message"),
         Item(name: "/audio", summary: "Attach an audio clip"),
         Item(name: "/mic", summary: "Record from the microphone"),

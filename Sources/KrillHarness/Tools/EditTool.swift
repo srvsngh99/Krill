@@ -6,6 +6,7 @@ import KrillTooling
 /// occurrence.
 public struct EditTool: Tool {
     public let name = "edit_file"
+    public let isFileEdit = true
     public let description =
         "Replace an exact string in a file. old_string must match exactly (incl. whitespace) and be unique unless replace_all is true."
     public let parametersJSON = """

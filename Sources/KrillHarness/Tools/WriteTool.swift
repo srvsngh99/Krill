@@ -5,6 +5,7 @@ import KrillTooling
 /// directories as needed).
 public struct WriteTool: Tool {
     public let name = "write_file"
+    public let isFileEdit = true
     public let description =
         "Create a new file or overwrite an existing one with the given content. Creates parent directories."
     public let parametersJSON = """

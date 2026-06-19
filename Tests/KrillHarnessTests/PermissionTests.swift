@@ -26,6 +26,7 @@ private actor RunFlag {
 private struct FlagTool: Tool {
     let name: String
     let isReadOnly: Bool
+    var isFileEdit: Bool = false
     let description = "flag tool"
     let parametersJSON = #"{"type":"object","properties":{"x":{"type":"string"}}}"#
     let flag: RunFlag
@@ -100,6 +101,46 @@ final class PermissionPolicyTests: XCTestCase {
         if case .deny = p.decision(toolName: "edit_file", isReadOnly: false) {} else {
             XCTFail("plan mode must deny mutating tools")
         }
+    }
+
+    func testAcceptEditsAllowsFileEditButAsksForCommand() {
+        let p = PermissionPolicy(mode: .acceptEdits)
+        // A file edit auto-applies...
+        XCTAssertEqual(
+            p.decision(toolName: "edit_file", isReadOnly: false, isFileEdit: true), .allow)
+        // ...while a command (not a file edit) still defers to the gate.
+        XCTAssertEqual(
+            p.decision(toolName: "bash", isReadOnly: false, isFileEdit: false), .ask)
+        // Read-only tools always run.
+        XCTAssertEqual(
+            p.decision(toolName: "read_file", isReadOnly: true), .allow)
+    }
+}
+
+final class PermissionPostureTests: XCTestCase {
+
+    func testParseAcceptsSynonyms() {
+        XCTAssertEqual(PermissionMode.parse("auto"), .acceptAll)
+        XCTAssertEqual(PermissionMode.parse("accept-all"), .acceptAll)
+        XCTAssertEqual(PermissionMode.parse("accept-edits"), .acceptEdits)
+        XCTAssertEqual(PermissionMode.parse("edits"), .acceptEdits)
+        XCTAssertEqual(PermissionMode.parse("ask"), .ask)
+        XCTAssertEqual(PermissionMode.parse("PLAN"), .plan)
+        XCTAssertNil(PermissionMode.parse("nonsense"))
+    }
+
+    func testShiftTabCycleOrderWraps() {
+        XCTAssertEqual(PermissionMode.plan.next, .ask)
+        XCTAssertEqual(PermissionMode.ask.next, .acceptEdits)
+        XCTAssertEqual(PermissionMode.acceptEdits.next, .acceptAll)
+        XCTAssertEqual(PermissionMode.acceptAll.next, .plan)
+    }
+
+    func testLabelsAreStable() {
+        XCTAssertEqual(PermissionMode.acceptAll.label, "auto")
+        XCTAssertEqual(PermissionMode.acceptEdits.label, "accept-edits")
+        XCTAssertEqual(PermissionMode.ask.label, "ask")
+        XCTAssertEqual(PermissionMode.plan.label, "plan")
     }
 }
 
@@ -193,6 +234,31 @@ final class AgentLoopPermissionTests: XCTestCase {
 
         let seen = await gate.seenArgs
         XCTAssertTrue(seen.contains(#"{"x":"hello"}"#), "gate must see the args that will run")
+    }
+
+    func testAcceptEditsRunsEditWithoutGateButAsksForBash() async {
+        // A file edit auto-applies (no gate consulted); the bash command defers
+        // to the gate, which declines here, so bash never runs.
+        let editFlag = RunFlag(), bashFlag = RunFlag()
+        let gen = ScriptGen([
+            hermesCall("write_file", #"{"x":"a"}"#),
+            hermesCall("bash", #"{"x":"rm -rf"}"#),
+            "done",
+        ])
+        let loop = AgentLoop(
+            generator: gen,
+            tools: ToolRegistry([
+                FlagTool(name: "write_file", isReadOnly: false, isFileEdit: true, flag: editFlag),
+                FlagTool(name: "bash", isReadOnly: false, flag: bashFlag),
+            ]),
+            permission: PermissionPolicy(mode: .acceptEdits),
+            gate: ApproveGate(approveAll: false))
+        _ = await loop.run(user: "go")
+
+        let edited = await editFlag.ran
+        let bashed = await bashFlag.ran
+        XCTAssertTrue(edited, "accept-edits must auto-apply a file edit")
+        XCTAssertFalse(bashed, "accept-edits must still gate (and here deny) a command")
     }
 
     func testDenyListBlocksToolEvenInAcceptAll() async {

@@ -6,6 +6,7 @@ import KrillTooling
 /// succeeds (all-or-nothing).
 public struct MultiEditTool: Tool {
     public let name = "multi_edit"
+    public let isFileEdit = true
     public let description =
         "Apply multiple exact-string edits to a single file in order, atomically (all succeed or none are written)."
     public let parametersJSON = """
