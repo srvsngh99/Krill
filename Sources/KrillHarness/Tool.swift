@@ -22,11 +22,21 @@ public protocol Tool: Sendable {
     var description: String { get }
     /// JSON-schema object (as a string) for the tool's arguments.
     var parametersJSON: String { get }
+    /// Whether the tool only observes (never writes files or runs commands).
+    /// Read-only tools are always allowed by the permission layer, even in plan
+    /// mode. Defaults to `false` - a tool must opt in to being trusted as safe.
+    var isReadOnly: Bool { get }
     /// Execute with the model-provided arguments (a JSON object string) and
     /// return the observation to feed back. Implementations must not throw -
     /// surface failures as a `ToolResult(isError: true)` so the loop can keep
     /// going and let the model recover.
     func run(argumentsJSON: String) async -> ToolResult
+}
+
+public extension Tool {
+    /// Conservative default: a tool is treated as mutating unless it declares
+    /// otherwise, so an unaudited tool requires approval rather than running free.
+    var isReadOnly: Bool { false }
 }
 
 /// Ordered, name-indexed set of the tools offered to the model for a run.

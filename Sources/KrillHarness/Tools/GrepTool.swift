@@ -5,6 +5,7 @@ import KrillTooling
 /// matches. Optionally restrict to files matching a glob.
 public struct GrepTool: Tool {
     public let name = "grep"
+    public let isReadOnly = true
     public let description =
         "Search file contents with a regular expression. Returns path:line:text matches. Optional glob filter."
     public let parametersJSON = """

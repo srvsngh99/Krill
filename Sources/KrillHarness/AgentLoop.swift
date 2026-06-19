@@ -51,17 +51,28 @@ public struct AgentLoop: Sendable {
     /// in-process differentiator - it is what lets a small model complete an
     /// agentic task instead of looping on empty arguments.
     public let constrainToolArgs: Bool
+    /// Permission policy consulted before every tool call. The default
+    /// (`.acceptAll`) runs every tool, preserving the autonomous flow the loop
+    /// shipped with; `.plan` denies mutating tools, `.ask` defers them to `gate`.
+    public let permission: PermissionPolicy
+    /// Interactive approver for `.ask` decisions. When the policy returns `.ask`
+    /// and this is nil, the call is denied (fail-safe: no silent execution).
+    public let gate: (any PermissionGate)?
 
     public init(
         generator: any HarnessGenerator,
         tools: ToolRegistry,
         maxIterations: Int = 12,
-        constrainToolArgs: Bool = true
+        constrainToolArgs: Bool = true,
+        permission: PermissionPolicy = PermissionPolicy(),
+        gate: (any PermissionGate)? = nil
     ) {
         self.generator = generator
         self.tools = tools
         self.maxIterations = max(1, maxIterations)
         self.constrainToolArgs = constrainToolArgs
+        self.permission = permission
+        self.gate = gate
     }
 
     public func run(user: String, system: String? = nil) async -> AgentTranscript {
@@ -110,22 +121,47 @@ public struct AgentLoop: Sendable {
             messages.append(["role": "assistant", "content": output])
             var invocations: [ToolInvocation] = []
             for call in calls {
-                guard let tool = tools.tool(named: call.name), let spec = tools.spec(named: call.name) else {
-                    let result = ToolResult(content: "Error: unknown tool '\(call.name)'", isError: true)
+                // Feed `result` back as the observation and record the invocation,
+                // whether the tool ran, was denied, or was unknown.
+                func record(args: String, _ result: ToolResult) {
                     invocations.append(ToolInvocation(
-                        name: call.name, argumentsJSON: call.argumentsJSON, result: result))
-                    messages.append(["role": "user", "content": "Tool result (\(call.name)):\n\(result.content)"])
+                        name: call.name, argumentsJSON: args, result: result))
+                    messages.append([
+                        "role": "user",
+                        "content": "Tool result (\(call.name)):\n\(result.content)",
+                    ])
+                }
+
+                guard let tool = tools.tool(named: call.name), let spec = tools.spec(named: call.name) else {
+                    record(args: call.argumentsJSON,
+                           ToolResult(content: "Error: unknown tool '\(call.name)'", isError: true))
+                    continue
+                }
+
+                // Permission gate: decide BEFORE repairing/running so a denied
+                // tool costs no extra generation. A denial is fed back so the
+                // model can adapt (e.g. switch to read-only investigation).
+                let decision = permission.decision(toolName: call.name, isReadOnly: tool.isReadOnly)
+                if case .deny(let reason) = decision {
+                    record(args: call.argumentsJSON,
+                           ToolResult(content: "Permission denied: \(reason)", isError: true))
                     continue
                 }
 
                 let argsJSON = await repairedArgs(for: call, spec: spec, history: messages)
-                let result = await tool.run(argumentsJSON: argsJSON)
-                invocations.append(ToolInvocation(
-                    name: call.name, argumentsJSON: argsJSON, result: result))
-                messages.append([
-                    "role": "user",
-                    "content": "Tool result (\(call.name)):\n\(result.content)",
-                ])
+
+                if case .ask = decision {
+                    let approved = await (gate?.approve(
+                        toolName: call.name, argumentsJSON: argsJSON) ?? false)
+                    if !approved {
+                        record(args: argsJSON, ToolResult(
+                            content: "Permission denied: the user declined to run '\(call.name)'.",
+                            isError: true))
+                        continue
+                    }
+                }
+
+                record(args: argsJSON, await tool.run(argumentsJSON: argsJSON))
             }
             steps.append(AgentStep(assistantText: visible, toolCalls: invocations))
         }
