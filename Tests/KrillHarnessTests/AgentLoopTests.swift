@@ -191,6 +191,21 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(calls, 0, "valid args must not trigger a repair pass")
     }
 
+    func testFailOpenKeepsOriginalArgsWhenRepairAlsoFails() async {
+        // The constrained pass returns args that STILL fail the schema; the loop
+        // must fall back to the original args (fail-open), not run garbage.
+        let gen = RepairMockGenerator(
+            freeResponses: [hermesCall("bash", "{}"), "done"],
+            constrainedReply: "{}")
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([RequiredArgTool()]))
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps[0].toolCalls[0].argumentsJSON, "{}",
+                       "fail-open: keep the original args when repair also fails the schema")
+        let calls = await gen.recordedConstrainedCalls()
+        XCTAssertEqual(calls, 1, "repair should have been attempted exactly once")
+    }
+
     func testConstrainDisabledSkipsRepair() async {
         let gen = RepairMockGenerator(
             freeResponses: [hermesCall("bash", "{}"), "done"],
