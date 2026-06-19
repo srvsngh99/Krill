@@ -192,11 +192,13 @@ final class AgentLoopTests: XCTestCase {
     }
 
     func testFailOpenKeepsOriginalArgsWhenRepairAlsoFails() async {
-        // The constrained pass returns args that STILL fail the schema; the loop
-        // must fall back to the original args (fail-open), not run garbage.
+        // The constrained pass returns args that STILL fail the schema (and are
+        // structurally distinct from the original, so the assertion proves the
+        // ORIGINAL was kept, not coincidence); the loop must fall back to the
+        // original args (fail-open), not run garbage.
         let gen = RepairMockGenerator(
             freeResponses: [hermesCall("bash", "{}"), "done"],
-            constrainedReply: "{}")
+            constrainedReply: #"{"wrong_field":"x"}"#)
         let loop = AgentLoop(generator: gen, tools: ToolRegistry([RequiredArgTool()]))
         let t = await loop.run(user: "go")
 
