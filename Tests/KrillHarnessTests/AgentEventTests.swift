@@ -105,6 +105,23 @@ final class AgentEventTests: XCTestCase {
             "no final answer when the loop hits the iteration cap")
     }
 
+    func testCancelledTaskStopsLoopAndEmitsCancelled() async {
+        let sink = EventSink()
+        // A generator that would otherwise loop forever calling a tool.
+        let always = Array(repeating: hermesCall("read_file", #"{"x":"a"}"#), count: 100)
+        let loop = AgentLoop(
+            generator: EventScriptGen(always),
+            tools: ToolRegistry([EchoTool(name: "read_file", isReadOnly: true, reply: "ok")]),
+            maxIterations: 100)
+        let task = Task { await loop.run(user: "go", onEvent: sink.sink) }
+        task.cancel()
+        let t = await task.value
+
+        XCTAssertTrue(t.wasCancelled, "a cancelled Task must stop the loop")
+        XCTAssertFalse(t.hitIterationLimit, "cancellation is not the iteration cap")
+        XCTAssertEqual(sink.events.last, .cancelled)
+    }
+
     func testRunWithoutObserverReturnsSameTranscript() async {
         // The event seam is additive: omitting onEvent yields the original
         // batch result unchanged.
