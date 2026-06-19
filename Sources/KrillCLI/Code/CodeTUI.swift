@@ -77,6 +77,16 @@ final class CodeTUI {
     private var inputHistory: [String] = []
     private var historyIndex = 0
     private var shouldQuit = false
+    private var menu = SlashMenu(commands: CodeTUI.slashCommands)
+
+    /// Slash commands offered in the code TUI (distinct from the chat set).
+    static let slashCommands: [SlashMenu.Item] = [
+        .init(name: "/help", summary: "Show keys and commands"),
+        .init(name: "/clear", summary: "Start a fresh conversation"),
+        .init(name: "/model", summary: "Show the loaded model"),
+        .init(name: "/system", summary: "Show the system prompt"),
+        .init(name: "/quit", summary: "Exit"),
+    ]
 
     init(loop: AgentLoop, task: String, system: String?, modelName: String) {
         self.loop = loop
@@ -106,11 +116,46 @@ final class CodeTUI {
                 if shouldQuit { break }
             }
             render(working: false, spin: 0)
-            if let task = submit, !shouldQuit {
-                await runAgent(task)
+            if let text = submit, !shouldQuit {
+                if text.hasPrefix("/") {
+                    handleCommand(text)
+                } else {
+                    await runAgent(text)
+                }
                 render(working: false, spin: 0)
             }
         }
+    }
+
+    // MARK: - Slash commands
+
+    private func handleCommand(_ raw: String) {
+        let cmd = raw.split(separator: " ", maxSplits: 1).first.map(String.init)?.lowercased() ?? raw
+        switch cmd {
+        case "/quit", "/exit", "/q":
+            shouldQuit = true
+        case "/clear":
+            conversation = []
+            model = [.note("[conversation cleared]")]
+        case "/help":
+            model.append(.note(
+                "Commands: /help  /clear  /model  /system  /quit\n"
+                + "Keys: Enter run  Ctrl-C cancel/clear-line  Ctrl-D exit  "
+                + "PgUp/PgDn scroll  Up/Down history"))
+        case "/model":
+            model.append(.note("model: \(modelName)"))
+        case "/system":
+            let sys = nonEmpty(system)
+            model.append(.note("system prompt: \(sys ?? "(none)")"))
+        default:
+            model.append(.note("[unknown command \(cmd) - type /help]"))
+        }
+        scrollOffset = 0
+    }
+
+    private func nonEmpty(_ s: String?) -> String? {
+        guard let s = s?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty else { return nil }
+        return s
     }
 
     // MARK: - One agent run (live render)
@@ -197,45 +242,60 @@ final class CodeTUI {
             if input.isEmpty { shouldQuit = true }
             return nil
         case .ctrlC:
-            if input.isEmpty { shouldQuit = true } else { input = ""; cursor = 0 }
+            if input.isEmpty { shouldQuit = true } else { input = ""; cursor = 0; menu.close() }
             return nil
-        case .ctrlU: input = ""; cursor = 0; return nil
+        case .ctrlU: input = ""; cursor = 0; menu.update(for: input); return nil
         case .ctrlA, .home: cursor = 0; return nil
         case .ctrlE, .end: cursor = input.count; return nil
         case .pageUp: scroll(by: pageStep()); return nil
         case .pageDown: scroll(by: -pageStep()); return nil
         case .scrollUp: scroll(by: 3); return nil
         case .scrollDown: scroll(by: -3); return nil
+        case .escape: menu.close(); return nil
         case .left: if cursor > 0 { cursor -= 1 }; return nil
         case .right: if cursor < input.count { cursor += 1 }; return nil
-        case .up: recallHistory(delta: -1); return nil
-        case .down: recallHistory(delta: 1); return nil
+        case .up:
+            if menu.isActive { menu.selectPrevious() } else { recallHistory(delta: -1) }
+            return nil
+        case .down:
+            if menu.isActive { menu.selectNext() } else { recallHistory(delta: 1) }
+            return nil
+        case .tab:
+            if let item = menu.current { setInput(item.name + " "); menu.close() }
+            return nil
         case .backspace:
             if cursor > 0 {
                 let idx = input.index(input.startIndex, offsetBy: cursor - 1)
-                input.remove(at: idx); cursor -= 1
+                input.remove(at: idx); cursor -= 1; menu.update(for: input)
             }
             return nil
         case .delete:
             if cursor < input.count {
                 let idx = input.index(input.startIndex, offsetBy: cursor)
-                input.remove(at: idx)
+                input.remove(at: idx); menu.update(for: input)
             }
             return nil
         case .enter:
+            // With the popup open, Enter runs the highlighted command directly.
+            if let item = menu.current, input != item.name {
+                input = ""; cursor = 0; menu.close()
+                return item.name
+            }
             let text = input.trimmingCharacters(in: .whitespaces)
-            input = ""; cursor = 0; scrollOffset = 0
+            input = ""; cursor = 0; menu.close(); scrollOffset = 0
             guard !text.isEmpty else { return nil }
             inputHistory.append(text); historyIndex = inputHistory.count
             return text
         case .char(let c):
             let idx = input.index(input.startIndex, offsetBy: cursor)
-            input.insert(c, at: idx); cursor += 1
+            input.insert(c, at: idx); cursor += 1; menu.update(for: input)
             return nil
         default:
             return nil
         }
     }
+
+    private func setInput(_ s: String) { input = s; cursor = s.count; menu.update(for: input) }
 
     private func recallHistory(delta: Int) {
         guard !inputHistory.isEmpty else { return }
@@ -253,7 +313,14 @@ final class CodeTUI {
         let box = inputBox(width: width, working: working)   // 3 lines
         let boxTop = max(paneTop + 1, rows - box.count)
         let footerRow = max(rows, boxTop + box.count)
-        let convHeight = max(1, boxTop - paneTop)
+        // The slash popup sits just above the input box (input phase only). Shrink
+        // the pane to make room and trim the popup to the rows available, so it
+        // can never overrun the masthead or emit an out-of-range cursor move on a
+        // short terminal (mirrors the chat TUI's pane-first geometry).
+        let availRows = max(0, boxTop - paneTop)
+        let menuAll = (!working && menu.isActive) ? renderMenu(width: width) : []
+        let menuLines = Array(menuAll.prefix(availRows))
+        let convHeight = max(0, availRows - menuLines.count)
 
         var frame = "\u{1B}[H"
         frame += positioned(1, Brand.header(width: width, model: modelName))
@@ -275,6 +342,7 @@ final class CodeTUI {
             frame += positioned(paneTop + i, content)
         }
 
+        for (i, line) in menuLines.enumerated() { frame += positioned(paneTop + convHeight + i, line) }
         for (i, line) in box.enumerated() { frame += positioned(boxTop + i, line) }
         let (left, right) = footer(working: working, spin: spin)
         frame += positioned(footerRow, Brand.footer(width: width, left: left, right: right))
@@ -302,7 +370,7 @@ final class CodeTUI {
         } else {
             let chars = Array(input)
             if chars.isEmpty {
-                let placeholder = "type a follow-up task   Ctrl-D to exit"
+                let placeholder = "type a follow-up task or /help   Ctrl-D to exit"
                 let clipped = String(placeholder.prefix(max(0, textWidth - 1)))
                 let pad = String(repeating: " ", count: max(0, textWidth - 1 - clipped.count))
                 body = Ansi.bold(promptStr) + Ansi.inverse(" ") + Ansi.chrome(clipped) + pad
@@ -317,6 +385,26 @@ final class CodeTUI {
         }
         let field = Ansi.chrome(v) + " " + body + " " + Ansi.chrome(v)
         return [top, field, bottom]
+    }
+
+    /// The slash-command popup: matching commands with the highlighted one
+    /// inverse-video, windowed to at most a few rows.
+    private func renderMenu(width: Int) -> [String] {
+        let maxVisible = 6
+        let total = menu.matches.count
+        var winStart = 0
+        if total > maxVisible {
+            winStart = min(max(0, menu.selected - maxVisible / 2), total - maxVisible)
+        }
+        var out: [String] = []
+        for i in winStart..<min(total, winStart + maxVisible) {
+            let item = menu.matches[i]
+            let marker = i == menu.selected ? ">" : " "
+            let line = "  \(marker) \(item.name)   \(item.summary)"
+            let clipped = String(line.prefix(max(0, width)))
+            out.append(i == menu.selected ? Ansi.inverse(clipped) : Ansi.chrome(clipped))
+        }
+        return out
     }
 
     private func footer(working: Bool, spin: Int) -> (String, String) {
