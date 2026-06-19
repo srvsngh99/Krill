@@ -52,9 +52,15 @@ enum FileToolSupport {
             switch c {
             case "*":
                 if i + 1 < chars.count, chars[i + 1] == "*" {
-                    out += ".*"
-                    i += 2
-                    if i < chars.count, chars[i] == "/" { i += 1 }  // `**/` also matches zero dirs
+                    if i + 2 < chars.count, chars[i + 2] == "/" {
+                        // `**/` matches zero or more WHOLE path components, so it
+                        // keeps a `/` boundary (`**/foo` must not match `barfoo`).
+                        out += "(?:.*/)?"
+                        i += 3
+                    } else {
+                        out += ".*"  // bare `**`
+                        i += 2
+                    }
                     continue
                 }
                 out += "[^/]*"

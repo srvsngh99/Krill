@@ -156,6 +156,16 @@ final class FileToolsTests: XCTestCase {
         XCTAssertEqual(FileToolSupport.globToRegex("a?b"), "^a[^/]b$")
     }
 
+    func testGlobDoubleStarKeepsPathBoundary() {
+        let rx = try! NSRegularExpression(pattern: FileToolSupport.globToRegex("**/foo.txt"))
+        func matches(_ s: String) -> Bool {
+            rx.firstMatch(in: s, range: NSRange(s.startIndex..<s.endIndex, in: s)) != nil
+        }
+        XCTAssertTrue(matches("foo.txt"))         // zero dirs
+        XCTAssertTrue(matches("a/b/foo.txt"))     // nested
+        XCTAssertFalse(matches("barfoo.txt"), "**/ must not match across a partial component")
+    }
+
     // MARK: grep
 
     func testGrepReturnsFileLineMatches() async throws {
