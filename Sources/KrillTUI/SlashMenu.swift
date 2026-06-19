@@ -4,7 +4,12 @@ import Foundation
 /// input and which one is highlighted. Pure and unit-tested; the TUI renders it
 /// and feeds it key events (Up/Down cycle, Tab/Enter accept).
 public struct SlashMenu {
-    public init() {}
+    /// The built-in command set this menu matches against. Defaults to the chat
+    /// command list (`all`); other surfaces (the `code` TUI) pass their own.
+    private let commandSet: [Item]
+
+    public init(commands: [Item] = SlashMenu.all) { self.commandSet = commands }
+
     public struct Item: Equatable, Sendable {
         public let name: String
         public let summary: String
@@ -43,8 +48,8 @@ public struct SlashMenu {
     /// All candidate commands: the built-ins followed by any registered extras
     /// that do not shadow a built-in.
     public var candidates: [Item] {
-        let builtinNames = Set(Self.all.map { $0.name })
-        return Self.all + extra.filter { !builtinNames.contains($0.name) }
+        let builtinNames = Set(commandSet.map { $0.name })
+        return commandSet + extra.filter { !builtinNames.contains($0.name) }
     }
 
     public private(set) var matches: [Item] = []

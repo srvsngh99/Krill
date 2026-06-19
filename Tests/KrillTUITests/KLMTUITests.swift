@@ -477,4 +477,18 @@ final class SlashMenuExtraTests: XCTestCase {
         m.update(for: "/mo")
         XCTAssertEqual(m.matches.map { $0.name }, ["/model"])
     }
+
+    func testCustomCommandSetReplacesDefaults() {
+        // A menu built with a custom command set matches ONLY that set, not the
+        // chat defaults (the code TUI supplies its own commands this way).
+        var m = SlashMenu(commands: [
+            SlashMenu.Item(name: "/clear", summary: "reset"),
+            SlashMenu.Item(name: "/quit", summary: "exit"),
+        ])
+        m.update(for: "/")
+        XCTAssertEqual(m.matches.map { $0.name }, ["/clear", "/quit"])
+        // A chat-only command is absent from the custom set.
+        m.update(for: "/image")
+        XCTAssertTrue(m.matches.isEmpty, "custom set must not include chat defaults")
+    }
 }
