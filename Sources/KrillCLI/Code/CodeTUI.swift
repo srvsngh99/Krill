@@ -33,15 +33,18 @@ private final class EventQueue: @unchecked Sendable {
     }
 }
 
-/// Full-screen renderer for a single `krill code` agent run. Drives the agent
-/// loop on a child Task and renders its events live (assistant prose, tool-call
-/// chips, observations/diffs) in a scrollable transcript, with a working spinner
-/// during generation, Ctrl-C cancellation, and resize support. Reuses the same
-/// raw-terminal / key-decoder / geometry primitives as the chat TUI.
+/// Full-screen, multi-turn TUI for `krill code`. Runs the initial task, then
+/// hosts an input box for follow-up tasks that continue the same conversation
+/// (via `AgentLoop`'s `priorMessages` seam). Each run is rendered live -
+/// assistant prose, tool-call chips, diffs - in a scrollable transcript with a
+/// working spinner, masthead/footer chrome, scroll, resize, and Ctrl-C cancel.
+/// Reuses the same raw-terminal / key-decoder / geometry primitives as the chat
+/// TUI.
 ///
-/// Single-run and non-interactive-by-design: it does not host an `ask`-mode
-/// approval prompt (that path uses the classic line renderer until an in-TUI
-/// approval UI lands), so the loop here never blocks on user input mid-run.
+/// One agent run at a time: while a run is in flight the input box is inert
+/// (keys drive cancel/scroll only). Ask mode is not hosted here (its approval
+/// prompt uses the classic line renderer), so the loop never blocks on input
+/// mid-run.
 final class CodeTUI {
     private enum Entry {
         case user(String)
@@ -53,7 +56,7 @@ final class CodeTUI {
     }
 
     private let loop: AgentLoop
-    private let task: String
+    private let initialTask: String
     private let system: String?
     private let modelName: String
 
@@ -61,15 +64,23 @@ final class CodeTUI {
     private let reader = KeyReader()
 
     private var model: [Entry] = []
+    private var conversation: [[String: String]] = []   // carried across turns
     private var rows = 24
     private var cols = 80
     private var scrollOffset = 0          // lines scrolled up from the bottom
     private var chipShown = false         // a chip was emitted for the in-flight call
-    private var status = "working"
+    private var status = "ready"
+
+    // Composer state (the input box for follow-up tasks).
+    private var input = ""
+    private var cursor = 0
+    private var inputHistory: [String] = []
+    private var historyIndex = 0
+    private var shouldQuit = false
 
     init(loop: AgentLoop, task: String, system: String?, modelName: String) {
         self.loop = loop
-        self.task = task
+        self.initialTask = task
         self.system = system
         self.modelName = modelName
     }
@@ -81,20 +92,45 @@ final class CodeTUI {
         updateSize()
         defer { raw.leave() }
 
-        model.append(.user(task))
-        render(working: true, spin: 0)
+        // Run the task the user launched with, then drop into the REPL.
+        await runAgent(initialTask)
+        render(working: false, spin: 0)
 
-        // Run the agent loop on a child Task; events arrive via the queue.
+        while !shouldQuit {
+            if codeWinchFlag != 0 { codeWinchFlag = 0; updateSize(); render(working: false, spin: 0) }
+            guard raw.waitForInput(timeoutMs: 250) else { continue }
+            guard let keys = reader.read() else { break }   // EOF
+            var submit: String?
+            for key in keys {
+                if let text = handleInputKey(key) { submit = text }
+                if shouldQuit { break }
+            }
+            render(working: false, spin: 0)
+            if let task = submit, !shouldQuit {
+                await runAgent(task)
+                render(working: false, spin: 0)
+            }
+        }
+    }
+
+    // MARK: - One agent run (live render)
+
+    private func runAgent(_ task: String) async {
+        model.append(.user(task))
+        status = "working"
+        scrollOffset = 0
+        chipShown = false
+
         let queue = EventQueue()
-        let theLoop = loop, theTask = task, theSystem = system
+        let theLoop = loop, sys = system, prior = conversation
         let runTask = Task {
-            _ = await theLoop.run(
-                user: theTask, system: theSystem,
+            let t = await theLoop.run(
+                user: task, system: sys, priorMessages: prior,
                 onEvent: { ev in queue.push(ev) })
             queue.markDone()
+            return t
         }
 
-        // Active phase: animate the spinner, drain events, allow scroll + cancel.
         var spin = 0
         while true {
             if codeWinchFlag != 0 { codeWinchFlag = 0; updateSize() }
@@ -106,9 +142,7 @@ final class CodeTUI {
             if raw.waitForInput(timeoutMs: 120), let keys = reader.read() {
                 for key in keys {
                     switch key {
-                    case .ctrlC:
-                        runTask.cancel()
-                        status = "cancelling"
+                    case .ctrlC: runTask.cancel(); status = "cancelling"
                     case .pageUp, .scrollUp: scroll(by: pageStep())
                     case .pageDown, .scrollDown: scroll(by: -pageStep())
                     case .up: scroll(by: 1)
@@ -119,7 +153,11 @@ final class CodeTUI {
             }
         }
 
-        await idleLoop()
+        let transcript = await runTask.value
+        conversation = transcript.messages   // continue from here next turn
+        if transcript.wasCancelled { status = "cancelled" }
+        else if transcript.hitIterationLimit { status = "iteration limit" }
+        else { status = "ready" }
     }
 
     // MARK: - Events -> transcript
@@ -143,47 +181,79 @@ final class CodeTUI {
             chipShown = false
         case .finalAnswer(let text):
             model.append(.finalAnswer(text))
-            status = "done"
         case .iterationLimitReached:
             model.append(.note("[stopped at the iteration limit without a final answer]"))
-            status = "iteration limit"
         case .cancelled:
             model.append(.note("[cancelled]"))
-            status = "cancelled"
         }
         scrollOffset = 0   // new content jumps the view back to the bottom
     }
 
-    // MARK: - Idle (post-run) loop
+    // MARK: - Input handling (composer)
 
-    private func idleLoop() async {
-        render(working: false, spin: 0)
-        while true {
-            if codeWinchFlag != 0 { codeWinchFlag = 0; updateSize(); render(working: false, spin: 0) }
-            guard raw.waitForInput(timeoutMs: 250) else { continue }
-            guard let keys = reader.read() else { break }   // EOF
-            var quit = false
-            for key in keys {
-                switch key {
-                case .ctrlC, .ctrlD, .escape, .char("q"): quit = true
-                case .pageUp, .scrollUp: scroll(by: pageStep())
-                case .pageDown, .scrollDown: scroll(by: -pageStep())
-                case .up: scroll(by: 1)
-                case .down: scroll(by: -1)
-                default: break
-                }
+    private func handleInputKey(_ key: Key) -> String? {
+        switch key {
+        case .ctrlD:
+            if input.isEmpty { shouldQuit = true }
+            return nil
+        case .ctrlC:
+            if input.isEmpty { shouldQuit = true } else { input = ""; cursor = 0 }
+            return nil
+        case .ctrlU: input = ""; cursor = 0; return nil
+        case .ctrlA, .home: cursor = 0; return nil
+        case .ctrlE, .end: cursor = input.count; return nil
+        case .pageUp: scroll(by: pageStep()); return nil
+        case .pageDown: scroll(by: -pageStep()); return nil
+        case .scrollUp: scroll(by: 3); return nil
+        case .scrollDown: scroll(by: -3); return nil
+        case .left: if cursor > 0 { cursor -= 1 }; return nil
+        case .right: if cursor < input.count { cursor += 1 }; return nil
+        case .up: recallHistory(delta: -1); return nil
+        case .down: recallHistory(delta: 1); return nil
+        case .backspace:
+            if cursor > 0 {
+                let idx = input.index(input.startIndex, offsetBy: cursor - 1)
+                input.remove(at: idx); cursor -= 1
             }
-            render(working: false, spin: 0)
-            if quit { break }
+            return nil
+        case .delete:
+            if cursor < input.count {
+                let idx = input.index(input.startIndex, offsetBy: cursor)
+                input.remove(at: idx)
+            }
+            return nil
+        case .enter:
+            let text = input.trimmingCharacters(in: .whitespaces)
+            input = ""; cursor = 0; scrollOffset = 0
+            guard !text.isEmpty else { return nil }
+            inputHistory.append(text); historyIndex = inputHistory.count
+            return text
+        case .char(let c):
+            let idx = input.index(input.startIndex, offsetBy: cursor)
+            input.insert(c, at: idx); cursor += 1
+            return nil
+        default:
+            return nil
         }
+    }
+
+    private func recallHistory(delta: Int) {
+        guard !inputHistory.isEmpty else { return }
+        let ni = max(0, min(inputHistory.count, historyIndex + delta))
+        historyIndex = ni
+        if ni == inputHistory.count { input = ""; cursor = 0 }
+        else { input = inputHistory[ni]; cursor = input.count }
     }
 
     // MARK: - Render
 
     private func render(working: Bool, spin: Int) {
         let width = cols
-        let convHeight = max(1, rows - 3)   // 1 masthead + 1 rule + 1 footer
         let paneTop = 3
+        let box = inputBox(width: width, working: working)   // 3 lines
+        let boxTop = max(paneTop + 1, rows - box.count)
+        let footerRow = max(rows, boxTop + box.count)
+        let convHeight = max(1, boxTop - paneTop)
 
         var frame = "\u{1B}[H"
         frame += positioned(1, Brand.header(width: width, model: modelName))
@@ -205,18 +275,56 @@ final class CodeTUI {
             frame += positioned(paneTop + i, content)
         }
 
+        for (i, line) in box.enumerated() { frame += positioned(boxTop + i, line) }
         let (left, right) = footer(working: working, spin: spin)
-        frame += positioned(rows, Brand.footer(width: width, left: left, right: right))
+        frame += positioned(footerRow, Brand.footer(width: width, left: left, right: right))
         frame += "\u{1B}[J"
         Output.write(frame)
+    }
+
+    private func inputBox(width: Int, working: Bool) -> [String] {
+        let w = max(8, width)
+        let h = "\u{2500}", v = "\u{2502}"
+        let tl = "\u{256D}", tr = "\u{256E}", bl = "\u{2570}", br = "\u{256F}"
+        let top = Ansi.chrome(Chrome.border(width: w, left: tl, fill: h, right: tr))
+        let bottom = Ansi.chrome(Chrome.border(width: w, left: bl, fill: h, right: br))
+
+        let fieldWidth = max(2, w - 4)
+        let promptStr = "> "
+        let textWidth = max(1, fieldWidth - promptStr.count)
+
+        var body: String
+        if working {
+            let msg = "working\u{2026}"
+            let clipped = String(msg.prefix(textWidth))
+            body = Ansi.chrome(promptStr) + Ansi.dim(clipped)
+                + String(repeating: " ", count: max(0, textWidth - clipped.count))
+        } else {
+            let chars = Array(input)
+            if chars.isEmpty {
+                let placeholder = "type a follow-up task   Ctrl-D to exit"
+                let clipped = String(placeholder.prefix(max(0, textWidth - 1)))
+                let pad = String(repeating: " ", count: max(0, textWidth - 1 - clipped.count))
+                body = Ansi.bold(promptStr) + Ansi.inverse(" ") + Ansi.chrome(clipped) + pad
+            } else {
+                let (content, cursorCol) = Chrome.inputField(text: chars, cursor: cursor, textWidth: textWidth)
+                var rendered = ""
+                for (i, ch) in Array(content).enumerated() {
+                    rendered += i == cursorCol ? Ansi.inverse(String(ch)) : String(ch)
+                }
+                body = Ansi.bold(promptStr) + rendered
+            }
+        }
+        let field = Ansi.chrome(v) + " " + body + " " + Ansi.chrome(v)
+        return [top, field, bottom]
     }
 
     private func footer(working: Bool, spin: Int) -> (String, String) {
         let dots = ["\u{2839}", "\u{2838}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}", "\u{2819}"]
         if working {
-            return ("\(dots[spin % dots.count]) \(status)", "Ctrl-C cancel")
+            return ("\(dots[spin % dots.count]) \(status)", "Ctrl-C cancel  PgUp/Dn scroll")
         }
-        return (status, "q quit  \u{2191}/\u{2193} scroll")
+        return (status, "Enter run  Ctrl-D exit  PgUp/Dn scroll")
     }
 
     private func transcriptLines(width: Int) -> [String] {
@@ -268,7 +376,7 @@ final class CodeTUI {
 
     private func scroll(by delta: Int) { scrollOffset = max(0, scrollOffset + delta) }
 
-    private func pageStep() -> Int { max(1, (rows - 3) - 1) }
+    private func pageStep() -> Int { max(1, (rows - 6) - 1) }
 
     private func updateSize() { let s = raw.size(); rows = s.rows; cols = s.cols }
 
