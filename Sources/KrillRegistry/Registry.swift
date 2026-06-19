@@ -47,14 +47,17 @@ public final class Registry: Sendable {
         return base
     }
 
-    /// One-time rename migration for the KrillLM → Krill rebrand.
+    /// One-time rename migration for the KrillLM -> Krill rebrand.
     ///
     /// Pre-rename installs kept everything (models/blobs, prefix cache, config,
-    /// agent state) under `~/.krillm`. If the new `~/.krill` home doesn't exist
-    /// yet but the legacy `~/.krillm` does, move the whole tree across in a
-    /// single rename so nothing has to be re-downloaded. Idempotent (no-op once
-    /// `~/.krill` exists) and best-effort (falls back to a symlink if the move
-    /// fails, e.g. across volumes).
+    /// agent state) under `~/.krillm`. Move it to `~/.krill` so nothing has to
+    /// be re-downloaded. Two cases:
+    ///   1. `~/.krill` absent -> move the whole tree in one rename.
+    ///   2. `~/.krill` present (commonly just a `cache/` dir created before the
+    ///      models were migrated) -> MERGE: move each top-level legacy entry the
+    ///      new home does not already have. Never clobber an existing entry.
+    /// Idempotent and best-effort (symlink fallback if a whole-tree move fails,
+    /// e.g. across volumes).
     @discardableResult
     public static func migrateLegacyHomeIfNeeded(
         home: URL = FileManager.default.homeDirectoryForCurrentUser,
@@ -63,17 +66,38 @@ public final class Registry: Sendable {
         let fm = FileManager.default
         let new = newBase ?? home.appendingPathComponent(".krill")
         let legacy = home.appendingPathComponent(".krillm")
-        guard !fm.fileExists(atPath: new.path),
-              fm.fileExists(atPath: legacy.path) else { return false }
-        do {
-            try fm.moveItem(at: legacy, to: new)
-            Logger(label: "krill.registry").info(
-                "Migrated legacy home ~/.krillm → ~/.krill")
-            return true
-        } catch {
-            try? fm.createSymbolicLink(at: new, withDestinationURL: legacy)
-            return false
+        guard fm.fileExists(atPath: legacy.path) else { return false }
+
+        // Case 1: new home absent -> move the whole tree.
+        if !fm.fileExists(atPath: new.path) {
+            do {
+                try fm.moveItem(at: legacy, to: new)
+                Logger(label: "krill.registry").info("Migrated legacy home ~/.krillm -> ~/.krill")
+                return true
+            } catch {
+                try? fm.createSymbolicLink(at: new, withDestinationURL: legacy)
+                return false
+            }
         }
+
+        // Case 2: new home exists -> merge missing entries so models are not
+        // stranded behind a pre-existing `cache/`.
+        var movedAny = false
+        let entries = (try? fm.contentsOfDirectory(atPath: legacy.path)) ?? []
+        for name in entries {
+            let dst = new.appendingPathComponent(name)
+            guard !fm.fileExists(atPath: dst.path) else { continue }
+            if (try? fm.moveItem(at: legacy.appendingPathComponent(name), to: dst)) != nil {
+                movedAny = true
+            }
+        }
+        if movedAny {
+            Logger(label: "krill.registry").info("Merged legacy home ~/.krillm into ~/.krill")
+            if (try? fm.contentsOfDirectory(atPath: legacy.path))?.isEmpty ?? false {
+                try? fm.removeItem(at: legacy)
+            }
+        }
+        return movedAny
     }
 
     /// Ensure the directory structure exists.
