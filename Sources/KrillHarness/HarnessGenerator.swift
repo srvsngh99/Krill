@@ -17,4 +17,18 @@ public protocol HarnessGenerator: Sendable {
 
     /// Produce the model's raw completion for the given chat history.
     func complete(messages: [[String: String]]) async -> String
+
+    /// Generate constrained so the output is a single JSON object conforming to
+    /// `jsonSchema`. Used to REPAIR a tool call whose free-form args were empty
+    /// or invalid - the small-local-model tool-arg fix: the engine grammar-
+    /// constrains decoding so required fields cannot be omitted. The default
+    /// falls back to unconstrained generation for backends that cannot
+    /// constrain (e.g. the test mock unless it overrides this).
+    func completeConstrained(messages: [[String: String]], jsonSchema: String) async -> String
+}
+
+extension HarnessGenerator {
+    public func completeConstrained(messages: [[String: String]], jsonSchema: String) async -> String {
+        await complete(messages: messages)
+    }
 }

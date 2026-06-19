@@ -48,6 +48,40 @@ private func hermesCall(_ name: String, _ argsJSON: String) -> String {
     "<tool_call>{\"name\": \"\(name)\", \"arguments\": \(argsJSON)}</tool_call>"
 }
 
+/// Generator that records whether the grammar-constrained repair pass fired and
+/// returns a canned constrained reply.
+private actor RepairMockGenerator: HarnessGenerator {
+    nonisolated let toolFormat: ToolCalling.ToolFormat = .hermes
+    private let freeResponses: [String]
+    private let constrainedReply: String
+    private var idx = 0
+    private(set) var constrainedCalls = 0
+
+    init(freeResponses: [String], constrainedReply: String) {
+        self.freeResponses = freeResponses
+        self.constrainedReply = constrainedReply
+    }
+    func complete(messages: [[String: String]]) async -> String {
+        defer { idx += 1 }
+        return idx < freeResponses.count ? freeResponses[idx] : "done"
+    }
+    func completeConstrained(messages: [[String: String]], jsonSchema: String) async -> String {
+        constrainedCalls += 1
+        return constrainedReply
+    }
+    func recordedConstrainedCalls() async -> Int { constrainedCalls }
+}
+
+/// Tool whose schema makes `command` required, so `{}` fails the schema check
+/// (the empty-args case). Echoes the args it received so tests can assert which
+/// args actually ran.
+private struct RequiredArgTool: Tool {
+    let name = "bash"
+    let description = "test stub with a required argument"
+    let parametersJSON = #"{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}"#
+    func run(argumentsJSON: String) async -> ToolResult { ToolResult(content: "ARGS=\(argumentsJSON)") }
+}
+
 final class AgentLoopTests: XCTestCase {
 
     func testNoToolCallReturnsFinalAnswerDirectly() async {
@@ -124,6 +158,67 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertTrue(t.hitIterationLimit)
         XCTAssertEqual(t.steps.count, 3, "should stop exactly at the cap")
         XCTAssertEqual(t.finalText, "")
+    }
+
+    func testEmptyArgsAreRepairedViaConstrainedPass() async {
+        // The model emits an empty-args call (the small-model failure); the
+        // schema-constrained second pass must repair it and the tool runs with
+        // the repaired args.
+        let gen = RepairMockGenerator(
+            freeResponses: [hermesCall("bash", "{}"), "all done"],
+            constrainedReply: #"{"command":"echo hi"}"#)
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([RequiredArgTool()]))
+        let t = await loop.run(user: "go")
+
+        let inv = t.steps[0].toolCalls[0]
+        XCTAssertEqual(inv.argumentsJSON, #"{"command":"echo hi"}"#, "empty args must be repaired")
+        XCTAssertTrue(inv.result.content.contains("echo hi"), "tool must run with repaired args")
+        let calls = await gen.recordedConstrainedCalls()
+        XCTAssertEqual(calls, 1, "the constrained repair pass should fire exactly once")
+    }
+
+    func testValidArgsSkipTheConstrainedPass() async {
+        // Capable model: args already satisfy the schema, so no repair (the gate
+        // is selective / fail-open).
+        let gen = RepairMockGenerator(
+            freeResponses: [hermesCall("bash", #"{"command":"ls"}"#), "done"],
+            constrainedReply: #"{"command":"SHOULD_NOT_BE_USED"}"#)
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([RequiredArgTool()]))
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps[0].toolCalls[0].argumentsJSON, #"{"command":"ls"}"#)
+        let calls = await gen.recordedConstrainedCalls()
+        XCTAssertEqual(calls, 0, "valid args must not trigger a repair pass")
+    }
+
+    func testFailOpenKeepsOriginalArgsWhenRepairAlsoFails() async {
+        // The constrained pass returns args that STILL fail the schema (and are
+        // structurally distinct from the original, so the assertion proves the
+        // ORIGINAL was kept, not coincidence); the loop must fall back to the
+        // original args (fail-open), not run garbage.
+        let gen = RepairMockGenerator(
+            freeResponses: [hermesCall("bash", "{}"), "done"],
+            constrainedReply: #"{"wrong_field":"x"}"#)
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([RequiredArgTool()]))
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps[0].toolCalls[0].argumentsJSON, "{}",
+                       "fail-open: keep the original args when repair also fails the schema")
+        let calls = await gen.recordedConstrainedCalls()
+        XCTAssertEqual(calls, 1, "repair should have been attempted exactly once")
+    }
+
+    func testConstrainDisabledSkipsRepair() async {
+        let gen = RepairMockGenerator(
+            freeResponses: [hermesCall("bash", "{}"), "done"],
+            constrainedReply: #"{"command":"x"}"#)
+        let loop = AgentLoop(
+            generator: gen, tools: ToolRegistry([RequiredArgTool()]), constrainToolArgs: false)
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps[0].toolCalls[0].argumentsJSON, "{}", "repair must be off when disabled")
+        let calls = await gen.recordedConstrainedCalls()
+        XCTAssertEqual(calls, 0)
     }
 
     func testRegistrySpecsPreserveOrderAndDedupe() {

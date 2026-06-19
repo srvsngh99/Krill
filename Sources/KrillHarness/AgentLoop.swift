@@ -45,11 +45,23 @@ public struct AgentLoop: Sendable {
     public let generator: any HarnessGenerator
     public let tools: ToolRegistry
     public let maxIterations: Int
+    /// When true, a tool call whose args do not satisfy the tool's JSON schema
+    /// (the empty-`{}` failure small local models produce) triggers a second,
+    /// grammar-constrained pass that regenerates the args. This is the
+    /// in-process differentiator - it is what lets a small model complete an
+    /// agentic task instead of looping on empty arguments.
+    public let constrainToolArgs: Bool
 
-    public init(generator: any HarnessGenerator, tools: ToolRegistry, maxIterations: Int = 12) {
+    public init(
+        generator: any HarnessGenerator,
+        tools: ToolRegistry,
+        maxIterations: Int = 12,
+        constrainToolArgs: Bool = true
+    ) {
         self.generator = generator
         self.tools = tools
         self.maxIterations = max(1, maxIterations)
+        self.constrainToolArgs = constrainToolArgs
     }
 
     public func run(user: String, system: String? = nil) async -> AgentTranscript {
@@ -93,15 +105,18 @@ public struct AgentLoop: Sendable {
             messages.append(["role": "assistant", "content": output])
             var invocations: [ToolInvocation] = []
             for call in calls {
-                let result: ToolResult
-                if let tool = tools.tool(named: call.name) {
-                    result = await tool.run(argumentsJSON: call.argumentsJSON)
-                } else {
-                    result = ToolResult(
-                        content: "Error: unknown tool '\(call.name)'", isError: true)
+                guard let tool = tools.tool(named: call.name), let spec = tools.spec(named: call.name) else {
+                    let result = ToolResult(content: "Error: unknown tool '\(call.name)'", isError: true)
+                    invocations.append(ToolInvocation(
+                        name: call.name, argumentsJSON: call.argumentsJSON, result: result))
+                    messages.append(["role": "user", "content": "Tool result (\(call.name)):\n\(result.content)"])
+                    continue
                 }
+
+                let argsJSON = await repairedArgs(for: call, spec: spec, history: messages)
+                let result = await tool.run(argumentsJSON: argsJSON)
                 invocations.append(ToolInvocation(
-                    name: call.name, argumentsJSON: call.argumentsJSON, result: result))
+                    name: call.name, argumentsJSON: argsJSON, result: result))
                 messages.append([
                     "role": "user",
                     "content": "Tool result (\(call.name)):\n\(result.content)",
@@ -113,5 +128,28 @@ public struct AgentLoop: Sendable {
         return AgentTranscript(
             steps: steps, finalText: finalText,
             hitIterationLimit: hitLimit, messages: messages)
+    }
+
+    /// Selective, fail-open two-pass arg repair: if the model's free-form args
+    /// already satisfy the schema (the common case for capable models), use
+    /// them unchanged. Otherwise ask the model to re-emit ONLY the args object,
+    /// grammar-constrained to the schema so required fields cannot be omitted,
+    /// and accept the regenerated args only if they now satisfy the schema.
+    private func repairedArgs(
+        for call: ToolCalling.ParsedToolCall,
+        spec: ServerToolSpec,
+        history: [[String: String]]
+    ) async -> String {
+        guard constrainToolArgs,
+              !ToolCalling.argsSatisfySchema(
+                argumentsJSON: call.argumentsJSON, parametersJSON: spec.parametersJSON)
+        else { return call.argumentsJSON }
+
+        let repairMessages = history + [["role": "user", "content": ToolCalling.argsRegenPrompt(tool: spec)]]
+        let repaired = await generator.completeConstrained(
+            messages: repairMessages, jsonSchema: spec.parametersJSON)
+        return ToolCalling.argsSatisfySchema(
+            argumentsJSON: repaired, parametersJSON: spec.parametersJSON)
+            ? repaired : call.argumentsJSON
     }
 }
