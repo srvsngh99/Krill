@@ -151,28 +151,33 @@ struct CodeCommand: AsyncParsableCommand {
             gate: mode == .ask ? StdinApprover() : nil)
 
         print("\n> \(task)\n")
-        let transcript = await loop.run(user: task, system: effectiveSystem)
-        render(transcript)
-    }
-
-    private func render(_ t: AgentTranscript) {
-        for step in t.steps {
-            if !step.assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                && !step.toolCalls.isEmpty {
-                print(step.assistantText)
-            }
-            for call in step.toolCalls {
-                let marker = call.result.isError ? "x" : "*"
-                print("  [\(marker)] \(call.name)(\(call.argumentsJSON))")
-                let lines = call.result.content
+        // Render the run live as the loop emits events, instead of dumping the
+        // whole transcript at the end. (The full-screen TUI in a later PR is a
+        // richer consumer of the same seam.)
+        let maxIter = maxIterations
+        let onEvent: @Sendable (AgentEvent) -> Void = { event in
+            switch event {
+            case .assistantTurn(let text, let willCallTools):
+                // A turn that calls tools may carry a preamble worth showing; the
+                // no-tools turn's text is surfaced by .finalAnswer instead.
+                if willCallTools,
+                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    print(text)
+                }
+            case .toolStarted:
+                break
+            case .toolFinished(let inv):
+                let marker = inv.result.isError ? "x" : "*"
+                print("  [\(marker)] \(inv.name)(\(inv.argumentsJSON))")
+                let lines = inv.result.content
                     .split(separator: "\n", omittingEmptySubsequences: false).prefix(20)
                 for line in lines { print("      \(line)") }
+            case .finalAnswer(let text):
+                print("\n\(text)")
+            case .iterationLimitReached:
+                print("\n[stopped at iteration limit (\(maxIter)) without a final answer]")
             }
         }
-        if t.hitIterationLimit {
-            print("\n[stopped at iteration limit (\(maxIterations)) without a final answer]")
-        } else {
-            print("\n\(t.finalText)")
-        }
+        _ = await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
     }
 }

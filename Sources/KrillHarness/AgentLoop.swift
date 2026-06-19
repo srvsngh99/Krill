@@ -34,6 +34,32 @@ public struct AgentTranscript: Sendable {
     public let messages: [[String: String]]
 }
 
+/// An incremental event emitted as the loop runs, so a live UI (the `code` TUI)
+/// can render the conversation as it happens instead of waiting for the whole
+/// run to finish. Events arrive in the order the loop produces them. The batch
+/// `AgentTranscript` is still returned at the end - events are an additive seam,
+/// not a replacement.
+///
+/// Note: events carry the CLEANED (reasoning-stripped, tool-marker-free)
+/// assistant text per turn, not raw token deltas. Raw streaming would leak
+/// `<tool_call>` markers mid-stream; a renderer shows a working indicator during
+/// generation and reveals the clean turn here.
+public enum AgentEvent: Sendable, Equatable {
+    /// The model finished a turn. `text` is the cleaned assistant text;
+    /// `willCallTools` is true when this turn is followed by tool calls.
+    case assistantTurn(text: String, willCallTools: Bool)
+    /// A tool passed the permission gate and is about to run, with the final
+    /// (possibly repaired) arguments it will run with.
+    case toolStarted(name: String, argumentsJSON: String)
+    /// A tool call resolved: it ran, was denied by the permission gate, or named
+    /// an unknown tool (distinguish via `invocation.result.isError`).
+    case toolFinished(ToolInvocation)
+    /// The loop ended with a final answer (a turn with no tool calls).
+    case finalAnswer(String)
+    /// The loop stopped at the iteration cap without a final answer.
+    case iterationLimitReached
+}
+
 /// The core agentic loop: inject the tool system turn, then repeatedly
 /// generate, parse tool calls (family-aware via `KrillTooling`), execute them,
 /// feed observations back, and continue until the model answers without a tool
@@ -75,7 +101,14 @@ public struct AgentLoop: Sendable {
         self.gate = gate
     }
 
-    public func run(user: String, system: String? = nil) async -> AgentTranscript {
+    /// Run the loop to completion. Pass `onEvent` to observe progress live (the
+    /// `code` TUI does); it is called synchronously from the loop in event order.
+    /// Omitting it preserves the original batch behavior exactly.
+    public func run(
+        user: String,
+        system: String? = nil,
+        onEvent: (@Sendable (AgentEvent) -> Void)? = nil
+    ) async -> AgentTranscript {
         let format = generator.toolFormat
         let specs = tools.specs()
         let hasTools = !specs.isEmpty
@@ -111,8 +144,12 @@ public struct AgentLoop: Sendable {
             if calls.isEmpty {
                 finalText = visible
                 steps.append(AgentStep(assistantText: visible, toolCalls: []))
+                onEvent?(.assistantTurn(text: visible, willCallTools: false))
+                onEvent?(.finalAnswer(visible))
                 break
             }
+
+            onEvent?(.assistantTurn(text: visible, willCallTools: true))
 
             // Record the model's own turn (raw, so it sees the call it made),
             // then run each tool and feed the observation back as a user turn
@@ -121,15 +158,17 @@ public struct AgentLoop: Sendable {
             messages.append(["role": "assistant", "content": output])
             var invocations: [ToolInvocation] = []
             for call in calls {
-                // Feed `result` back as the observation and record the invocation,
-                // whether the tool ran, was denied, or was unknown.
+                // Feed `result` back as the observation, record the invocation,
+                // and emit it, whether the tool ran, was denied, or was unknown.
                 func record(args: String, _ result: ToolResult) {
-                    invocations.append(ToolInvocation(
-                        name: call.name, argumentsJSON: args, result: result))
+                    let invocation = ToolInvocation(
+                        name: call.name, argumentsJSON: args, result: result)
+                    invocations.append(invocation)
                     messages.append([
                         "role": "user",
                         "content": "Tool result (\(call.name)):\n\(result.content)",
                     ])
+                    onEvent?(.toolFinished(invocation))
                 }
 
                 guard let tool = tools.tool(named: call.name), let spec = tools.spec(named: call.name) else {
@@ -161,10 +200,13 @@ public struct AgentLoop: Sendable {
                     }
                 }
 
+                onEvent?(.toolStarted(name: call.name, argumentsJSON: argsJSON))
                 record(args: argsJSON, await tool.run(argumentsJSON: argsJSON))
             }
             steps.append(AgentStep(assistantText: visible, toolCalls: invocations))
         }
+
+        if hitLimit { onEvent?(.iterationLimitReached) }
 
         return AgentTranscript(
             steps: steps, finalText: finalText,
