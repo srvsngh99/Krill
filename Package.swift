@@ -93,6 +93,14 @@ let package = Package(
             name: "KrillTooling",
             dependencies: ["KrillRegistry"]
         ),
+        // Native in-process agentic harness (the `krill code` loop). Pure
+        // loop+tools logic depending only on KrillTooling - no MLX - so it is
+        // unit-testable with a mock generator. The engine-backed generator
+        // lives in KrillCLI where InferenceEngine is wired.
+        .target(
+            name: "KrillHarness",
+            dependencies: ["KrillTooling"]
+        ),
         .target(
             name: "KrillServer",
             dependencies: [
@@ -135,6 +143,7 @@ let package = Package(
                 "KrillRegistry",
                 "KrillServer",
                 "KrillTooling",
+                "KrillHarness",
                 "CEditLine",
                 "KrillTUI",
                 .product(name: "MLX", package: "mlx-swift"),
@@ -185,6 +194,10 @@ let package = Package(
         .testTarget(
             name: "KrillToolingTests",
             dependencies: ["KrillTooling", "KrillRegistry", "KrillGrammar"]
+        ),
+        .testTarget(
+            name: "KrillHarnessTests",
+            dependencies: ["KrillHarness", "KrillTooling"]
         ),
         .testTarget(
             name: "KrillRegistryTests",

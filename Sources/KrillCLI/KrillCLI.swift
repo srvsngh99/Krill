@@ -17,6 +17,7 @@ struct Krill: AsyncParsableCommand {
         version: KrillVersion,
         subcommands: [
             RunCommand.self,
+            CodeCommand.self,
             PullCommand.self,
             ServeCommand.self,
             LaunchCommand.self,
