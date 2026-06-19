@@ -311,12 +311,16 @@ final class CodeTUI {
         let width = cols
         let paneTop = 3
         let box = inputBox(width: width, working: working)   // 3 lines
-        // The slash popup sits just above the input box (input phase only).
-        let menuLines = (!working && menu.isActive) ? renderMenu(width: width) : []
         let boxTop = max(paneTop + 1, rows - box.count)
         let footerRow = max(rows, boxTop + box.count)
-        let menuTop = boxTop - menuLines.count
-        let convHeight = max(1, menuTop - paneTop)
+        // The slash popup sits just above the input box (input phase only). Shrink
+        // the pane to make room and trim the popup to the rows available, so it
+        // can never overrun the masthead or emit an out-of-range cursor move on a
+        // short terminal (mirrors the chat TUI's pane-first geometry).
+        let availRows = max(0, boxTop - paneTop)
+        let menuAll = (!working && menu.isActive) ? renderMenu(width: width) : []
+        let menuLines = Array(menuAll.prefix(availRows))
+        let convHeight = max(0, availRows - menuLines.count)
 
         var frame = "\u{1B}[H"
         frame += positioned(1, Brand.header(width: width, model: modelName))
@@ -338,7 +342,7 @@ final class CodeTUI {
             frame += positioned(paneTop + i, content)
         }
 
-        for (i, line) in menuLines.enumerated() { frame += positioned(menuTop + i, line) }
+        for (i, line) in menuLines.enumerated() { frame += positioned(paneTop + convHeight + i, line) }
         for (i, line) in box.enumerated() { frame += positioned(boxTop + i, line) }
         let (left, right) = footer(working: working, spin: spin)
         frame += positioned(footerRow, Brand.footer(width: width, left: left, right: right))
