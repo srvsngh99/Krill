@@ -35,6 +35,10 @@ struct CodeCommand: AsyncParsableCommand {
           help: "Allow the agent to run shell commands via the bash tool (PR2: no permission gate yet).")
     var bash: Bool = true
 
+    @Flag(name: .long, inversion: .prefixedNo,
+          help: "Grammar-constrain tool-call arguments to the schema when a model emits empty/invalid args (helps small models).")
+    var constrainArgs: Bool = true
+
     func run() async throws {
         let registry = Registry()
 
@@ -91,7 +95,8 @@ struct CodeCommand: AsyncParsableCommand {
         let loop = AgentLoop(
             generator: EngineGenerator(engine: engine, maxTokens: maxTokens),
             tools: ToolRegistry(tools),
-            maxIterations: maxIterations)
+            maxIterations: maxIterations,
+            constrainToolArgs: constrainArgs)
 
         print("\n> \(task)\n")
         let transcript = await loop.run(user: task, system: system)
