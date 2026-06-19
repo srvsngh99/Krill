@@ -91,10 +91,15 @@ public struct AgentLoop: Sendable {
             let output = await generator.complete(messages: messages)
             let (calls, cleaned) = ToolCalling.extractIfToolsOffered(
                 from: output, hasTools: hasTools, format: format)
+            // Strip reasoning (`<think>`/`<thinking>`/Gemma channels) from the
+            // text we DISPLAY. The raw `output` still goes into the message
+            // history below, so the model keeps its own context and tool-call
+            // markers are untouched - this is display-only cleanup.
+            let visible = strippedForDisplay(cleaned)
 
             if calls.isEmpty {
-                finalText = cleaned
-                steps.append(AgentStep(assistantText: cleaned, toolCalls: []))
+                finalText = visible
+                steps.append(AgentStep(assistantText: visible, toolCalls: []))
                 break
             }
 
@@ -122,12 +127,29 @@ public struct AgentLoop: Sendable {
                     "content": "Tool result (\(call.name)):\n\(result.content)",
                 ])
             }
-            steps.append(AgentStep(assistantText: cleaned, toolCalls: invocations))
+            steps.append(AgentStep(assistantText: visible, toolCalls: invocations))
         }
 
         return AgentTranscript(
             steps: steps, finalText: finalText,
             hitIterationLimit: hitLimit, messages: messages)
+    }
+
+    /// Strip ALL reasoning blocks from text bound for the display surface.
+    /// `ReasoningParser.strip` removes every Gemma channel but only the FIRST
+    /// `<think>`/`<thinking>` block per call (the shared server/streaming
+    /// convention). Small local models - the target of `krill code` - can emit
+    /// several reasoning blocks in one turn, so apply `strip` to a fixpoint:
+    /// each pass removes one more block and strictly shrinks the text, so this
+    /// terminates. Keeping the loop here (not in the shared parser) leaves the
+    /// server/streaming single-block semantics untouched.
+    private func strippedForDisplay(_ text: String) -> String {
+        var visible = text
+        while true {
+            let next = ReasoningParser.strip(visible).visible
+            if next == visible { return visible }
+            visible = next
+        }
     }
 
     /// Selective, fail-open two-pass arg repair: if the model's free-form args
