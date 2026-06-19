@@ -157,11 +157,10 @@ struct CodeCommand: AsyncParsableCommand {
         let maxIter = maxIterations
         let onEvent: @Sendable (AgentEvent) -> Void = { event in
             switch event {
-            case .assistantTurn(let text, let willCallTools):
-                // A turn that calls tools may carry a preamble worth showing; the
-                // no-tools turn's text is surfaced by .finalAnswer instead.
-                if willCallTools,
-                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            case .assistantTurn(let text):
+                // Preamble of a tool-calling turn; the terminal turn's text is
+                // surfaced by .finalAnswer instead.
+                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     print(text)
                 }
             case .toolStarted:

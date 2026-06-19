@@ -39,16 +39,15 @@ private func hermesCall(_ name: String, _ argsJSON: String) -> String {
 
 final class AgentEventTests: XCTestCase {
 
-    func testNoToolRunEmitsAssistantThenFinal() async {
+    func testNoToolRunEmitsOnlyFinal() async {
+        // A terminal turn emits ONLY finalAnswer - no assistantTurn - so a
+        // consumer never double-prints the answer.
         let sink = EventSink()
         let gen = EventScriptGen(["The answer is 4."])
         let loop = AgentLoop(generator: gen, tools: ToolRegistry([EchoTool(name: "bash", isReadOnly: false, reply: "ok")]))
         _ = await loop.run(user: "2+2?", onEvent: sink.sink)
 
-        XCTAssertEqual(sink.events, [
-            .assistantTurn(text: "The answer is 4.", willCallTools: false),
-            .finalAnswer("The answer is 4."),
-        ])
+        XCTAssertEqual(sink.events, [.finalAnswer("The answer is 4.")])
     }
 
     func testSingleToolRunEmitsFullSequence() async {
@@ -62,14 +61,13 @@ final class AgentEventTests: XCTestCase {
             tools: ToolRegistry([EchoTool(name: "read_file", isReadOnly: true, reply: "FILE")]))
         _ = await loop.run(user: "go", onEvent: sink.sink)
 
-        XCTAssertEqual(sink.events.count, 5)
-        XCTAssertEqual(sink.events[0], .assistantTurn(text: "Checking.", willCallTools: true))
+        XCTAssertEqual(sink.events.count, 4)
+        XCTAssertEqual(sink.events[0], .assistantTurn(text: "Checking."))
         XCTAssertEqual(sink.events[1], .toolStarted(name: "read_file", argumentsJSON: #"{"x":"a"}"#))
         guard case .toolFinished(let inv) = sink.events[2] else { return XCTFail("expected toolFinished") }
         XCTAssertEqual(inv.name, "read_file")
         XCTAssertEqual(inv.result.content, "FILE")
-        XCTAssertEqual(sink.events[3], .assistantTurn(text: "All done.", willCallTools: false))
-        XCTAssertEqual(sink.events[4], .finalAnswer("All done."))
+        XCTAssertEqual(sink.events[3], .finalAnswer("All done."))
     }
 
     func testDeniedToolEmitsFinishedButNotStarted() async {

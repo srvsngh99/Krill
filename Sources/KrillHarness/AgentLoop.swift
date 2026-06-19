@@ -45,16 +45,20 @@ public struct AgentTranscript: Sendable {
 /// `<tool_call>` markers mid-stream; a renderer shows a working indicator during
 /// generation and reveals the clean turn here.
 public enum AgentEvent: Sendable, Equatable {
-    /// The model finished a turn. `text` is the cleaned assistant text;
-    /// `willCallTools` is true when this turn is followed by tool calls.
-    case assistantTurn(text: String, willCallTools: Bool)
+    /// The cleaned preamble text of a turn that is about to call tools (the
+    /// `toolStarted`/`toolFinished` events for that turn follow). The text may be
+    /// empty when the model jumps straight to a tool call. The TERMINAL turn's
+    /// text is delivered by `finalAnswer`, not here - so a consumer can render
+    /// `assistantTurn` and `finalAnswer` without ever double-printing.
+    case assistantTurn(text: String)
     /// A tool passed the permission gate and is about to run, with the final
     /// (possibly repaired) arguments it will run with.
     case toolStarted(name: String, argumentsJSON: String)
     /// A tool call resolved: it ran, was denied by the permission gate, or named
     /// an unknown tool (distinguish via `invocation.result.isError`).
     case toolFinished(ToolInvocation)
-    /// The loop ended with a final answer (a turn with no tool calls).
+    /// The loop ended with a final answer (a turn with no tool calls). This is
+    /// the only event that carries the terminal turn's text.
     case finalAnswer(String)
     /// The loop stopped at the iteration cap without a final answer.
     case iterationLimitReached
@@ -144,12 +148,11 @@ public struct AgentLoop: Sendable {
             if calls.isEmpty {
                 finalText = visible
                 steps.append(AgentStep(assistantText: visible, toolCalls: []))
-                onEvent?(.assistantTurn(text: visible, willCallTools: false))
                 onEvent?(.finalAnswer(visible))
                 break
             }
 
-            onEvent?(.assistantTurn(text: visible, willCallTools: true))
+            onEvent?(.assistantTurn(text: visible))
 
             // Record the model's own turn (raw, so it sees the call it made),
             // then run each tool and feed the observation back as a user turn
