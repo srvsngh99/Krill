@@ -253,6 +253,20 @@ final class AgentLoopTests: XCTestCase {
             "raw model output (including reasoning) must remain in the message history")
     }
 
+    func testMultipleReasoningBlocksAreAllStripped() async {
+        // Small local models can emit several reasoning blocks in one turn;
+        // every block must be stripped from the displayed answer, not just the
+        // first (the shared parser strips only the first block per call).
+        let gen = MockGenerator(responses: [
+            "<think>first thought</think>Part one. <think>second thought</think>Part two.",
+        ])
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([StubTool()]))
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.finalText, "Part one. Part two.")
+        XCTAssertFalse(t.finalText.contains("thought"), "no reasoning block may leak")
+    }
+
     func testRegistrySpecsPreserveOrderAndDedupe() {
         let reg = ToolRegistry([
             StubTool(name: "read"),
