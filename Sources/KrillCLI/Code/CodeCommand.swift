@@ -77,9 +77,14 @@ struct CodeCommand: AsyncParsableCommand {
         try await engine.load()
         print(String(format: "Ready (%.1fs).", CFAbsoluteTimeGetCurrent() - loadStart))
 
-        var tools: [any Tool] = []
+        // Filesystem toolset is always available; bash is opt-out (no permission
+        // layer yet - that arrives in a later PR).
+        var tools: [any Tool] = [
+            ReadTool(), ListTool(), GlobTool(), GrepTool(),
+            EditTool(), MultiEditTool(), WriteTool(),
+        ]
         if bash {
-            print("Note: the bash tool can run shell commands with no sandbox. Use --no-bash to disable.")
+            print("Note: the bash tool and file edits run with no sandbox. Use --no-bash to disable shell access.")
             tools.append(BashTool())
         }
 
