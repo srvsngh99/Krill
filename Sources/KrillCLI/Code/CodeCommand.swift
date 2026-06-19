@@ -32,12 +32,28 @@ struct CodeCommand: AsyncParsableCommand {
     var system: String?
 
     @Flag(name: .long, inversion: .prefixedNo,
-          help: "Allow the agent to run shell commands via the bash tool (PR2: no permission gate yet).")
+          help: "Allow the agent to run shell commands via the bash tool.")
     var bash: Bool = true
 
     @Flag(name: .long, inversion: .prefixedNo,
           help: "Grammar-constrain tool-call arguments to the schema when a model emits empty/invalid args (helps small models).")
     var constrainArgs: Bool = true
+
+    @Flag(name: .long,
+          help: "Read-only plan mode: the agent may inspect files but cannot edit them or run commands; it proposes a plan. Shorthand for --permission-mode plan.")
+    var plan: Bool = false
+
+    @Option(name: .long,
+            help: "Permission mode: accept-all (run every tool), ask (confirm each mutating tool), or plan (read-only).")
+    var permissionMode: String?
+
+    @Option(name: .customLong("allow-tool"), parsing: .singleValue,
+            help: "Always allow this tool by name (repeatable). Overrides the mode but not --deny-tool.")
+    var allowTools: [String] = []
+
+    @Option(name: .customLong("deny-tool"), parsing: .singleValue,
+            help: "Always deny this tool by name (repeatable). Highest precedence.")
+    var denyTools: [String] = []
 
     func run() async throws {
         let registry = Registry()
@@ -75,31 +91,67 @@ struct CodeCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        // Resolve the permission mode: --plan is shorthand for plan mode and
+        // wins if both are passed.
+        let mode: PermissionMode
+        if plan {
+            mode = .plan
+        } else if let raw = nonEmpty(permissionMode) {
+            guard let parsed = PermissionMode(rawValue: raw) else {
+                print("Error: invalid --permission-mode '\(raw)'. Choose: "
+                    + PermissionMode.allCases.map(\.rawValue).joined(separator: ", "))
+                throw ExitCode.failure
+            }
+            mode = parsed
+        } else {
+            mode = .acceptAll
+        }
+        let policy = PermissionPolicy(
+            mode: mode, allow: Set(allowTools), deny: Set(denyTools))
+
         print("Loading model from \(model)...")
         let engine = InferenceEngine(modelDirectory: modelDir)
         let loadStart = CFAbsoluteTimeGetCurrent()
         try await engine.load()
         print(String(format: "Ready (%.1fs).", CFAbsoluteTimeGetCurrent() - loadStart))
 
-        // Filesystem toolset is always available; bash is opt-out (no permission
-        // layer yet - that arrives in a later PR).
+        // Filesystem toolset is always available; bash is opt-out. The
+        // permission layer (below) governs whether mutating tools actually run.
         var tools: [any Tool] = [
             ReadTool(), ListTool(), GlobTool(), GrepTool(),
             EditTool(), MultiEditTool(), WriteTool(),
         ]
-        if bash {
-            print("Note: the bash tool and file edits run with no sandbox. Use --no-bash to disable shell access.")
-            tools.append(BashTool())
+        if bash { tools.append(BashTool()) }
+
+        // Tell the user the posture, and steer the model in plan mode.
+        var effectiveSystem = system
+        switch mode {
+        case .plan:
+            print("Plan mode: read-only. The agent can inspect files but cannot edit them or run commands.")
+            let planNote =
+                "You are in PLAN MODE (read-only). You may read and search files with the "
+                + "read-only tools, but you must NOT write files, edit files, or run shell "
+                + "commands - those are denied. Investigate as needed, then present a clear, "
+                + "concise step-by-step plan as your final answer."
+            effectiveSystem = [planNote, nonEmpty(system)].compactMap { $0 }.joined(separator: "\n\n")
+        case .ask:
+            print("Ask mode: you will be prompted to approve each file edit or shell command.")
+        case .acceptAll:
+            if bash {
+                print("Note: the bash tool and file edits run with no sandbox. Use --no-bash to disable shell access, or --plan / --permission-mode ask to gate tools.")
+            }
         }
 
         let loop = AgentLoop(
             generator: EngineGenerator(engine: engine, maxTokens: maxTokens),
             tools: ToolRegistry(tools),
             maxIterations: maxIterations,
-            constrainToolArgs: constrainArgs)
+            constrainToolArgs: constrainArgs,
+            permission: policy,
+            gate: mode == .ask ? StdinApprover() : nil)
 
         print("\n> \(task)\n")
-        let transcript = await loop.run(user: task, system: system)
+        let transcript = await loop.run(user: task, system: effectiveSystem)
         render(transcript)
     }
 
