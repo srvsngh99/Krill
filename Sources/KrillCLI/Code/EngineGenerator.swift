@@ -31,6 +31,9 @@ struct EngineGenerator: HarnessGenerator {
     private func collect(_ stream: AsyncStream<TokenEvent>) async -> String {
         var out = ""
         for await event in stream {
+            // Honor Ctrl-C from the TUI: leaving the for-await drops the stream,
+            // whose onTermination cancels the engine's decode loop on the GPU.
+            if Task.isCancelled { break }
             if event.isEnd { break }
             out += event.text
         }

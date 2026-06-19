@@ -31,7 +31,24 @@ public struct AgentTranscript: Sendable {
     public let steps: [AgentStep]
     public let finalText: String
     public let hitIterationLimit: Bool
+    /// True when the run stopped because its Task was cancelled (Ctrl-C in the
+    /// TUI), as opposed to finishing or hitting the iteration cap.
+    public let wasCancelled: Bool
     public let messages: [[String: String]]
+
+    public init(
+        steps: [AgentStep],
+        finalText: String,
+        hitIterationLimit: Bool,
+        wasCancelled: Bool = false,
+        messages: [[String: String]]
+    ) {
+        self.steps = steps
+        self.finalText = finalText
+        self.hitIterationLimit = hitIterationLimit
+        self.wasCancelled = wasCancelled
+        self.messages = messages
+    }
 }
 
 /// An incremental event emitted as the loop runs, so a live UI (the `code` TUI)
@@ -62,6 +79,8 @@ public enum AgentEvent: Sendable, Equatable {
     case finalAnswer(String)
     /// The loop stopped at the iteration cap without a final answer.
     case iterationLimitReached
+    /// The run was cancelled (its Task was cancelled, e.g. Ctrl-C in the TUI).
+    case cancelled
 }
 
 /// The core agentic loop: inject the tool system turn, then repeatedly
@@ -127,9 +146,18 @@ public struct AgentLoop: Sendable {
         var steps: [AgentStep] = []
         var finalText = ""
         var hitLimit = false
+        var cancelled = false
 
         var iteration = 0
         while true {
+            // Cooperative cancellation: when the enclosing Task is cancelled
+            // (the `code` TUI does this on Ctrl-C), stop between turns rather
+            // than starting another generation. The generator is expected to
+            // honor cancellation too, so an in-flight turn returns promptly.
+            if Task.isCancelled {
+                cancelled = true
+                break
+            }
             if iteration >= maxIterations {
                 hitLimit = true
                 break
@@ -209,11 +237,12 @@ public struct AgentLoop: Sendable {
             steps.append(AgentStep(assistantText: visible, toolCalls: invocations))
         }
 
-        if hitLimit { onEvent?(.iterationLimitReached) }
+        if cancelled { onEvent?(.cancelled) }
+        else if hitLimit { onEvent?(.iterationLimitReached) }
 
         return AgentTranscript(
             steps: steps, finalText: finalText,
-            hitIterationLimit: hitLimit, messages: messages)
+            hitIterationLimit: hitLimit, wasCancelled: cancelled, messages: messages)
     }
 
     /// Strip ALL reasoning blocks from text bound for the display surface.

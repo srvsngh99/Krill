@@ -26,6 +26,7 @@ enum Ansi {
     static func white(_ s: String) -> String { wrap(s, "97") }
     static func cyan(_ s: String) -> String { wrap(s, "36") }
     static func green(_ s: String) -> String { wrap(s, "32") }
+    static func red(_ s: String) -> String { wrap(s, "31") }
     static func yellow(_ s: String) -> String { wrap(s, "33") }
     static func magenta(_ s: String) -> String { wrap(s, "35") }
     static func gray(_ s: String) -> String { wrap(s, "90") }
