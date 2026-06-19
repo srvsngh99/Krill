@@ -5,6 +5,7 @@ import KrillTooling
 /// lines for edits). Optional `offset`/`limit` window large files.
 public struct ReadTool: Tool {
     public let name = "read_file"
+    public let isReadOnly = true
     public let description =
         "Read a text file and return its contents with line numbers. Use offset/limit for large files."
     public let parametersJSON = """

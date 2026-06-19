@@ -4,6 +4,7 @@ import KrillTooling
 /// List the entries of a directory (directories marked with a trailing slash).
 public struct ListTool: Tool {
     public let name = "list_dir"
+    public let isReadOnly = true
     public let description = "List the files and subdirectories of a directory."
     public let parametersJSON = """
     {"type":"object","properties":{\

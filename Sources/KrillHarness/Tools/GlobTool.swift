@@ -5,6 +5,7 @@ import KrillTooling
 /// Supports `*`, `?`, character classes, and `**` (crosses directories).
 public struct GlobTool: Tool {
     public let name = "glob"
+    public let isReadOnly = true
     public let description =
         "Find files matching a glob pattern (e.g. '**/*.swift', 'Sources/*.json'). Returns matching paths."
     public let parametersJSON = """
