@@ -267,6 +267,35 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertFalse(t.finalText.contains("thought"), "no reasoning block may leak")
     }
 
+    func testContinuationCarriesPriorConversation() async {
+        // First turn establishes context; the second turn continues from the
+        // prior transcript's messages and must see that history (and not
+        // re-inject the tool system turn).
+        let gen1 = MockGenerator(responses: ["First answer."])
+        let loop = AgentLoop(generator: gen1, tools: ToolRegistry([StubTool()]))
+        let t1 = await loop.run(user: "first task")
+        XCTAssertEqual(t1.finalText, "First answer.")
+        let firstCount = t1.messages.count
+
+        let gen2 = MockGenerator(responses: ["Second answer."])
+        let loop2 = AgentLoop(generator: gen2, tools: ToolRegistry([StubTool()]))
+        let t2 = await loop2.run(user: "second task", priorMessages: t1.messages)
+
+        XCTAssertEqual(t2.finalText, "Second answer.")
+        // The second run was seeded with the prior messages plus the new user
+        // turn and the assistant reply, so it strictly grows the history.
+        XCTAssertGreaterThan(t2.messages.count, firstCount)
+        XCTAssertTrue(
+            t2.messages.contains { ($0["content"] ?? "").contains("first task") },
+            "continuation must retain the prior user turn")
+        XCTAssertTrue(
+            t2.messages.contains { ($0["content"] ?? "").contains("second task") },
+            "continuation must include the new user turn")
+        // Exactly one tool system turn (not re-injected on continuation).
+        let systemTurns = t2.messages.filter { $0["role"] == "system" }.count
+        XCTAssertLessThanOrEqual(systemTurns, 1, "tool system turn must not be duplicated")
+    }
+
     func testRegistrySpecsPreserveOrderAndDedupe() {
         let reg = ToolRegistry([
             StubTool(name: "read"),

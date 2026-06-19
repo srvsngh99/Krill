@@ -127,21 +127,36 @@ public struct AgentLoop: Sendable {
     /// Run the loop to completion. Pass `onEvent` to observe progress live (the
     /// `code` TUI does); it is called synchronously from the loop in event order.
     /// Omitting it preserves the original batch behavior exactly.
+    ///
+    /// Pass `priorMessages` (a previous run's `transcript.messages`) to CONTINUE
+    /// that conversation: the tool system turn and history are already present,
+    /// so they are not re-injected - only the new `user` turn is appended. This
+    /// is how the multi-turn TUI carries context across follow-up tasks. When
+    /// `priorMessages` is empty, the loop starts fresh (system + user + tool
+    /// injection), the original behavior.
     public func run(
         user: String,
         system: String? = nil,
+        priorMessages: [[String: String]] = [],
         onEvent: (@Sendable (AgentEvent) -> Void)? = nil
     ) async -> AgentTranscript {
         let format = generator.toolFormat
         let specs = tools.specs()
         let hasTools = !specs.isEmpty
 
-        var messages: [[String: String]] = []
-        if let system, !system.isEmpty {
-            messages.append(["role": "system", "content": system])
+        var messages: [[String: String]]
+        if priorMessages.isEmpty {
+            messages = []
+            if let system, !system.isEmpty {
+                messages.append(["role": "system", "content": system])
+            }
+            messages.append(["role": "user", "content": user])
+            messages = ToolCalling.injectToolSystem(into: messages, tools: specs, format: format)
+        } else {
+            // Continue an existing conversation: tools/history already injected.
+            messages = priorMessages
+            messages.append(["role": "user", "content": user])
         }
-        messages.append(["role": "user", "content": user])
-        messages = ToolCalling.injectToolSystem(into: messages, tools: specs, format: format)
 
         var steps: [AgentStep] = []
         var finalText = ""
