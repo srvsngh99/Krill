@@ -91,10 +91,15 @@ public struct AgentLoop: Sendable {
             let output = await generator.complete(messages: messages)
             let (calls, cleaned) = ToolCalling.extractIfToolsOffered(
                 from: output, hasTools: hasTools, format: format)
+            // Strip reasoning (`<think>`/`<thinking>`/Gemma channels) from the
+            // text we DISPLAY. The raw `output` still goes into the message
+            // history below, so the model keeps its own context and tool-call
+            // markers are untouched - this is display-only cleanup.
+            let visible = ReasoningParser.strip(cleaned).visible
 
             if calls.isEmpty {
-                finalText = cleaned
-                steps.append(AgentStep(assistantText: cleaned, toolCalls: []))
+                finalText = visible
+                steps.append(AgentStep(assistantText: visible, toolCalls: []))
                 break
             }
 
@@ -122,7 +127,7 @@ public struct AgentLoop: Sendable {
                     "content": "Tool result (\(call.name)):\n\(result.content)",
                 ])
             }
-            steps.append(AgentStep(assistantText: cleaned, toolCalls: invocations))
+            steps.append(AgentStep(assistantText: visible, toolCalls: invocations))
         }
 
         return AgentTranscript(
