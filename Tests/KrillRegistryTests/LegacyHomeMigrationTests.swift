@@ -50,6 +50,49 @@ final class LegacyHomeMigrationTests: XCTestCase {
         XCTAssertTrue(fm.fileExists(atPath: new.appendingPathComponent("keep").path))
     }
 
+    func testMergesStrandedModelsWhenNewHomeHasOnlyCache() throws {
+        // Reproduces the real bug: ~/.krill exists with just a cache/ dir
+        // (created before models migrated), so a whole-tree move is impossible
+        // and the models must be merged across rather than stranded.
+        let home = try makeTempHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let fm = FileManager.default
+        let new = home.appendingPathComponent(".krill")
+        try fm.createDirectory(at: new.appendingPathComponent("cache"), withIntermediateDirectories: true)
+        try Data([0x9]).write(to: new.appendingPathComponent("cache/c.bin"))
+        let legacy = home.appendingPathComponent(".krillm")
+        try fm.createDirectory(at: legacy.appendingPathComponent("models/blobs"), withIntermediateDirectories: true)
+        try Data([0xAB]).write(to: legacy.appendingPathComponent("models/blobs/w.safetensors"))
+        try Data("default_model=\"x\"".utf8).write(to: legacy.appendingPathComponent("config.toml"))
+
+        let moved = Registry.migrateLegacyHomeIfNeeded(home: home)
+
+        XCTAssertTrue(moved)
+        XCTAssertTrue(fm.fileExists(atPath: new.appendingPathComponent("models/blobs/w.safetensors").path),
+                      "stranded models must be merged into ~/.krill")
+        XCTAssertTrue(fm.fileExists(atPath: new.appendingPathComponent("config.toml").path))
+        XCTAssertTrue(fm.fileExists(atPath: new.appendingPathComponent("cache/c.bin").path),
+                      "pre-existing cache must be preserved, not clobbered")
+        XCTAssertFalse(fm.fileExists(atPath: legacy.path), "emptied legacy dir should be removed")
+    }
+
+    func testMergeNeverClobbersAnExistingEntry() throws {
+        let home = try makeTempHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let fm = FileManager.default
+        let new = home.appendingPathComponent(".krill")
+        try fm.createDirectory(at: new.appendingPathComponent("models"), withIntermediateDirectories: true)
+        try Data("NEW".utf8).write(to: new.appendingPathComponent("models/keep"))
+        let legacy = home.appendingPathComponent(".krillm")
+        try fm.createDirectory(at: legacy.appendingPathComponent("models"), withIntermediateDirectories: true)
+        try Data("OLD".utf8).write(to: legacy.appendingPathComponent("models/keep"))
+
+        _ = Registry.migrateLegacyHomeIfNeeded(home: home)
+
+        XCTAssertEqual(try Data(contentsOf: new.appendingPathComponent("models/keep")), Data("NEW".utf8),
+                       "an existing entry in the new home must win; legacy must not clobber it")
+    }
+
     func testNoOpWhenNothingToMigrate() throws {
         let home = try makeTempHome()
         defer { try? FileManager.default.removeItem(at: home) }
