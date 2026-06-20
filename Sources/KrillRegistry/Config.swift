@@ -245,6 +245,14 @@ public struct KrillConfig: Sendable {
         guard writableKeys.contains(key) else {
             throw ConfigError.unknownKey(key)
         }
+        // The writer emits `key = "value"` and the parser reads it back by
+        // trimming surrounding quotes (it does not unescape). A value containing
+        // a quote, backslash, or newline would therefore not round-trip and could
+        // corrupt the file on the atomic rewrite, so reject it rather than write
+        // something the parser cannot read. No legitimate config value needs them.
+        guard !value.contains(where: { $0 == "\"" || $0 == "\\" || $0 == "\n" || $0 == "\r" }) else {
+            throw ConfigError.invalidValue(key: key, value: value)
+        }
         let url = configPath()
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -257,13 +265,21 @@ public struct KrillConfig: Sendable {
     /// Pure line-wise upsert of `key = "value"` into existing TOML text: replaces
     /// an existing assignment for `key` in place (preserving comments, blanks, and
     /// every other line), else appends. Returned text ends with a newline.
-    /// Exposed for testing without touching the real config file.
+    ///
+    /// All of Krill's config keys live in the top-level (pre-`[section]`) region,
+    /// so the upsert is scoped to that region: it never matches or writes a key
+    /// inside a `[section]` table (which could share a bare key name), and a new
+    /// key is inserted just before the first section header rather than after a
+    /// table it does not belong to. Exposed for testing.
     public static func upsertTOML(_ existing: String, key: String, value: String) -> String {
         var lines = existing.isEmpty ? [] : existing.components(separatedBy: "\n")
         let newLine = "\(key) = \"\(value)\""
         var replaced = false
+        var firstSection: Int?
         for i in lines.indices {
             let t = lines[i].trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("[") { if firstSection == nil { firstSection = i }; continue }
+            if firstSection != nil { continue }   // only upsert in the global region
             guard !t.hasPrefix("#"), let eq = t.firstIndex(of: "=") else { continue }
             if t[..<eq].trimmingCharacters(in: .whitespaces) == key {
                 lines[i] = newLine
@@ -272,7 +288,9 @@ public struct KrillConfig: Sendable {
             }
         }
         if !replaced {
-            if let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
+            if let fs = firstSection {
+                lines.insert(newLine, at: fs)      // end of the global region, before any table
+            } else if let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
                 lines[lines.count - 1] = newLine   // reuse a trailing blank line
             } else {
                 lines.append(newLine)
@@ -315,11 +333,14 @@ public struct KrillConfig: Sendable {
 
     public enum ConfigError: Error, CustomStringConvertible {
         case unknownKey(String)
+        case invalidValue(key: String, value: String)
         public var description: String {
             switch self {
             case .unknownKey(let k):
                 return "unknown config key '\(k)'. Known keys: "
                     + KrillConfig.writableKeys.joined(separator: ", ")
+            case .invalidValue(let k, _):
+                return "value for '\(k)' may not contain a quote, backslash, or newline."
             }
         }
     }

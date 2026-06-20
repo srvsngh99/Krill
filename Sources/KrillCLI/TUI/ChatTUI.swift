@@ -926,6 +926,14 @@ final class ChatTUI {
     }
 
     private func changeDirectory(_ path: String) {
+        // The agent tools resolve relative paths against the process working
+        // directory, so changing it mid-run would silently retarget a running
+        // background agent's file and shell operations. Refuse while any is live.
+        if sessions.contains(where: { $0.isRunning }) {
+            note("Cannot change directory while a background agent is running - it would "
+                + "retarget the agent's file operations. Wait for it to finish, or /clear.")
+            return
+        }
         let expanded = (path as NSString).expandingTildeInPath
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir), isDir.boolValue else {
@@ -1929,7 +1937,7 @@ final class ChatTUI {
         // Rows 1-2: light masthead (wordmark line + dim rule). When attached to a
         // background agent, the masthead names it so it is obvious you are not in
         // the main view.
-        let headerLabel = activeSession.map { "agent[\($0.id)] \($0.title) — \($0.statusLabel())" } ?? modelName
+        let headerLabel = activeSession.map { "agent[\($0.id)] \($0.title) - \($0.statusLabel())" } ?? modelName
         frame += positioned(1, Brand.header(width: width, model: headerLabel))
         frame += positioned(2, Brand.headerRule(width: width))
 
