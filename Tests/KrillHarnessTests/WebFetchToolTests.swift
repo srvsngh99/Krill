@@ -50,6 +50,31 @@ final class WebFetchToolTests: XCTestCase {
         }
     }
 
+    func testBlocksObfuscatedIPv4Forms() {
+        // Every textual spelling the resolver accepts for loopback / metadata
+        // must be canonicalized and blocked - not just dotted-quad.
+        for h in [
+            "2130706433",          // decimal 127.0.0.1
+            "0x7f000001",          // hex 127.0.0.1
+            "0x7f.0.0.1",          // mixed hex
+            "017700000001",        // octal 127.0.0.1
+            "127.1",               // short form 127.0.0.1
+            "127.0.0.1.",          // trailing dot
+            "0",                   // 0.0.0.0
+            "2852039166",          // decimal 169.254.169.254 (cloud metadata)
+            "0xA9FEA9FE",          // hex 169.254.169.254
+            "localhost.",          // trailing-dot name
+        ] {
+            XCTAssertTrue(WebFetchTool.isBlockedHost(h), "\(h) must be blocked")
+        }
+    }
+
+    func testBlocksIPv4MappedIPv6() {
+        for h in ["::ffff:127.0.0.1", "::ffff:169.254.169.254", "::", "::127.0.0.1"] {
+            XCTAssertTrue(WebFetchTool.isBlockedHost(h), "\(h) must be blocked")
+        }
+    }
+
     // MARK: - HTML extraction (pure)
 
     func testHtmlToTextStripsTagsScriptsAndEntities() {
