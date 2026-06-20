@@ -16,17 +16,22 @@ private func tuiWinchHandler(_ sig: Int32) { tuiWinchFlag = 1 }
 /// Thread-safe hand-off of `AgentEvent`s from the background agent-run Task to
 /// the main render loop (the run Task only ever touches this; all UI state lives
 /// on the main task). Mirrors the code TUI's queue.
-private final class EventQueue: @unchecked Sendable {
+final class EventQueue: @unchecked Sendable {
     private let lock = NSLock()
     private var events: [AgentEvent] = []
     private var done = false
+    private var result: AgentTranscript?
     func push(_ e: AgentEvent) { lock.lock(); events.append(e); lock.unlock() }
     func markDone() { lock.lock(); done = true; lock.unlock() }
+    /// Mark done AND stash the final transcript (so a synchronous pump can pick
+    /// up the continued message history without awaiting the run Task).
+    func finish(_ t: AgentTranscript) { lock.lock(); result = t; done = true; lock.unlock() }
     func drain() -> [AgentEvent] {
         lock.lock(); defer { lock.unlock() }
         let out = events; events.removeAll(); return out
     }
     var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return done && events.isEmpty }
+    var finishedResult: AgentTranscript? { lock.lock(); defer { lock.unlock() }; return result }
 }
 
 /// Full-screen opencode-style chat TUI for Krill, in the Sourav AI Labs
@@ -68,6 +73,20 @@ final class ChatTUI {
     private var agentChipShown = false          // a chip was emitted for the in-flight call
     private let approver = TUIApprover()
     private var initialAgentTask: String?       // auto-run once on launch (krill code "task")
+
+    // Background agents: independent sessions spawned by /bg or the model's
+    // dispatch_agent tool. `activeSessionID` is the attached session (nil = the
+    // main chat/agent view). `spawnQueue` carries dispatch_agent requests from a
+    // tool's task to this main task. `switcher` is the modal /agents picker.
+    private var sessions: [AgentSession] = []
+    private var activeSessionID: Int?
+    private var nextSessionID = 1
+    private let spawnQueue = SpawnQueue()
+    private var switcher: AgentSwitcher?
+
+    private var activeSession: AgentSession? {
+        activeSessionID.flatMap { id in sessions.first { $0.id == id } }
+    }
 
     // Attachments
     private struct Att { let kind: MediaKind; let data: Data; let name: String; let dims: (Int, Int)? }
@@ -213,7 +232,7 @@ final class ChatTUI {
         // `/quit`/`/exit`/`/q` and Ctrl-D (which only set `shouldQuit`); Ctrl-C
         // and new turns already stop it inline. Without this a reply still being
         // read aloud would keep talking after the session ends.
-        defer { synth.stop(); raw.leave() }
+        defer { synth.stop(); sessions.forEach { $0.cancel() }; raw.leave() }
 
         if !pendingImages.isEmpty || pendingAudio != nil {
             view.append(Msg(role: .note, text: attachSummary()))
@@ -233,6 +252,7 @@ final class ChatTUI {
 
         while !shouldQuit {
             if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize(); render() }
+            if pumpAll() { render() }   // advance background agents, surface live status
             guard raw.waitForInput(timeoutMs: 250) else { continue }
             guard let keys = reader.read() else { break }   // nil == EOF
             // An empty (non-nil) batch is a stray mouse/terminal event - ignore it.
@@ -265,6 +285,10 @@ final class ChatTUI {
         // Modal screens own the keyboard while open.
         if overlay != nil { handleOverlayKey(key); return nil }
         if picker != nil { handlePickerKey(key); return nil }
+        if switcher != nil { handleSwitcherKey(key); return nil }
+        // Attached to a running background agent: keys drive its approval / cancel
+        // / scroll, not the composer (which is inert until the agent is idle).
+        if let s = activeSession, s.isRunning { handleAttachedRunKey(key, session: s); return nil }
         switch key {
         case .ctrlD:
             if input.isEmpty { shouldQuit = true }
@@ -638,6 +662,14 @@ final class ChatTUI {
             render()
             return
         }
+        // Attached to a background session: a non-command submission continues
+        // THAT session (its own history), not the main chat. Running sessions
+        // intercept keys earlier, so the active session here is idle/finished.
+        if let s = activeSession {
+            s.start(task: trimmed)
+            render()
+            return
+        }
         // Inline @path and bare-path attachments.
         let (cleaned, atts) = extractInline(trimmed)
         pendingImages.append(contentsOf: atts.filter { $0.kind == .image })
@@ -662,7 +694,8 @@ final class ChatTUI {
 
     /// Aliases accepted by handleCommand but kept out of the autosuggest list to
     /// avoid cluttering it.
-    private static let commandAliases: Set<String> = ["/img", "/exit", "/q", "/reset", "/vmode"]
+    private static let commandAliases: Set<String> = [
+        "/img", "/exit", "/q", "/reset", "/vmode", "/background", "/switch", "/back"]
 
     private func isCommand(_ s: String) -> Bool {
         let first = String(s.split(separator: " ").first ?? "")
@@ -695,6 +728,8 @@ final class ChatTUI {
         case "/clear", "/reset":   // /reset kept as an alias for clearing the chat
             modelTurns.removeAll(); view.removeAll(); pendingImages.removeAll(); pendingAudio = nil
             agentMessages.removeAll(); agentSeeded = false; approver.reset()
+            // Cancel and drop every background agent too.
+            sessions.forEach { $0.cancel() }; sessions.removeAll(); activeSessionID = nil
             note("Conversation cleared.")
         case "/history":
             showOverlay("Conversation", modelTurns.isEmpty ? "No conversation yet."
@@ -711,6 +746,21 @@ final class ChatTUI {
                 showModelDeepDive(n.isEmpty ? modelName : n)
             }
             else { await switchOrDownload(arg) }
+        case "/bg", "/background":
+            guard surface == .agent else {
+                note("Switch to agent mode (/agent) before spawning a background agent."); break
+            }
+            guard !arg.isEmpty else { note("Usage: /bg <task>"); break }
+            spawnSession(title: DispatchTool.deriveTitle(arg), task: arg)
+        case "/agents":
+            guard !sessions.isEmpty else { note("No background agents yet. Start one with /bg <task>."); break }
+            switcher = AgentSwitcher(entries: switcherEntries(), current: activeSessionID)
+        case "/switch":
+            if let n = Int(arg), sessions.contains(where: { $0.id == n }) { attach(n) }
+            else { note("No agent [\(arg)]. /agents to list.") }
+        case "/main", "/back":
+            if activeSessionID != nil { attach(nil); note("Back to the main view.") }
+            else { note("Already on the main view.") }
         case "/config": handleConfig(arg)
         case "/init": await runInit()
         case "/diff": showDiff()
@@ -953,12 +1003,14 @@ final class ChatTUI {
 
     // MARK: - Agent mode
 
-    /// The agent toolset: read-only explorers + file edits + bash. The permission
-    /// posture - not this list - governs what actually runs.
+    /// The agent toolset: read-only explorers + file edits + bash + the ability
+    /// to spawn a background agent. The permission posture - not this list -
+    /// governs what actually runs.
     private func agentTools() -> ToolRegistry {
         ToolRegistry([
             ReadTool(), ListTool(), GlobTool(), GrepTool(),
             EditTool(), MultiEditTool(), WriteTool(), BashTool(),
+            DispatchTool(queue: spawnQueue),
         ])
     }
 
@@ -1012,6 +1064,7 @@ final class ChatTUI {
         var spin = 0
         while true {
             if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize() }
+            pumpAll()   // keep background agents advancing during a foreground turn
             for ev in queue.drain() { applyAgentEvent(ev) }
             let finished = queue.isFinished
             let elapsed = Self.formatElapsed(CFAbsoluteTimeGetCurrent() - startedAt)
@@ -1060,31 +1113,25 @@ final class ChatTUI {
         }
     }
 
-    /// Fold one agent event into the shared transcript view.
+    /// Fold one agent event into the shared transcript view, via the single
+    /// `foldAgentEvent` mapping (shared with background sessions).
     private func applyAgentEvent(_ event: AgentEvent) {
-        switch event {
-        case .assistantTurn(let text):
-            let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !t.isEmpty { view.append(Msg(role: .assistant, text: t)) }
-        case .toolStarted(let name, let args):
-            view.append(Msg(role: .toolCall, text: args, toolName: name))
-            agentChipShown = true
-        case .toolFinished(let inv):
-            // Denied / unknown tools never emit toolStarted, so add their chip
-            // here so the observation is never orphaned.
-            if !agentChipShown {
-                view.append(Msg(role: .toolCall, text: inv.argumentsJSON, toolName: inv.name))
-            }
-            view.append(Msg(role: .toolResult, text: inv.result.content, toolError: inv.result.isError))
-            agentChipShown = false
-        case .finalAnswer(let text):
-            view.append(Msg(role: .assistant, text: text))
-        case .iterationLimitReached:
-            note("[stopped at the iteration limit without a final answer]")
-        case .cancelled:
-            note("(cancelled)")
-        }
+        var produced: [AgentEntry] = []
+        foldAgentEvent(event, into: &produced, chipShown: &agentChipShown)
+        for e in produced { view.append(Self.msg(from: e)) }
         scrollOffset = 0
+    }
+
+    /// Map a transcript entry to a chat `Msg` (so the foreground agent turn and
+    /// an attached background session render through the same pane code).
+    private static func msg(from e: AgentEntry) -> Msg {
+        switch e {
+        case .user(let t): return Msg(role: .user, text: t)
+        case .assistant(let t): return Msg(role: .assistant, text: t)
+        case .toolCall(let name, let args): return Msg(role: .toolCall, text: args, toolName: name)
+        case .toolResult(let content, let isError): return Msg(role: .toolResult, text: content, toolError: isError)
+        case .note(let t): return Msg(role: .note, text: t)
+        }
     }
 
     /// The y/n/a approval prompt for a pending tool call (shown above the input
@@ -1109,6 +1156,121 @@ final class ChatTUI {
         case .note: return Ansi.yellow(line.text)
         case .dim: return Ansi.dim(line.text)
         }
+    }
+
+    // MARK: - Background agents (/bg, dispatch_agent, /agents switcher)
+
+    /// Advance every background agent one tick and start any agents the model
+    /// asked for via dispatch_agent. Returns true if anything changed (re-render).
+    @discardableResult
+    private func pumpAll() -> Bool {
+        var changed = false
+        for req in spawnQueue.drain() {
+            spawnSession(title: req.title, task: req.task)
+            changed = true
+        }
+        for s in sessions where s.pump() { changed = true }
+        return changed
+    }
+
+    /// Create and start a background agent for `task`. It inherits the current
+    /// engine + posture and the full toolset (so it can itself dispatch).
+    private func spawnSession(title: String, task: String) {
+        let s = AgentSession(
+            id: nextSessionID, title: title, engine: engine,
+            maxTokens: maxTokens, posture: posture, tools: agentTools())
+        nextSessionID += 1
+        sessions.append(s)
+        s.start(task: task)
+        note("Started background agent [\(s.id)] '\(title)' (posture: \(posture.label)). "
+            + "/agents to attach, /switch \(s.id) to jump in.")
+    }
+
+    /// Attach to a session (or the main view when `id` is nil).
+    private func attach(_ id: Int?) {
+        activeSessionID = id
+        scrollOffset = 0
+        if let id, let s = sessions.first(where: { $0.id == id }) {
+            note("Attached to agent [\(id)] '\(s.title)'. /main to return.")
+        }
+    }
+
+    /// Rows for the /agents switcher: the main view plus every session.
+    private func switcherEntries() -> [AgentSwitcher.Entry] {
+        var out = [AgentSwitcher.Entry(
+            id: nil, title: "main",
+            status: surface == .agent ? "agent:\(posture.label)" : "chat")]
+        for s in sessions {
+            out.append(.init(id: s.id, title: "[\(s.id)] \(s.title)", status: s.statusLabel()))
+        }
+        return out
+    }
+
+    /// Key handling while the /agents switcher is open.
+    private func handleSwitcherKey(_ key: Key) {
+        switch key {
+        case .up, .scrollUp: switcher?.selectPrevious()
+        case .down, .scrollDown: switcher?.selectNext()
+        case .enter:
+            let chosen = switcher?.current?.id
+            switcher = nil
+            attach(chosen)
+        case .escape, .ctrlC: switcher = nil
+        default: break
+        }
+    }
+
+    /// Key handling while attached to a RUNNING background session: answer its
+    /// approval prompt (y/n/a), cancel it, or scroll its transcript.
+    private func handleAttachedRunKey(_ key: Key, session: AgentSession) {
+        if session.approver.pending() != nil {
+            switch key {
+            case .char("y"), .char("Y"), .enter: session.approver.resolve(true)
+            case .char("a"), .char("A"): session.approver.resolve(true, always: true)
+            case .char("n"), .char("N"), .escape: session.approver.resolve(false)
+            case .ctrlC: session.cancel()
+            default: break
+            }
+            return
+        }
+        switch key {
+        case .ctrlC, .escape: session.cancel()
+        case .ctrlD: shouldQuit = true
+        case .pageUp: scrollOffset += paneHeight() - 1
+        case .pageDown: scrollOffset = max(0, scrollOffset - (paneHeight() - 1))
+        case .scrollUp, .up: scrollOffset += 3
+        case .scrollDown, .down: scrollOffset = max(0, scrollOffset - 3)
+        default: break
+        }
+    }
+
+    /// Render the /agents switcher: the main view plus each background session
+    /// with its live status; the highlighted row is inverse-video.
+    private func renderSwitcher(_ sw: AgentSwitcher, width: Int, height: Int) -> [String] {
+        let margin = "  "
+        var out: [String] = [
+            margin + Ansi.bold("Agents"),
+            margin + Ansi.chrome("Up/Down  \u{00B7}  Enter attach  \u{00B7}  Esc close"),
+            "",
+        ]
+        func rpad(_ s: String, _ w: Int) -> String { s.padding(toLength: w, withPad: " ", startingAt: 0) }
+        let titleW = min(34, max(8, sw.entries.map { $0.title.count }.max() ?? 8))
+        let maxVisible = max(3, height - 5)
+        let total = sw.entries.count
+        var winStart = 0
+        if total > maxVisible { winStart = min(max(0, sw.selected - maxVisible / 2), total - maxVisible) }
+        let winEnd = min(winStart + maxVisible, total)
+        if winStart > 0 { out.append(margin + Ansi.chrome("   ...")) }
+        for i in winStart..<winEnd {
+            let e = sw.entries[i]
+            let chevron = i == sw.selected ? "\u{25B8}" : " "
+            let attached = e.id == activeSessionID ? "* " : "  "
+            let row = "\(chevron) \(attached)\(rpad(e.title, titleW))  \(e.status)"
+            let line = margin + String(row.prefix(max(0, width - margin.count)))
+            out.append(i == sw.selected ? Ansi.bold(line) : Ansi.chrome(line))
+        }
+        if winEnd < total { out.append(margin + Ansi.chrome("   ...")) }
+        return out
     }
 
     /// Map the `voice_mode` config string to a posture (default off/text).
@@ -1181,6 +1343,16 @@ final class ChatTUI {
     /// voice state into the footer keeps it persistent without a second status row.
     private func footerContent() -> (left: String, right: String) {
         let sep = " \u{00B7} "
+        // Attached to a background agent: the footer reflects THAT session.
+        if let s = activeSession {
+            let left: String
+            switch s.status {
+            case .running, .waiting: left = "\(s.statusLabel())\(sep)Esc interrupt\(sep)/main to return"
+            case .idle:              left = "done\(sep)type to continue\(sep)/main to return"
+            case .cancelled:         left = "cancelled\(sep)/main to return"
+            }
+            return (left, "agent[\(s.id)]:\(s.posture.label)\(sep)\(cwdLabel)\(sep)\(KrillVersionTag)")
+        }
         // Spoken-replies (TTS) indicator: independent of the mic, so it shows even
         // on text-only models. Leads the right half when on.
         let speakTag = speakReplies ? "\u{25CF} speak\(sep)" : ""
@@ -1188,7 +1360,9 @@ final class ChatTUI {
         let thinkTag = thinkingOn ? "\u{25CF} think\(sep)" : ""
         // Agent posture chip: shows the leash state whenever hands are on.
         let agentTag = surface == .agent ? "\u{25CF} agent:\(posture.label)\(sep)" : ""
-        let cleanRight = "\(agentTag)\(thinkTag)\(speakTag)\(cwdLabel)\(sep)\(KrillVersionTag)"
+        // Background-agent count, with a marker when one needs approval.
+        let agentsTag = bgAgentsTag(sep)
+        let cleanRight = "\(agentsTag)\(agentTag)\(thinkTag)\(speakTag)\(cwdLabel)\(sep)\(KrillVersionTag)"
         // Voice OFF (text mode) or a non-audio model: no voice chrome at all - the
         // footer is just the generation status and cwd/version (plus speak tag).
         guard engine.canUseNativeAudio, voiceMode != .type || !voiceActivity.isEmpty else {
@@ -1206,8 +1380,19 @@ final class ChatTUI {
             case .type:      left = ""   // unreachable (guarded above)
             }
         }
-        let right = lastStatus.isEmpty ? cleanRight : "\(agentTag)\(speakTag)\(lastStatus)\(sep)\(KrillVersionTag)"
+        let right = lastStatus.isEmpty ? cleanRight : "\(agentsTag)\(agentTag)\(speakTag)\(lastStatus)\(sep)\(KrillVersionTag)"
         return (left, right)
+    }
+
+    /// Footer chip for background agents: count + how many are running, with a
+    /// marker when one is waiting on an approval. Empty when there are none.
+    private func bgAgentsTag(_ sep: String) -> String {
+        guard !sessions.isEmpty else { return "" }
+        let running = sessions.filter { $0.isRunning }.count
+        let waiting = sessions.contains { $0.status == .waiting }
+        let run = running > 0 ? "(\(running) running)" : ""
+        let flag = waiting ? " !" : ""
+        return "\u{25CF} agents:\(sessions.count)\(run)\(flag)\(sep)"
     }
 
     /// A small monochrome VU meter that "dances" while recording - purely cosmetic
@@ -1229,6 +1414,12 @@ final class ChatTUI {
     /// it is off). Empty on non-audio models, where there is nothing to hint.
     private func composerHint() -> String {
         let sep = " \u{00B7} "
+        // Attached to a background agent: how to interact with it.
+        if let s = activeSession {
+            return s.isRunning
+                ? "agent working\(sep)Esc interrupt\(sep)/main to return"
+                : "type to continue this agent\(sep)/main to return"
+        }
         // In agent mode the leash + how to change it is the most useful hint.
         if surface == .agent {
             return "agent:\(posture.label)\(sep)Shift+Tab posture\(sep)/agent to exit"
@@ -1304,6 +1495,10 @@ final class ChatTUI {
         lastStatus = "thinking..."
         render()
 
+        // Serialize against any background agent decode (single-GPU): wait our
+        // turn, then hold the gate for the whole stream.
+        await GenerationGate.shared.acquire()
+        defer { GenerationGate.shared.release() }
         let gen = engine.generate(
             messages: messages, params: params, maxTokens: maxTokens,
             imageData: imgs.first, audioData: pendingAudio?.data, imagesData: imgs,
@@ -1502,6 +1697,8 @@ final class ChatTUI {
         for t in modelTurns { messages.append(["role": t.role, "content": t.content]) }
         messages.append(["role": "user", "content":
             "Summarize our conversation so far as a concise briefing that preserves all key facts, decisions, code, names, numbers, and open threads, so we can continue seamlessly. Output only the summary."])
+        await GenerationGate.shared.acquire()
+        defer { GenerationGate.shared.release() }
         let gen = engine.generate(
             messages: messages, params: params, maxTokens: maxTokens,
             imageData: nil, audioData: nil, imagesData: [], enableThinking: thinkingOn)
@@ -1729,8 +1926,11 @@ final class ChatTUI {
         let width = cols
         var frame = "\u{1B}[H"   // cursor home
 
-        // Rows 1-2: light masthead (wordmark line + dim rule).
-        frame += positioned(1, Brand.header(width: width, model: modelName))
+        // Rows 1-2: light masthead (wordmark line + dim rule). When attached to a
+        // background agent, the masthead names it so it is obvious you are not in
+        // the main view.
+        let headerLabel = activeSession.map { "agent[\($0.id)] \($0.title) — \($0.statusLabel())" } ?? modelName
+        frame += positioned(1, Brand.header(width: width, model: headerLabel))
         frame += positioned(2, Brand.headerRule(width: width))
 
         // Layout from the bottom up: the 3-row input box, then the footer below
@@ -1741,12 +1941,17 @@ final class ChatTUI {
         let box = inputBox(width: width)             // 3 lines: top / field / bottom
         let boxTop = max(paneTop + 1, rows - box.count)
         let footerRow = max(rows, boxTop + box.count)
-        let modal = picker != nil || overlay != nil
+        let attached = activeSession
+        let modal = picker != nil || overlay != nil || switcher != nil
         let menuLines = menu.isActive ? renderMenu(width: width) : []
         // A faded, italic, right-aligned hint sits on the row just above the input
         // box (hidden while the slash popup or a modal screen owns that space). A
-        // pending agent approval takes that row instead, drawn prominently.
-        let approval = surface == .agent ? approver.pending() : nil
+        // pending agent approval takes that row instead, drawn prominently. When
+        // attached to a background session the approval is THAT session's.
+        let approval: TUIApprover.Request?
+        if let attached { approval = attached.approver.pending() }
+        else if surface == .agent { approval = approver.pending() }
+        else { approval = nil }
         let hintText: String
         if let approval { hintText = approvalPrompt(approval) }
         else if menu.isActive || modal { hintText = "" }
@@ -1761,10 +1966,12 @@ final class ChatTUI {
         let pane: [String]
         if let ov = overlay { pane = overlayBody(ov, width: width, height: convHeight) }
         else if let p = picker { pane = renderPicker(p, width: width, height: convHeight) }
+        else if let sw = switcher { pane = renderSwitcher(sw, width: width, height: convHeight) }
+        else if let attached { pane = paneLines(attached.entries.map(Self.msg(from:)), width: width) }
         else { pane = paneLines(width: width) }
         let blankTop = modal
             ? 0
-            : Chrome.anchorBlankTop(paneCount: pane.count, convHeight: convHeight, centered: view.isEmpty)
+            : Chrome.anchorBlankTop(paneCount: pane.count, convHeight: convHeight, centered: view.isEmpty && attached == nil)
         let maxStart = max(0, pane.count - convHeight)
         scrollOffset = min(scrollOffset, maxStart)   // clamp: cannot scroll past the top
         let start = max(0, maxStart - scrollOffset)
@@ -1815,12 +2022,18 @@ final class ChatTUI {
     /// (bottom-anchor vs. centered splash) is handled by `render`.
     private func paneLines(width: Int) -> [String] {
         guard !view.isEmpty else { return Brand.splash(width: width) }
+        return paneLines(view, width: width)
+    }
+
+    /// Render an arbitrary message list (the main `view`, or an attached
+    /// background session's transcript mapped through `msg(from:)`).
+    private func paneLines(_ msgs: [Msg], width: Int) -> [String] {
         let margin = "  "
         let w = max(10, width - 4)                       // 2-space margin both sides
         let rule = Ansi.chrome(margin + String(repeating: "\u{2500}", count: min(w, 48)))
         var lines: [String] = []
         var sawTurn = false
-        for msg in view {
+        for msg in msgs {
             switch msg.role {
             case .user:
                 if sawTurn { lines.append(rule); lines.append("") }

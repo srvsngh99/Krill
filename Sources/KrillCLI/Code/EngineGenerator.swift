@@ -16,12 +16,18 @@ struct EngineGenerator: HarnessGenerator {
     }
 
     func complete(messages: [[String: String]]) async -> String {
-        await collect(engine.generate(messages: messages, params: .greedy, maxTokens: maxTokens).stream)
+        // Serialize against every other in-process generation (foreground chat +
+        // other background agents) so decodes never overlap on the single GPU.
+        await GenerationGate.shared.acquire()
+        defer { GenerationGate.shared.release() }
+        return await collect(engine.generate(messages: messages, params: .greedy, maxTokens: maxTokens).stream)
     }
 
     func completeConstrained(messages: [[String: String]], jsonSchema: String) async -> String {
         // Grammar-constrain decoding to a JSON object matching the tool's
         // parameter schema, so a small model cannot omit required fields.
+        await GenerationGate.shared.acquire()
+        defer { GenerationGate.shared.release() }
         let (stream, _) = engine.generate(
             messages: messages, params: .greedy, maxTokens: 256,
             format: .jsonSchemaCompact(jsonSchema))

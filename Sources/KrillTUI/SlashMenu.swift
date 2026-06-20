@@ -23,6 +23,9 @@ public struct SlashMenu {
     public static let all: [Item] = [
         Item(name: "/help", summary: "Show keys and commands"),
         Item(name: "/agent", summary: "Toggle agent mode (tools + file edits); Shift+Tab cycles posture"),
+        Item(name: "/bg", summary: "Spawn a background agent: /bg <task>"),
+        Item(name: "/agents", summary: "List and switch between background agents"),
+        Item(name: "/main", summary: "Return to the main view from an agent"),
         Item(name: "/image", summary: "Attach an image to your next message"),
         Item(name: "/audio", summary: "Attach an audio clip"),
         Item(name: "/mic", summary: "Record from the microphone"),
