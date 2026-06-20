@@ -44,11 +44,11 @@ struct CodeCommand: AsyncParsableCommand {
     var plan: Bool = false
 
     @Flag(name: .long,
-          help: "Use the classic line renderer instead of the full-screen TUI (also the default for non-interactive output and ask mode).")
+          help: "Use the classic line renderer instead of the full-screen TUI (also the default for non-interactive output, or when tool allow/deny flags are set).")
     var classic: Bool = false
 
     @Option(name: .long,
-            help: "Permission mode: accept-all (run every tool), ask (confirm each mutating tool), or plan (read-only).")
+            help: "Permission posture: plan (read-only), ask (confirm each mutating tool), accept-edits (auto-apply edits, ask for commands), or auto/accept-all (run every tool).")
     var permissionMode: String?
 
     @Option(name: .customLong("allow-tool"), parsing: .singleValue,
@@ -101,9 +101,9 @@ struct CodeCommand: AsyncParsableCommand {
         if plan {
             mode = .plan
         } else if let raw = nonEmpty(permissionMode) {
-            guard let parsed = PermissionMode(rawValue: raw) else {
+            guard let parsed = PermissionMode.parse(raw) else {
                 print("Error: invalid --permission-mode '\(raw)'. Choose: "
-                    + PermissionMode.allCases.map(\.rawValue).joined(separator: ", "))
+                    + PermissionMode.allCases.map(\.rawValue).joined(separator: ", ") + " (or 'auto').")
                 throw ExitCode.failure
             }
             mode = parsed
@@ -127,16 +127,31 @@ struct CodeCommand: AsyncParsableCommand {
         ]
         if bash { tools.append(BashTool()) }
 
-        // The full-screen TUI is the default on an interactive terminal, except
-        // in ask mode (its approval prompt needs the line renderer for now).
-        let useTUI = RawTerminal.isInteractive && !classic && mode != .ask
+        // On an interactive terminal with the default toolset, `krill code` is
+        // just the unified chat TUI launched in agent mode - same surface as
+        // `krill`, hands already on. The full-screen TUI hosts every posture
+        // (including ask / accept-edits via an in-TUI approval prompt). Fine-
+        // grained tool flags (--no-bash / --allow-tool / --deny-tool) fall back
+        // to the classic line renderer below, which honors them.
+        let defaultToolset = bash && allowTools.isEmpty && denyTools.isEmpty
+        if RawTerminal.isInteractive && !classic && defaultToolset {
+            let tui = ChatTUI(
+                engine: engine, modelName: model, system: nonEmpty(system),
+                params: .greedy, maxTokens: maxTokens, registry: registry,
+                initialImage: nil, initialAudio: nil,
+                thinkingSetting: KrillConfig.load().thinking,
+                modeSetting: "agent", agentPostureSetting: mode.rawValue,
+                initialAgentTask: task)
+            await tui.run()
+            return
+        }
 
-        // Steer the model in plan mode; surface the posture in the line renderer
-        // (the TUI shows it in its own chrome).
+        // Classic line renderer (--classic, non-interactive, or tool flags set).
+        // Steer the model in plan mode; surface the posture inline.
         var effectiveSystem = system
         switch mode {
         case .plan:
-            if !useTUI { print("Plan mode: read-only. The agent can inspect files but cannot edit them or run commands.") }
+            print("Plan mode: read-only. The agent can inspect files but cannot edit them or run commands.")
             let planNote =
                 "You are in PLAN MODE (read-only). You may read and search files with the "
                 + "read-only tools, but you must NOT write files, edit files, or run shell "
@@ -145,8 +160,10 @@ struct CodeCommand: AsyncParsableCommand {
             effectiveSystem = [planNote, nonEmpty(system)].compactMap { $0 }.joined(separator: "\n\n")
         case .ask:
             print("Ask mode: you will be prompted to approve each file edit or shell command.")
+        case .acceptEdits:
+            print("Accept-edits mode: file edits apply automatically; you will be prompted before shell commands.")
         case .acceptAll:
-            if !useTUI, bash {
+            if bash {
                 print("Note: the bash tool and file edits run with no sandbox. Use --no-bash to disable shell access, or --plan / --permission-mode ask to gate tools.")
             }
         }
@@ -157,12 +174,7 @@ struct CodeCommand: AsyncParsableCommand {
             maxIterations: maxIterations,
             constrainToolArgs: constrainArgs,
             permission: policy,
-            gate: mode == .ask ? StdinApprover() : nil)
-
-        if useTUI {
-            await CodeTUI(loop: loop, task: task, system: effectiveSystem, modelName: model).run()
-            return
-        }
+            gate: (mode == .ask || mode == .acceptEdits) ? StdinApprover() : nil)
 
         print("\n> \(task)\n")
         // Render the run live as the loop emits events, instead of dumping the

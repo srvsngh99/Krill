@@ -32,6 +32,14 @@ enum FileToolSupport {
 
     /// Compact before/after summary for an edit (the level of "diff rendering"
     /// a coding agent needs: what was replaced, not a full file patch).
+    /// Number of lines in a string (an empty string is 0 lines).
+    static func lineCount(_ s: String) -> Int {
+        s.isEmpty ? 0 : s.split(separator: "\n", omittingEmptySubsequences: false).count
+    }
+
+    /// Compact diffstat for a mutating tool result, e.g. "+5 -2".
+    static func diffstat(added: Int, removed: Int) -> String { "+\(added) -\(removed)" }
+
     static func changeSummary(old: String, new: String, limit: Int = 240) -> String {
         func clip(_ s: String) -> String {
             let oneLine = s.replacingOccurrences(of: "\n", with: "\\n")

@@ -23,12 +23,20 @@ final class CodeViewTests: XCTestCase {
         XCTAssertEqual(lines[0].style, .toolName)
         XCTAssertEqual(lines[0].text.count, 30, "chip is clipped to exactly the width")
         XCTAssertTrue(lines[0].text.hasSuffix("\u{2026}"), "clip marks the cut with an ellipsis")
-        XCTAssertTrue(lines[0].text.hasPrefix("* edit_file("))
+        XCTAssertTrue(lines[0].text.hasPrefix("\u{25B8} edit_file"))
     }
 
-    func testToolCallChipShortFits() {
+    func testToolCallChipSurfacesPath() {
+        // The chip surfaces the salient path argument, not the raw JSON.
+        let lines = CodeView.toolCall(
+            name: "edit_file", argumentsJSON: #"{"path":"a.txt","old_string":"x","new_string":"y"}"#, width: 60)
+        XCTAssertEqual(lines[0].text, "\u{25B8} edit_file  a.txt")
+    }
+
+    func testToolCallChipFallsBackToJSON() {
+        // No salient field: fall back to the compacted JSON after the name.
         let lines = CodeView.toolCall(name: "grep", argumentsJSON: #"{"q":"x"}"#, width: 40)
-        XCTAssertEqual(lines[0].text, #"* grep({"q":"x"})"#)
+        XCTAssertEqual(lines[0].text, #"▸ grep  {"q":"x"}"#)
     }
 
     func testToolResultTagsDiffLines() {

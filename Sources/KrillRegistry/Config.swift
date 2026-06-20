@@ -82,6 +82,18 @@ public struct KrillConfig: Sendable {
     /// talk/listen loop. `speak_replies` in config; `KRILL_SPEAK_REPLIES` env.
     public var speakReplies: Bool
 
+    /// Which surface the interactive TUI launches in: "chat" (default, pure
+    /// inference) or "agent" (tools + file edits, the unified coding mode).
+    /// `default_mode` in config. `krill code` always starts in agent mode
+    /// regardless of this default.
+    public var defaultMode: String
+
+    /// Which permission posture agent mode opens on: "plan" (default, read-only),
+    /// "ask" (confirm each mutating tool), "accept-edits" (auto-apply edits, ask
+    /// for commands), or "auto"/"accept-all" (run everything). Shift+Tab cycles
+    /// it live in the TUI. `default_agent_posture` in config.
+    public var defaultAgentPosture: String
+
     /// Default reasoning ("thinking") state for new sessions: when true and the
     /// model has a thinking channel, the engine turns it on so the model reasons
     /// before answering. ON by default (it is a no-op for models with no thinking
@@ -111,6 +123,8 @@ public struct KrillConfig: Sendable {
         self.flashAttention = false
         self.voiceMode = "off"
         self.speakReplies = false
+        self.defaultMode = "chat"
+        self.defaultAgentPosture = "plan"
         self.thinking = true
     }
 
@@ -180,6 +194,10 @@ public struct KrillConfig: Sendable {
                 voiceMode = value
             case "speak_replies":
                 speakReplies = value == "true" || value == "1"
+            case "default_mode":
+                defaultMode = value
+            case "default_agent_posture":
+                defaultAgentPosture = value
             case "thinking", "enable_thinking":
                 thinking = value == "true" || value == "1" || value == "on" || value == "yes"
             case "keep_alive":
@@ -198,6 +216,133 @@ public struct KrillConfig: Sendable {
         raw.split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+    }
+
+    /// Path to the persisted config file (`~/.krill/config.toml`).
+    public static func configPath() -> URL {
+        Registry.defaultBaseDir().appendingPathComponent("config.toml")
+    }
+
+    /// The config keys a user may set via `/config key=value`. Other TOML keys
+    /// the parser understands (e.g. `port` as an alias of `server_port`) are not
+    /// offered here to keep the surface small and unambiguous.
+    public static let writableKeys: [String] = [
+        "default_model", "default_quant", "default_mode", "default_agent_posture",
+        "kv_cache_dtype", "context_length", "thinking",
+        "voice_mode", "speak_replies",
+        "prefix_cache_size_gb", "prefix_cache_max_entry_gb",
+        "speculative_decoding", "decode_pipeline", "ngram_spec", "flash_attention",
+        "server_port", "server_host", "idle_timeout", "keep_alive",
+        "num_parallel", "max_loaded_models", "max_queue", "models_dir",
+    ]
+
+    /// Persist `key = value` to `config.toml`, upserting in place: an existing
+    /// assignment line for `key` is replaced (preserving everything else,
+    /// including comments and blank lines), otherwise the pair is appended.
+    /// Creates the file (and base dir) if missing. Throws on an unknown key or
+    /// on a write failure, so the caller can surface a clear message.
+    public static func set(key: String, value: String) throws {
+        guard writableKeys.contains(key) else {
+            throw ConfigError.unknownKey(key)
+        }
+        // The writer emits `key = "value"` and the parser reads it back by
+        // trimming surrounding quotes (it does not unescape). A value containing
+        // a quote, backslash, or newline would therefore not round-trip and could
+        // corrupt the file on the atomic rewrite, so reject it rather than write
+        // something the parser cannot read. No legitimate config value needs them.
+        guard !value.contains(where: { $0 == "\"" || $0 == "\\" || $0 == "\n" || $0 == "\r" }) else {
+            throw ConfigError.invalidValue(key: key, value: value)
+        }
+        let url = configPath()
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let updated = upsertTOML(existing, key: key, value: value)
+        try updated.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Pure line-wise upsert of `key = "value"` into existing TOML text: replaces
+    /// an existing assignment for `key` in place (preserving comments, blanks, and
+    /// every other line), else appends. Returned text ends with a newline.
+    ///
+    /// All of Krill's config keys live in the top-level (pre-`[section]`) region,
+    /// so the upsert is scoped to that region: it never matches or writes a key
+    /// inside a `[section]` table (which could share a bare key name), and a new
+    /// key is inserted just before the first section header rather than after a
+    /// table it does not belong to. Exposed for testing.
+    public static func upsertTOML(_ existing: String, key: String, value: String) -> String {
+        var lines = existing.isEmpty ? [] : existing.components(separatedBy: "\n")
+        let newLine = "\(key) = \"\(value)\""
+        var replaced = false
+        var firstSection: Int?
+        for i in lines.indices {
+            let t = lines[i].trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("[") { if firstSection == nil { firstSection = i }; continue }
+            if firstSection != nil { continue }   // only upsert in the global region
+            guard !t.hasPrefix("#"), let eq = t.firstIndex(of: "=") else { continue }
+            if t[..<eq].trimmingCharacters(in: .whitespaces) == key {
+                lines[i] = newLine
+                replaced = true
+                break
+            }
+        }
+        if !replaced {
+            if let fs = firstSection {
+                lines.insert(newLine, at: fs)      // end of the global region, before any table
+            } else if let last = lines.last, last.trimmingCharacters(in: .whitespaces).isEmpty {
+                lines[lines.count - 1] = newLine   // reuse a trailing blank line
+            } else {
+                lines.append(newLine)
+            }
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// Current key/value pairs for the writable keys, in `writableKeys` order,
+    /// for display by `/config`. Reflects the fully-resolved config (file + env).
+    public func displayPairs() -> [(key: String, value: String)] {
+        func b(_ v: Bool) -> String { v ? "true" : "false" }
+        let map: [String: String] = [
+            "default_model": defaultModel ?? "(none)",
+            "default_quant": "\(defaultQuant)",
+            "default_mode": defaultMode,
+            "default_agent_posture": defaultAgentPosture,
+            "kv_cache_dtype": kvCacheDtype,
+            "context_length": contextLength.map { "\($0)" } ?? "(model default)",
+            "thinking": b(thinking),
+            "voice_mode": voiceMode,
+            "speak_replies": b(speakReplies),
+            "prefix_cache_size_gb": "\(prefixCacheSizeGB)",
+            "prefix_cache_max_entry_gb": "\(prefixCacheMaxEntryGB)",
+            "speculative_decoding": b(speculativeDecoding),
+            "decode_pipeline": b(decodePipeline),
+            "ngram_spec": b(ngramSpec),
+            "flash_attention": b(flashAttention),
+            "server_port": "\(serverPort)",
+            "server_host": serverHost,
+            "idle_timeout": "\(idleTimeout)",
+            "keep_alive": keepAlive,
+            "num_parallel": "\(numParallel)",
+            "max_loaded_models": "\(maxLoadedModels)",
+            "max_queue": "\(maxQueue)",
+            "models_dir": modelsDir ?? "(default)",
+        ]
+        return KrillConfig.writableKeys.map { ($0, map[$0] ?? "") }
+    }
+
+    public enum ConfigError: Error, CustomStringConvertible {
+        case unknownKey(String)
+        case invalidValue(key: String, value: String)
+        public var description: String {
+            switch self {
+            case .unknownKey(let k):
+                return "unknown config key '\(k)'. Known keys: "
+                    + KrillConfig.writableKeys.joined(separator: ", ")
+            case .invalidValue(let k, _):
+                return "value for '\(k)' may not contain a quote, backslash, or newline."
+            }
+        }
     }
 
     /// Override from environment. `OLLAMA_*` aliases are applied first so a
