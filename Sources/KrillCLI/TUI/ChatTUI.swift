@@ -1011,12 +1011,12 @@ final class ChatTUI {
 
     // MARK: - Agent mode
 
-    /// The agent toolset: read-only explorers + file edits + bash + the ability
-    /// to spawn a background agent. The permission posture - not this list -
-    /// governs what actually runs.
+    /// The agent toolset: read-only explorers + web fetch + file edits + bash +
+    /// the ability to spawn a background agent. The permission posture - not this
+    /// list - governs what actually runs.
     private func agentTools() -> ToolRegistry {
         ToolRegistry([
-            ReadTool(), ListTool(), GlobTool(), GrepTool(),
+            ReadTool(), ListTool(), GlobTool(), GrepTool(), WebFetchTool(),
             EditTool(), MultiEditTool(), WriteTool(), BashTool(),
             DispatchTool(queue: spawnQueue),
         ])
