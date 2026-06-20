@@ -26,6 +26,11 @@ public protocol Tool: Sendable {
     /// Read-only tools are always allowed by the permission layer, even in plan
     /// mode. Defaults to `false` - a tool must opt in to being trusted as safe.
     var isReadOnly: Bool { get }
+    /// Whether the tool's mutation is a file edit (write/edit a file) as opposed
+    /// to running an arbitrary command (bash). Lets the `accept-edits` posture
+    /// auto-apply edits while still gating shell commands. Defaults to `false`
+    /// (a mutating tool is treated as a command unless it opts in).
+    var isFileEdit: Bool { get }
     /// Execute with the model-provided arguments (a JSON object string) and
     /// return the observation to feed back. Implementations must not throw -
     /// surface failures as a `ToolResult(isError: true)` so the loop can keep
@@ -37,6 +42,9 @@ public extension Tool {
     /// Conservative default: a tool is treated as mutating unless it declares
     /// otherwise, so an unaudited tool requires approval rather than running free.
     var isReadOnly: Bool { false }
+    /// Conservative default: a mutating tool is treated as a command (the most
+    /// gated category) unless it declares itself a file edit.
+    var isFileEdit: Bool { false }
 }
 
 /// Ordered, name-indexed set of the tools offered to the model for a run.

@@ -45,11 +45,28 @@ public enum CodeView {
         Layout.wrap(text, width: max(1, width)).map { CodeLine($0, .note) }
     }
 
-    /// A tool-call chip: `* name(args)` on one line, ellipsized to the width
-    /// (tool-arg JSON wraps poorly, so a single clipped line reads cleanly).
+    /// A tool-call chip: `▸ name  <primary arg>` on one line, ellipsized to the
+    /// width. The primary argument (a path/pattern/command) is surfaced in
+    /// preference to the raw JSON so the step reads like an action; the full JSON
+    /// is the fallback when no salient field is present.
     public static func toolCall(name: String, argumentsJSON: String, width: Int) -> [CodeLine] {
-        let chip = "* \(name)(\(argumentsJSON))"
+        let detail = primaryArg(argumentsJSON)
+        let chip = detail.isEmpty ? "\u{25B8} \(name)" : "\u{25B8} \(name)  \(detail)"
         return [CodeLine(clip(chip, width: max(1, width)), .toolName)]
+    }
+
+    /// Pull the most salient argument from a tool-call's JSON for the chip:
+    /// the path / pattern / command / url, else the compacted JSON.
+    private static func primaryArg(_ json: String) -> String {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return json.trimmingCharacters(in: .whitespacesAndNewlines) }
+        for key in ["path", "pattern", "command", "url", "query", "title", "task"] {
+            if let v = obj[key] as? String, !v.isEmpty {
+                return v.replacingOccurrences(of: "\n", with: " ")
+            }
+        }
+        return json.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// A tool observation, indented under its chip. Diff lines (`+ `/`- `) are

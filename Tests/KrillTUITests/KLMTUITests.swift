@@ -22,6 +22,12 @@ final class KeyDecoderTests: XCTestCase {
         XCTAssertEqual(KeyDecoder.decode([0x1b, 0x4f, 0x41]), [.up])
     }
 
+    func testShiftTabBackTab() {
+        // ESC [ Z is the back-tab (Shift+Tab) sequence, used to cycle the agent
+        // permission posture.
+        XCTAssertEqual(KeyDecoder.decode([0x1b, 0x5b, 0x5a]), [.backTab])
+    }
+
     func testNavAndLoneEscape() {
         XCTAssertEqual(KeyDecoder.decode([0x1b, 0x5b, 0x35, 0x7e]), [.pageUp])
         XCTAssertEqual(KeyDecoder.decode([0x1b, 0x5b, 0x36, 0x7e]), [.pageDown])
