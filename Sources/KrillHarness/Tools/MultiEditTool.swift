@@ -32,7 +32,7 @@ public struct MultiEditTool: Tool {
         }
 
         var text = String(decoding: data, as: UTF8.self)
-        var total = 0
+        var total = 0, added = 0, removed = 0
         for (i, edit) in edits.enumerated() {
             guard let old = edit["old_string"] as? String, let new = edit["new_string"] as? String else {
                 return ToolResult(content: "Error: edit \(i + 1) needs 'old_string' and 'new_string'.", isError: true)
@@ -44,6 +44,8 @@ public struct MultiEditTool: Tool {
             case .ok(let updated, let count):
                 text = updated
                 total += count
+                added += FileToolSupport.lineCount(new) * count
+                removed += FileToolSupport.lineCount(old) * count
             }
         }
         do {
@@ -51,8 +53,9 @@ public struct MultiEditTool: Tool {
         } catch {
             return ToolResult(content: "Error: could not write \(FileToolSupport.display(url)): \(error.localizedDescription)", isError: true)
         }
+        let stat = FileToolSupport.diffstat(added: added, removed: removed)
         return ToolResult(
-            content: "Applied \(edits.count) edit(s) to \(FileToolSupport.display(url)) (\(total) replacement(s)).",
+            content: "Applied \(edits.count) edit(s) to \(FileToolSupport.display(url)) (\(stat), \(total) replacement(s)).",
             isError: false)
     }
 }

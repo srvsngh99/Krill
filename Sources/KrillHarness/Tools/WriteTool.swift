@@ -29,6 +29,9 @@ public struct WriteTool: Tool {
         if existed && isDir.boolValue {
             return ToolResult(content: "Error: \(FileToolSupport.display(url)) is a directory.", isError: true)
         }
+        // Read the prior content (if any) before overwriting, so the result can
+        // report a diffstat against what was there.
+        let oldContent = existed ? (try? String(contentsOf: url, encoding: .utf8)) ?? "" : ""
         do {
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -37,9 +40,11 @@ public struct WriteTool: Tool {
             return ToolResult(content: "Error: could not write \(FileToolSupport.display(url)): \(error.localizedDescription)", isError: true)
         }
         let verb = existed ? "Overwrote" : "Created"
-        let lineCount = content.isEmpty ? 0 : content.split(separator: "\n", omittingEmptySubsequences: false).count
+        let stat = FileToolSupport.diffstat(
+            added: FileToolSupport.lineCount(content),
+            removed: FileToolSupport.lineCount(oldContent))
         return ToolResult(
-            content: "\(verb) \(FileToolSupport.display(url)) (\(lineCount) lines, \(content.utf8.count) bytes).",
+            content: "\(verb) \(FileToolSupport.display(url)) (\(stat), \(content.utf8.count) bytes).",
             isError: false)
     }
 }

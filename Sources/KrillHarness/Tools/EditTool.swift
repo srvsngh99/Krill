@@ -41,8 +41,11 @@ public struct EditTool: Tool {
             } catch {
                 return ToolResult(content: "Error: could not write \(FileToolSupport.display(url)): \(error.localizedDescription)", isError: true)
             }
+            let stat = FileToolSupport.diffstat(
+                added: FileToolSupport.lineCount(newString) * count,
+                removed: FileToolSupport.lineCount(oldString) * count)
             return ToolResult(
-                content: "Edited \(FileToolSupport.display(url)): \(count) replacement(s).\n"
+                content: "Edited \(FileToolSupport.display(url)) (\(stat), \(count) replacement(s)).\n"
                     + FileToolSupport.changeSummary(old: oldString, new: newString),
                 isError: false)
         }
