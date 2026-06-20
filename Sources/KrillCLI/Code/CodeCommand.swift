@@ -122,7 +122,7 @@ struct CodeCommand: AsyncParsableCommand {
         // Filesystem toolset is always available; bash is opt-out. The
         // permission layer (below) governs whether mutating tools actually run.
         var tools: [any Tool] = [
-            ReadTool(), ListTool(), GlobTool(), GrepTool(),
+            ReadTool(), ListTool(), GlobTool(), GrepTool(), WebFetchTool(),
             EditTool(), MultiEditTool(), WriteTool(),
         ]
         if bash { tools.append(BashTool()) }
