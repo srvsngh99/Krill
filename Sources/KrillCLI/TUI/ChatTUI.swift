@@ -130,16 +130,23 @@ final class ChatTUI {
     private var rows = 24, cols = 80
     private var lastStatus = ""
     private var contextWindow = 0          // model's max context (tokens), 0 = unknown
+    private var lastStats: GenerationStats? // most recent turn's stats (for /context)
     private var shouldQuit = false
 
-    // Working-directory label for the footer (e.g. "Krill:main"). Computed once.
-    private lazy var cwdLabel: String = {
+    // Working-directory label for the footer (e.g. "Krill:main"). Recomputed on
+    // `/cd` so the footer tracks the session's directory.
+    private lazy var cwdLabel: String = Self.computeCwdLabel()
+    // Extra directories the agent may read/operate in, added with `/add-dir`
+    // (informational - the tools already accept absolute paths). Shown in /status.
+    private var extraDirs: [String] = []
+
+    private static func computeCwdLabel() -> String {
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).lastPathComponent
         guard let head = try? String(contentsOfFile: ".git/HEAD", encoding: .utf8),
               let r = head.range(of: "refs/heads/") else { return dir }
         let branch = head[r.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
         return branch.isEmpty ? dir : "\(dir):\(branch)"
-    }()
+    }
 
     private let raw = RawTerminal()
     private let reader = KeyReader()
@@ -704,6 +711,16 @@ final class ChatTUI {
                 showModelDeepDive(n.isEmpty ? modelName : n)
             }
             else { await switchOrDownload(arg) }
+        case "/config": handleConfig(arg)
+        case "/init": await runInit()
+        case "/diff": showDiff()
+        case "/status": showOverlay("Status", statusOverlay())
+        case "/context": showOverlay("Context", contextOverlay())
+        case "/copy": copyLastReply()
+        case "/cd":
+            if arg.isEmpty { note("Usage: /cd <path>") } else { changeDirectory(arg) }
+        case "/add-dir":
+            if arg.isEmpty { note("Usage: /add-dir <path>") } else { addDir(arg) }
         case "/save": saveTranscript(arg)
         case "/attach": note(attachSummary())
         case "/remove": removeAttachment(arg)
@@ -778,6 +795,162 @@ final class ChatTUI {
 
     private func note(_ s: String) { view.append(Msg(role: .note, text: s)) }
 
+    // MARK: - Local commands (/config /init /diff /status /context /copy /cd /add-dir)
+
+    /// Run a command and capture combined stdout+stderr (read-only helpers like
+    /// /diff and /copy). Returns nil if the process could not be launched.
+    private func runCapture(_ launchPath: String, _ args: [String], stdin: String? = nil) -> String? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: launchPath)
+        proc.arguments = args
+        let outPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = outPipe
+        var inPipe: Pipe?
+        if stdin != nil { inPipe = Pipe(); proc.standardInput = inPipe }
+        do { try proc.run() } catch { return nil }
+        if let inPipe, let data = stdin?.data(using: .utf8) {
+            inPipe.fileHandleForWriting.write(data)
+            inPipe.fileHandleForWriting.closeFile()
+        }
+        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    private func handleConfig(_ arg: String) {
+        guard !arg.isEmpty else {
+            let cfg = KrillConfig.load()
+            let pad = (KrillConfig.writableKeys.map(\.count).max() ?? 12) + 2
+            let body = cfg.displayPairs()
+                .map { "  " + $0.key.padding(toLength: pad, withPad: " ", startingAt: 0) + $0.value }
+                .joined(separator: "\n")
+            showOverlay("Config  (~/.krill/config.toml)",
+                body + "\n\nSet with: /config key=value")
+            return
+        }
+        // Accept `key=value` or `key value`.
+        let eq = arg.firstIndex(of: "=")
+        let (key, value): (String, String)
+        if let eq {
+            key = String(arg[..<eq]).trimmingCharacters(in: .whitespaces)
+            value = String(arg[arg.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+        } else {
+            let p = arg.split(separator: " ", maxSplits: 1).map(String.init)
+            guard p.count == 2 else { note("Usage: /config key=value"); return }
+            key = p[0]; value = p[1]
+        }
+        guard !value.isEmpty else { note("Usage: /config key=value"); return }
+        do {
+            try KrillConfig.set(key: key, value: value)
+            note("Set \(key) = \(value) in ~/.krill/config.toml. "
+                + "Applies to new sessions (some keys also take effect now via /model, Shift+Tab, etc.).")
+        } catch { note("\(error)") }
+    }
+
+    private func showDiff() {
+        // git diff for tracked changes + the names of untracked files.
+        let tracked = runCapture("/usr/bin/git", ["diff", "--stat"]) ?? ""
+        let full = runCapture("/usr/bin/git", ["diff"]) ?? ""
+        let untracked = runCapture("/usr/bin/git", ["ls-files", "--others", "--exclude-standard"]) ?? ""
+        if tracked.isEmpty && full.isEmpty && untracked.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            note("No pending changes (or not a git repo)."); return
+        }
+        var body = ""
+        if !tracked.isEmpty { body += tracked + "\n" }
+        let newFiles = untracked.split(separator: "\n").map { "  new: \($0)" }.joined(separator: "\n")
+        if !newFiles.isEmpty { body += newFiles + "\n\n" }
+        body += full
+        showOverlay("Changes (git diff)", body.isEmpty ? "No tracked changes." : body)
+    }
+
+    private func copyLastReply() {
+        guard let last = view.last(where: { $0.role == .assistant })?.text, !last.isEmpty else {
+            note("No reply to copy yet."); return
+        }
+        if runCapture("/usr/bin/pbcopy", [], stdin: last) != nil {
+            note("Copied the last reply to the clipboard (\(last.count) chars).")
+        } else {
+            note("Could not copy (pbcopy unavailable).")
+        }
+    }
+
+    private func changeDirectory(_ path: String) {
+        let expanded = (path as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir), isDir.boolValue else {
+            note("Not a directory: \(path)"); return
+        }
+        guard FileManager.default.changeCurrentDirectoryPath(expanded) else {
+            note("Could not change to \(path)"); return
+        }
+        cwdLabel = Self.computeCwdLabel()
+        note("Working directory: \(FileManager.default.currentDirectoryPath)")
+    }
+
+    private func addDir(_ path: String) {
+        let expanded = (path as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDir), isDir.boolValue else {
+            note("Not a directory: \(path)"); return
+        }
+        if !extraDirs.contains(expanded) { extraDirs.append(expanded) }
+        note("Added \(expanded). The agent can read/operate there by absolute path.")
+    }
+
+    private func statusOverlay() -> String {
+        var lines = [
+            "  krill          \(KrillVersionTag)",
+            "  model          \(modelName)",
+            "  directory      \(FileManager.default.currentDirectoryPath)",
+            "  surface        \(surface == .agent ? "agent" : "chat")",
+        ]
+        if surface == .agent { lines.append("  posture        \(posture.label) - \(posture.postureNote)") }
+        if contextWindow > 0 { lines.append("  context window \(formatContext(contextWindow))") }
+        lines.append("  thinking       \(thinkingOn ? "on" : "off")")
+        if !extraDirs.isEmpty {
+            lines.append("  extra dirs     " + extraDirs.joined(separator: ", "))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func contextOverlay() -> String {
+        var lines = ["Context usage"]
+        if let st = lastStats {
+            let used = st.promptTokens + st.generatedTokens
+            lines.append("  prompt tokens   \(st.promptTokens)")
+            lines.append("  reply tokens    \(st.generatedTokens)")
+            lines.append("  last turn total \(used)")
+            if contextWindow > 0 {
+                let frac = min(1.0, Double(used) / Double(contextWindow))
+                lines.append("  window          \(contextBar(frac)) \(used)/\(formatContext(contextWindow)) \(Int((frac*100).rounded()))%")
+            }
+        } else {
+            lines.append("  (no generation yet)")
+        }
+        lines.append("")
+        lines.append("Conversation")
+        lines.append("  messages        \(modelTurns.count)")
+        if surface == .agent { lines.append("  agent messages  \(agentMessages.count)") }
+        return lines.joined(separator: "\n")
+    }
+
+    /// `/init` - generate a CLAUDE.md by running the agent on a canned survey task.
+    /// (Foreground for now; routes to a background agent once those land.)
+    private func runInit() async {
+        if surface != .agent {
+            surface = .agent
+            ensureAgentSeed()
+            note("Switched to agent mode for /init.")
+        }
+        let task =
+            "Survey this repository and write a concise CLAUDE.md at the repo root for future "
+            + "coding agents. Cover: the build and test commands, the high-level architecture and "
+            + "where the main modules live, and any important conventions. Use the read-only tools "
+            + "to inspect the repo first, then write the file. Keep it tight and skimmable."
+        await runAgentTurn(task)
+    }
+
     // MARK: - Agent mode
 
     /// The agent toolset: read-only explorers + file edits + bash. The permission
@@ -835,17 +1008,19 @@ final class ChatTUI {
         }
 
         let dots = ["\u{2839}", "\u{2838}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}", "\u{2819}"]
+        let startedAt = CFAbsoluteTimeGetCurrent()
         var spin = 0
         while true {
             if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize() }
             for ev in queue.drain() { applyAgentEvent(ev) }
             let finished = queue.isFinished
+            let elapsed = Self.formatElapsed(CFAbsoluteTimeGetCurrent() - startedAt)
             if finished {
                 lastStatus = ""
             } else if approver.pending() != nil {
-                lastStatus = "awaiting approval"
+                lastStatus = "\(dots[spin % dots.count]) awaiting approval \u{00B7} \(elapsed)"
             } else {
-                lastStatus = "\(dots[spin % dots.count]) working"
+                lastStatus = "\(dots[spin % dots.count]) working \u{00B7} \(elapsed) \u{00B7} Esc interrupt"
             }
             render()
             if finished { break }
@@ -876,7 +1051,7 @@ final class ChatTUI {
             return
         }
         switch key {
-        case .ctrlC: bgTask.cancel(); lastStatus = "cancelling"
+        case .ctrlC, .escape: bgTask.cancel(); lastStatus = "cancelling"
         case .pageUp: scrollOffset += paneHeight() - 1
         case .pageDown: scrollOffset = max(0, scrollOffset - (paneHeight() - 1))
         case .scrollUp, .up: scrollOffset += 3
@@ -1176,7 +1351,7 @@ final class ChatTUI {
             view.append(Msg(role: .note, text: "(cancelled)"))
         } else {
             modelTurns.append((role: "assistant", content: assistant))
-            if let st = gen.stats() { lastStatus = statusText(st, images: usedImgs, audio: usedAud) }
+            if let st = gen.stats() { lastStats = st; lastStatus = statusText(st, images: usedImgs, audio: usedAud) }
             // Read the reply aloud when speaking is on (voice phase 2). Cleaned of
             // markdown that reads badly; a new reply interrupts the previous one.
             if speakReplies, !assistant.isEmpty { synth.speak(assistant) }
@@ -1213,6 +1388,12 @@ final class ChatTUI {
         guard n >= 1024 else { return "\(n)" }
         let k = Double(n) / 1024
         return k == k.rounded() ? "\(Int(k))K" : String(format: "%.0fK", k)
+    }
+
+    /// Compact elapsed readout for the live agent footer: `8s`, `1m04s`.
+    static func formatElapsed(_ seconds: Double) -> String {
+        let s = Int(seconds.rounded())
+        return s < 60 ? "\(s)s" : String(format: "%dm%02ds", s / 60, s % 60)
     }
 
     private func switchModel(_ name: String) async {
@@ -1864,6 +2045,7 @@ final class ChatTUI {
             ("Hold Space", "Push-to-talk (dictate/handsfree/send postures)"),
             ("Ctrl-V", "Cycle voice posture: type/dictate/handsfree/send"),
             ("PgUp / PgDn", "Scroll the conversation"),
+            ("Esc", "Interrupt the agent while it works"),
             ("Ctrl-C", "Cancel the reply, or clear the input"),
             ("Ctrl-D", "Quit"),
         ]
