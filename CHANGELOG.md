@@ -6,6 +6,32 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+### Added
+
+- **Unified chat + agent TUI.** `krill run` and `krill code` are now one
+  full-screen surface: `/agent` toggles agent mode (tools + file edits) in the
+  chat, and `Shift+Tab` cycles the permission posture `plan -> ask ->
+  accept-edits -> auto` (shown as a footer chip). `accept-edits` auto-applies
+  file edits while still gating shell commands. `ask` / `accept-edits` prompt for
+  approval inline (`y`/`n`/`a`) inside the full-screen TUI. Config keys
+  `default_mode` and `default_agent_posture` seed the launch state; `krill code`
+  is an alias that opens in agent mode. (#252)
+- **Local slash commands** in the TUI: `/config` (show or set a config key,
+  persisted to `~/.krill/config.toml`), `/diff`, `/status`, `/context`, `/copy`,
+  `/cd`, `/add-dir`, and `/init` (generate a `CLAUDE.md`). (#252)
+- **Live agent-at-work display:** an elapsed timer and `Esc` to interrupt a run,
+  action-style tool-call chips, and a `+N -M` diffstat on edits. (#252)
+- **Switchable background agents.** `/bg <task>` (and the model's `dispatch_agent`
+  tool) spawn agents that run independently; `/agents` (plus `/switch <n>` /
+  `/main`) attach to one to watch it live, answer its approval prompts, or
+  continue it. Generations are serialized across agents on the single shared
+  model. (#252)
+- **`web_fetch` tool.** The agent can fetch an http(s) URL and read it as text
+  (HTML stripped). Read-only, with SSRF guards (the host is canonicalized to its
+  IP bytes, so obfuscated literals cannot reach private/loopback/cloud-metadata
+  addresses, checked up front and on every redirect hop), a streamed body cap,
+  and untrusted-content framing to resist prompt injection. (#253)
+
 ## [0.10.0] - 2026-06-19
 
 ### Added
