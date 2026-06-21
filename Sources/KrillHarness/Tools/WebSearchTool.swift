@@ -29,10 +29,18 @@ public protocol SearchBackend: Sendable {
 
 /// SearXNG backend: queries a self-hosted SearXNG instance's JSON API
 /// (`<base>/search?q=...&format=json`). The instance must have `json` enabled in
-/// its `search.formats` (SearXNG ships HTML-only by default). The configured URL
-/// is explicitly trusted (the user runs it, typically on localhost), so no SSRF
-/// host check is applied to it - unlike `web_fetch`, whose targets are
-/// model/user supplied.
+/// its `search.formats` (SearXNG ships HTML-only by default).
+///
+/// The configured URL is explicitly trusted (the user runs it, typically on
+/// localhost), so the backend does not apply `web_fetch`'s up-front private-host
+/// check to it - that check exists because `web_fetch`'s targets are
+/// model/user supplied, which this URL is not. The initial request therefore
+/// reaches a loopback/private SearXNG fine (the shared `URLSessionWebFetcher`
+/// only vets *redirects*, not the first hop). Note the one consequence of
+/// reusing that fetcher: if the instance ever issued a 30x to another
+/// private/loopback host the redirect would be refused; SearXNG's JSON endpoint
+/// answers 200 directly and does not redirect, so this does not arise in
+/// practice.
 public struct SearxngBackend: SearchBackend {
     public let name = "searxng"
     private let baseURL: String
@@ -87,7 +95,7 @@ public struct SearxngBackend: SearchBackend {
         return out
     }
 
-    public enum SearchError: Error, CustomStringConvertible {
+    public enum SearchError: Error, CustomStringConvertible, LocalizedError {
         case badBackendURL(String)
         case httpStatus(Int)
         case badResponse
@@ -100,6 +108,9 @@ public struct SearxngBackend: SearchBackend {
             case .badResponse: return "search backend returned an unparseable response"
             }
         }
+        // So `error.localizedDescription` returns this readable text rather than
+        // the generic Foundation fallback for a non-LocalizedError enum.
+        public var errorDescription: String? { description }
     }
 }
 
@@ -177,7 +188,7 @@ public struct WebSearchTool: Tool {
             results = try await backend.search(query: query, count: count)
         } catch {
             return ToolResult(
-                content: "Error searching for \"\(query)\": \(error)", isError: true)
+                content: "Error searching for \"\(query)\": \(error.localizedDescription)", isError: true)
         }
         if results.isEmpty {
             return ToolResult(content: "No results for \"\(query)\".", isError: false)
