@@ -1016,7 +1016,7 @@ final class ChatTUI {
     /// list - governs what actually runs.
     private func agentTools() -> ToolRegistry {
         ToolRegistry([
-            ReadTool(), ListTool(), GlobTool(), GrepTool(), WebFetchTool(),
+            ReadTool(), ListTool(), GlobTool(), GrepTool(), WebFetchTool(), WebSearchTool(),
             EditTool(), MultiEditTool(), WriteTool(), BashTool(),
             DispatchTool(queue: spawnQueue),
         ])

@@ -89,9 +89,10 @@ your project. Type `/agent` again to turn hands back off. `krill code [task]`
 opens the same surface already in agent mode (and runs `task` if given).
 
 The toolset: read-only explorers (`read_file`, `list_dir`, `glob`, `grep`),
-`web_fetch` (fetch a URL as readable text), file edits (`edit_file`,
-`multi_edit`, `write_file`), `bash`, and `dispatch_agent` (spawn a background
-agent). As it works, the transcript shows each step as an action chip
+`web_search` (search the web for links + snippets) and `web_fetch` (fetch a URL
+as readable text), file edits (`edit_file`, `multi_edit`, `write_file`), `bash`,
+and `dispatch_agent` (spawn a background agent). As it works, the transcript
+shows each step as an action chip
 (`▸ edit_file path`), the tool's result (with a `+N -M` diffstat on edits), and a
 live footer (`working . 8s . Esc interrupt`). Press **Esc** (or `Ctrl-C`) to
 interrupt a run.
@@ -137,6 +138,26 @@ Because the in-process path has a single shared model, generations are
 serialized: agents progress turn by turn and never decode at the same instant
 (there is no throughput gain from running several at once on one GPU; the value
 is being able to watch, steer, and switch between them).
+
+## Web search
+
+`web_fetch` reads a page you already have a URL for; `web_search` finds the URLs.
+The agent searches, gets a ranked list of titles/URLs/snippets, then fetches the
+promising ones to read them.
+
+Search is **off until you point Krill at a backend** - it is local-first, with no
+API key. Today the backend is a self-hosted [SearXNG](https://docs.searxng.org/)
+instance:
+
+```
+/config searxng_url=http://localhost:8888
+```
+
+(or export `KRILL_SEARXNG_URL`). The instance must have `json` enabled in its
+`search.formats` - SearXNG ships HTML-only, so add `json` to that list in its
+`settings.yml`. The backend is pluggable behind `search_backend` (default
+`searxng`); when no backend is configured the tool returns a one-line note
+telling you how to enable it rather than failing silently.
 
 ## Model deep-dive
 
