@@ -159,6 +159,28 @@ instance:
 `searxng`); when no backend is configured the tool returns a one-line note
 telling you how to enable it rather than failing silently.
 
+### Deep research
+
+`/research <question>` runs a multi-step research pass and writes a cited answer
+into the conversation:
+
+1. **Plan** - the model turns your question into a few focused search queries.
+2. **Search** - each query goes to the search backend; the results are pooled and
+   de-duplicated by URL.
+3. **Read** - the top sources are fetched with `web_fetch` and each page is
+   summarized on its own (only the short summary is kept, so a long page never
+   blows the context window).
+4. **Synthesize** - the model writes the answer from those summaries, citing
+   sources inline as `[1]`, `[2]`, ... with a `Sources:` list at the end.
+
+It runs in the foreground with a live progress trail (planning -> searching ->
+reading [n/total] -> synthesizing); press `Esc` or `Ctrl-C` to stop. The search
+and fetch steps are driven by code, not by the model agentically - each model
+call is a single bounded step, which is far more reliable on a small local model
+than asking it to drive a long tool loop itself. Needs `searxng_url` set (same as
+`web_search`); without it `/research` tells you how to enable search. The answer
+is added to the conversation, so you can ask follow-ups that build on it.
+
 ## Model deep-dive
 
 In the model picker, press `i` (or the right-arrow) on a row - or run

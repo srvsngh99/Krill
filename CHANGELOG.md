@@ -37,6 +37,14 @@ reverse chronological order. Versioning follows
   default `searxng`) and local-first: point Krill at a self-hosted SearXNG
   instance via `searxng_url` (or `KRILL_SEARXNG_URL`); off until configured, with
   a clear note on how to enable it.
+- **`/research <question>` deep research.** A multi-step research pass that
+  writes a cited answer into the conversation: the model plans search queries,
+  the queries run through the search backend, the top de-duplicated sources are
+  fetched and each summarized on its own (so a long page never blows the context
+  window), and the model synthesizes the answer with inline `[n]` citations and a
+  Sources list. Search and fetch are driven deterministically (not by the model
+  agentically) for reliability on a small local model; runs in the foreground
+  with a live progress trail and `Esc` to stop. Needs `searxng_url` set.
 
 ## [0.10.0] - 2026-06-19
 
