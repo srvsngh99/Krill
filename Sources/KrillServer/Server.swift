@@ -7,6 +7,7 @@ import KrillEngine
 import KrillRegistry
 import KrillSampler
 import KrillTooling
+import KrillHarness
 
 /// Krill HTTP server providing OpenAI-compatible and Ollama-compatible endpoints.
 ///
@@ -338,6 +339,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             handleLoadModel(context: context, body: body)
         case (.POST, "/v1/models/unload"):
             handleUnloadModel(context: context)
+
+        // Deep research (Krill-native): run the in-process DeepResearch loop over
+        // the configured search backend (Kreach) and return a cited answer. The
+        // shared capability every KrillLM client gets via the server.
+        case (.POST, "/research"):
+            routeGenerate(context: context, body: body) { self.handleResearch(context: $0, body: $1) }
 
         // Status
         case (.GET, "/v1/status"):
@@ -2899,6 +2906,113 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             }
         }
+    }
+
+    // MARK: - Deep research (Kreach-backed)
+
+    /// POST /research — run KrillLM's in-process `DeepResearch` (plan → search →
+    /// read → synthesize a cited answer) over the configured search backend, and
+    /// return the answer + sources as JSON. With `search_backend = "kreach"` the
+    /// search platform is the user's own Kreach index; the agentic loop and the
+    /// synthesis run here, so every KrillLM client (deepkrill, minikrill, …) gets
+    /// deep research for free by POSTing `{ "question": "..." }`.
+    ///
+    /// Routed through `routeGenerate`, so it runs on the active (or requested)
+    /// model. Body: `{ "question" | "q": String }`.
+    private func handleResearch(context: ChannelHandlerContext, body: ByteBuffer) {
+        guard let json = parseJSON(body),
+              let raw = (json["question"] as? String) ?? (json["q"] as? String),
+              !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            sendJSON(context: context, status: .badRequest,
+                     body: ["error": "research requires a non-empty 'question'."])
+            return
+        }
+        let question = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let eng = engine
+        guard eng.isLoaded else {
+            sendJSON(context: context, status: .serviceUnavailable,
+                     body: ["error": "no model loaded; load a model before /research."])
+            return
+        }
+        guard let backend = WebSearchTool.configuredBackend() else {
+            sendJSON(context: context, status: .badRequest, body: [
+                "error": "no search backend configured; set search_backend=kreach "
+                    + "(optionally kreach_url) or a searxng_url."])
+            return
+        }
+
+        let maxTokens = 1536
+        let el = context.eventLoop
+        nonisolated(unsafe) let ctx = context
+        Task {
+            let webFetch = WebFetchTool()
+            let research = DeepResearch(
+                complete: { msgs in
+                    let raw = await Self.collectGeneration(
+                        eng.generate(messages: msgs, params: .greedy, maxTokens: maxTokens).stream)
+                    // Strip reasoning-model <think> channel: otherwise it pollutes
+                    // the planner's query list and leaks chain-of-thought into the
+                    // answer (KrillLM defaults thinking-on).
+                    return Self.stripThinking(raw)
+                },
+                backend: backend,
+                fetch: { url, maxChars in
+                    let args: [String: Any] = ["url": url, "max_chars": maxChars]
+                    guard let data = try? JSONSerialization.data(withJSONObject: args),
+                          let argsJSON = String(data: data, encoding: .utf8) else { return nil }
+                    let r = await webFetch.run(argumentsJSON: argsJSON)
+                    return r.isError ? nil : r.content
+                })
+            let report = await research.run(question: question, onProgress: { _ in })
+
+            let answer: String
+            if report.isEmpty {
+                answer = "No sources could be gathered from the \(backend.name) "
+                    + "index for this question."
+            } else {
+                let list = DeepResearch.sourcesList(report.sources)
+                answer = report.text.isEmpty ? list : report.text + "\n\n" + list
+            }
+            let sourcesOut: [[String: String]] = report.sources.map {
+                ["url": $0.url, "title": $0.title, "summary": $0.summary]
+            }
+            self.sendJSONOnLoop(context: ctx, eventLoop: el, status: .ok, body: [
+                "question": question,
+                "answer": answer,
+                "backend": backend.name,
+                "sources": sourcesOut,
+            ])
+        }
+    }
+
+    /// Collect a generation stream to a single string (drops on cancellation/EOS).
+    private static func collectGeneration(_ stream: AsyncStream<TokenEvent>) async -> String {
+        var out = ""
+        for await event in stream {
+            if Task.isCancelled { break }
+            if event.isEnd { break }
+            out += event.text
+        }
+        return out
+    }
+
+    /// Remove `<think>...</think>` reasoning blocks (and a dangling unclosed
+    /// `<think>`) from a completion, so reasoning-model output works in the
+    /// research loop: the planner gets clean queries, the answer carries no
+    /// chain-of-thought.
+    private static func stripThinking(_ s: String) -> String {
+        var out = s
+        while let start = out.range(of: "<think>") {
+            if let end = out.range(of: "</think>", range: start.upperBound..<out.endIndex) {
+                out.removeSubrange(start.lowerBound..<end.upperBound)
+            } else {
+                out.removeSubrange(start.lowerBound..<out.endIndex)
+                break
+            }
+        }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func parseJSON(_ buffer: ByteBuffer) -> [String: Any]? {

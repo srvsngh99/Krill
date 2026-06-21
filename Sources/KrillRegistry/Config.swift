@@ -105,6 +105,11 @@ public struct KrillConfig: Sendable {
     /// `KRILL_SEARXNG_URL` env.
     public var searxngURL: String?
 
+    /// Base URL of the Kreach search engine for `search_backend = "kreach"`
+    /// (the user's own crawled index; default "http://127.0.0.1:8000" when unset).
+    /// `kreach_url` in config; `KRILL_KREACH_URL` env.
+    public var kreachURL: String?
+
     /// Default reasoning ("thinking") state for new sessions: when true and the
     /// model has a thinking channel, the engine turns it on so the model reasons
     /// before answering. ON by default (it is a no-op for models with no thinking
@@ -138,6 +143,7 @@ public struct KrillConfig: Sendable {
         self.defaultAgentPosture = "plan"
         self.searchBackend = "searxng"
         self.searxngURL = nil
+        self.kreachURL = nil
         self.thinking = true
     }
 
@@ -215,6 +221,8 @@ public struct KrillConfig: Sendable {
                 searchBackend = value
             case "searxng_url":
                 searxngURL = value.isEmpty ? nil : value
+            case "kreach_url":
+                kreachURL = value.isEmpty ? nil : value
             case "thinking", "enable_thinking":
                 thinking = value == "true" || value == "1" || value == "on" || value == "yes"
             case "keep_alive":
@@ -245,7 +253,7 @@ public struct KrillConfig: Sendable {
     /// offered here to keep the surface small and unambiguous.
     public static let writableKeys: [String] = [
         "default_model", "default_quant", "default_mode", "default_agent_posture",
-        "search_backend", "searxng_url",
+        "search_backend", "searxng_url", "kreach_url",
         "kv_cache_dtype", "context_length", "thinking",
         "voice_mode", "speak_replies",
         "prefix_cache_size_gb", "prefix_cache_max_entry_gb",
@@ -328,6 +336,7 @@ public struct KrillConfig: Sendable {
             "default_agent_posture": defaultAgentPosture,
             "search_backend": searchBackend,
             "searxng_url": searxngURL ?? "(none)",
+            "kreach_url": kreachURL ?? "(none)",
             "kv_cache_dtype": kvCacheDtype,
             "context_length": contextLength.map { "\($0)" } ?? "(model default)",
             "thinking": b(thinking),
@@ -414,6 +423,7 @@ public struct KrillConfig: Sendable {
         }
         if let v = env["KRILL_SEARCH_BACKEND"] { searchBackend = v }
         if let v = env["KRILL_SEARXNG_URL"] { searxngURL = v.isEmpty ? nil : v }
+        if let v = env["KRILL_KREACH_URL"] { kreachURL = v.isEmpty ? nil : v }
 
         if let v = ProcessInfo.processInfo.environment["KRILL_DEFAULT_MODEL"] {
             defaultModel = v
