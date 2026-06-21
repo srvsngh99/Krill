@@ -31,6 +31,12 @@ reverse chronological order. Versioning follows
   IP bytes, so obfuscated literals cannot reach private/loopback/cloud-metadata
   addresses, checked up front and on every redirect hop), a streamed body cap,
   and untrusted-content framing to resist prompt injection. (#253)
+- **`web_search` tool.** The agent can search the web for a ranked list of
+  titles, URLs, and snippets, then read the promising pages with `web_fetch`.
+  Read-only and untrusted-framed. The backend is pluggable (`search_backend`,
+  default `searxng`) and local-first: point Krill at a self-hosted SearXNG
+  instance via `searxng_url` (or `KRILL_SEARXNG_URL`); off until configured, with
+  a clear note on how to enable it.
 
 ## [0.10.0] - 2026-06-19
 
