@@ -159,6 +159,11 @@ public struct WebSearchTool: Tool {
                 return nil
             }
             return SearxngBackend(baseURL: url)
+        case "kreach":
+            // Kreach is the user's own engine; default to the local loopback API
+            // so `search_backend = "kreach"` works with no extra URL config.
+            let url = cfg.kreachURL?.trimmingCharacters(in: .whitespaces)
+            return KreachBackend(baseURL: (url?.isEmpty == false ? url! : "http://127.0.0.1:8000"))
         default:
             return nil
         }
