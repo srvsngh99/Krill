@@ -6,6 +6,12 @@ conversation pane, a bottom input box with a slash-command autosuggest popup,
 and a status footer (`model . tok/s . ctx N / total (%) . cwd:branch . version`).
 It is a multi-turn conversation that remembers context.
 
+It is also an **agent**: type `/agent` to turn hands on (file edits, shell, web
+fetch) in the same surface, with `Shift+Tab` cycling how much it may do without
+asking. See [Agent mode](#agent-mode) and [Background agents](#background-agents).
+`krill code [task]` is an alias that opens this same surface already in agent
+mode.
+
 The TUI is the default on an interactive terminal. When stdout is not a TTY
 (piped/redirected) Krill falls back to the classic libedit line REPL; force it
 with `--classic`. Color is disabled under `NO_COLOR`.
@@ -31,11 +37,13 @@ If auto-detection ever misreads, pass `--theme light` or `--theme dark`.
 |-----|--------|
 | `Up` / `Down` | Recall input history, or cycle the slash-command popup |
 | `Tab` | Accept the highlighted command (then add arguments) |
+| `Shift+Tab` | Agent mode: cycle the permission posture (plan / ask / accept-edits / auto) |
 | `Enter` | Send the message |
 | Hold `Space` | Push-to-talk (only when voice is on: dictate / handsfree / send) |
 | `Ctrl-V` | Turn voice on and cycle it: off -> dictate -> handsfree -> send -> off |
 | `PgUp` / `PgDn` | Scroll the conversation |
 | Mouse wheel / trackpad | Scroll the conversation (hold Option/Fn to select text) |
+| `Esc` | Interrupt the agent while it is working (in agent mode) |
 | `Ctrl-C` | Cancel a streaming reply, or clear the input |
 | `Ctrl-D` | Quit |
 
@@ -47,6 +55,16 @@ Tab to fill it and add arguments. `/help` lists everything.
 | Command | Action |
 |---------|--------|
 | `/help` | Show keys and commands |
+| `/agent` | Toggle agent mode (tools + file edits); `Shift+Tab` cycles the posture |
+| `/bg <task>` | Spawn a background agent for a task (see Background agents) |
+| `/agents` | List and switch between background agents (`/switch <n>`, `/main` too) |
+| `/config [key=value]` | Show config, or set a key (persists to `~/.krill/config.toml`) |
+| `/init` | Generate a `CLAUDE.md` for this repo (runs the agent) |
+| `/diff` | Show pending working-tree changes (`git diff`) |
+| `/status` | Show version, model, working directory, posture, context |
+| `/context` | Show context-window usage for the last turn |
+| `/copy` | Copy the last reply to the clipboard |
+| `/cd <path>` / `/add-dir <path>` | Change / add a working directory the agent can use |
 | `/model [name]` | Open the model picker, or switch/download a named model in place |
 | `/model info [name]` | Open the model deep-dive (also `i` / right-arrow on a row in the picker) |
 | `/system <text>` | Set the system prompt |
@@ -63,6 +81,62 @@ Tab to fill it and add arguments. `/help` lists everything.
 | `/voice` | Show the current voice state (posture + engine) |
 | `/voice engine apple\|whisper` | Choose the dictation engine (see Voice) |
 | `/quit` | Exit (`/exit`, `/q` too) |
+
+## Agent mode
+
+`/agent` turns the chat into an **agent**: the model gains tools and can act on
+your project. Type `/agent` again to turn hands back off. `krill code [task]`
+opens the same surface already in agent mode (and runs `task` if given).
+
+The toolset: read-only explorers (`read_file`, `list_dir`, `glob`, `grep`),
+`web_fetch` (fetch a URL as readable text), file edits (`edit_file`,
+`multi_edit`, `write_file`), `bash`, and `dispatch_agent` (spawn a background
+agent). As it works, the transcript shows each step as an action chip
+(`> edit_file path`), the tool's result (with a `+N -M` diffstat on edits), and a
+live footer (`working . 8s . Esc interrupt`). Press **Esc** (or `Ctrl-C`) to
+interrupt a run.
+
+### Permission postures
+
+What the agent may do without asking is the **posture**, cycled live with
+**`Shift+Tab`** and shown as a footer chip (`agent:plan`). Read-only tools always
+run; the posture governs the mutating ones:
+
+| Posture | Behaviour |
+|---------|-----------|
+| `plan` | Read-only. The agent investigates and proposes a plan; edits and commands are denied. |
+| `ask` | Confirm every file edit and shell command before it runs. |
+| `accept-edits` | File edits apply automatically; shell commands still ask. |
+| `auto` | Everything runs without asking. |
+
+In `ask` / `accept-edits`, when the agent wants to run a gated tool an approval
+bar appears above the input box: `[y]es` runs it, `[n]o` (or `Esc`) denies it,
+`[a]lways` allows that tool for the rest of the session.
+
+The launch defaults come from `~/.krill/config.toml`: `default_mode`
+(`chat` or `agent`) and `default_agent_posture` (`plan` / `ask` / `accept-edits`
+/ `auto`). Set them in place with `/config default_mode=agent`.
+
+## Background agents
+
+Spawn agents that run independently and switch between them - Krill's analogue of
+Claude Code's background sessions (not invisible subagents).
+
+- **`/bg <task>`** starts a background agent on `task` (it inherits the current
+  model and posture). The model can also spawn one itself with the
+  `dispatch_agent` tool, e.g. to fan a sub-task out while it keeps working.
+- **`/agents`** opens a switcher listing the main view plus every background
+  agent with its live status; `Enter` attaches. `/switch <n>` and `/main` (return
+  to the main view) do the same without the popup.
+- While **attached** you watch the agent live, answer its approval prompts
+  (`y`/`n`/`a`), `Esc` to interrupt it, or - once it is idle - type to continue
+  its conversation. The footer shows a background-agent count (with a `!` when one
+  is waiting on an approval).
+
+Because the in-process path has a single shared model, generations are
+serialized: agents progress turn by turn and never decode at the same instant
+(there is no throughput gain from running several at once on one GPU; the value
+is being able to watch, steer, and switch between them).
 
 ## Model deep-dive
 

@@ -209,6 +209,10 @@ krill run llama-3.2-3b "What is the meaning of life?"
 # Interactive REPL
 krill run llama-3.2-3b
 
+# Agentic coding: the chat TUI with tools + file edits (Shift+Tab cycles the
+# permission posture plan -> ask -> accept-edits -> auto). See docs/TUI.md.
+krill code "add a docstring to the top function in main.swift"
+
 # Start API server (OpenAI + Ollama compatible)
 krill serve --model llama-3.2-3b
 # Then: curl http://localhost:57455/v1/chat/completions ...
@@ -245,7 +249,8 @@ krill pull mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
 
 | Command | Description |
 |---------|-------------|
-| `krill run <model> [prompt]` | Chat (interactive or single-shot) |
+| `krill run <model> [prompt]` | Chat (interactive or single-shot); the TUI is also an agent via `/agent` |
+| `krill code [task]` | Open the chat TUI in agent mode (tools, file edits, web fetch); alias of `krill run` + `/agent` |
 | `krill pull <model>` | Download model from HuggingFace |
 | `krill serve` | Start OpenAI/Ollama-compatible HTTP server |
 | `krill launch <agent>` | Boot a coding agent (Claude Code, Codex, OpenCode, ...) wired to Krill |
