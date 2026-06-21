@@ -108,6 +108,7 @@ let package = Package(
                 "KrillCache",
                 "KrillRegistry",
                 "KrillTooling",
+                "KrillHarness",
                 "KrillSampler",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
