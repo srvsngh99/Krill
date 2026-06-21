@@ -34,6 +34,22 @@ final class EventQueue: @unchecked Sendable {
     var finishedResult: AgentTranscript? { lock.lock(); defer { lock.unlock() }; return result }
 }
 
+/// Thread-safe hand-off of `DeepResearch.Progress` (and the final `Report`) from
+/// the research-run Task to the render loop (same pattern as `EventQueue`).
+final class ResearchProgressQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [DeepResearch.Progress] = []
+    private var done = false
+    private var report: DeepResearch.Report?
+    func push(_ p: DeepResearch.Progress) { lock.lock(); items.append(p); lock.unlock() }
+    func finish(_ r: DeepResearch.Report) { lock.lock(); report = r; done = true; lock.unlock() }
+    func drain() -> [DeepResearch.Progress] {
+        lock.lock(); defer { lock.unlock() }
+        let out = items; items.removeAll(); return out
+    }
+    var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return done && items.isEmpty }
+}
+
 /// Full-screen opencode-style chat TUI for Krill, in the Sourav AI Labs
 /// monochrome identity: a branded masthead, a scrollable conversation pane, a
 /// bottom input box with a slash-command autosuggest popup (Up/Down to cycle),
@@ -752,6 +768,9 @@ final class ChatTUI {
             }
             guard !arg.isEmpty else { note("Usage: /bg <task>"); break }
             spawnSession(title: DispatchTool.deriveTitle(arg), task: arg)
+        case "/research":
+            guard !arg.isEmpty else { note("Usage: /research <question>"); break }
+            await runResearch(arg)
         case "/agents":
             guard !sessions.isEmpty else { note("No background agents yet. Start one with /bg <task>."); break }
             switcher = AgentSwitcher(entries: switcherEntries(), current: activeSessionID)
@@ -1096,6 +1115,106 @@ final class ChatTUI {
         lastStatus = transcript.wasCancelled ? "cancelled"
             : (transcript.hitIterationLimit ? "iteration limit" : "")
         render()
+    }
+
+    // MARK: - Deep research (/research)
+
+    /// Run a deterministic deep-research pass for `question`: plan queries ->
+    /// web_search -> web_fetch -> per-page summary -> synthesized cited answer.
+    /// Runs in the foreground (the user invoked it and waits for the answer) with
+    /// a live progress trail; `Esc`/`Ctrl-C` cancels. The answer is appended to
+    /// the conversation so follow-up questions can build on it.
+    private func runResearch(_ question: String) async {
+        guard let backend = WebSearchTool.configuredBackend() else {
+            note("Web search is not configured, so /research has nothing to search. Set a SearXNG "
+                + "instance: /config searxng_url=http://localhost:8888 (the instance needs `json` in "
+                + "its search.formats), or export KRILL_SEARXNG_URL.")
+            return
+        }
+        view.append(Msg(role: .user, text: "/research \(question)"))
+        modelTurns.append((role: "user", content: question))
+        scrollOffset = 0
+        note("Researching: \(question)")
+        render()
+
+        let gen = EngineGenerator(engine: engine, maxTokens: maxTokens)
+        let webFetch = WebFetchTool()
+        let research = DeepResearch(
+            complete: { msgs in await gen.complete(messages: msgs) },
+            backend: backend,
+            fetch: { url, maxChars in
+                let args: [String: Any] = ["url": url, "max_chars": maxChars]
+                guard let data = try? JSONSerialization.data(withJSONObject: args),
+                      let json = String(data: data, encoding: .utf8) else { return nil }
+                let r = await webFetch.run(argumentsJSON: json)
+                return r.isError ? nil : r.content
+            })
+
+        let queue = ResearchProgressQueue()
+        let runTask = Task {
+            let rep = await research.run(question: question, onProgress: { p in queue.push(p) })
+            queue.finish(rep)
+            return rep
+        }
+
+        let dots = ["\u{2839}", "\u{2838}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}", "\u{2819}"]
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        var spin = 0
+        while true {
+            if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize() }
+            pumpAll()   // keep background agents advancing
+            for p in queue.drain() { note(Self.researchProgressLine(p)); scrollOffset = 0 }
+            let finished = queue.isFinished
+            let elapsed = Self.formatElapsed(CFAbsoluteTimeGetCurrent() - startedAt)
+            lastStatus = finished ? "" : "\(dots[spin % dots.count]) researching \u{00B7} \(elapsed) \u{00B7} Esc interrupt"
+            render()
+            if finished { break }
+            spin += 1
+            if raw.waitForInput(timeoutMs: 120), let keys = reader.read() {
+                for key in keys {
+                    switch key {
+                    case .ctrlC, .escape: runTask.cancel(); lastStatus = "cancelling"
+                    case .pageUp: scrollOffset += paneHeight() - 1
+                    case .pageDown: scrollOffset = max(0, scrollOffset - (paneHeight() - 1))
+                    case .scrollUp, .up: scrollOffset += 3
+                    case .scrollDown, .down: scrollOffset = max(0, scrollOffset - 3)
+                    default: break
+                    }
+                }
+            }
+        }
+
+        let report = await runTask.value
+        if report.isEmpty {
+            note(report.sources.isEmpty
+                ? "No usable sources found for that question."
+                : "Could not synthesize an answer (stopped or no readable pages).")
+            lastStatus = ""
+            render()
+            return
+        }
+        // Ensure the answer carries its citations even if the model omitted them.
+        var finalText = report.text.isEmpty ? "(no answer generated)" : report.text
+        if !finalText.lowercased().contains("sources:") {
+            finalText += "\n\n" + DeepResearch.sourcesList(report.sources)
+        }
+        view.append(Msg(role: .assistant, text: finalText))
+        modelTurns.append((role: "assistant", content: finalText))
+        lastStatus = "researched \(report.sources.count) source\(report.sources.count == 1 ? "" : "s")"
+        scrollOffset = 0
+        render()
+    }
+
+    /// A one-line progress note for each research phase.
+    private static func researchProgressLine(_ p: DeepResearch.Progress) -> String {
+        switch p {
+        case .planning: return "Planning search queries..."
+        case .queries(let qs): return "Queries: " + qs.joined(separator: "  |  ")
+        case .searching(let q): return "Searching: \(q)"
+        case .gathered(let n): return "Selected \(n) source\(n == 1 ? "" : "s") to read."
+        case .fetching(let url, let i, let total): return "Reading [\(i)/\(total)] \(url)"
+        case .synthesizing: return "Synthesizing the answer..."
+        }
     }
 
     /// Keys handled while an agent run is in flight: answer a pending approval

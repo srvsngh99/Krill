@@ -24,6 +24,7 @@ public struct SlashMenu {
         Item(name: "/help", summary: "Show keys and commands"),
         Item(name: "/agent", summary: "Toggle agent mode (tools + file edits); Shift+Tab cycles posture"),
         Item(name: "/bg", summary: "Spawn a background agent: /bg <task>"),
+        Item(name: "/research", summary: "Deep web research: /research <question> (needs searxng_url)"),
         Item(name: "/agents", summary: "List and switch between background agents"),
         Item(name: "/main", summary: "Return to the main view from an agent"),
         Item(name: "/image", summary: "Attach an image to your next message"),
