@@ -214,7 +214,7 @@ public struct DeepResearch: Sendable {
             "You write a concise, well-organized research answer from numbered source summaries. "
             + "Cite sources inline as [1], [2], etc., matching the numbers given. Use only the "
             + "summaries provided; do not invent facts or citations. If the summaries disagree, say so. "
-            + "End with a 'Sources:' list mapping each number to its URL."
+            + "Do not write a Sources list yourself - the source URLs are appended automatically."
         var user = "Question: \(question)\n\nSource summaries:\n"
         for (i, f) in findings.enumerated() {
             user += "\n[\(i + 1)] \(f.title) - \(f.url)\n\(f.summary)\n"

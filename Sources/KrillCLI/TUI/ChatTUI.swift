@@ -1185,19 +1185,20 @@ final class ChatTUI {
         }
 
         let report = await runTask.value
-        if report.isEmpty {
+        // No synthesized text means either nothing was found, or the run was
+        // stopped (cancel) / the model produced nothing before synthesis.
+        guard !report.text.isEmpty else {
             note(report.sources.isEmpty
                 ? "No usable sources found for that question."
-                : "Could not synthesize an answer (stopped or no readable pages).")
+                : "Research stopped before an answer was synthesized.")
             lastStatus = ""
             render()
             return
         }
-        // Ensure the answer carries its citations even if the model omitted them.
-        var finalText = report.text.isEmpty ? "(no answer generated)" : report.text
-        if !finalText.lowercased().contains("sources:") {
-            finalText += "\n\n" + DeepResearch.sourcesList(report.sources)
-        }
+        // Always append our ground-truth Sources list (built from the fetched
+        // findings, so the URLs are correct). The synthesis prompt is told not to
+        // emit its own, so this neither duplicates nor relies on a fragile match.
+        let finalText = report.text + "\n\n" + DeepResearch.sourcesList(report.sources)
         view.append(Msg(role: .assistant, text: finalText))
         modelTurns.append((role: "assistant", content: finalText))
         lastStatus = "researched \(report.sources.count) source\(report.sources.count == 1 ? "" : "s")"
