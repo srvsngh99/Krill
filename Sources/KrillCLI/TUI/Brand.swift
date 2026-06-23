@@ -30,7 +30,7 @@ enum Brand {
         // launch splash, not the persistent bar.
         let leftPlain = "  \(wordmark)"
         let rightPlain = "\(model)  "
-        let styledLeft = "  " + Ansi.bold(wordmark)
+        let styledLeft = "  " + Ansi.bold(Ansi.ember(wordmark))
         if width >= leftPlain.count + rightPlain.count + 1 {
             let pad = width - leftPlain.count - rightPlain.count
             return styledLeft + String(repeating: " ", count: pad) + Ansi.chrome(model) + "  "
@@ -75,9 +75,9 @@ enum Brand {
         let bannerWidth = Banner.width(banner)
         let heroRows: [String]
         if width >= bannerWidth {
-            heroRows = banner.map { center(Ansi.bold($0), bannerWidth) }
+            heroRows = Ansi.emberGradient(banner).map { center($0, bannerWidth) }
         } else {
-            heroRows = [center(Ansi.bold(wordmark), visibleCount(wordmark))]
+            heroRows = [center(Ansi.bold(Ansi.ember(wordmark)), visibleCount(wordmark))]
         }
 
         // Tagline split on "Mac" so it can be reverse-highlighted like the brand
@@ -87,7 +87,7 @@ enum Brand {
         let head = parts.first ?? tagline
         let tail = parts.count > 1 ? parts[1] : ""
         let taglineVis = 3 + head.count + (parts.count > 1 ? 3 : 0) + tail.count
-        var styledTagline = Ansi.chrome(">_ ") + Ansi.chrome(head)
+        var styledTagline = Ansi.ember(">_ ") + Ansi.chrome(head)
         if parts.count > 1 { styledTagline += Ansi.inverse(Ansi.bold("Mac")) + Ansi.chrome(tail) }
         let taglineLine = center(styledTagline, taglineVis)
 
@@ -96,7 +96,7 @@ enum Brand {
         // device bold beside the lab name, with the "INDEPENDENT AI LAB" line
         // and site beneath.
         let lockupPlain = "\(labMark)  \(lab)"
-        let styledLockup = Ansi.bold(labMark) + "  " + Ansi.chrome(lab)
+        let styledLockup = Ansi.ember(Ansi.bold(labMark)) + "  " + Ansi.chrome(lab)
         let tagPlain = "\(labTagline)  \u{00B7}  \(site)"
 
         var out: [String] = [""]
