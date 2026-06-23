@@ -164,6 +164,10 @@ final class ChatTUI {
     private var scrollOffset = 0     // lines scrolled up from bottom
     private var rows = 24, cols = 80
     private var lastStatus = ""
+    // Index in `view` of the assistant turn currently being generated, so its
+    // bullet renders as a pulsing (blinking) dot while we wait on the model.
+    // nil when no generation is in flight.
+    private var liveReplyIdx: Int? = nil
     private var contextWindow = 0          // model's max context (tokens), 0 = unknown
     private var lastStats: GenerationStats? // most recent turn's stats (for /context)
     private var shouldQuit = false
@@ -437,8 +441,11 @@ final class ChatTUI {
             out.append(idx < ov.lines.count ? styled(ov.lines[idx]) : "")
         }
         let more = maxStart > 0 ? "  \u{00B7}  more (Up/Down)" : ""
+        // When a model picker is open underneath, Esc returns to that list (a
+        // second Esc closes it); otherwise it closes straight to the chat.
+        let backHint = picker != nil ? "Esc back to list" : "Esc to close"
         out.append("")
-        out.append(margin + Ansi.chrome("Esc to close" + more))
+        out.append(margin + Ansi.chrome(backHint + more))
         return out
     }
 
@@ -452,7 +459,10 @@ final class ChatTUI {
             if let chosen = picker?.current?.name { pendingModelLoad = chosen }
             picker = nil
         case .right, .char("i"), .char("I"):
-            if let name = picker?.current?.name { picker = nil; showModelDeepDive(name) }
+            // Open the deep-dive ON TOP of the picker (keep `picker` set): the
+            // overlay owns the keyboard while open, and closing it (Esc) falls
+            // back to the still-open list. A second Esc then closes the list.
+            if let name = picker?.current?.name { showModelDeepDive(name) }
         case .escape, .ctrlC: picker = nil
         default: break
         }
@@ -653,12 +663,15 @@ final class ChatTUI {
                 out.append(margin + Ansi.chrome(e.downloaded ? "Installed" : "Available"))
                 lastSection = e.downloaded
             }
-            let chevron = i == p.selected ? "\u{25B8}" : " "        // selected marker
-            let row = "\(chevron) \(rpad(e.name, nameW))  \(lpad(e.params, paramW))  \(rpad(e.quant, quantW))  \(lpad(e.size, sizeW))"
-            let line = margin + String(row.prefix(max(0, width - margin.count)))
-            if i == p.selected { out.append(Ansi.bold(line)) }      // light: chevron + bold
-            else if e.downloaded { out.append(Ansi.user(line)) }
-            else { out.append(Ansi.chrome(line)) }
+            let body = "\(rpad(e.name, nameW))  \(lpad(e.params, paramW))  \(rpad(e.quant, quantW))  \(lpad(e.size, sizeW))"
+            let bodyClipped = String(body.prefix(max(0, width - margin.count - 2)))  // -2 for the 2-col marker
+            if i == p.selected {
+                // ember selection marker (selection = state) + bold row
+                out.append(margin + Ansi.ember("\u{25B8}") + " " + Ansi.bold(bodyClipped))
+            } else {
+                let line = margin + "  " + bodyClipped
+                out.append(e.downloaded ? Ansi.user(line) : Ansi.chrome(line))
+            }
         }
         if winEnd < total { out.append(margin + Ansi.chrome("   ...")) }
         out.append("")
@@ -1484,8 +1497,10 @@ final class ChatTUI {
         // Spoken-replies (TTS) indicator: independent of the mic, so it shows even
         // on text-only models. Leads the right half when on.
         let speakTag = speakReplies ? "\u{25CF} speak\(sep)" : ""
-        // Reasoning indicator: a mono dot when the thinking channel is on.
-        let thinkTag = thinkingOn ? "\u{25CF} think\(sep)" : ""
+        // Reasoning indicator + toggle hint: filled dot when the thinking channel
+        // is on, hollow when off, always carrying the ⌃T key so it reads as a
+        // switch (Ctrl-T flips it; a no-op on models with no thinking channel).
+        let thinkTag = (thinkingOn ? Ansi.ember("\u{25CF}") : "\u{25CB}") + " think \u{2303}T\(sep)"
         // Agent posture chip: shows the leash state whenever hands are on.
         let agentTag = surface == .agent ? "\u{25CF} agent:\(posture.label)\(sep)" : ""
         // Background-agent count, with a marker when one needs approval.
@@ -1494,12 +1509,12 @@ final class ChatTUI {
         // Voice OFF (text mode) or a non-audio model: no voice chrome at all - the
         // footer is just the generation status and cwd/version (plus speak tag).
         guard engine.canUseNativeAudio, voiceMode != .type || !voiceActivity.isEmpty else {
-            return (lastStatus.isEmpty ? "ready" : lastStatus, cleanRight)
+            return (lastStatus.isEmpty ? modelContextStatus() : lastStatus, cleanRight)
         }
-        let dot = "\u{25CF}"
+        let dot = Ansi.ember("\u{25CF}")
         let left: String
         if !voiceActivity.isEmpty {
-            left = "\(vuMeter(voiceFrame)) \(voiceActivity)"   // animated meter while live
+            left = "\(Ansi.ember(vuMeter(voiceFrame))) \(voiceActivity)"   // animated ember meter while live
         } else {
             switch voiceMode {
             case .dictate:   left = "\(dot) dictate\(sep)\(engineLabel)\(sep)Ctrl-V to cycle"
@@ -1619,8 +1634,9 @@ final class ChatTUI {
 
         view.append(Msg(role: .assistant, text: ""))
         let aIdx = view.count - 1
+        liveReplyIdx = aIdx            // pulse this turn's bullet until the reply lands
         scrollOffset = 0
-        lastStatus = "thinking..."
+        lastStatus = modelContextStatus() + " \u{00B7} Esc interrupt"
         render()
 
         // Serialize against any background agent decode (single-GPU): wait our
@@ -1634,10 +1650,12 @@ final class ChatTUI {
         var stream: AsyncStream<TokenEvent>? = gen.stream
         let filter = StreamingReasoningFilter()
         var assistant = ""
+        var rawAll = ""            // every token, pre-filter (to tell "all reasoning" from truly empty)
         var cancelled = false
 
         for await event in stream! {
             if event.isEnd { break }
+            rawAll += event.text
             let visible = filter.consume(event.text)
             if !visible.isEmpty {
                 assistant += visible
@@ -1667,8 +1685,23 @@ final class ChatTUI {
         assistant = cleanVisible
             .replacingOccurrences(of: #"</?\|?(?:channel|think|thinking)\|?>"#, with: "", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        view[aIdx].text = assistant.isEmpty ? "(no response)" : assistant
+        // Distinguish a truly empty generation from one where the model spent the
+        // whole turn in its reasoning channel and never wrote a visible answer
+        // (common with thinking ON): the latter is far more actionable.
+        let emptyMsg: String
+        if rawAll.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            emptyMsg = "(no response)"
+        } else if thinkingOn {
+            emptyMsg = "(the model reasoned but produced no answer — press Ctrl-T to turn thinking off, then retry)"
+        } else {
+            emptyMsg = "(no response)"
+        }
+        view[aIdx].text = assistant.isEmpty ? emptyMsg : assistant
 
+        // Clear the transient generating status; the footer falls back to the
+        // model name + context (never a stale "thinking..."/interrupt line).
+        lastStatus = ""
+        liveReplyIdx = nil            // reply has landed; stop pulsing the bullet
         if cancelled {
             synth.stop()                       // hush any in-flight speech
             view.append(Msg(role: .note, text: "(cancelled)"))
@@ -1699,11 +1732,42 @@ final class ChatTUI {
         return parts.joined(separator: " \u{00B7} ")
     }
 
+    /// The persistent/idle footer status: the model name with the live context
+    /// usage beside it. This is what the footer shows when nothing transient is
+    /// happening (never a stale "thinking..."). Uses the last generation's token
+    /// stats when present, else just the model name and the window size.
+    private func modelContextStatus() -> String {
+        var parts = [modelName]
+        if let st = lastStats {
+            let ctx = st.promptTokens + st.generatedTokens
+            if contextWindow > 0 {
+                let frac = min(1.0, Double(ctx) / Double(contextWindow))
+                let pct = Int((frac * 100).rounded())
+                parts.append("ctx \(contextBar(frac)) \(ctx)/\(formatContext(contextWindow)) \(pct)%")
+            } else {
+                parts.append("ctx \(ctx)")
+            }
+        } else if contextWindow > 0 {
+            parts.append("ctx \(formatContext(contextWindow))")
+        }
+        return parts.joined(separator: " \u{00B7} ")
+    }
+
     /// A small monochrome fill bar for context usage: filled vs empty squares.
     private func contextBar(_ frac: Double, cells: Int = 8) -> String {
         let filled = max(0, min(cells, Int((frac * Double(cells)).rounded())))
-        return String(repeating: "\u{25B0}", count: filled)        // filled square
-             + String(repeating: "\u{25B1}", count: cells - filled) // empty square
+        // Filled cells carry the ember spectrum (amber->coral->magenta) as a
+        // "heating up" signal; empty cells stay neutral. Coloured per absolute
+        // position so the gradient reads the same regardless of fill level.
+        let stops = ["38;2;255;192;77", "38;2;255;160;84", "38;2;255;125;92", "38;2;240;94;104", "38;2;224;69;125"]
+        var out = ""
+        for i in 0..<filled {
+            let t = cells <= 1 ? 0.0 : Double(i) / Double(cells - 1)
+            let code = stops[min(stops.count - 1, Int((t * Double(stops.count - 1)).rounded()))]
+            out += Ansi.enabled ? "\u{1B}[\(code)m\u{25B0}\u{1B}[0m" : "\u{25B0}"
+        }
+        out += String(repeating: "\u{25B1}", count: cells - filled)  // empty square
+        return out
     }
 
     /// Compact context-window size, e.g. 131072 -> "128K", 8192 -> "8K".
@@ -2142,37 +2206,61 @@ final class ChatTUI {
         "\u{1B}[\(row);1H\u{1B}[2K" + content
     }
 
-    /// Conversation pane lines. Turns are distinguished by SHADE, not by role
-    /// labels: the user's own words read bright white; the model's reply reads
-    /// dim gray so the user's turn clearly stands out. A faint rule opens each
-    /// new exchange (before every user turn but the first) so the back-and-forth
-    /// groups visually without any "you"/"krill" name tags. Vertical placement
-    /// (bottom-anchor vs. centered splash) is handled by `render`.
+    /// Conversation pane lines. Turns are distinguished by GLYPH + shade, not by
+    /// role labels: the user's words sit on a subtle full-width `>` bar (the
+    /// entered command), the model's reply leads with a filled accent bullet in
+    /// the terminal's own foreground (the prominent turn), and steps/notes are
+    /// dim with a `✳` marker. Vertical placement (bottom-anchor vs. centered
+    /// splash) is handled by `render`.
     private func paneLines(width: Int) -> [String] {
         guard !view.isEmpty else { return Brand.splash(width: width) }
-        return paneLines(view, width: width)
+        return paneLines(view, width: width, blinkIdx: liveReplyIdx)
     }
 
     /// Render an arbitrary message list (the main `view`, or an attached
     /// background session's transcript mapped through `msg(from:)`).
-    private func paneLines(_ msgs: [Msg], width: Int) -> [String] {
+    private func paneLines(_ msgs: [Msg], width: Int, blinkIdx: Int? = nil) -> [String] {
         let margin = "  "
         let w = max(10, width - 4)                       // 2-space margin both sides
-        let rule = Ansi.chrome(margin + String(repeating: "\u{2500}", count: min(w, 48)))
         var lines: [String] = []
         var sawTurn = false
-        for msg in msgs {
+        for (mIdx, msg) in msgs.enumerated() {
             switch msg.role {
             case .user:
-                if sawTurn { lines.append(rule); lines.append("") }
+                // The user's turn reads as an entered command: a full-width subtle
+                // bar with a `>` chevron, the words sitting on it. Continuation
+                // lines align under the text. A blank line opens each exchange.
+                if sawTurn { lines.append("") }
                 sawTurn = true
-                for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.user(l)) }
+                let wrapped = Layout.wrap(msg.text, width: max(1, width - 4))
+                for (i, l) in wrapped.enumerated() {
+                    let prefix = i == 0 ? " > " : "   "
+                    lines.append(Ansi.userBar(prefix + l, width: width))
+                }
             case .assistant:
+                // The model's reply is the prominent turn: a filled accent bullet
+                // on the first line, the text in the terminal's own foreground
+                // (markdown-styled), continuation lines hanging-indented under it.
+                // While this turn is still being generated its bullet blinks.
                 sawTurn = true
                 lines.append("")
-                for l in TUIMarkdown.render(msg.text, width: w) { lines.append(margin + Ansi.model(l)) }
+                let live = mIdx == blinkIdx
+                let firstBullet = live ? Ansi.blink(Ansi.ember("\u{25CF}")) + " " : Ansi.ember("\u{25CF} ")
+                let rendered = TUIMarkdown.render(msg.text, width: max(1, w - 2))
+                if rendered.isEmpty {
+                    lines.append(margin + firstBullet)   // pulsing dot while awaiting the first token
+                } else {
+                    for (i, l) in rendered.enumerated() {
+                        let bullet = i == 0 ? firstBullet : "  "
+                        lines.append(margin + bullet + Ansi.model(l))
+                    }
+                }
             case .note:
-                for l in Layout.wrap(msg.text, width: w) { lines.append(margin + Ansi.chrome(l)) }
+                // Steps / notes shown to the user: dim, marked with a step glyph.
+                for (i, l) in Layout.wrap(msg.text, width: max(1, w - 2)).enumerated() {
+                    let mark = i == 0 ? "\u{2733} " : "  "
+                    lines.append(margin + Ansi.chrome(mark + l))
+                }
             case .toolCall:
                 for l in CodeView.toolCall(name: msg.toolName, argumentsJSON: msg.text, width: w) {
                     lines.append(margin + styledCode(l))
