@@ -236,13 +236,17 @@ final class ChromeBorderTests: XCTestCase {
 }
 
 final class BannerTests: XCTestCase {
-    func testRowsEqualWidthAndPureAscii() {
+    func testRowsEqualWidthAndBlockGlyphs() {
         let rows = Banner.krill
         let w = Banner.width(rows)
         XCTAssertGreaterThan(w, 0)
+        // The wordmark is a solid-block logo: each cell is either the full block
+        // or a space. (Source is authored in ASCII, then filled with the block.)
+        let allowed: Set<Character> = ["\u{2588}", " "]
         for row in rows {
             XCTAssertEqual(row.count, w, "banner rows must be equal width")
-            XCTAssertTrue(row.allSatisfy { $0.isASCII }, "banner must be pure ASCII")
+            XCTAssertTrue(row.allSatisfy { allowed.contains($0) },
+                          "banner cells must be the full block or a space")
         }
     }
 }
