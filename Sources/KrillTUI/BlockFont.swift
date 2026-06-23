@@ -15,7 +15,7 @@ public enum BlockFont {
             // Pad every row of this glyph to the glyph's own max width so a row
             // authored a column short never shifts the letters after it.
             let gw = g.map(\.count).max() ?? 0
-            let gap = i == 0 ? "" : " "
+            let gap = i == 0 ? "" : "  "
             for r in 0..<height {
                 let cell = g[r].padding(toLength: gw, withPad: " ", startingAt: 0)
                 rows[r] += gap + cell

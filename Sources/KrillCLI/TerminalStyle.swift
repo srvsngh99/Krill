@@ -78,6 +78,15 @@ enum Ansi {
     /// Secondary chrome shade (masthead, footer, rules, borders, notes).
     static func chrome(_ s: String) -> String { roleWrap(s, theme.chromeSGR) }
 
+    /// Like `chrome`, but re-enters the chrome shade after every inner reset, so
+    /// embedded colour spans (ember signal accents) keep their colour while the
+    /// rest of the line stays dim. Used by the footer, which carries ember spans.
+    static func chromeStyled(_ s: String) -> String {
+        guard enabled, let code = theme.chromeSGR else { return s }
+        let reEnter = "\u{1B}[0m\u{1B}[\(code)m"
+        return "\u{1B}[\(code)m" + s.replacingOccurrences(of: "\u{1B}[0m", with: reEnter) + "\u{1B}[0m"
+    }
+
     /// Model-turn shade: tint plain text with the model color while preserving
     /// embedded spans (re-enter the color after every inner reset), like
     /// `dimStyled` but driven by the palette. When the palette has no model color

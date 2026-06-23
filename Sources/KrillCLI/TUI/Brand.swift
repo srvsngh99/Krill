@@ -51,9 +51,10 @@ enum Brand {
     static func footer(width: Int, left: String, right: String) -> String {
         let l = "  \(left)"
         let r = "\(right)  "
-        let pad = max(1, width - l.count - r.count)
+        // Measure visible width: segments may carry ember signal spans (ANSI).
+        let pad = max(1, width - visibleCount(l) - visibleCount(r))
         let line = l + String(repeating: " ", count: pad) + r
-        return Ansi.chrome(clip(line, width: width))
+        return Ansi.chromeStyled(clip(line, width: width))
     }
 
     // MARK: - Launch splash
@@ -141,6 +142,6 @@ enum Brand {
     }
 
     private static func clip(_ s: String, width: Int) -> String {
-        s.count <= width ? s : String(s.prefix(width))
+        visibleCount(s) <= width ? s : String(s.prefix(width))
     }
 }

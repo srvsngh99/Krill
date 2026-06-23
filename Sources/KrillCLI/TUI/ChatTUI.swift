@@ -663,12 +663,15 @@ final class ChatTUI {
                 out.append(margin + Ansi.chrome(e.downloaded ? "Installed" : "Available"))
                 lastSection = e.downloaded
             }
-            let chevron = i == p.selected ? "\u{25B8}" : " "        // selected marker
-            let row = "\(chevron) \(rpad(e.name, nameW))  \(lpad(e.params, paramW))  \(rpad(e.quant, quantW))  \(lpad(e.size, sizeW))"
-            let line = margin + String(row.prefix(max(0, width - margin.count)))
-            if i == p.selected { out.append(Ansi.bold(line)) }      // light: chevron + bold
-            else if e.downloaded { out.append(Ansi.user(line)) }
-            else { out.append(Ansi.chrome(line)) }
+            let body = "\(rpad(e.name, nameW))  \(lpad(e.params, paramW))  \(rpad(e.quant, quantW))  \(lpad(e.size, sizeW))"
+            let bodyClipped = String(body.prefix(max(0, width - margin.count - 2)))  // -2 for the 2-col marker
+            if i == p.selected {
+                // ember selection marker (selection = state) + bold row
+                out.append(margin + Ansi.ember("\u{25B8}") + " " + Ansi.bold(bodyClipped))
+            } else {
+                let line = margin + "  " + bodyClipped
+                out.append(e.downloaded ? Ansi.user(line) : Ansi.chrome(line))
+            }
         }
         if winEnd < total { out.append(margin + Ansi.chrome("   ...")) }
         out.append("")
@@ -1497,7 +1500,7 @@ final class ChatTUI {
         // Reasoning indicator + toggle hint: filled dot when the thinking channel
         // is on, hollow when off, always carrying the ⌃T key so it reads as a
         // switch (Ctrl-T flips it; a no-op on models with no thinking channel).
-        let thinkTag = (thinkingOn ? "\u{25CF}" : "\u{25CB}") + " think \u{2303}T\(sep)"
+        let thinkTag = (thinkingOn ? Ansi.ember("\u{25CF}") : "\u{25CB}") + " think \u{2303}T\(sep)"
         // Agent posture chip: shows the leash state whenever hands are on.
         let agentTag = surface == .agent ? "\u{25CF} agent:\(posture.label)\(sep)" : ""
         // Background-agent count, with a marker when one needs approval.
@@ -1508,10 +1511,10 @@ final class ChatTUI {
         guard engine.canUseNativeAudio, voiceMode != .type || !voiceActivity.isEmpty else {
             return (lastStatus.isEmpty ? modelContextStatus() : lastStatus, cleanRight)
         }
-        let dot = "\u{25CF}"
+        let dot = Ansi.ember("\u{25CF}")
         let left: String
         if !voiceActivity.isEmpty {
-            left = "\(vuMeter(voiceFrame)) \(voiceActivity)"   // animated meter while live
+            left = "\(Ansi.ember(vuMeter(voiceFrame))) \(voiceActivity)"   // animated ember meter while live
         } else {
             switch voiceMode {
             case .dictate:   left = "\(dot) dictate\(sep)\(engineLabel)\(sep)Ctrl-V to cycle"
@@ -1753,8 +1756,18 @@ final class ChatTUI {
     /// A small monochrome fill bar for context usage: filled vs empty squares.
     private func contextBar(_ frac: Double, cells: Int = 8) -> String {
         let filled = max(0, min(cells, Int((frac * Double(cells)).rounded())))
-        return String(repeating: "\u{25B0}", count: filled)        // filled square
-             + String(repeating: "\u{25B1}", count: cells - filled) // empty square
+        // Filled cells carry the ember spectrum (amber->coral->magenta) as a
+        // "heating up" signal; empty cells stay neutral. Coloured per absolute
+        // position so the gradient reads the same regardless of fill level.
+        let stops = ["38;2;255;192;77", "38;2;255;160;84", "38;2;255;125;92", "38;2;240;94;104", "38;2;224;69;125"]
+        var out = ""
+        for i in 0..<filled {
+            let t = cells <= 1 ? 0.0 : Double(i) / Double(cells - 1)
+            let code = stops[min(stops.count - 1, Int((t * Double(stops.count - 1)).rounded()))]
+            out += Ansi.enabled ? "\u{1B}[\(code)m\u{25B0}\u{1B}[0m" : "\u{25B0}"
+        }
+        out += String(repeating: "\u{25B1}", count: cells - filled)  // empty square
+        return out
     }
 
     /// Compact context-window size, e.g. 131072 -> "128K", 8192 -> "8K".
