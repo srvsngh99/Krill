@@ -168,6 +168,10 @@ final class ChatTUI {
     // bullet renders as a pulsing (blinking) dot while we wait on the model.
     // nil when no generation is in flight.
     private var liveReplyIdx: Int? = nil
+    // Messages typed while a reply is streaming. They are sent in order once the
+    // current reply lands (steering): the user no longer has to wait for each
+    // turn to finish before composing the next.
+    private var queuedMessages: [String] = []
     private var contextWindow = 0          // model's max context (tokens), 0 = unknown
     private var lastStats: GenerationStats? // most recent turn's stats (for /context)
     private var shouldQuit = false
@@ -275,7 +279,12 @@ final class ChatTUI {
             if pumpAll() { render() }   // advance background agents, surface live status
             guard raw.waitForInput(timeoutMs: 250) else { continue }
             guard let keys = reader.read() else { break }   // nil == EOF
-            // An empty (non-nil) batch is a stray mouse/terminal event - ignore it.
+            // An empty (non-nil) batch is a stray mouse/terminal event (a click or
+            // motion report the reader recognized but ignores). Skip it WITHOUT
+            // re-rendering: SGR mouse reporting streams these, and rendering on
+            // each one turns a burst into a tight redraw loop the user sees as
+            // violent flicker (most visible on the model picker's inverse rows).
+            if keys.isEmpty { continue }
             var submit: String?
             for key in keys {
                 if let text = handleKey(key) { submit = text }
@@ -283,6 +292,13 @@ final class ChatTUI {
             }
             render()
             if let text = submit, !shouldQuit { await processSubmit(text) }
+            // Send anything typed (queued) while the model was replying, in order.
+            // Each queued turn may itself queue more, so drain until empty.
+            while !queuedMessages.isEmpty, !shouldQuit {
+                let next = queuedMessages.removeFirst()
+                render()
+                await processSubmit(next)
+            }
             // The picker chose a model: load (or download then load) it now.
             if let name = pendingModelLoad, !shouldQuit {
                 pendingModelLoad = nil
@@ -389,6 +405,46 @@ final class ChatTUI {
         default:
             return nil
         }
+    }
+
+    /// Key handling WHILE a reply is streaming. The composer stays live so the
+    /// user can type ahead and queue messages (steering); Enter banks the typed
+    /// line to send once the reply lands, Ctrl-C cancels the in-flight reply, and
+    /// the wheel/PgUp scroll the pane. Returns true to cancel the current reply.
+    /// Deliberately narrow (no slash menu / history / voice) so nothing with a
+    /// side effect fires mid-generation.
+    private func handleStreamingKey(_ key: Key) -> Bool {
+        switch key {
+        case .ctrlC:
+            return true                       // cancel the in-flight reply
+        case .enter:
+            let text = input.trimmingCharacters(in: .whitespaces)
+            if !text.isEmpty { queuedMessages.append(input) }
+            input = ""; cursor = 0; menu.close()
+        case .char(let c):
+            let idx = input.index(input.startIndex, offsetBy: cursor)
+            input.insert(c, at: idx); cursor += 1
+        case .backspace:
+            if cursor > 0 {
+                let idx = input.index(input.startIndex, offsetBy: cursor - 1)
+                input.remove(at: idx); cursor -= 1
+            }
+        case .delete:
+            if cursor < input.count {
+                input.remove(at: input.index(input.startIndex, offsetBy: cursor))
+            }
+        case .left:  if cursor > 0 { cursor -= 1 }
+        case .right: if cursor < input.count { cursor += 1 }
+        case .ctrlA, .home: cursor = 0
+        case .ctrlE, .end:  cursor = input.count
+        case .ctrlU: input = ""; cursor = 0
+        case .pageUp:   scrollOffset += max(1, paneHeight() - 1)
+        case .pageDown: scrollOffset = max(0, scrollOffset - max(1, paneHeight() - 1))
+        case .scrollUp:   scrollOffset += 3
+        case .scrollDown: scrollOffset = max(0, scrollOffset - 3)
+        default: break
+        }
+        return false
     }
 
     private func setInput(_ s: String) { input = s; cursor = s.count; menu.update(for: input) }
@@ -1557,6 +1613,12 @@ final class ChatTUI {
     /// it is off). Empty on non-audio models, where there is nothing to hint.
     private func composerHint() -> String {
         let sep = " \u{00B7} "
+        // Messages queued while the model is replying: surface the count so the
+        // typed-ahead turns are not invisible (they send when the reply lands).
+        if !queuedMessages.isEmpty {
+            let n = queuedMessages.count
+            return "\(n) message\(n == 1 ? "" : "s") queued\(sep)sent after this reply"
+        }
         // Attached to a background agent: how to interact with it.
         if let s = activeSession {
             return s.isRunning
@@ -1662,14 +1724,14 @@ final class ChatTUI {
                 view[aIdx].text = assistant
                 render()
             }
-            // Watch for Ctrl-C (raw mode delivers it as a byte) and resize.
-            if raw.waitForInput(timeoutMs: 0) {
-                let keys = reader.read() ?? []
-                if keys.contains(.ctrlC) { cancelled = true; break }
-                if keys.contains(.pageUp) { scrollOffset += paneHeight() - 1; render() }
-                if keys.contains(.pageDown) { scrollOffset = max(0, scrollOffset - (paneHeight() - 1)); render() }
-                if keys.contains(.scrollUp) { scrollOffset += 3; render() }
-                if keys.contains(.scrollDown) { scrollOffset = max(0, scrollOffset - 3); render() }
+            // Keep the composer live while streaming: the user can type ahead and
+            // queue messages, scroll, or Ctrl-C to cancel. (Raw mode delivers
+            // these as bytes mid-stream.)
+            if raw.waitForInput(timeoutMs: 0), let keys = reader.read(), !keys.isEmpty {
+                var cancel = false
+                for k in keys where handleStreamingKey(k) { cancel = true }
+                render()
+                if cancel { cancelled = true; break }
             }
             if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize() }
         }
