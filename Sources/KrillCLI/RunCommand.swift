@@ -201,6 +201,15 @@ struct RunCommand: AsyncParsableCommand {
             audioData = try Data(contentsOf: URL(fileURLWithPath: audio))
         }
 
+        // Interactive chat needs headroom for a hidden reasoning chain PLUS the
+        // visible answer: a thinking model can spend hundreds of tokens reasoning
+        // inside its `<|channel>thought>` block before it writes a single visible
+        // word, and a 512-token cap can be exhausted mid-reasoning (the reply then
+        // comes back empty). Default the multi-turn surfaces to 4096; single-shot
+        // CLI stays lean at 512. An explicit `--max-tokens` always wins.
+        let userPinnedMaxTokens = CommandLine.arguments.contains("--max-tokens")
+        let chatMaxTokens = userPinnedMaxTokens ? maxTokens : 4096
+
         if let prompt {
             // Single-shot mode
             try await generateAndPrint(
@@ -216,7 +225,7 @@ struct RunCommand: AsyncParsableCommand {
             let tuiConfig = KrillConfig.load()
             let tui = ChatTUI(
                 engine: engine, modelName: model, system: system,
-                params: params, maxTokens: maxTokens, registry: registry,
+                params: params, maxTokens: chatMaxTokens, registry: registry,
                 initialImage: imageData, initialAudio: audioData, theme: theme,
                 voiceModeSetting: tuiConfig.voiceMode,
                 speakRepliesSetting: tuiConfig.speakReplies,
@@ -230,7 +239,7 @@ struct RunCommand: AsyncParsableCommand {
             // editing/history/tab-completion, streamed markdown, media attach.
             let session = InteractiveSession(
                 engine: engine, modelName: model, system: system,
-                params: params, maxTokens: maxTokens, registry: registry,
+                params: params, maxTokens: chatMaxTokens, registry: registry,
                 initialImage: imageData, initialAudio: audioData,
                 thinking: KrillConfig.load().thinking)
             do {
