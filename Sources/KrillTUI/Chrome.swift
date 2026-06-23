@@ -58,17 +58,21 @@ public enum Chrome {
 /// line-drawing `_ | / \` style) so they sit inside the house ASCII rule and
 /// render in any terminal.
 public enum Banner {
-    /// The "Krill" wordmark in the classic line-drawing style, scaled up for
-    /// presence. All rows are the same width; ~31 columns, so callers should
-    /// fall back to a plain wordmark on terminals too narrow to fit it.
-    public static let krill: [String] = [
-        " _  __     _ _ _ _      __  __ ",
-        "| |/ /    (_) | | |    |  \\/  |",
-        "| ' / _ __ _| | | |    | \\  / |",
-        "|  < | '__| | | | |    | |\\/| |",
-        "| . \\| |  | | | | |____| |  | |",
-        "|_|\\_\\_|  |_|_|_|______|_|  |_|",
-    ]
+    /// The "KRILL" wordmark in solid blocks, for a bold, full-weight masthead
+    /// that matches the block mascot. Authored on a `#`-grid (kept ASCII so the
+    /// source bytes stay ASCII, like the mascot) then filled with the full block.
+    /// All rows are the same width (~38 columns), so callers fall back to a plain
+    /// wordmark on terminals too narrow to fit it.
+    public static let krill: [String] = {
+        let pattern = [
+            "##  ##  #####   ######  ##      ##    ",
+            "## ##   ##  ##    ##    ##      ##    ",
+            "####    #####     ##    ##      ##    ",
+            "## ##   ##  ##    ##    ##      ##    ",
+            "##  ##  ##  ##  ######  ######  ######",
+        ]
+        return pattern.map { $0.replacingOccurrences(of: "#", with: "\u{2588}") }
+    }()
 
     /// A small pixel-art "krill" mascot (block glyphs, written as `\u{}` escapes
     /// so the source bytes stay ASCII). Faces right toward the wordmark it sits

@@ -70,20 +70,12 @@ enum Brand {
         func center(_ s: String, _ vis: Int) -> String {
             String(repeating: " ", count: Chrome.centerPad(visibleWidth: vis, totalWidth: width)) + s
         }
-        // Hero = the krill mascot beside the block wordmark, centered as one
-        // unit. Falls back to the plain `>_ Krill` line on terminals too
-        // narrow to fit the pair.
-        let mascot = Banner.krillMascot
-        let mascotWidth = Banner.width(mascot)
+        // Hero = the solid-block "KRILL" wordmark, centered on its own. Falls
+        // back to the plain `>_ Krill` line on terminals too narrow to fit it.
         let bannerWidth = Banner.width(banner)
-        let gap = "   "
-        let combinedWidth = mascotWidth + gap.count + bannerWidth
         let heroRows: [String]
-        if width >= combinedWidth {
-            let pad = String(repeating: " ", count: Chrome.centerPad(visibleWidth: combinedWidth, totalWidth: width))
-            heroRows = zip(mascot, banner).map { m, b in
-                pad + Ansi.bold(m.padding(toLength: mascotWidth, withPad: " ", startingAt: 0)) + gap + Ansi.bold(b)
-            }
+        if width >= bannerWidth {
+            heroRows = banner.map { center(Ansi.bold($0), bannerWidth) }
         } else {
             heroRows = [center(Ansi.bold(wordmark), visibleCount(wordmark))]
         }

@@ -342,7 +342,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         // Deep research (Krill-native): run the in-process DeepResearch loop over
         // the configured search backend (Kreach) and return a cited answer. The
-        // shared capability every KrillLM client gets via the server.
+        // shared capability every Krill client gets via the server.
         case (.POST, "/research"):
             routeGenerate(context: context, body: body) { self.handleResearch(context: $0, body: $1) }
 
@@ -2910,11 +2910,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     // MARK: - Deep research (Kreach-backed)
 
-    /// POST /research — run KrillLM's in-process `DeepResearch` (plan → search →
+    /// POST /research — run Krill's in-process `DeepResearch` (plan → search →
     /// read → synthesize a cited answer) over the configured search backend, and
     /// return the answer + sources as JSON. With `search_backend = "kreach"` the
     /// search platform is the user's own Kreach index; the agentic loop and the
-    /// synthesis run here, so every KrillLM client (deepkrill, minikrill, …) gets
+    /// synthesis run here, so every Krill client (deepkrill, minikrill, …) gets
     /// deep research for free by POSTing `{ "question": "..." }`.
     ///
     /// Routed through `routeGenerate`, so it runs on the active (or requested)
@@ -2954,7 +2954,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         eng.generate(messages: msgs, params: .greedy, maxTokens: maxTokens).stream)
                     // Strip reasoning-model <think> channel: otherwise it pollutes
                     // the planner's query list and leaks chain-of-thought into the
-                    // answer (KrillLM defaults thinking-on).
+                    // answer (Krill defaults thinking-on).
                     return Self.stripThinking(raw)
                 },
                 backend: backend,

@@ -26,10 +26,6 @@ class Krill < Formula
       libexec.install "mlx-swift_Cmlx.bundle"
     end
     bin.install_symlink libexec/"krill"
-    # Back-compat shim (one release): the binary was `krillm` before the
-    # KrillLM → Krill rebrand. Keeps existing muscle-memory/scripts working;
-    # remove in a later release.
-    bin.install_symlink libexec/"krill" => "krillm"
   end
 
   def caveats
