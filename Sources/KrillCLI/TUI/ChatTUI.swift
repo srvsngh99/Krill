@@ -2248,7 +2248,7 @@ final class ChatTUI {
             let placeholder = "type a message   /help for commands"
             let clipped = String(placeholder.prefix(max(0, textWidth - 1)))
             let pad = String(repeating: " ", count: max(0, textWidth - 1 - clipped.count))
-            body = Ansi.bold(promptStr) + Ansi.inverse(" ") + Ansi.chrome(clipped) + pad
+            body = Ansi.ember(Ansi.bold(promptStr)) + Ansi.inverse(" ") + Ansi.chrome(clipped) + pad
         } else {
             // Pure geometry windows the text and locates the cursor; we only
             // apply the inverse-video block cursor to that one cell.
@@ -2258,7 +2258,7 @@ final class ChatTUI {
             for (i, ch) in cs.enumerated() {
                 rendered += i == cursorCol ? Ansi.inverse(String(ch)) : String(ch)
             }
-            body = Ansi.bold(promptStr) + rendered
+            body = Ansi.ember(Ansi.bold(promptStr)) + rendered
         }
         let field = Ansi.chrome(v) + " " + body + " " + Ansi.chrome(v)
         return [top, field, bottom]

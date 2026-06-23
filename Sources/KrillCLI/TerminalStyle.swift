@@ -31,6 +31,20 @@ enum Ansi {
     static func magenta(_ s: String) -> String { wrap(s, "35") }
     static func gray(_ s: String) -> String { wrap(s, "90") }
 
+    // MARK: - Ember accent (Krill's owned palette — the one place colour lives)
+
+    /// Single-line Ember accent (coral mid-stop #FF7D5C) for marks, prompts, spinner.
+    static func ember(_ s: String) -> String { wrap(s, "38;2;255;125;92") }
+    /// Colour a multi-row banner top→bottom amber #FFC04D → coral #FF7D5C → magenta #E0457D.
+    static func emberGradient(_ rows: [String]) -> [String] {
+        guard rows.count > 1 else { return rows.map { ember($0) } }
+        let stops = ["38;2;255;192;77", "38;2;255;160;84", "38;2;255;125;92", "38;2;240;94;104", "38;2;224;69;125"]
+        return rows.enumerated().map { i, r in
+            let t = Double(i) / Double(rows.count - 1)
+            return wrap(r, stops[min(stops.count - 1, Int((t * Double(stops.count - 1)).rounded()))])
+        }
+    }
+
     /// Gray-tint an already-styled string: set gray as the base color and
     /// re-enter gray after every inner reset, so embedded spans (code, bold)
     /// keep their own styling but plain text reads dim. Used to calm the model's
@@ -100,7 +114,7 @@ final class Spinner: @unchecked Sendable {
             let frames = ["|", "/", "-", "\\"]
             var i = 0
             while !Task.isCancelled {
-                print("\r\(Ansi.cyan(frames[i % frames.count])) \(Ansi.dim(label))", terminator: "")
+                print("\r\(Ansi.ember(frames[i % frames.count])) \(Ansi.dim(label))", terminator: "")
                 fflush(stdout)
                 i += 1
                 try? await Task.sleep(nanoseconds: 90_000_000)
