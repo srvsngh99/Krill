@@ -368,12 +368,16 @@ final class ThemeTests: XCTestCase {
 
     func testPalettes() {
         XCTAssertEqual(Theme.palette(for: .dark).userSGR, "97")
-        XCTAssertEqual(Theme.palette(for: .dark).modelSGR, "90")
+        XCTAssertNil(Theme.palette(for: .dark).modelSGR)           // model reply = prominent default fg
         XCTAssertEqual(Theme.palette(for: .light).userSGR, "1")   // bold default, not 97
-        XCTAssertEqual(Theme.palette(for: .light).modelSGR, "90")
+        XCTAssertNil(Theme.palette(for: .light).modelSGR)          // model reply = prominent default fg
         XCTAssertEqual(Theme.palette(for: .unknown).userSGR, "1")
         XCTAssertNil(Theme.palette(for: .unknown).modelSGR)        // terminal default fg
         XCTAssertEqual(Theme.palette(for: .unknown).chromeSGR, "2")
+        // User-turn bar: a subtle background on dark/light, none on unknown.
+        XCTAssertEqual(Theme.palette(for: .dark).userBarSGR, "97;48;5;236")
+        XCTAssertEqual(Theme.palette(for: .light).userBarSGR, "30;48;5;253")
+        XCTAssertNil(Theme.palette(for: .unknown).userBarSGR)
     }
 
     func testLuminanceFromOSC11() {

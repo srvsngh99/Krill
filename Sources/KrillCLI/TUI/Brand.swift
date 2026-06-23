@@ -3,19 +3,21 @@ import KrillTUI
 
 /// Sourav AI Labs / Krill brand surface for the TUI, rendered in the brand's
 /// monochrome (ink-on-paper) identity: bold for the wordmark, dim for secondary
-/// text, an inverse-video bar for the masthead. The `>_` device that wraps the
+/// text, an inverse-video bar for the masthead. The `>…_` device that wraps the
 /// wordmark is the SAI mark (see assets/krill-lockup-ink.png).
 enum Brand {
     static let product = "Krill"
     static let lab = "Sourav AI Labs"
-    static let labMark = "> SAI_"            // the SAI lockup device (matches the brand lockup)
+    static let labMark = ">SAI_"             // the SAI lockup device (matches the brand lockup)
     static let labTagline = "INDEPENDENT AI LAB"
     static let tagline = "A fast, lean LLM runtime, built for Mac."
     static let site = "souravailabs.ai"
     static let chips = ["text \u{00B7} vision \u{00B7} audio", "agentic", "macOS-native"]
 
-    /// The `>_ Krill` wordmark (plain text; caller styles it).
-    static var wordmark: String { ">_ \(product)" }
+    /// The `>Krill_` wordmark (plain text; caller styles it). Matches the
+    /// `>SAI_` lockup device: a `>` prompt flush against the name, then a
+    /// trailing `_` cursor — not a `>_` cursor with the name set apart.
+    static var wordmark: String { ">\(product)_" }
 
     // MARK: - Masthead (persistent top bar)
 
@@ -62,7 +64,7 @@ enum Brand {
     static let banner: [String] = Banner.krill
 
     /// Centered launch splash in the brand identity: the block wordmark (or a
-    /// plain `>_ Krill` fallback on terminals too narrow for the banner), a
+    /// plain `>Krill_` fallback on terminals too narrow for the banner), a
     /// terminal-style tagline (the `>_` device typing the brand line, with "Mac"
     /// reverse-highlighted exactly as the social preview highlights it),
     /// capability chips, and the lab/site line.
@@ -81,18 +83,20 @@ enum Brand {
         }
 
         // Tagline split on "Mac" so it can be reverse-highlighted like the brand
-        // asset, with the `>_` device prefixed (the line reads as a terminal
-        // prompt typing the brand line).
+        // asset, with the `>` prompt flush at the front and the `_` cursor
+        // trailing at the very end (the line reads as a terminal prompt that has
+        // just typed the brand line), matching the `>Krill_` / `>SAI_` marks.
         let parts = tagline.components(separatedBy: "Mac")
         let head = parts.first ?? tagline
         let tail = parts.count > 1 ? parts[1] : ""
-        let taglineVis = 3 + head.count + (parts.count > 1 ? 3 : 0) + tail.count
-        var styledTagline = Ansi.ember(">_ ") + Ansi.chrome(head)
+        let taglineVis = 1 + head.count + (parts.count > 1 ? 3 : 0) + tail.count + 1
+        var styledTagline = Ansi.ember(">") + Ansi.chrome(head)
         if parts.count > 1 { styledTagline += Ansi.inverse(Ansi.bold("Mac")) + Ansi.chrome(tail) }
+        styledTagline += Ansi.ember("_")
         let taglineLine = center(styledTagline, taglineVis)
 
         let chipRow = chips.map { " \($0) " }.joined(separator: "  ")
-        // The Sourav AI Labs lockup, rendered like the brand mark: the `> SAI_`
+        // The Sourav AI Labs lockup, rendered like the brand mark: the `>SAI_`
         // device bold beside the lab name, with the "INDEPENDENT AI LAB" line
         // and site beneath.
         let lockupPlain = "\(labMark)  \(lab)"

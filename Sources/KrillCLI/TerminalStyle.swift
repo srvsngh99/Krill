@@ -22,6 +22,10 @@ enum Ansi {
     /// Faded + italic - for unobtrusive contextual hints.
     static func hint(_ s: String) -> String { wrap(s, "2;3") }
     static func inverse(_ s: String) -> String { wrap(s, "7") }
+    /// Slow-blink attribute (SGR 5) - the terminal animates it, so a pulsing
+    /// glyph needs no render timer. Used for the live reply bullet while the
+    /// model is still producing the turn.
+    static func blink(_ s: String) -> String { wrap(s, "5") }
     static func underline(_ s: String) -> String { wrap(s, "4") }
     static func white(_ s: String) -> String { wrap(s, "97") }
     static func cyan(_ s: String) -> String { wrap(s, "36") }
@@ -82,6 +86,17 @@ enum Ansi {
         guard enabled, let code = theme.modelSGR else { return s }
         let reEnter = "\u{1B}[0m\u{1B}[\(code)m"
         return "\u{1B}[\(code)m" + s.replacingOccurrences(of: "\u{1B}[0m", with: reEnter) + "\u{1B}[0m"
+    }
+
+    /// Render a user-turn line as a subtle full-width bar: the plain text padded
+    /// to `width` and wrapped in the palette's bar SGR (fg+bg). When the palette
+    /// has no bar (unknown background), fall back to the bright user shade so the
+    /// turn still stands apart. `text` must be plain (no embedded resets).
+    static func userBar(_ text: String, width: Int) -> String {
+        let pad = max(0, width - text.count)
+        let full = text + String(repeating: " ", count: pad)
+        guard enabled, let code = theme.userBarSGR else { return user(text) }
+        return "\u{1B}[\(code)m" + full + "\u{1B}[0m"
     }
 
     /// Clear the current line and return the cursor to column 0.

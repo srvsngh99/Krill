@@ -16,10 +16,15 @@ public struct Palette: Sendable, Equatable {
     public let userSGR: String?
     public let modelSGR: String?
     public let chromeSGR: String?
-    public init(userSGR: String?, modelSGR: String?, chromeSGR: String?) {
+    /// SGR for the user-turn bar: a subtle full-width background (fg+bg) the
+    /// user's own words sit on, so the prompt reads as an entered command rather
+    /// than bright text. `nil` -> no bar (fall back to a plain chevron line).
+    public let userBarSGR: String?
+    public init(userSGR: String?, modelSGR: String?, chromeSGR: String?, userBarSGR: String? = nil) {
         self.userSGR = userSGR
         self.modelSGR = modelSGR
         self.chromeSGR = chromeSGR
+        self.userBarSGR = userBarSGR
     }
 }
 
@@ -60,9 +65,9 @@ public enum Theme {
     /// from the terminal's own foreground, so it can never be unreadable.
     public static func palette(for background: Background) -> Palette {
         switch background {
-        case .dark:    return Palette(userSGR: "97", modelSGR: "90", chromeSGR: "2")
-        case .light:   return Palette(userSGR: "1",  modelSGR: "90", chromeSGR: "2")
-        case .unknown: return Palette(userSGR: "1",  modelSGR: nil,  chromeSGR: "2")
+        case .dark:    return Palette(userSGR: "97", modelSGR: nil, chromeSGR: "2", userBarSGR: "97;48;5;236")
+        case .light:   return Palette(userSGR: "1",  modelSGR: nil, chromeSGR: "2", userBarSGR: "30;48;5;253")
+        case .unknown: return Palette(userSGR: "1",  modelSGR: nil,  chromeSGR: "2", userBarSGR: nil)
         }
     }
 
