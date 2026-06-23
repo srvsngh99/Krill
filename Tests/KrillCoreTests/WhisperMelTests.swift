@@ -16,8 +16,10 @@ final class WhisperMelTests: XCTestCase {
     private func refWaveform() -> [Float] {
         let sr = 16_000, n = 16_000 * 3
         return (0 ..< n).map { i in
-            Float(0.5 * sin(2.0 * .pi * 440.0 * Double(i) / Double(sr))
-                + 0.3 * sin(2.0 * .pi * 880.0 * Double(i) / Double(sr)))
+            let t = Double(i) / Double(sr)
+            let fundamental = 0.5 * sin(2.0 * .pi * 440.0 * t)
+            let overtone = 0.3 * sin(2.0 * .pi * 880.0 * t)
+            return Float(fundamental + overtone)
         }
     }
 

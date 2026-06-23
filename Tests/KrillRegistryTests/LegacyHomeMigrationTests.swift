@@ -1,9 +1,9 @@
 import XCTest
 @testable import KrillRegistry
 
-/// Covers the one-time KrillLM → Krill home migration: pre-rename installs kept
-/// everything under `~/.krillm`; the registry must move that tree to `~/.krill`
-/// on first use so models/cache/config survive the rebrand without a re-download.
+/// Covers the one-time legacy-home migration: older installs kept everything
+/// under `~/.krillm`; the registry must move that tree to `~/.krill` on first
+/// use so models/cache/config survive without a re-download.
 final class LegacyHomeMigrationTests: XCTestCase {
     private func makeTempHome() throws -> URL {
         let dir = FileManager.default.temporaryDirectory
