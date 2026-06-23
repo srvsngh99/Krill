@@ -47,9 +47,9 @@ public final class Registry: Sendable {
         return base
     }
 
-    /// One-time rename migration for the KrillLM -> Krill rebrand.
+    /// One-time migration of the legacy `~/.krillm` home to `~/.krill`.
     ///
-    /// Pre-rename installs kept everything (models/blobs, prefix cache, config,
+    /// Older installs kept everything (models/blobs, prefix cache, config,
     /// agent state) under `~/.krillm`. Move it to `~/.krill` so nothing has to
     /// be re-downloaded. Two cases:
     ///   1. `~/.krill` absent -> move the whole tree in one rename.

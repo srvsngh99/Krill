@@ -10,10 +10,10 @@ import FoundationNetworking
 /// change; the `web_search` tool and the `DeepResearch` orchestrator are
 /// backend-agnostic.
 ///
-/// The role this plays: Kreach is the *search platform* underneath KrillLM's
+/// The role this plays: Kreach is the *search platform* underneath Krill's
 /// `DeepResearch` — Kreach retrieves over its owned, crawled index; the agent
 /// (this process, driven by the local model) plans the queries, reads the
-/// pages, and synthesizes the cited answer. Every client that talks to KrillLM
+/// pages, and synthesizes the cited answer. Every client that talks to Krill
 /// (deepkrill, minikrill, …) gets deep research over Kreach for free via the
 /// server's `/research` route, without reimplementing the loop.
 ///
