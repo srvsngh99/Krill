@@ -35,6 +35,8 @@ And the inverse: `krill launch claude` (or `codex`, `opencode`, `copilot`, `droi
 
 Underneath: a continuous batcher (~2× throughput under load), shared-prefix KV reuse (repeat prompts hit cache instead of re-prefilling — the agentic/RAG fast path), speculative decoding, and native vision (SigLIP2) + audio (USM Conformer). All Swift + MLX.
 
+> **⚠️ Early release.** Krill is young and still getting its polish — expect some rough edges, and pin a version if you need stability. Bug reports, ideas, and feedback are genuinely welcome → [open an issue](https://github.com/srvsngh99/Krill/issues).
+
 ## Install
 
 ```sh
@@ -91,6 +93,8 @@ Full methodology and gates: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md), [`docs/B
 
 ## Models
 
+**36 chat & multimodal models** ship as one-word `krill pull` shortcuts (plus ~19 embedding / reranker models), spanning ~15 architecture families. Switch between installed models **live in a chat** with `/model` — the conversation carries over — or import any `mlx-community` repo and it joins the picker.
+
 ```bash
 krill pull gemma-4-e2b       # Gemma 4 — text + image + audio, all native (also: -e4b, -12b flagship)
 krill pull qwen3-14b         # Qwen 3 (incl. MoE: qwen3-30b) — also Qwen 2.5: qwen2.5-7b
@@ -103,6 +107,8 @@ krill pull mlx-community/Meta-Llama-3.1-8B-Instruct-4bit   # …or any mlx-commu
 ```
 
 Native text also runs Phi, GLM-4, Mixtral, OLMoE, and DeepSeek-V2/V3, plus a ~15-family embedding/reranker stack. Vision serving adds LLaVA-1.5, Llama-3.2-Vision (mllama, multi-image), and Qwen2.5-VL.
+
+**Formats:** not anything-goes — Krill is MLX-native. It runs **MLX-format** checkpoints (safetensors) in 4-bit, 8-bit, `nvfp4` (mixed-precision 4-bit-float), or bf16/fp16 — **GGUF is not supported**. Any `mlx-community` model of a supported architecture loads as-is; convert other Hugging Face checkpoints with `krill quantize <hf-path>`.
 
 ## Commands
 
