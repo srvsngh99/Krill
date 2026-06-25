@@ -59,10 +59,10 @@ Tab to fill it and add arguments. `/help` lists everything.
 | `/bg <task>` | Spawn a background agent for a task (see Background agents) |
 | `/agents` | List and switch between background agents (`/switch <n>`, `/main` too) |
 | `/config [key=value]` | Show config, or set a key (persists to `~/.krill/config.toml`) |
-| `/init` | Generate a `CLAUDE.md` for this repo (runs the agent) |
+| `/init` | Generate a `Krill.md` for this repo (runs the agent) |
 | `/diff` | Show pending working-tree changes (`git diff`) |
 | `/status` | Show version, model, working directory, posture, context |
-| `/context` | Show context-window usage for the last turn |
+| `/context` | Show context-window usage: a segmented fill bar plus a per-category token breakdown (system, your messages, model replies, free) |
 | `/copy` | Copy the last reply to the clipboard |
 | `/cd <path>` / `/add-dir <path>` | Change / add a working directory the agent can use |
 | `/model [name]` | Open the model picker, or switch/download a named model in place |

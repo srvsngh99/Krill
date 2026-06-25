@@ -6,8 +6,25 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-06-25
+
+### Changed
+
+- **Rename to Krill complete across every public surface.** The project's old
+  `KrillLM` / `krillm` identity is fully retired: the Homebrew tap is now
+  `srvsngh99/krill` (install with `brew tap srvsngh99/krill && brew install
+  krill`), the release artifacts are named `krill-<version>-arm64-apple-macos`,
+  and the remaining old-name references in docs, model cards, and benchmark
+  writeups now say Krill. The one-time `~/.krillm` -> `~/.krill` home migration
+  is kept so existing users carry their state over.
+
 ### Added
 
+- **One-line `curl | sh` installer.** Install without Homebrew:
+  `curl -fsSL https://raw.githubusercontent.com/srvsngh99/Krill/main/install.sh
+  | sh`. The script downloads the latest signed release tarball, lays the
+  `krill` binary down next to its `mlx.metallib` and Metal bundle, strips the
+  Gatekeeper quarantine, and links `krill` onto your PATH (Apple Silicon only).
 - **Unified chat + agent TUI.** `krill run` and `krill code` are now one
   full-screen surface: `/agent` toggles agent mode (tools + file edits) in the
   chat, and `Shift+Tab` cycles the permission posture `plan -> ask ->
