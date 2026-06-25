@@ -202,6 +202,14 @@ private let aliases: [String: ResolvedModel] = [
         repo: "srv-sngh/gemma-4-12B-coder-fable5-composer2.5-nvfp4",
         name: "gemma-4-12b-coder", family: .gemma4Unified, params: "12B",
         quant: "nvfp4", context: 131072),
+    // Community AGENTIC fine-tune of gemma-4-12B-it (tool-use / tau2), served
+    // natively in MLX. Converted from bf16 safetensors -> MLX-layout key remap
+    // -> the proven mixed-nvfp4 requant (8-bit o_proj + vision/audio projectors).
+    // Same `gemma4_unified` backbone - see docs/GEMMA4_12B_AGENTIC_FINETUNE.md.
+    "gemma-4-12b-agentic": ResolvedModel(
+        repo: "srv-sngh/gemma-4-12B-agentic-fable5-composer2.5-v2-nvfp4",
+        name: "gemma-4-12b-agentic", family: .gemma4Unified, params: "12B",
+        quant: "nvfp4", context: 131072),
     // Google's Gemma 4 lineup is E2B / E4B / 12B (unified) / 26B-A4B / 31B.
     // 26B-A4B and 31B are not aliased here yet (the `Gemma4Model` loader is
     // currently e2b-shape-specific) - see docs/FOLLOWUPS_AGENT_DOGFOOD.md §1.

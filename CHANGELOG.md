@@ -6,6 +6,18 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-06-25
+
+### Added
+
+- **`gemma-4-12b-agentic` model.** The Gemma-4-12B *agentic* fine-tune
+  (`yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2`) in Krill's
+  mixed-NVFP4 format, served natively on the `gemma4_unified` runtime —
+  `krill pull gemma-4-12b-agentic`. Uniquely Krill-loadable (not GGUF, not
+  transformers). Weights, card, and benchmarks on Hugging Face:
+  `srv-sngh/gemma-4-12B-agentic-fable5-composer2.5-v2-nvfp4`. See
+  `docs/GEMMA4_12B_AGENTIC_FINETUNE.md`.
+
 ## [0.12.0] - 2026-06-25
 
 ### Changed
