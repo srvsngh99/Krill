@@ -11,7 +11,19 @@
 
 ## Release Status
 
-**Current release: v0.10.0 - GLM-4, faster decode, and a fully native quantizer** (`brew tap srvsngh99/krill && brew install krill`).
+**Current release: v0.12.0 - unified chat + agent TUI, web tools, and a one-line installer.**
+
+Install with Homebrew:
+
+```sh
+brew tap srvsngh99/krill && brew install krill
+```
+
+…or with the one-line installer (Apple Silicon):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/srvsngh99/Krill/main/install.sh | sh
+```
 
 The headline of this release is the **full-screen chat TUI and on-device voice**:
 `krill run` now opens an opencode-style alternate-screen chat interface (branded
@@ -178,6 +190,16 @@ release leans on capability, concurrency, cold start, and agentic/RAG
 latency (see Release Status above and `docs/BENCHMARKS.md`).
 
 ## Install
+
+```sh
+# Homebrew
+brew tap srvsngh99/krill && brew install krill
+
+# Or the one-line installer (Apple Silicon, no Homebrew needed)
+curl -fsSL https://raw.githubusercontent.com/srvsngh99/Krill/main/install.sh | sh
+```
+
+Build from source instead:
 
 ```bash
 # From source (requires Xcode + Metal Toolchain)

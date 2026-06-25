@@ -40,7 +40,7 @@ public struct SlashMenu {
         Item(name: "/system", summary: "Set the system prompt"),
         Item(name: "/model", summary: "Switch model, or 'info <name>' for a deep-dive"),
         Item(name: "/config", summary: "Show config, or set a key: /config key=value"),
-        Item(name: "/init", summary: "Generate a CLAUDE.md for this repo (agent task)"),
+        Item(name: "/init", summary: "Generate a Krill.md for this repo (agent task)"),
         Item(name: "/diff", summary: "Show pending working-tree changes (git diff)"),
         Item(name: "/status", summary: "Show version, model, cwd, posture, context"),
         Item(name: "/context", summary: "Show context-window usage breakdown"),

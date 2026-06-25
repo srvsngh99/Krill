@@ -433,6 +433,13 @@ final class ChatTUI {
             if cursor < input.count {
                 input.remove(at: input.index(input.startIndex, offsetBy: cursor))
             }
+        case .up:
+            // Pull the most recently queued message back into the composer to edit
+            // it before it sends. Only when the composer is empty, so we never
+            // clobber text the user is mid-way through typing. Re-queues on Enter.
+            if input.isEmpty, !queuedMessages.isEmpty {
+                input = queuedMessages.removeLast(); cursor = input.count
+            }
         case .left:  if cursor > 0 { cursor -= 1 }
         case .right: if cursor < input.count { cursor += 1 }
         case .ctrlA, .home: cursor = 0
@@ -1061,19 +1068,87 @@ final class ChatTUI {
     }
 
     private func contextOverlay() -> String {
-        var lines = ["Context usage"]
-        if let st = lastStats {
-            let used = st.promptTokens + st.generatedTokens
-            lines.append("  prompt tokens   \(st.promptTokens)")
-            lines.append("  reply tokens    \(st.generatedTokens)")
-            lines.append("  last turn total \(used)")
-            if contextWindow > 0 {
-                let frac = min(1.0, Double(used) / Double(contextWindow))
-                lines.append("  window          \(contextBar(frac)) \(used)/\(formatContext(contextWindow)) \(Int((frac*100).rounded()))%")
+        // Category colours (ember family): each maps to a coloured run in the bar
+        // and a matching glyph in the legend below it.
+        let sysCode   = "38;2;255;192;77"   // amber
+        let userCode  = "38;2;255;125;92"   // coral
+        let modelCode = "38;2;224;69;125"   // magenta
+        let toolCode  = "38;2;255;160;84"   // soft orange
+
+        // Per-category character weights, drawn from whichever transcript is live.
+        struct Cat { let label: String; let code: String; var chars: Int; var tokens: Int = 0 }
+        var cats: [Cat]
+        if surface == .agent && !agentMessages.isEmpty {
+            var sys = 0, usr = 0, asst = 0, tool = 0
+            for m in agentMessages {
+                let c = (m["content"] ?? "").count
+                switch m["role"] {
+                case "system":    sys  += c
+                case "user":      usr  += c
+                case "assistant": asst += c
+                default:          tool += c
+                }
             }
+            cats = [Cat(label: "system + tools", code: sysCode,   chars: sys),
+                    Cat(label: "your messages",  code: userCode,  chars: usr),
+                    Cat(label: "model replies",  code: modelCode, chars: asst),
+                    Cat(label: "tool results",   code: toolCode,  chars: tool)]
         } else {
-            lines.append("  (no generation yet)")
+            let sys = system?.count ?? 0
+            var usr = 0, asst = 0
+            for t in modelTurns {
+                if t.role == "user" { usr += t.content.count } else { asst += t.content.count }
+            }
+            cats = [Cat(label: "system prompt", code: sysCode,   chars: sys),
+                    Cat(label: "your messages", code: userCode,  chars: usr),
+                    Cat(label: "model replies", code: modelCode, chars: asst)]
         }
+        let totalChars = cats.reduce(0) { $0 + $1.chars }
+
+        // Anchor the breakdown to real token counts when we have them: spread the
+        // measured occupancy across categories by character share. Before any
+        // generation, fall back to a ~4-chars/token estimate.
+        let used: Int
+        let estimated: Bool
+        if let st = lastStats {
+            used = st.promptTokens + st.generatedTokens; estimated = false
+        } else {
+            used = (totalChars + 3) / 4; estimated = true
+        }
+        if totalChars > 0 {
+            for i in cats.indices {
+                cats[i].tokens = Int((Double(cats[i].chars) / Double(totalChars) * Double(used)).rounded())
+            }
+        }
+
+        var lines: [String] = ["Context window"]
+        if contextWindow > 0 {
+            let frac = min(1.0, Double(used) / Double(contextWindow))
+            let pct = Int((frac * 100).rounded())
+            let free = max(0, contextWindow - used)
+            lines.append("  " + contextSegmentBar(cats.map { (tokens: $0.tokens, code: $0.code) }, window: contextWindow))
+            lines.append("  \(fmtTok(used)) / \(formatContext(contextWindow)) used \u{00B7} \(fmtTok(free)) free \u{00B7} \(pct)%")
+        } else {
+            lines.append("  \(fmtTok(used)) tokens used \u{00B7} window size unknown")
+        }
+        if estimated { lines.append("  (estimated \u{2014} no generation yet)") }
+
+        lines.append("")
+        lines.append("What's using it")
+        func legend(_ glyphCode: String?, _ label: String, _ tokens: Int) {
+            let glyph = glyphCode.map { Ansi.enabled ? "\u{1B}[\($0)m\u{25B0}\u{1B}[0m" : "\u{25B0}" } ?? "\u{25B1}"
+            let name = label.padding(toLength: 14, withPad: " ", startingAt: 0)
+            let tok = fmtTok(tokens).padding(toLength: 6, withPad: " ", startingAt: 0)
+            if contextWindow > 0 {
+                let pct = Int((Double(tokens) / Double(contextWindow) * 100).rounded())
+                lines.append("  \(glyph) \(name) \(tok) \(pct)%")
+            } else {
+                lines.append("  \(glyph) \(name) \(tok)")
+            }
+        }
+        for c in cats where c.chars > 0 { legend(c.code, c.label, c.tokens) }
+        if contextWindow > 0 { legend(nil, "free", max(0, contextWindow - used)) }
+
         lines.append("")
         lines.append("Conversation")
         lines.append("  messages        \(modelTurns.count)")
@@ -1081,7 +1156,26 @@ final class ChatTUI {
         return lines.joined(separator: "\n")
     }
 
-    /// `/init` - generate a CLAUDE.md by running the agent on a canned survey task.
+    /// A single horizontal bar split into coloured runs — one per context
+    /// category — with the unused tail shown as hollow cells. The "boxes" view of
+    /// where the window is going; colours match the legend glyphs beneath it.
+    private func contextSegmentBar(_ segments: [(tokens: Int, code: String)], window: Int, cells: Int = 32) -> String {
+        guard window > 0 else { return String(repeating: "\u{25B1}", count: cells) }
+        var bar = ""
+        var filled = 0
+        for seg in segments where seg.tokens > 0 {
+            let n = min(cells - filled, max(0, Int((Double(seg.tokens) / Double(window) * Double(cells)).rounded())))
+            guard n > 0 else { continue }
+            let run = String(repeating: "\u{25B0}", count: n)
+            bar += Ansi.enabled ? "\u{1B}[\(seg.code)m\(run)\u{1B}[0m" : run
+            filled += n
+            if filled >= cells { break }
+        }
+        bar += String(repeating: "\u{25B1}", count: max(0, cells - filled))
+        return bar
+    }
+
+    /// `/init` - generate a Krill.md by running the agent on a canned survey task.
     /// (Foreground for now; routes to a background agent once those land.)
     private func runInit() async {
         if surface != .agent {
@@ -1090,7 +1184,7 @@ final class ChatTUI {
             note("Switched to agent mode for /init.")
         }
         let task =
-            "Survey this repository and write a concise CLAUDE.md at the repo root for future "
+            "Survey this repository and write a concise Krill.md at the repo root for future "
             + "coding agents. Cover: the build and test commands, the high-level architecture and "
             + "where the main modules live, and any important conventions. Use the read-only tools "
             + "to inspect the repo first, then write the file. Keep it tight and skimmable."
@@ -1611,13 +1705,25 @@ final class ChatTUI {
     /// Short contextual hint shown faded + italic, right-aligned above the input
     /// box: what Space does in the current posture (and how to reach voice when
     /// it is off). Empty on non-audio models, where there is nothing to hint.
+    /// One-line preview of a queued type-ahead message for the composer hint:
+    /// newlines/tabs flattened to spaces and clipped so a long message never
+    /// blows out the single hint row.
+    private func queuedPreview(_ s: String, max: Int = 44) -> String {
+        let flat = s.replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+            .trimmingCharacters(in: .whitespaces)
+        return flat.count <= max ? flat : String(flat.prefix(max - 1)) + "\u{2026}"
+    }
+
     private func composerHint() -> String {
         let sep = " \u{00B7} "
         // Messages queued while the model is replying: surface the count so the
         // typed-ahead turns are not invisible (they send when the reply lands).
         if !queuedMessages.isEmpty {
             let n = queuedMessages.count
-            return "\(n) message\(n == 1 ? "" : "s") queued\(sep)sent after this reply"
+            let preview = queuedPreview(queuedMessages.last ?? "")
+            let head = n == 1 ? "queued" : "\(n) queued"
+            return "\(head): \(preview)\(sep)\u{2191} to edit"
         }
         // Attached to a background agent: how to interact with it.
         if let s = activeSession {
@@ -1715,15 +1821,27 @@ final class ChatTUI {
         var rawAll = ""            // every token, pre-filter (to tell "all reasoning" from truly empty)
         var cancelled = false
 
+        var genTokens = 0          // output tokens so far (one per streamed event)
+        var lastTick = -1.0        // throttle the live status to a ~250ms cadence
         for await event in stream! {
             if event.isEnd { break }
             rawAll += event.text
+            genTokens += 1
             let visible = filter.consume(event.text)
+            var dirty = false
             if !visible.isEmpty {
                 assistant += visible
                 view[aIdx].text = assistant
-                render()
+                dirty = true
             }
+            // Live progress while the user waits: an animated spinner, the running
+            // output-token count, and elapsed time. Refreshed every ~250ms so it
+            // keeps ticking even through the think phase, which emits no visible
+            // answer text yet (and so would otherwise look frozen).
+            lastStatus = generatingStatus(tokens: genTokens, elapsed: event.elapsed)
+            let tick = (event.elapsed * 4).rounded(.down)
+            if tick != lastTick { lastTick = tick; dirty = true }
+            if dirty { render() }
             // Keep the composer live while streaming: the user can type ahead and
             // queue messages, scroll, or Ctrl-C to cancel. (Raw mode delivers
             // these as bytes mid-stream.)
@@ -1776,6 +1894,27 @@ final class ChatTUI {
         }
         pendingImages.removeAll(); pendingAudio = nil
         render()
+    }
+
+    /// Live footer status while a chat reply streams: animated spinner, the
+    /// running output-token count, and elapsed time — so the wait is never a
+    /// dead screen. Carries a "thinking" tag while the reasoning channel is on
+    /// (where no visible answer lands until the model finishes thinking).
+    private func generatingStatus(tokens: Int, elapsed: Double) -> String {
+        let dots = ["\u{2839}", "\u{2838}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}", "\u{2819}"]
+        let spin = dots[Int(max(0, elapsed) * 4) % dots.count]
+        let sep = " \u{00B7} "
+        var parts = ["\(spin) generating", "\u{2193} \(fmtTok(tokens)) tok", Self.formatElapsed(elapsed)]
+        if thinkingOn { parts.append("thinking") }
+        parts.append("Esc interrupt")
+        return parts.joined(separator: sep)
+    }
+
+    /// Compact token count for status/breakdown readouts: 412, 5.2K, 64K.
+    private func fmtTok(_ n: Int) -> String {
+        guard n >= 1000 else { return "\(n)" }
+        let k = Double(n) / 1000
+        return k < 10 ? String(format: "%.1fK", k) : String(format: "%.0fK", k)
     }
 
     private func statusText(_ st: GenerationStats, images: Int, audio: Bool) -> String {
