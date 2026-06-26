@@ -227,7 +227,7 @@ final class Qwen35GatedDeltaNet: Module {
 
     /// Forward. `x`: `[B,S,hiddenSize]`. With `cache`, carries conv + SSM state
     /// across calls for incremental decode; without it, a fresh prefill.
-    func callAsFunction(_ x: MLXArray, cache: Qwen35SSMCache? = nil) -> MLXArray {
+    func callAsFunction(_ x: MLXArray, cache: GatedDeltaCache? = nil) -> MLXArray {
         let B = x.dim(0), S = x.dim(1)
 
         let qkv = inProjQkv(x)                                   // [B,S,convDim]
@@ -269,24 +269,9 @@ final class Qwen35GatedDeltaNet: Module {
     }
 }
 
-/// Per-layer cache for a GatedDeltaNet (linear-attention) layer: the (k-1)-col
-/// causal-conv state and the `[B,Hv,Dv,Dk]` SSM recurrent state. Conforms to
-/// `KVCacheProtocol` so it can travel in the engine's `[KVCacheProtocol]` array;
-/// the KV-style `update`/`snapshot` are never called on a linear layer.
-public final class Qwen35SSMCache: KVCacheProtocol, @unchecked Sendable {
-    var convState: MLXArray?
-    var ssmState: MLXArray?
-    private var seq = 0
-
-    public init() {}
-    public func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
-        fatalError("Qwen35SSMCache: linear-attention layers do not use KV update")
-    }
-    public func snapshot() -> (keys: MLXArray, values: MLXArray)? { nil }
-    public func reset() { convState = nil; ssmState = nil; seq = 0 }
-    public var sequenceLength: Int { seq }
-    func advance(_ n: Int) { seq += n }
-}
+// The per-layer GatedDeltaNet cache (`GatedDeltaCache`: conv-state + SSM
+// recurrent state) lives in KrillCache so the engine's `makeKVCaches(spec:)`
+// can build it for `.ssm` layers.
 
 // MARK: - Full softmax attention (Qwen3-Next gated attention)
 
@@ -394,7 +379,7 @@ final class Qwen35DecoderLayer: Module {
         let normed = inputLayernorm(x)
         let r: MLXArray
         if isLinear {
-            r = linearAttn!(normed, cache: cache as? Qwen35SSMCache)
+            r = linearAttn!(normed, cache: cache as? GatedDeltaCache)
         } else {
             r = selfAttn!(normed, mask: mask, cache: cache as? KVCache)
         }
@@ -425,7 +410,7 @@ final class Qwen35Model: Module {
     }
 
     /// Forward. `tokens`: `[B, L]`. With per-layer `caches` (one `KVCache` per
-    /// full-attn layer, one `Qwen35SSMCache` per linear layer) this carries
+    /// full-attn layer, one `GatedDeltaCache` per linear layer) this carries
     /// state for incremental decode; without them it is a cacheless prefill.
     func callAsFunction(_ tokens: MLXArray, caches: [KVCacheProtocol]? = nil) -> MLXArray {
         var h = embedTokens(tokens)
@@ -453,11 +438,11 @@ public final class Qwen35ForCausalLM: Module {
         lmHead(model(tokens, caches: caches))
     }
 
-    /// One per-layer cache: `KVCache` for full-attn layers, `Qwen35SSMCache`
+    /// One per-layer cache: `KVCache` for full-attn layers, `GatedDeltaCache`
     /// for GatedDeltaNet layers. Pass to `callAsFunction` for incremental decode.
     public func makeCaches() -> [KVCacheProtocol] {
         (0 ..< config.numHiddenLayers).map { idx -> KVCacheProtocol in
-            config.isLinearLayer(idx) ? Qwen35SSMCache() : KVCache()
+            config.isLinearLayer(idx) ? GatedDeltaCache() : KVCache()
         }
     }
 }

@@ -35,6 +35,39 @@ public protocol RestorableKVCache: KVCacheProtocol {
 public enum KVCacheKind: Sendable, Equatable {
     case standard
     case rotating(window: Int)
+    /// GatedDeltaNet linear-attention layer: a conv-state + SSM recurrent-state
+    /// cache (`GatedDeltaCache`), not a key/value cache. Used by qwen3_5-class
+    /// hybrid models for their linear layers; full-attention layers stay `.standard`.
+    case ssm
+}
+
+/// Per-layer cache for a GatedDeltaNet (linear-attention) layer. Holds the
+/// causal-conv state and the `[B, Hv, Dv, Dk]` SSM recurrent state — NOT keys
+/// and values. Conforms to `RestorableKVCache` only so it can ride in the
+/// engine's `[RestorableKVCache]` array; the KV-style operations are inert
+/// (`snapshot` nil, not truncatable) so the engine cold-prefills these layers
+/// rather than seeding them from the prefix cache. The model layer reads/writes
+/// `convState`/`ssmState` directly after downcasting.
+public final class GatedDeltaCache: RestorableKVCache, @unchecked Sendable {
+    public var convState: MLXArray?
+    public var ssmState: MLXArray?
+    private var seq = 0
+
+    public init() {}
+
+    public func update(keys newK: MLXArray, values newV: MLXArray) -> (MLXArray, MLXArray) {
+        fatalError("GatedDeltaCache: linear-attention layers do not use KV update")
+    }
+    public func snapshot() -> (keys: MLXArray, values: MLXArray)? { nil }
+    public func reset() { convState = nil; ssmState = nil; seq = 0 }
+    public var sequenceLength: Int { seq }
+    public func advance(_ n: Int) { seq += n }
+
+    // RestorableKVCache: inert — SSM state is not addressable by position, so the
+    // engine treats these layers as cold-prefill-only.
+    public func restore(keys: MLXArray, values: MLXArray, totalSeen: Int) {}
+    public func canTruncate(to n: Int) -> Bool { false }
+    public func truncate(to n: Int) {}
 }
 
 /// Per-layer Key-Value cache for transformer attention.
@@ -170,6 +203,7 @@ public func makeKVCaches(spec: [KVCacheKind]?, numLayers: Int) -> [RestorableKVC
         switch kind {
         case .standard: return KVCache()
         case .rotating(let window): return RotatingKVCache(window: window)
+        case .ssm: return GatedDeltaCache()
         }
     }
 }
