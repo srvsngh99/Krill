@@ -43,16 +43,26 @@ jobs:
           token: ${{ secrets.TAP_TOKEN }}   # fine-grained PAT: Contents + PRs write on homebrew-krill
 
       - name: Rewrite Formula/krill.rb
+        env:
+          # Passed via env (not inlined into the script) so arbitrary
+          # characters in the values can't break or inject into the rewrite.
+          NEW_URL: ${{ steps.meta.outputs.url }}
+          NEW_SHA: ${{ steps.meta.outputs.sha }}
+          NEW_VER: ${{ steps.meta.outputs.ver }}
         run: |
           set -euo pipefail
-          F=Formula/krill.rb
-          sed -i -E \
-            -e "s|^( *url ).*|\1\"${{ steps.meta.outputs.url }}\"|" \
-            -e "s|^( *sha256 ).*|\1\"${{ steps.meta.outputs.sha }}\"|" \
-            -e "s|^( *version ).*|\1\"${{ steps.meta.outputs.ver }}\"|" \
-            "$F"
+          # Ruby (preinstalled on the runner, and the formula's own language)
+          # rather than sed: block-form sub! preserves the indent via $1 with
+          # no backreference-in-string ambiguity, and only the 3 target lines
+          # change (the `assert_match ... version` test line is left alone).
+          ruby -i -pe '
+            $_.sub!(/^(\s*url\s+)".*"/)     { "#{$1}\"#{ENV["NEW_URL"]}\"" }
+            $_.sub!(/^(\s*sha256\s+)".*"/)  { "#{$1}\"#{ENV["NEW_SHA"]}\"" }
+            $_.sub!(/^(\s*version\s+)".*"/) { "#{$1}\"#{ENV["NEW_VER"]}\"" }
+          ' Formula/krill.rb
           echo "----- updated formula -----"
-          grep -E "url|sha256|version" "$F"
+          grep -E '^\s*(url|sha256|version) ' Formula/krill.rb
+          ruby -c Formula/krill.rb   # fail fast if the rewrite broke the formula
 
       - name: Open bump PR
         env:
