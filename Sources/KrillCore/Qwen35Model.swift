@@ -258,3 +258,158 @@ final class Qwen35GatedDeltaNet: Module {
         return outProj(out.reshaped(B, S, numVHeads * headVDim))
     }
 }
+
+// MARK: - Full softmax attention (Qwen3-Next gated attention)
+
+final class Qwen35Attention: Module {
+    let numHeads: Int
+    let numKVHeads: Int
+    let headDim: Int
+    let scale: Float
+
+    @ModuleInfo(key: "q_proj") var qProj: Linear
+    @ModuleInfo(key: "k_proj") var kProj: Linear
+    @ModuleInfo(key: "v_proj") var vProj: Linear
+    @ModuleInfo(key: "o_proj") var oProj: Linear
+    @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
+    @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
+    let rope: RoPE
+
+    init(_ c: Qwen35Config) {
+        numHeads = c.numAttentionHeads
+        numKVHeads = c.numKeyValueHeads
+        headDim = c.headDim
+        scale = 1.0 / Float(c.headDim).squareRoot()
+        _qProj = ModuleInfo(wrappedValue: Linear(c.hiddenSize, numHeads * headDim * 2, bias: false), key: "q_proj")
+        _kProj = ModuleInfo(wrappedValue: Linear(c.hiddenSize, numKVHeads * headDim, bias: false), key: "k_proj")
+        _vProj = ModuleInfo(wrappedValue: Linear(c.hiddenSize, numKVHeads * headDim, bias: false), key: "v_proj")
+        _oProj = ModuleInfo(wrappedValue: Linear(numHeads * headDim, c.hiddenSize, bias: false), key: "o_proj")
+        _qNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: headDim, eps: c.rmsNormEps), key: "q_norm")
+        _kNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: headDim, eps: c.rmsNormEps), key: "k_norm")
+        // Partial rotary: rotate the first floor(headDim * partialRotaryFactor) dims.
+        // mRoPE collapses to standard RoPE for text-only positions.
+        let rotaryDim = Int(Float(headDim) * c.partialRotaryFactor)
+        self.rope = RoPE(dimensions: rotaryDim, traditional: false, base: c.ropeTheta)
+    }
+
+    func callAsFunction(_ x: MLXArray, mask: MLXArray?) -> MLXArray {
+        let B = x.dim(0), L = x.dim(1)
+
+        let qp = qProj(x).reshaped(B, L, numHeads, headDim * 2)
+        let qParts = split(qp, indices: [headDim], axis: -1)
+        var queries = qNorm(qParts[0])                                  // [B,L,numHeads,headDim]
+        let gate = qParts[1].reshaped(B, L, numHeads * headDim)
+        var keys = kNorm(kProj(x).reshaped(B, L, numKVHeads, headDim))
+        var values = vProj(x).reshaped(B, L, numKVHeads, headDim)
+
+        queries = queries.transposed(0, 2, 1, 3)
+        keys = keys.transposed(0, 2, 1, 3)
+        values = values.transposed(0, 2, 1, 3)
+
+        queries = rope(queries)
+        keys = rope(keys)
+
+        let out = MLXFast.scaledDotProductAttention(
+            queries: queries, keys: keys, values: values, scale: scale, mask: mask)
+        let o = out.transposed(0, 2, 1, 3).reshaped(B, L, numHeads * headDim)
+        return oProj(o * sigmoid(gate))
+    }
+}
+
+// MARK: - MLP
+
+final class Qwen35MLP: Module {
+    @ModuleInfo(key: "gate_proj") var gateProj: Linear
+    @ModuleInfo(key: "up_proj") var upProj: Linear
+    @ModuleInfo(key: "down_proj") var downProj: Linear
+
+    init(_ dim: Int, _ hidden: Int) {
+        _gateProj = ModuleInfo(wrappedValue: Linear(dim, hidden, bias: false), key: "gate_proj")
+        _upProj = ModuleInfo(wrappedValue: Linear(dim, hidden, bias: false), key: "up_proj")
+        _downProj = ModuleInfo(wrappedValue: Linear(hidden, dim, bias: false), key: "down_proj")
+    }
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        downProj(silu(gateProj(x)) * upProj(x))
+    }
+}
+
+// MARK: - Decoder layer (hybrid: linear vs full attention)
+
+final class Qwen35DecoderLayer: Module {
+    let isLinear: Bool
+    @ModuleInfo(key: "linear_attn") var linearAttn: Qwen35GatedDeltaNet?
+    @ModuleInfo(key: "self_attn") var selfAttn: Qwen35Attention?
+    @ModuleInfo(key: "input_layernorm") var inputLayernorm: RMSNorm
+    @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayernorm: RMSNorm
+    @ModuleInfo(key: "mlp") var mlp: Qwen35MLP
+
+    init(_ c: Qwen35Config, layerIdx: Int) {
+        isLinear = c.isLinearLayer(layerIdx)
+        if isLinear {
+            _linearAttn = ModuleInfo(wrappedValue: Qwen35GatedDeltaNet(c), key: "linear_attn")
+            _selfAttn = ModuleInfo(wrappedValue: nil, key: "self_attn")
+        } else {
+            _linearAttn = ModuleInfo(wrappedValue: nil, key: "linear_attn")
+            _selfAttn = ModuleInfo(wrappedValue: Qwen35Attention(c), key: "self_attn")
+        }
+        _inputLayernorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: c.hiddenSize, eps: c.rmsNormEps), key: "input_layernorm")
+        _postAttentionLayernorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: c.hiddenSize, eps: c.rmsNormEps), key: "post_attention_layernorm")
+        _mlp = ModuleInfo(wrappedValue: Qwen35MLP(c.hiddenSize, c.intermediateSize), key: "mlp")
+    }
+
+    func callAsFunction(_ x: MLXArray, mask: MLXArray?) -> MLXArray {
+        let normed = inputLayernorm(x)
+        let r = isLinear ? linearAttn!(normed) : selfAttn!(normed, mask: mask)
+        let h = x + r
+        return h + mlp(postAttentionLayernorm(h))
+    }
+}
+
+// MARK: - Model + LM head
+
+/// Additive causal mask `[L, L]` (0 on/below diagonal, -inf above).
+@inline(__always)
+func qwen35CausalMask(_ L: Int, _ dtype: DType) -> MLXArray {
+    let idx = MLXArray(Int32(0) ..< Int32(L))
+    let upper = idx.expandedDimensions(axis: 0) .> idx.expandedDimensions(axis: 1)  // [L,L] true above diag
+    return MLX.where(upper, MLXArray(-Float.greatestFiniteMagnitude), MLXArray(Float(0))).asType(dtype)
+}
+
+final class Qwen35Model: Module {
+    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
+    let layers: [Qwen35DecoderLayer]
+    @ModuleInfo(key: "norm") var norm: RMSNorm
+
+    init(_ c: Qwen35Config) {
+        _embedTokens = ModuleInfo(wrappedValue: Embedding(embeddingCount: c.vocabSize, dimensions: c.hiddenSize), key: "embed_tokens")
+        layers = (0 ..< c.numHiddenLayers).map { Qwen35DecoderLayer(c, layerIdx: $0) }
+        _norm = ModuleInfo(wrappedValue: RMSNorm(dimensions: c.hiddenSize, eps: c.rmsNormEps), key: "norm")
+    }
+
+    /// Cacheless full-sequence (prefill) forward — used for parity. `tokens`: `[B, L]`.
+    func callAsFunction(_ tokens: MLXArray) -> MLXArray {
+        var h = embedTokens(tokens)
+        let L = h.dim(1)
+        let mask: MLXArray? = L > 1 ? qwen35CausalMask(L, h.dtype) : nil
+        for layer in layers {
+            h = layer(h, mask: mask)
+        }
+        return norm(h)
+    }
+}
+
+public final class Qwen35ForCausalLM: Module {
+    @ModuleInfo(key: "model") var model: Qwen35Model
+    @ModuleInfo(key: "lm_head") var lmHead: Linear
+    public let config: Qwen35Config
+
+    public init(_ c: Qwen35Config) {
+        self.config = c
+        _model = ModuleInfo(wrappedValue: Qwen35Model(c), key: "model")
+        _lmHead = ModuleInfo(wrappedValue: Linear(c.hiddenSize, c.vocabSize, bias: false), key: "lm_head")
+    }
+
+    public func callAsFunction(_ tokens: MLXArray) -> MLXArray {
+        lmHead(model(tokens))
+    }
+}
