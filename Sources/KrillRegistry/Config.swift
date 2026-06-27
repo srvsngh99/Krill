@@ -94,21 +94,35 @@ public struct KrillConfig: Sendable {
     /// it live in the TUI. `default_agent_posture` in config.
     public var defaultAgentPosture: String
 
-    /// Which web-search backend `web_search` uses: "searxng" (default,
-    /// local-first, no API key). The tool is read-only and only active when a
-    /// backend URL is set. `search_backend` in config; `KRILL_SEARCH_BACKEND` env.
+    /// Which web-search backend `web_search` uses: "auto" (default → keyless
+    /// DuckDuckGo, works out of the box), "brave"/"tavily" (BYOK, need an API
+    /// key), or "searxng" (self-hosted). The tool is read-only.
+    /// `search_backend` in config; `KRILL_SEARCH_BACKEND` env.
     public var searchBackend: String
 
     /// Base URL of the SearXNG instance `web_search` queries (e.g.
-    /// "http://localhost:8888"); nil disables web search. The instance must have
-    /// `json` enabled in its search.formats. `searxng_url` in config;
+    /// "http://localhost:8888"); nil disables the searxng backend. The instance
+    /// must have `json` enabled in its search.formats. `searxng_url` in config;
     /// `KRILL_SEARXNG_URL` env.
     public var searxngURL: String?
 
-    /// Base URL of the Kreach search engine for `search_backend = "kreach"`
-    /// (the user's own crawled index; default "http://127.0.0.1:8000" when unset).
+    /// API key for `search_backend = "brave"` (Brave Search API, free tier
+    /// available). `brave_api_key` in config; `KRILL_BRAVE_API_KEY` env. Redacted
+    /// in `/config` output.
+    public var braveAPIKey: String?
+
+    /// API key for `search_backend = "tavily"` (Tavily API, free tier available).
+    /// `tavily_api_key` in config; `KRILL_TAVILY_API_KEY` env. Redacted in
+    /// `/config` output.
+    public var tavilyAPIKey: String?
+
+    #if KREACH
+    /// Base URL of the PRIVATE Kreach search engine for `search_backend =
+    /// "kreach"` (a self-hosted crawled index; default "http://127.0.0.1:8000"
+    /// when unset). Compiled in only for `KRILL_KREACH=1` dev builds.
     /// `kreach_url` in config; `KRILL_KREACH_URL` env.
     public var kreachURL: String?
+    #endif
 
     /// Default reasoning ("thinking") state for new sessions: when true and the
     /// model has a thinking channel, the engine turns it on so the model reasons
@@ -141,9 +155,13 @@ public struct KrillConfig: Sendable {
         self.speakReplies = false
         self.defaultMode = "chat"
         self.defaultAgentPosture = "plan"
-        self.searchBackend = "searxng"
+        self.searchBackend = "auto"
         self.searxngURL = nil
+        self.braveAPIKey = nil
+        self.tavilyAPIKey = nil
+        #if KREACH
         self.kreachURL = nil
+        #endif
         self.thinking = true
     }
 
@@ -221,8 +239,14 @@ public struct KrillConfig: Sendable {
                 searchBackend = value
             case "searxng_url":
                 searxngURL = value.isEmpty ? nil : value
+            case "brave_api_key":
+                braveAPIKey = value.isEmpty ? nil : value
+            case "tavily_api_key":
+                tavilyAPIKey = value.isEmpty ? nil : value
+            #if KREACH
             case "kreach_url":
                 kreachURL = value.isEmpty ? nil : value
+            #endif
             case "thinking", "enable_thinking":
                 thinking = value == "true" || value == "1" || value == "on" || value == "yes"
             case "keep_alive":
@@ -251,16 +275,22 @@ public struct KrillConfig: Sendable {
     /// The config keys a user may set via `/config key=value`. Other TOML keys
     /// the parser understands (e.g. `port` as an alias of `server_port`) are not
     /// offered here to keep the surface small and unambiguous.
-    public static let writableKeys: [String] = [
-        "default_model", "default_quant", "default_mode", "default_agent_posture",
-        "search_backend", "searxng_url", "kreach_url",
-        "kv_cache_dtype", "context_length", "thinking",
-        "voice_mode", "speak_replies",
-        "prefix_cache_size_gb", "prefix_cache_max_entry_gb",
-        "speculative_decoding", "decode_pipeline", "ngram_spec", "flash_attention",
-        "server_port", "server_host", "idle_timeout", "keep_alive",
-        "num_parallel", "max_loaded_models", "max_queue", "models_dir",
-    ]
+    public static let writableKeys: [String] = {
+        var keys = [
+            "default_model", "default_quant", "default_mode", "default_agent_posture",
+            "search_backend", "searxng_url", "brave_api_key", "tavily_api_key",
+            "kv_cache_dtype", "context_length", "thinking",
+            "voice_mode", "speak_replies",
+            "prefix_cache_size_gb", "prefix_cache_max_entry_gb",
+            "speculative_decoding", "decode_pipeline", "ngram_spec", "flash_attention",
+            "server_port", "server_host", "idle_timeout", "keep_alive",
+            "num_parallel", "max_loaded_models", "max_queue", "models_dir",
+        ]
+        #if KREACH
+        keys.append("kreach_url")   // private local backend; dev builds only
+        #endif
+        return keys
+    }()
 
     /// Persist `key = value` to `config.toml`, upserting in place: an existing
     /// assignment line for `key` is replaced (preserving everything else,
@@ -329,14 +359,19 @@ public struct KrillConfig: Sendable {
     /// for display by `/config`. Reflects the fully-resolved config (file + env).
     public func displayPairs() -> [(key: String, value: String)] {
         func b(_ v: Bool) -> String { v ? "true" : "false" }
-        let map: [String: String] = [
+        // Redact secrets: show only whether a key is set, never its value.
+        func secret(_ v: String?) -> String {
+            (v?.trimmingCharacters(in: .whitespaces).isEmpty == false) ? "(set)" : "(none)"
+        }
+        var map: [String: String] = [
             "default_model": defaultModel ?? "(none)",
             "default_quant": "\(defaultQuant)",
             "default_mode": defaultMode,
             "default_agent_posture": defaultAgentPosture,
             "search_backend": searchBackend,
             "searxng_url": searxngURL ?? "(none)",
-            "kreach_url": kreachURL ?? "(none)",
+            "brave_api_key": secret(braveAPIKey),
+            "tavily_api_key": secret(tavilyAPIKey),
             "kv_cache_dtype": kvCacheDtype,
             "context_length": contextLength.map { "\($0)" } ?? "(model default)",
             "thinking": b(thinking),
@@ -357,6 +392,9 @@ public struct KrillConfig: Sendable {
             "max_queue": "\(maxQueue)",
             "models_dir": modelsDir ?? "(default)",
         ]
+        #if KREACH
+        map["kreach_url"] = kreachURL ?? "(none)"
+        #endif
         return KrillConfig.writableKeys.map { ($0, map[$0] ?? "") }
     }
 
@@ -423,7 +461,11 @@ public struct KrillConfig: Sendable {
         }
         if let v = env["KRILL_SEARCH_BACKEND"] { searchBackend = v }
         if let v = env["KRILL_SEARXNG_URL"] { searxngURL = v.isEmpty ? nil : v }
+        if let v = env["KRILL_BRAVE_API_KEY"] { braveAPIKey = v.isEmpty ? nil : v }
+        if let v = env["KRILL_TAVILY_API_KEY"] { tavilyAPIKey = v.isEmpty ? nil : v }
+        #if KREACH
         if let v = env["KRILL_KREACH_URL"] { kreachURL = v.isEmpty ? nil : v }
+        #endif
 
         if let v = ProcessInfo.processInfo.environment["KRILL_DEFAULT_MODEL"] {
             defaultModel = v

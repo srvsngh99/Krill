@@ -57,3 +57,4 @@ Status: proposed | adopted | superseded by NNNN. Date: YYYY-MM-DD. Owner: <name>
 | # | Title | Status | Date |
 |---|---|---|---|
 | [0001](0001-tool-calling-and-parser.md) | Tool calling and parsing (hybrid: robust default + per-alias parse override) | adopted | 2026-06-27 |
+| [0002](0002-web-search-backends.md) | Web search backends (keyless DuckDuckGo default + BYOK Brave/Tavily; private Kreach behind a build flag) | adopted | 2026-06-28 |

@@ -29,7 +29,7 @@ Most local-LLM stacks are one half of a pair:
 | **Serve** | `krill serve` | Drop-in **OpenAI · Ollama · Anthropic** API on `:57455` |
 | **Agent** | `krill code <task>` | Coding agent — bash, edits, glob/grep, **web**, **deep research** — on your local model |
 
-The agent isn't boxed into your filesystem. **`web_search`** ranks the open web through a local-first SearXNG backend you point it at, and **`web_fetch`** reads any page as clean text — both SSRF-guarded and untrusted-framed against prompt injection — while **`/research <question>`** runs a multi-source deep-research pass (plan queries → fetch → summarize each source → synthesize a cited answer). A local model that browses, and cites its work.
+The agent isn't boxed into your filesystem. **`web_search`** ranks the open web — keyless out of the box (DuckDuckGo), or point it at Brave/Tavily (free-tier API key) or your own SearXNG for reliable results — and **`web_fetch`** reads any page as clean text — both SSRF-guarded and untrusted-framed against prompt injection — while **`/research <question>`** runs a multi-source deep-research pass (plan queries → fetch → summarize each source → synthesize a cited answer). A local model that browses, and cites its work.
 
 And the inverse: `krill launch claude` (or `codex`, `opencode`, `copilot`, `droid`, `hermes`, `pi`) points an **external** harness at Krill's engine. Krill is the model *for* other agents, or the agent *on* its own model.
 
@@ -180,6 +180,22 @@ The full-screen TUI (themes, slash commands, attachments, push-to-talk voice) ha
 | `KRILL_KV_CACHE_DTYPE` | `fp16` | KV cache precision (`fp16` / `int8`) |
 | `KRILL_PREFILL_CHUNK` | `2048` | Prompt tokens per prefill pass — lets 32k+ contexts run without OOM (`0` disables) |
 | `KRILL_ROTATING_KV` | `1` | Windowed KV for Gemma sliding layers — O(window) long-context decode (`0` disables) |
+| `KRILL_SEARCH_BACKEND` | `auto` | Web-search backend: `auto` (keyless DuckDuckGo), `brave`, `tavily`, or `searxng` |
+| `KRILL_BRAVE_API_KEY` | — | API key for `search_backend=brave` (free tier available) |
+| `KRILL_TAVILY_API_KEY` | — | API key for `search_backend=tavily` (free tier available) |
+
+### Web search
+
+`web_search` works with no setup via DuckDuckGo. For reliable, rate-limit-free
+results, add a free-tier API key:
+
+```sh
+krill --config search_backend=brave         # or: tavily
+krill --config brave_api_key=YOUR_KEY        # or export KRILL_BRAVE_API_KEY
+```
+
+Or point at a self-hosted SearXNG with `search_backend=searxng` + `searxng_url`.
+See [docs/decisions/0002-web-search-backends.md](docs/decisions/0002-web-search-backends.md).
 
 ## Author
 

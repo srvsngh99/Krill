@@ -22,7 +22,7 @@ GEMMA4_BENCH_WARMUP ?= 1
 KRILL_PYTHON ?= $(HOME)/.krill/venv/bin/python3
 KRILL_VENV_PYTHON ?= python3
 
-.PHONY: build release install uninstall clean test bench bench-compare bench-concurrent bench-gemma4-multimodal bench-release-gate parity-gate metallib dist dist-app app-bundle version
+.PHONY: build release dev install uninstall clean test bench bench-compare bench-concurrent bench-gemma4-multimodal bench-release-gate parity-gate metallib dist dist-app app-bundle version
 
 # Debug build (default)
 build:
@@ -72,11 +72,21 @@ metallib:
 	done; \
 	echo "Metal shaders compiled to $$BUILD_PATH/mlx.metallib"
 
-# Optimized release build
+# Optimized release build (PUBLIC: Kreach is NOT compiled in)
 release:
 	swift build -c release --arch arm64
 	$(MAKE) metallib CONFIGURATION=release REQUIRE_METALLIB=1
 	@echo "Binary at $(BUILD_DIR)/$(BINARY_NAME)"
+	@ls -lh $(BUILD_DIR)/$(BINARY_NAME)
+
+# LOCAL dev release with the PRIVATE Kreach backend compiled in. Sets the
+# KRILL_KREACH=1 build env that Package.swift turns into `-D KREACH`. Use this
+# for Sourav's own setup (search_backend=kreach). Public `make release` / `make
+# dist` leave it out, so Kreach never ships in a downloaded binary.
+dev:
+	KRILL_KREACH=1 swift build -c release --arch arm64
+	$(MAKE) metallib CONFIGURATION=release REQUIRE_METALLIB=1
+	@echo "Binary at $(BUILD_DIR)/$(BINARY_NAME) (KREACH enabled)"
 	@ls -lh $(BUILD_DIR)/$(BINARY_NAME)
 
 # Install to PREFIX/bin
