@@ -6,6 +6,28 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-06-27
+
+### Added
+
+- **Universal tool calling: every model family can go agentic.** A `.pythonic`
+  parser plus tool-name recovery (casing, namespaced/arg-baked names like
+  `tools__get_weather__city__Paris` -> `get_weather`) and a `parameters`/
+  `arguments` alias, all gated on the offered tool names, so Mistral, Phi, Llama
+  and Gemma fine-tunes now emit usable tool calls instead of mangled or text-only
+  output. Shared by the inference server and the `krill code` harness. See
+  `docs/decisions/0001-tool-calling-and-parser.md`.
+
+### Fixed
+
+- `krill code` no longer loops to the iteration cap when a model emits a
+  mis-cased or wrapped tool call: the harness applies the same name recovery as
+  the server, appends a "call only when needed, then answer and stop" directive
+  when the caller has no system prompt, and a runaway guard drops exact repeat
+  calls and caps total tool executions.
+- Parse the wrapped Llama call shape `{"function":{"name",...,"parameters"}}`
+  while still rejecting echoed tool schemas.
+
 ## [0.14.1] - 2026-06-27
 
 ### Added
