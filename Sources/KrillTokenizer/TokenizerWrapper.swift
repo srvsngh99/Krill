@@ -691,6 +691,48 @@ public final class KrillTokenizer: @unchecked Sendable {
         return out
     }
 
+    /// True when the model's effective chat template is ChatML-based (contains
+    /// the `<|im_start|>` turn marker) — a Qwen / Qwen 3.5 (Ornith) / Hermes
+    /// checkpoint. Used to pick the correct manual fallback when the Swift Jinja
+    /// port cannot render the model's `chat_template.jinja`. Ornith-9B's template,
+    /// for example, captures a macro's return value via
+    /// `{% set x = render_content(...) %}`, which the port does not support; the
+    /// render fails, and without this branch the generic Llama-3 fallback below
+    /// emits `<|eot_id|>` turn terminators. Those are NOT this model's EOS
+    /// (`<|im_end|>`), so the model echoes them as text and generation never
+    /// stops — it runs on, fabricating turn after turn, until the token cap.
+    public var usesChatMLTemplate: Bool {
+        chatTemplateString?.contains("<|im_start|>") ?? false
+    }
+
+    /// Build a plain ChatML prompt string for a ChatML model whose
+    /// `chat_template.jinja` could not be rendered by the Swift Jinja port.
+    /// Mirrors the turn structure of the proven native ChatML builder
+    /// (`formatQwen25VLTokenIds`): `<|im_start|>{role}\n{content}<|im_end|>\n`
+    /// per message, then a trailing `<|im_start|>assistant\n` to cue generation.
+    /// The marker strings tokenize to the checkpoint's real ChatML ids through
+    /// the caller's `encodeWithoutExtraBOS`, so the assistant turn terminates on
+    /// the model's true `<|im_end|>` EOS. ChatML roles are system / user /
+    /// assistant / tool; anything else (e.g. a `tools` definitions block) folds
+    /// into a user turn, exactly as the native builder does. Text-only by design:
+    /// Krill's native qwen3_5 runtime serves text, and the checkpoint keeps its
+    /// full vision-capable template untouched for other consumers (mlx_vlm).
+    public func chatmlPrompt(messages: [[String: String]]) -> String {
+        var out = ""
+        for msg in messages {
+            let rawRole = msg["role"] ?? "user"
+            let content = msg["content"] ?? ""
+            let role: String
+            switch rawRole {
+            case "system", "user", "assistant", "tool": role = rawRole
+            default: role = "user"
+            }
+            out += "<|im_start|>\(role)\n\(content)<|im_end|>\n"
+        }
+        out += "<|im_start|>assistant\n"
+        return out
+    }
+
     public func applyChatTemplate(messages: [[String: String]]) -> String {
         // First preference: the tokenizer's embedded `chat_template`
         // (whatever shipped in `tokenizer_config.json`).
@@ -710,6 +752,18 @@ public final class KrillTokenizer: @unchecked Sendable {
            let tokenIds = try? tokenizer.applyChatTemplate(
                messages: messages, chatTemplate: template) {
             return tokenizer.decode(tokens: tokenIds)
+        }
+
+        // The model's own template exists but the Swift Jinja port could not
+        // render it (both attempts above failed). If it is ChatML-based, emit a
+        // manual ChatML prompt rather than falling through to the Gemma-4 /
+        // Llama-3 manual formats below: those terminate turns with a marker that
+        // is not this model's EOS, so generation never stops. (Ornith-9B /
+        // qwen3_5 hits this — its template uses `{% set x = render_content(...) %}`
+        // macro-capture the port can't evaluate; the old Llama-3 fallback emitted
+        // `<|eot_id|>`, which the model echoed as text and looped on.)
+        if usesChatMLTemplate {
+            return chatmlPrompt(messages: messages)
         }
 
         // Detect Gemma 4 by checking if token 105 decodes to a turn marker
