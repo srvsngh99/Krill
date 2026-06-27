@@ -362,6 +362,22 @@ let architectureRules: [ArchitectureRule] = [
         matches: { arch, mt in arch.contains("llama") || mt == "llama" },
         action: .load { try loadLlama(configData: $0, directory: $1) }),
 
+    // Qwen 3.5 (Ornith-9B) native Swift+MLX TEXT runtime: a Qwen3-Next-class
+    // HYBRID decoder - GatedDeltaNet linear-attention (SSM) layers interleaved
+    // with full softmax-attention every `full_attention_interval`. The vision
+    // tower is deferred (image inference stays on mlx_vlm), so this serves the
+    // text decoder only. MUST precede the generic `qwen` rule: that rule matches
+    // `arch.contains("qwen")`, so a qwen3_5 checkpoint would otherwise load as a
+    // dense Qwen and emit garbage. The `!moe` guard keeps a future
+    // `qwen3_5_moe` (which also contains "qwen3_5") out of this dense loader.
+    ArchitectureRule(
+        id: "qwen3_5",
+        matches: { arch, mt in
+            (arch.contains("qwen3_5") && !arch.contains("moe"))
+                || mt == "qwen3_5" || mt == "qwen3_5_text"
+        },
+        action: .load { try loadQwen35(configData: $0, directory: $1) }),
+
     ArchitectureRule(
         id: "qwen",
         matches: { arch, mt in arch.contains("qwen") || mt.hasPrefix("qwen") },
@@ -668,6 +684,111 @@ private func loadQwen25VL(configData: Data, directory: URL) throws -> LoadedMode
                 + "regressed.")
         },
         vocabSize: config.vocabSize
+    )
+}
+
+/// Top-level wrapper for the Ornith / qwen3_5 config: the real checkpoint
+/// nests the text decoder hyperparameters under `text_config` (alongside a
+/// `vision_config` we ignore - the vision tower is deferred to mlx_vlm) and
+/// carries the affine-int4 `quantization` block at the top level. Decoding the
+/// wrapper isolates the text decoder so `Qwen35Config` sees the flat key layout
+/// its decoder expects. (`rope_theta` lives under `text_config.rope_parameters`
+/// in the real config, but `Qwen35Config`'s defaults - 1e7 theta, 0.25 partial
+/// - already match Ornith, so the nested block need not be threaded through.)
+private struct Qwen35ConfigWrapper: Decodable {
+    let textConfig: Qwen35Config
+    let quantization: QuantizationConfig?
+    enum CodingKeys: String, CodingKey {
+        case textConfig = "text_config"
+        case quantization
+    }
+}
+
+/// Qwen3.5 (Ornith-9B) native text decoder: a Qwen3-Next-class HYBRID stack -
+/// `full_attention_interval`-spaced full softmax-attention layers interleaved
+/// with GatedDeltaNet linear-attention (SSM) layers. TEXT-ONLY: the vision
+/// tower is dropped at load (image inference stays on mlx_vlm); only the
+/// `language_model.*` weights are materialized.
+///
+/// The checkpoint ships in mlx_vlm format (prefix `language_model.model.*` /
+/// `language_model.lm_head.*`, vision under `vision_tower.*`, no `mtp.*`) and is
+/// PRE-QUANTIZED affine int4 (group 64) with `.scales`/`.biases` on every Linear
+/// and the embedding. `keyPrefix: "language_model."` strips the prefix so the
+/// language weights land on `model.*` / `lm_head.*`; the `keyRewrite` hook drops
+/// the vision tower / MTP head and applies the SAME conditional sanitize mlx_lm
+/// uses for qwen3_5 - the conv1d `moveaxis(2,1)` and the RMSNorm `+1.0` shift
+/// fire ONLY for original torch-format checkpoints (MTP present OR conv1d not
+/// already `[.,k,1]`). mlx_vlm-format quants trigger neither, so they load
+/// byte-for-byte as the parity-verified `Qwen35ForCausalLM` expects.
+private func loadQwen35(configData: Data, directory: URL) throws -> LoadedModel {
+    let wrapper = try JSONDecoder().decode(Qwen35ConfigWrapper.self, from: configData)
+    let config = wrapper.textConfig
+    let model = Qwen35ForCausalLM(config)
+
+    try loadWeights(
+        into: model,
+        from: directory,
+        quantization: wrapper.quantization,
+        // Strips `language_model.` -> `model.layers.*` / `model.embed_tokens.*`
+        // / `model.norm.*` and `language_model.lm_head.*` -> `lm_head.*`. Keys
+        // outside the language model (`vision_tower.*`) are preserved here and
+        // dropped in the rewrite below.
+        keyPrefix: "language_model.",
+        keyRewrite: { weights in
+            // mlx_lm's qwen3_5 sanitize() is conditional: both transforms apply
+            // only to ORIGINAL torch-format checkpoints. Detect that BEFORE
+            // dropping MTP, since `has_mtp` is one of the two triggers.
+            let hasMTP = weights.keys.contains { $0.hasPrefix("mtp.") || $0.contains(".mtp.") }
+            let hasUnsanitizedConv = weights.contains { key, value in
+                key.hasSuffix("conv1d.weight") && (value.shape.last ?? 1) != 1
+            }
+            let shouldShiftNorms = hasMTP || hasUnsanitizedConv
+
+            // Text-only port: drop the vision tower and the (absent here) MTP
+            // speculative head. Their weights have no module in
+            // `Qwen35ForCausalLM`, so loading them would only waste memory
+            // (and trip strict verify if it were ever enabled).
+            for key in Array(weights.keys)
+            where key.hasPrefix("vision_tower.") || key.hasPrefix("visual.")
+                || key.hasPrefix("mtp.") || key.contains(".mtp.") {
+                weights.removeValue(forKey: key)
+            }
+
+            // conv1d (out, in/groups, kernel) torch layout -> mlx (out, kernel,
+            // in/groups). No-op when already `[.,k,1]` (mlx_vlm-format quants).
+            let normSuffixes = [
+                ".input_layernorm.weight", ".post_attention_layernorm.weight",
+                "model.norm.weight", ".q_norm.weight", ".k_norm.weight",
+            ]
+            for (key, value) in weights {
+                if key.hasSuffix("conv1d.weight") && (value.shape.last ?? 1) != 1 {
+                    weights[key] = value.movedAxis(source: 2, destination: 1)
+                }
+                // qwen3_5 stores RMSNorm weight `w` where the effective scale is
+                // `1 + w`; the torch checkpoint needs the shift baked in (mlx_vlm
+                // already did this at conversion, hence the guard).
+                if shouldShiftNorms, value.ndim == 1,
+                    normSuffixes.contains(where: { key.hasSuffix($0) }) {
+                    weights[key] = value + 1.0
+                }
+            }
+        },
+        strictVerify: true)
+
+    // Per-layer cache kinds: GatedDeltaNet (linear) layers need the SSM
+    // conv/recurrent-state cache; full-attention layers use a standard KV cache.
+    let cacheSpec: [KVCacheKind] = (0 ..< config.numHiddenLayers).map {
+        config.isLinearLayer($0) ? .ssm : .standard
+    }
+
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "qwen3_5",
+        forward: { tokens, caches in model(tokens, caches: caches) },
+        multimodalForward: nil,
+        vocabSize: config.vocabSize,
+        cacheSpec: cacheSpec
     )
 }
 

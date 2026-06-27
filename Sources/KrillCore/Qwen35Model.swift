@@ -306,7 +306,7 @@ final class Qwen35Attention: Module {
         self.rope = RoPE(dimensions: rotaryDim, traditional: false, base: c.ropeTheta)
     }
 
-    func callAsFunction(_ x: MLXArray, mask: MLXArray?, cache: KVCache? = nil) -> MLXArray {
+    func callAsFunction(_ x: MLXArray, cache: KVCache? = nil) -> MLXArray {
         let B = x.dim(0), L = x.dim(1)
 
         let qp = qProj(x).reshaped(B, L, numHeads, headDim * 2)
@@ -326,6 +326,15 @@ final class Qwen35Attention: Module {
         if let cache {
             (keys, values) = cache.update(keys: keys, values: values)
         }
+
+        // Build the causal mask HERE (not at the model level) so it spans the
+        // cached prefix: a multi-token query block forwarded against a non-empty
+        // cache (chunked prefill of a long prompt, or a partial-prefix reuse)
+        // needs a `[L, offset+L]` mask, not `[L, L]`. A single-token decode step
+        // (L == 1) needs no mask. At offset 0 this is the plain causal mask, so
+        // cacheless prefill is unchanged (parity-preserving).
+        let mask: MLXArray? = L > 1
+            ? qwen35CausalMask(L, offset: offset, queries.dtype) : nil
 
         let out = MLXFast.scaledDotProductAttention(
             queries: queries, keys: keys, values: values, scale: scale, mask: mask)
@@ -375,13 +384,15 @@ final class Qwen35DecoderLayer: Module {
         _mlp = ModuleInfo(wrappedValue: Qwen35MLP(c.hiddenSize, c.intermediateSize), key: "mlp")
     }
 
-    func callAsFunction(_ x: MLXArray, mask: MLXArray?, cache: KVCacheProtocol? = nil) -> MLXArray {
+    func callAsFunction(_ x: MLXArray, cache: KVCacheProtocol? = nil) -> MLXArray {
         let normed = inputLayernorm(x)
         let r: MLXArray
         if isLinear {
             r = linearAttn!(normed, cache: cache as? GatedDeltaCache)
         } else {
-            r = selfAttn!(normed, mask: mask, cache: cache as? KVCache)
+            // Full-attention layer builds its own causal mask from the cache
+            // offset (see Qwen35Attention); the linear layer is causal by scan.
+            r = selfAttn!(normed, cache: cache as? KVCache)
         }
         let h = x + r
         return h + mlp(postAttentionLayernorm(h))
@@ -390,12 +401,17 @@ final class Qwen35DecoderLayer: Module {
 
 // MARK: - Model + LM head
 
-/// Additive causal mask `[L, L]` (0 on/below diagonal, -inf above).
+/// Additive causal mask `[L, offset+L]` for a query block of length `L` whose
+/// first query sits at absolute position `offset` (i.e. `offset` cached keys
+/// precede it): 0 where a query may attend, -inf strictly above its diagonal.
+/// At `offset == 0` this is the plain `[L, L]` causal mask (cacheless prefill).
 @inline(__always)
-func qwen35CausalMask(_ L: Int, _ dtype: DType) -> MLXArray {
-    let idx = MLXArray(Int32(0) ..< Int32(L))
-    let upper = idx.expandedDimensions(axis: 0) .> idx.expandedDimensions(axis: 1)  // [L,L] true above diag
-    return MLX.where(upper, MLXArray(-Float.greatestFiniteMagnitude), MLXArray(Float(0))).asType(dtype)
+func qwen35CausalMask(_ L: Int, offset: Int, _ dtype: DType) -> MLXArray {
+    let kv = offset + L
+    let qPos = MLXArray(Int32(offset) ..< Int32(kv)).expandedDimensions(axis: 1)  // [L,1] abs query pos
+    let kPos = MLXArray(Int32(0) ..< Int32(kv)).expandedDimensions(axis: 0)       // [1,kv] key pos
+    let future = kPos .> qPos                                                     // [L,kv] true where key is ahead
+    return MLX.where(future, MLXArray(-Float.greatestFiniteMagnitude), MLXArray(Float(0))).asType(dtype)
 }
 
 final class Qwen35Model: Module {
@@ -414,10 +430,8 @@ final class Qwen35Model: Module {
     /// state for incremental decode; without them it is a cacheless prefill.
     func callAsFunction(_ tokens: MLXArray, caches: [KVCacheProtocol]? = nil) -> MLXArray {
         var h = embedTokens(tokens)
-        let L = h.dim(1)
-        let mask: MLXArray? = L > 1 ? qwen35CausalMask(L, h.dtype) : nil
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: mask, cache: caches?[i])
+            h = layer(h, cache: caches?[i])
         }
         return norm(h)
     }

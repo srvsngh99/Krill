@@ -144,6 +144,14 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     /// mRoPE, and image preprocessing land in follow-up PRs (see
     /// docs/workstreams/WS5_SECOND_NATIVE_VISION_FAMILY.md).
     case qwen25vl = "qwen2_5_vl"
+    /// Qwen3.5 (Ornith-9B) Qwen3-Next-class HYBRID family: GatedDeltaNet
+    /// linear-attention (SSM) layers interleaved with full softmax-attention
+    /// every `full_attention_interval`. Native Swift+MLX TEXT runtime
+    /// (`Qwen35ForCausalLM`, scan + forward + decode parity-verified vs mlx_lm);
+    /// the vision tower is deferred to mlx_vlm, so this declares text generation
+    /// only. The checkpoint nests its text decoder under `text_config` and ships
+    /// mlx_vlm-format affine-int4 weights.
+    case qwen35 = "qwen3_5"
     /// LLaVA-1.5 vision-language family. A CLIP ViT vision tower + a
     /// multi-modal projector (linear -> gelu -> linear) + a Llama text
     /// backbone; the projected CLIP features are spliced into the token
@@ -246,6 +254,11 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         if archLower.contains("qwen3moe") || archLower.contains("qwen2moe") { return .moe }
         if archLower.contains("olmoe") { return .moe }
         if archLower.contains("qwen2_5_vl") || archLower.contains("qwen2vl") { return .qwen25vl }
+        // Qwen3.5 (Ornith) hybrid before the generic qwen arm: its arch
+        // `Qwen3_5ForConditionalGeneration` contains "qwen", so it would
+        // otherwise route to the dense `.qwen` family. The `!moe` guard reserves
+        // a future `qwen3_5_moe` for the MoE path.
+        if archLower.contains("qwen3_5") && !archLower.contains("moe") { return .qwen35 }
         if archLower.contains("qwen") { return .qwen }
         if archLower.contains("mistral") { return .mistral }
         if archLower.contains("phi") { return .phi }
@@ -260,6 +273,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         case "gemma", "gemma2", "gemma3": return .gemma
         case "gemma4", "gemma4_text": return .gemma4
         case "qwen2_5_vl", "qwen2_vl": return .qwen25vl
+        case "qwen3_5", "qwen3_5_text": return .qwen35
         case "llava": return .llava
         case "mllama": return .llamaVision
         case "mixtral", "qwen3_moe", "qwen2_moe", "olmoe": return .moe
