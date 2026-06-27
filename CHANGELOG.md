@@ -6,6 +6,23 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-06-27
+
+### Added
+
+- **Ornith-9B nvfp4 build.** Mixed-precision nvfp4 quant of Ornith-1.0-9B
+  (group 16 base, `down_proj`/`o_proj` at 8-bit, vision tower preserved),
+  registered as `ornith-9b-nvfp4` and pulling from
+  `srv-sngh/Ornith-9B-mlx-nvfp4`. `krill pull ornith-9b-nvfp4`.
+
+### Fixed
+
+- Point the `ornith-9b` alias at the published int4 repo
+  `srv-sngh/Ornith-1.0-9B-MLX-4bit` (was a non-existent repo name).
+- nvfp4 weight loader resolves per-module precision overrides under the
+  `language_model.` key prefix, so Ornith's protected `down_proj`/`o_proj`
+  8-bit tensors load instead of crashing on `biases` mismatch.
+
 ## [0.13.0] - 2026-06-25
 
 ### Added
