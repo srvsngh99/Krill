@@ -47,6 +47,10 @@ brew tap srvsngh99/krill && brew install krill
 curl -fsSL https://raw.githubusercontent.com/srvsngh99/Krill/main/install.sh | sh
 ```
 
+**Updating:** Homebrew installs update with `brew upgrade krill`; installer
+builds update in place with `krill update` (add `--check` to only see if a
+newer release is available).
+
 <details>
 <summary>Build from source</summary>
 
