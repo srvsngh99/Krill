@@ -6,6 +6,20 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Ornith-9B (qwen3_5) no longer runs on / loops on multi-turn and agentic
+  turns.** Its `chat_template.jinja` captures a macro's return value via
+  `{% set x = render_content(...) %}`, which the Swift Jinja port cannot render,
+  so prompt building fell through to a family-blind manual **Llama-3** fallback.
+  The Llama `<|eot_id|>` turn terminator is not Ornith's EOS (`<|im_end|>`), so
+  the model echoed it as text and never stopped — fabricating fake turns until
+  the token cap (and timing out `krill code`). `applyChatTemplate` now detects a
+  ChatML template (`usesChatMLTemplate`) and renders a correct manual ChatML
+  prompt (`chatmlPrompt`) before the Gemma/Llama fallbacks, so any ChatML model
+  whose template the port can't render degrades to ChatML — not Llama. The
+  checkpoint template (shared with the mlx_vlm vision path) is untouched.
+
 ## [0.14.2] - 2026-06-27
 
 ### Added
