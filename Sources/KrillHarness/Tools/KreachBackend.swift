@@ -3,6 +3,12 @@ import Foundation
 import FoundationNetworking
 #endif
 
+// PRIVATE backend, gated behind the `KREACH` compile flag (set via KRILL_KREACH=1
+// — see Package.swift / `make dev`). The entire type is compiled in ONLY for
+// Sourav's local dev builds and is ABSENT from public release binaries. Public
+// users get DuckDuckGo (default) + Brave/Tavily (BYOK) + SearXNG instead.
+#if KREACH
+
 /// Kreach backend: queries the user's own Kreach search engine
 /// (`<base>/search?q=...&limit=N`) and maps its ranked results into
 /// `SearchResult`s. This is the conformer the `SearchBackend` protocol was
@@ -91,3 +97,5 @@ public struct KreachBackend: SearchBackend {
         public var errorDescription: String? { description }
     }
 }
+
+#endif // KREACH

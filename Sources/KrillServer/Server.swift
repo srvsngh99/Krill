@@ -341,8 +341,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             handleUnloadModel(context: context)
 
         // Deep research (Krill-native): run the in-process DeepResearch loop over
-        // the configured search backend (Kreach) and return a cited answer. The
-        // shared capability every Krill client gets via the server.
+        // the configured search backend (DuckDuckGo by default) and return a
+        // cited answer. The shared capability every Krill client gets via the server.
         case (.POST, "/research"):
             routeGenerate(context: context, body: body) { self.handleResearch(context: $0, body: $1) }
 
@@ -2922,14 +2922,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    // MARK: - Deep research (Kreach-backed)
+    // MARK: - Deep research
 
     /// POST /research — run Krill's in-process `DeepResearch` (plan → search →
     /// read → synthesize a cited answer) over the configured search backend, and
-    /// return the answer + sources as JSON. With `search_backend = "kreach"` the
-    /// search platform is the user's own Kreach index; the agentic loop and the
-    /// synthesis run here, so every Krill client (deepkrill, minikrill, …) gets
-    /// deep research for free by POSTing `{ "question": "..." }`.
+    /// return the answer + sources as JSON. Backend-agnostic: it uses whatever
+    /// `search_backend` resolves to (DuckDuckGo by default, or Brave/Tavily/
+    /// SearXNG). The agentic loop and the synthesis run here, so every Krill
+    /// client gets deep research for free by POSTing `{ "question": "..." }`.
     ///
     /// Routed through `routeGenerate`, so it runs on the active (or requested)
     /// model. Body: `{ "question" | "q": String }`.
@@ -2952,8 +2952,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         guard let backend = WebSearchTool.configuredBackend() else {
             sendJSON(context: context, status: .badRequest, body: [
-                "error": "no search backend configured; set search_backend=kreach "
-                    + "(optionally kreach_url) or a searxng_url."])
+                "error": "selected search backend is not configured. The default "
+                    + "(DuckDuckGo) needs no setup; for a BYOK backend set "
+                    + "search_backend=brave|tavily plus its api key, or a searxng_url."])
             return
         }
 

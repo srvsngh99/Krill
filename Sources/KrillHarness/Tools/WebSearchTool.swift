@@ -17,10 +17,12 @@ public struct SearchResult: Sendable, Equatable {
     }
 }
 
-/// A pluggable web-search provider. SearXNG (local-first, no API key) is the
-/// shipped conformer; a Kreach backend (the user's own search engine) drops in
-/// behind this same interface once its API is exposed - the tool above is
-/// backend-agnostic, so adding Kreach is a new conformer + a `search_backend`
+/// A pluggable web-search provider. Shipped conformers: `DuckDuckGoBackend`
+/// (keyless, the zero-config default), `BraveBackend` / `TavilyBackend` (BYOK,
+/// the reliable upgrades), and `SearxngBackend` (self-hosted). A private
+/// `KreachBackend` (a self-hosted crawled index) drops in behind this same
+/// interface for `KRILL_KREACH=1` local dev builds only. The tool is
+/// backend-agnostic, so adding a provider is a new conformer + a `search_backend`
 /// value, not a tool change.
 public protocol SearchBackend: Sendable {
     var name: String { get }
@@ -118,8 +120,9 @@ public struct SearxngBackend: SearchBackend {
 /// URLs, and snippets. Read-only (no filesystem/shell side effect), so it runs
 /// under any permission posture without prompting. Pairs with `web_fetch`: the
 /// model searches to find candidate pages, then fetches the promising ones to
-/// read them. The actual provider is pluggable (SearXNG today; Kreach later)
-/// and configured out of band - this tool only formats the query and results.
+/// read them. The actual provider is pluggable (DuckDuckGo by default; Brave /
+/// Tavily / SearXNG by config) and configured out of band - this tool only
+/// formats the query and results.
 ///
 /// When no backend is configured the tool returns a clear, actionable error
 /// rather than failing silently, telling the user how to point Krill at a
@@ -148,31 +151,51 @@ public struct WebSearchTool: Tool {
         self.defaultCount = defaultCount
     }
 
-    /// Build the backend from the resolved config, or nil if search isn't set up.
-    /// Currently only `search_backend = "searxng"` (the default) with a
-    /// `searxng_url` is wired; an unknown backend name yields nil.
+    /// Build the backend from the resolved config. The default (`auto`) is the
+    /// keyless `DuckDuckGoBackend`, so `web_search` works out of the box on a
+    /// fresh install. `brave` / `tavily` are BYOK (need an API key) and return nil
+    /// — surfacing an actionable error — when the key is unset; `searxng` needs a
+    /// `searxng_url`. An unknown backend name yields nil.
     public static func configuredBackend() -> SearchBackend? {
         let cfg = KrillConfig.load()
         switch cfg.searchBackend.lowercased() {
-        case "searxng", "":
+        case "", "auto", "duckduckgo", "ddg":
+            // Keyless zero-config default — no key, no self-hosted instance.
+            return DuckDuckGoBackend()
+        case "brave":
+            guard let key = cfg.braveAPIKey?.trimmingCharacters(in: .whitespaces), !key.isEmpty else {
+                return nil
+            }
+            return BraveBackend(apiKey: key)
+        case "tavily":
+            guard let key = cfg.tavilyAPIKey?.trimmingCharacters(in: .whitespaces), !key.isEmpty else {
+                return nil
+            }
+            return TavilyBackend(apiKey: key)
+        case "searxng":
             guard let url = cfg.searxngURL, !url.trimmingCharacters(in: .whitespaces).isEmpty else {
                 return nil
             }
             return SearxngBackend(baseURL: url)
+        #if KREACH
         case "kreach":
-            // Kreach is the user's own engine; default to the local loopback API
-            // so `search_backend = "kreach"` works with no extra URL config.
+            // PRIVATE local backend (a self-hosted crawled index). Compiled in
+            // ONLY for `KRILL_KREACH=1` dev builds; absent from public releases.
+            // Defaults to the loopback API so it works with no extra URL config.
             let url = cfg.kreachURL?.trimmingCharacters(in: .whitespaces)
             return KreachBackend(baseURL: (url?.isEmpty == false ? url! : "http://127.0.0.1:8000"))
+        #endif
         default:
             return nil
         }
     }
 
     private static let notConfigured =
-        "Error: web search is not configured. Set a SearXNG instance URL to enable it, e.g.\n"
-        + "  /config searxng_url=http://localhost:8888\n"
-        + "or export KRILL_SEARXNG_URL. The instance must have `json` enabled in its search.formats."
+        "Error: the selected web-search backend is not configured. The default "
+        + "(DuckDuckGo) needs no setup; for reliable results set a BYOK backend, e.g.\n"
+        + "  /config search_backend=brave   (then  /config brave_api_key=...   or  export KRILL_BRAVE_API_KEY)\n"
+        + "  /config search_backend=tavily  (then  /config tavily_api_key=...  or  export KRILL_TAVILY_API_KEY)\n"
+        + "Or point at a self-hosted SearXNG with  /config searxng_url=http://localhost:8888 ."
 
     public func run(argumentsJSON: String) async -> ToolResult {
         guard let obj = jsonObject(argumentsJSON),

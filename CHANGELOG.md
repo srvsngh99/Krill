@@ -6,6 +6,17 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+### Added
+
+- **Web search works out of the box.** `web_search` (and `DeepResearch` /
+  `POST /research`) now ships a keyless **DuckDuckGo** backend as the default
+  (`search_backend = auto`), so a fresh install can search the web with no setup.
+  For reliable, rate-limit-free results, opt into a **BYOK** backend: **Brave**
+  (`/config search_backend=brave` + `brave_api_key` or `KRILL_BRAVE_API_KEY`) or
+  **Tavily** (`search_backend=tavily` + `tavily_api_key` / `KRILL_TAVILY_API_KEY`);
+  both have free tiers. Self-hosted SearXNG is still supported. API keys are
+  redacted in `/config` output. See `docs/decisions/0002-web-search-backends.md`.
+
 ### Fixed
 
 - **Ornith-9B (qwen3_5) no longer runs on / loops on multi-turn and agentic

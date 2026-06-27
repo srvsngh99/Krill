@@ -4,6 +4,10 @@ import XCTest
 import FoundationNetworking
 #endif
 
+// KreachBackend is gated behind the KREACH compile flag (private, dev-only), so
+// its tests are too — they compile only under `KRILL_KREACH=1` (see Package.swift).
+#if KREACH
+
 /// Canned fetcher returning a fixed JSON body, to drive KreachBackend without
 /// the network (mirrors the SearxngBackend test's stub).
 private struct StubJSONFetcher: WebFetcher {
@@ -84,3 +88,5 @@ final class KreachBackendTests: XCTestCase {
         XCTAssertEqual(backend?.name, "kreach", "search_backend=kreach selects KreachBackend")
     }
 }
+
+#endif // KREACH
