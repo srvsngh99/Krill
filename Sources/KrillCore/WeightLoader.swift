@@ -116,7 +116,24 @@ public func loadWeights(
                      mode: mlxQuantizationMode(q.mode))
         } else {
             quantize(model: model) { path, _ in
-                let eff = q.effective(for: path)
+                // When `keyPrefix` is set the weight KEYS are de-prefixed at load,
+                // but the config's per-module override keys keep the prefix:
+                // mlx_vlm-format VLMs key overrides `language_model.model.layers.N...`
+                // while the loaded module path is `model.layers.N...`. Resolve the
+                // de-prefixed path first, then the prefixed form, so protected
+                // modules (e.g. 8-bit down_proj/o_proj on an nvfp4 base) bind to
+                // their real precision instead of silently falling back to the
+                // top-level format (whose missing `.biases` then fails the load).
+                // Mirrors loadGemma4's text-only override fallback.
+                let lookup: String
+                if q.moduleOverrides[path] != nil {
+                    lookup = path
+                } else if let kp = keyPrefix, q.moduleOverrides[kp + path] != nil {
+                    lookup = kp + path
+                } else {
+                    lookup = path
+                }
+                let eff = q.effective(for: lookup)
                 return (eff.groupSize, eff.bits, mlxQuantizationMode(eff.mode))
             }
         }

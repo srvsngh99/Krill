@@ -136,8 +136,13 @@ private let aliases: [String: ResolvedModel] = [
     // affine-int4 quant we publish under srv-sngh (linked to the upstream
     // `deepreinforce-ai/Ornith-1.0-9B`); see the HF-publish step.
     "ornith-9b": ResolvedModel(
-        repo: "srv-sngh/Ornith-1.0-9B-4bit",
+        repo: "srv-sngh/Ornith-1.0-9B-MLX-4bit",
         name: "ornith-9b", family: .qwen35, params: "9B", quant: "4bit", context: 262144),
+    // nvfp4 mixed-precision build (g16 base + down_proj/o_proj @8-bit, vision
+    // preserved); same complete-VLM weights, smaller/faster than the int4.
+    "ornith-9b-nvfp4": ResolvedModel(
+        repo: "srv-sngh/Ornith-9B-mlx-nvfp4",
+        name: "ornith-9b-nvfp4", family: .qwen35, params: "9B", quant: "nvfp4", context: 262144),
 
     // Mixture-of-experts (WS6 foundation tier: family detection +
     // clear rejection only; router + expert dispatch lands in
