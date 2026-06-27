@@ -156,27 +156,59 @@ public enum ToolCalling {
         format: ToolFormat = .hermes
     ) -> [[String: String]] {
         guard !tools.isEmpty else { return messages }
+        let hadSystem = messages.contains { $0["role"] == "system" }
+        let injected: [[String: String]]
         switch format {
         case .hermes:
-            return injectHermes(into: messages, tools: tools)
+            injected = injectHermes(into: messages, tools: tools)
         case .gemma4:
-            return injectGemma4(into: messages, tools: tools)
+            injected = injectGemma4(into: messages, tools: tools)
         case .llama:
-            return injectLlama(into: messages, tools: tools)
+            injected = injectLlama(into: messages, tools: tools)
         case .qwen:
-            return injectQwen(into: messages, tools: tools)
+            injected = injectQwen(into: messages, tools: tools)
         case .mistral:
-            return injectMistral(into: messages, tools: tools)
+            injected = injectMistral(into: messages, tools: tools)
         case .phi:
-            return injectPhi(into: messages, tools: tools)
+            injected = injectPhi(into: messages, tools: tools)
         case .pythonic:
             // `.pythonic` is a PARSE-only override (vLLM-style): inject always
             // resolves via `forFamily`, which never yields `.pythonic`, so a
             // pythonic-pinned model is still prompted in its trained family
             // format. This arm is defensive; the generic Hermes block is a safe
             // tool prompt if a caller ever forces pythonic injection.
-            return injectHermes(into: messages, tools: tools)
+            injected = injectHermes(into: messages, tools: tools)
         }
+        // When the caller brought no system prompt of its own, add a short
+        // agentic directive so models that tend to over-call (Mistral, Ornith)
+        // stop once they have results instead of looping. Clients that supply
+        // their own system prompt (deepkrill, reef) keep full control.
+        guard !hadSystem else { return injected }
+        return appendingAgenticDirective(to: injected)
+    }
+
+    /// One-line behavior nudge appended to the tool system turn: call only when
+    /// needed, then answer and stop. Curbs the compulsive re-calling some
+    /// families show in a multi-step agent loop.
+    static let agenticToolDirective =
+        "Use tools only when needed. Once you have the tool results, "
+        + "reply with the final answer and do not call any more tools."
+
+    private static func appendingAgenticDirective(
+        to messages: [[String: String]]
+    ) -> [[String: String]] {
+        var out = messages
+        if let i = out.firstIndex(where: { $0["role"] == "system" }) {
+            out[i]["content"] = (out[i]["content"] ?? "") + "\n\n" + agenticToolDirective
+            return out
+        }
+        // No system turn (Gemma 4's `tools` role, Mistral's user-turn tools):
+        // hang the nudge off the last user turn so the native structure - and
+        // the leading tools turn - stays intact.
+        if let i = out.lastIndex(where: { $0["role"] == "user" }) {
+            out[i]["content"] = (out[i]["content"] ?? "") + "\n\n" + agenticToolDirective
+        }
+        return out
     }
 
     // MARK: - Forced (grammar-constrained) tool calls
@@ -841,6 +873,30 @@ public enum ToolCalling {
     /// `arguments`; `<|python_tag|>` may prefix it for the code env). Falls
     /// back to the Hermes sentinel because the small 1B checkpoint
     /// sometimes emits `<tool_call>…</tool_call>` instead.
+    /// Interprets a JSON object as a tool CALL - a string `name` plus actual
+    /// `parameters`/`arguments` values - and rejects an echoed tool SCHEMA
+    /// (which carries a `description`, the `type:"function"` wrapper, or a
+    /// JSON-schema args body like `{"type":"object","properties":…}`).
+    private static func callObject(_ obj: [String: Any]) -> ParsedToolCall? {
+        guard let name = obj["name"] as? String, !name.isEmpty,
+              (obj["type"] as? String) != "function",
+              obj["description"] == nil,
+              let argsAny = obj["parameters"] ?? obj["arguments"] else { return nil }
+        if let argsObj = argsAny as? [String: Any],
+           (argsObj["type"] as? String) == "object", argsObj["properties"] != nil {
+            return nil   // an echoed schema body, not a concrete call
+        }
+        let argsString: String
+        if let s = argsAny as? String {
+            argsString = s
+        } else if let d = try? JSONSerialization.data(withJSONObject: argsAny) {
+            argsString = String(data: d, encoding: .utf8) ?? "{}"
+        } else {
+            argsString = "{}"
+        }
+        return ParsedToolCall(name: name, argumentsJSON: argsString)
+    }
+
     static func extractLlama(from text: String)
         -> (calls: [ParsedToolCall], cleanedText: String)
     {
@@ -861,20 +917,13 @@ public enum ToolCalling {
         var scan = Substring(cleaned)
         while let (json, end) = firstJSONObject(in: scan), !json.isEmpty {
             if let data = json.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let name = obj["name"] as? String, !name.isEmpty,
-               obj["function"] == nil,
-               !((obj["type"] as? String) == "function"),
-               let argsAny = obj["parameters"] ?? obj["arguments"] {
-                let argsString: String
-                if let s = argsAny as? String {
-                    argsString = s
-                } else if let d = try? JSONSerialization.data(withJSONObject: argsAny) {
-                    argsString = String(data: d, encoding: .utf8) ?? "{}"
-                } else {
-                    argsString = "{}"
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                // A call can be the object itself, or nested under `function`
+                // (OpenAI-style `{"function":{"name":…,"parameters":…}}`).
+                if let call = callObject(obj)
+                    ?? (obj["function"] as? [String: Any]).flatMap(callObject) {
+                    calls.append(call)
                 }
-                calls.append(ParsedToolCall(name: name, argumentsJSON: argsString))
             }
             scan = scan[end...]
         }

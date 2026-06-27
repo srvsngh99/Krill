@@ -148,8 +148,9 @@ final class AgentLoopTests: XCTestCase {
     }
 
     func testIterationCapStopsAnInfiniteToolLoop() async {
-        // Model that ALWAYS calls a tool: the cap must stop it.
-        let always = Array(repeating: hermesCall("bash", #"{"command":"loop"}"#), count: 20)
+        // Model that ALWAYS calls a tool (varying args so the runaway dedupe
+        // does not trip first): the iteration cap must stop it.
+        let always = (0 ..< 20).map { hermesCall("bash", "{\"command\":\"loop\($0)\"}") }
         let gen = MockGenerator(responses: always)
         let loop = AgentLoop(
             generator: gen, tools: ToolRegistry([StubTool()]), maxIterations: 3)
@@ -158,6 +159,34 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertTrue(t.hitIterationLimit)
         XCTAssertEqual(t.steps.count, 3, "should stop exactly at the cap")
         XCTAssertEqual(t.finalText, "")
+    }
+
+    func testRunawayGuardStopsRepeatedIdenticalCalls() async {
+        // A model re-emitting the SAME (name, args) call is looping; the runaway
+        // guard must stop it BEFORE the iteration cap, without erroring.
+        let same = Array(repeating: hermesCall("bash", #"{"command":"loop"}"#), count: 20)
+        let gen = MockGenerator(responses: same)
+        let loop = AgentLoop(
+            generator: gen, tools: ToolRegistry([StubTool()]), maxIterations: 10)
+        let t = await loop.run(user: "go")
+
+        XCTAssertFalse(t.hitIterationLimit, "dedupe should stop before the iteration cap")
+        // 1st turn runs the call; 2nd turn is an exact repeat -> guard trips.
+        XCTAssertEqual(t.steps.count, 2)
+        XCTAssertEqual(t.steps[0].toolCalls.count, 1)
+        XCTAssertTrue(t.steps[1].toolCalls.isEmpty)
+    }
+
+    func testRunawayGuardCapsCallsInOneTurn() async {
+        // One turn emitting many distinct calls is clamped by the total budget
+        // (maxIterations * 4), so a spam generation cannot run unbounded.
+        let many = (0 ..< 20).map { hermesCall("bash", "{\"command\":\"c\($0)\"}") }.joined()
+        let gen = MockGenerator(responses: [many, "done"])
+        let loop = AgentLoop(
+            generator: gen, tools: ToolRegistry([StubTool()]), maxIterations: 3)
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps[0].toolCalls.count, 12, "20-call turn clamped to the 3*4 budget")
     }
 
     func testEmptyArgsAreRepairedViaConstrainedPass() async {

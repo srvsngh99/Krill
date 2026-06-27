@@ -1196,6 +1196,44 @@ final class ServerTests: XCTestCase {
         XCTAssertTrue(out[0]["content"]?.contains("<tool_call>") ?? false)
     }
 
+    func testToolSystemInjectionAddsAgenticDirectiveWhenNoSystem() {
+        // No caller system prompt -> add the "answer and stop" nudge.
+        let msgs = [["role": "user", "content": "hi"]]
+        let spec = ServerToolSpec(name: "t", description: "d", parametersJSON: "{}")
+        let out = ToolCalling.injectToolSystem(into: msgs, tools: [spec])
+        XCTAssertEqual(out.first?["role"], "system")
+        XCTAssertTrue(out.first?["content"]?.contains(ToolCalling.agenticToolDirective) ?? false)
+    }
+
+    func testToolSystemInjectionSkipsAgenticDirectiveWhenSystemPresent() {
+        // A caller that brought its own system prompt keeps full control.
+        let msgs = [["role": "system", "content": "Be terse."],
+                    ["role": "user", "content": "hi"]]
+        let spec = ServerToolSpec(name: "t", description: "d", parametersJSON: "{}")
+        let out = ToolCalling.injectToolSystem(into: msgs, tools: [spec])
+        XCTAssertFalse(out[0]["content"]?.contains(ToolCalling.agenticToolDirective) ?? true)
+    }
+
+    func testLlamaExtractWrappedFunctionObject() {
+        // Some Llama builds wrap the call: {"function":{"name",…,"parameters":…}}.
+        let (calls, _) = ToolCalling.extractToolCalls(
+            from: "{\"function\":{\"name\":\"get_weather\",\"parameters\":{\"city\":\"Tokyo\"}}}",
+            format: .llama, knownToolNames: ["get_weather"])
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "get_weather")
+        XCTAssertEqual(argsObj(calls[0])?["city"] as? String, "Tokyo")
+    }
+
+    func testLlamaExtractRejectsEchoedSchema() {
+        // An echoed tool SCHEMA (description + JSON-schema args body) is not a call.
+        let schema = "{\"type\":\"function\",\"function\":{\"name\":\"get_weather\","
+            + "\"description\":\"Get weather\",\"parameters\":{\"type\":\"object\","
+            + "\"properties\":{\"city\":{\"type\":\"string\"}}}}}"
+        let (calls, _) = ToolCalling.extractToolCalls(
+            from: schema, format: .llama, knownToolNames: ["get_weather"])
+        XCTAssertTrue(calls.isEmpty)
+    }
+
     // MARK: - Native Gemma 4 tool format (WS1-4)
 
     func testGemma4ExtractCanonicalCall() {
