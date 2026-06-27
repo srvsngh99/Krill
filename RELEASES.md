@@ -7,6 +7,18 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.14.0 — 2026-06-27
+Adds a **native Swift + MLX runtime for Ornith-1.0-9B** (`krill run ornith-9b`) —
+a Qwen3.5-class hybrid (GatedDeltaNet linear-attention/SSM layers interleaved
+with full softmax-attention), ported from scratch and verified to match mlx_vlm
+token-for-token. Text is served natively; the vision tower runs via mlx_vlm for
+now. Quant published at `srv-sngh/Ornith-1.0-9B-4bit` (int4; nvfp4 to follow in
+v0.14.1). Credit to the original creators, `deepreinforce-ai/Ornith-1.0-9B`.
+
+Also ships **`krill update`** — a self-update command that checks the latest
+release, semver-compares the running `KrillVersion`, and re-runs the installer
+(Homebrew installs are redirected to `brew upgrade`).
+
 ## v0.13.0 — 2026-06-25
 Adds the **`gemma-4-12b-agentic`** model — the Gemma-4-12B *agentic* fine-tune in
 Krill's mixed-NVFP4 format, runnable with `krill pull gemma-4-12b-agentic`. It's
