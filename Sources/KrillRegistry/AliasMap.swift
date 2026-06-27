@@ -62,6 +62,25 @@ public struct ResolvedModel: Sendable {
     public let params: String
     public let quant: String
     public let context: Int
+    /// Optional per-alias tool-call PARSER override (e.g. "pythonic"). When set,
+    /// `ToolCalling.ToolFormat.forModel` uses it instead of the family default
+    /// for PARSING only; the inject/prompt still follows the family template.
+    /// Stored as a String to keep KrillRegistry free of a KrillTooling import.
+    /// Valid values: hermes, gemma4, llama, qwen, mistral, phi, pythonic.
+    public let toolFormat: String?
+
+    public init(
+        repo: String, name: String, family: ModelFamily, params: String,
+        quant: String, context: Int, toolFormat: String? = nil
+    ) {
+        self.repo = repo
+        self.name = name
+        self.family = family
+        self.params = params
+        self.quant = quant
+        self.context = context
+        self.toolFormat = toolFormat
+    }
 }
 
 // MARK: - Alias Database
@@ -215,6 +234,11 @@ private let aliases: [String: ResolvedModel] = [
     // natively in MLX. Converted from bf16 safetensors -> MLX-layout key remap
     // -> the proven mixed-nvfp4 requant (8-bit o_proj + vision/audio projectors).
     // Same `gemma4_unified` backbone - see docs/GEMMA4_12B_AGENTIC_FINETUNE.md.
+    // No toolFormat override: this finetune emits the gemma4 SENTINEL
+    // (`<|tool_call>call:NAME{json}<tool_call|>`), not pythonic, so it uses the
+    // family gemma4 parser plus the robust default (name-recovery for its
+    // `tools__name__arg__val` manglings, casing canonicalization, and the
+    // pythonic fallback). Verified by the cross-family agentic benchmark.
     "gemma-4-12b-agentic": ResolvedModel(
         repo: "srv-sngh/gemma-4-12B-agentic-fable5-composer2.5-v2-nvfp4",
         name: "gemma-4-12b-agentic", family: .gemma4Unified, params: "12B",

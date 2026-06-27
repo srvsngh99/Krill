@@ -50,6 +50,11 @@ public enum ToolCalling {
         case qwen
         case mistral
         case phi
+        /// Pythonic calls: `name(arg=val)`, `tools.name(arg=val)`, and fenced
+        /// ```tool_code / ```python blocks. This is Gemma 3/4's OFFICIAL
+        /// function-calling form and what several agentic fine-tunes emit. Like
+        /// vLLM's `pythonic` tool-call parser; selectable per-alias.
+        case pythonic
 
         /// Resolve the wire format from the loaded model family
         /// (`InferenceEngine.family`).
@@ -83,6 +88,34 @@ public enum ToolCalling {
             case .mistral: return .mistral
             case .phi: return .phi
             }
+        }
+
+        /// Map a per-alias override string (registry `ResolvedModel.toolFormat`)
+        /// onto a format. Returns nil for an unknown string.
+        public static func forName(_ s: String) -> ToolFormat? {
+            switch s.lowercased() {
+            case "hermes": return .hermes
+            case "gemma4": return .gemma4
+            case "llama": return .llama
+            case "qwen": return .qwen
+            case "mistral": return .mistral
+            case "phi": return .phi
+            case "pythonic": return .pythonic
+            default: return nil
+            }
+        }
+
+        /// Resolve the PARSE format for a specific model: a per-alias override
+        /// (`AliasMap.resolve(name).toolFormat`) wins; otherwise the family
+        /// default. Inject still uses `forFamily`, so a pythonic-pinned model
+        /// keeps its trained prompt and only its PARSER changes (vLLM-style).
+        public static func forModel(_ modelName: String?, family: String?) -> ToolFormat {
+            if let modelName,
+               let override = AliasMap.resolve(modelName)?.toolFormat,
+               let fmt = forName(override) {
+                return fmt
+            }
+            return forFamily(family)
         }
     }
 
@@ -136,6 +169,13 @@ public enum ToolCalling {
             return injectMistral(into: messages, tools: tools)
         case .phi:
             return injectPhi(into: messages, tools: tools)
+        case .pythonic:
+            // `.pythonic` is a PARSE-only override (vLLM-style): inject always
+            // resolves via `forFamily`, which never yields `.pythonic`, so a
+            // pythonic-pinned model is still prompted in its trained family
+            // format. This arm is defensive; the generic Hermes block is a safe
+            // tool prompt if a caller ever forces pythonic injection.
+            return injectHermes(into: messages, tools: tools)
         }
     }
 
@@ -728,17 +768,34 @@ public enum ToolCalling {
         ("<|tool_call|>", "<tool_call|>"),
     ]
 
-    public static func extractToolCalls(from text: String, format: ToolFormat = .hermes)
-        -> (calls: [ParsedToolCall], cleanedText: String)
-    {
+    public static func extractToolCalls(
+        from text: String, format: ToolFormat = .hermes,
+        knownToolNames: [String] = []
+    ) -> (calls: [ParsedToolCall], cleanedText: String) {
+        var result: (calls: [ParsedToolCall], cleanedText: String)
         switch format {
-        case .hermes: return extractHermes(from: text)
-        case .gemma4: return extractGemma4(from: text)
-        case .llama: return extractLlama(from: text)
-        case .qwen: return extractQwen(from: text)
-        case .mistral: return extractMistral(from: text)
-        case .phi: return extractPhi(from: text)
+        case .hermes: result = extractHermes(from: text)
+        case .gemma4: result = extractGemma4(from: text)
+        case .llama: result = extractLlama(from: text)
+        case .qwen: result = extractQwen(from: text)
+        case .mistral: result = extractMistral(from: text)
+        case .phi: result = extractPhi(from: text)
+        case .pythonic: result = extractPythonic(from: text, known: knownToolNames)
         }
+        // Robust default: when the native parser found nothing and we know the
+        // offered tool names, try the pythonic form (Gemma's official
+        // function-calling, and what some agentic fine-tunes emit). Gated on the
+        // names so a stray `func(...)` in prose is never a false call.
+        if result.calls.isEmpty, !knownToolNames.isEmpty, format != .pythonic {
+            let py = extractPythonic(from: text, known: knownToolNames)
+            if !py.calls.isEmpty { result = py }
+        }
+        // Canonicalize tool-name casing to the offered set (`Multiply` ->
+        // `multiply`) so a casing slip is never an "unknown tool".
+        if !knownToolNames.isEmpty {
+            result.calls = canonicalizeNames(result.calls, known: knownToolNames)
+        }
+        return result
     }
 
     /// Extract tool calls only when the request actually offered tools.
@@ -748,10 +805,11 @@ public enum ToolCalling {
     /// output as a tool call (e.g. an Anthropic `tool_use` block). With no
     /// tools offered there can be no tool calls by definition.
     public static func extractIfToolsOffered(
-        from text: String, hasTools: Bool, format: ToolFormat
+        from text: String, hasTools: Bool, format: ToolFormat,
+        knownToolNames: [String] = []
     ) -> (calls: [ParsedToolCall], cleanedText: String) {
         guard hasTools else { return ([], text) }
-        return extractToolCalls(from: text, format: format)
+        return extractToolCalls(from: text, format: format, knownToolNames: knownToolNames)
     }
 
     /// Qwen 2.5/3 parser: the Hermes extractor, plus a leading-junk-tolerant
@@ -934,6 +992,10 @@ public enum ToolCalling {
         // Strip reasoning channels from visible output (shared with the
         // non-tool response path via ReasoningParser).
         var cleaned = ReasoningParser.stripGemmaChannels(text).visible
+        // Some Gemma fine-tunes emit a special-token quote `<|"|>` inside arg
+        // blobs (e.g. `{city:<|"|>Tokyo<|"|>}`); normalize it to a real quote so
+        // the arg JSON parses.
+        cleaned = cleaned.replacingOccurrences(of: "<|\"|>", with: "\"")
 
         var calls: [ParsedToolCall] = []
         while let s = cleaned.range(of: "<|tool_call>") {
@@ -1155,7 +1217,9 @@ public enum ToolCalling {
         else { return nil }
 
         let argsString: String
-        if let a = obj["arguments"] {
+        // Accept `parameters` as an alias for `arguments` (Llama/Hermes mixed
+        // emitters use either) so a `{name, parameters}` object is not dropped.
+        if let a = obj["arguments"] ?? obj["parameters"] {
             if let s = a as? String {
                 argsString = s
             } else if let d = try? JSONSerialization.data(withJSONObject: a) {
@@ -1167,6 +1231,229 @@ public enum ToolCalling {
             argsString = "{}"
         }
         return ParsedToolCall(name: name, argumentsJSON: argsString)
+    }
+
+    // MARK: - Pythonic parser + cross-format normalization
+
+    /// Canonicalize parsed tool-name casing to the offered set: `Multiply` ->
+    /// `multiply`. Names that already match exactly, or have no case-insensitive
+    /// match, are left untouched.
+    static func canonicalizeNames(_ calls: [ParsedToolCall], known: [String])
+        -> [ParsedToolCall]
+    {
+        guard !known.isEmpty else { return calls }
+        let exact = Set(known)
+        var lower: [String: String] = [:]
+        for k in known where lower[k.lowercased()] == nil { lower[k.lowercased()] = k }
+        return calls.map { c in
+            if exact.contains(c.name) { return c }
+            if let canon = recoverKnownName(c.name, lower), canon != c.name {
+                return ParsedToolCall(name: canon, argumentsJSON: c.argumentsJSON)
+            }
+            return c
+        }
+    }
+
+    /// Resolve a parsed tool name to an OFFERED tool, tolerating casing and the
+    /// namespaced/mangled names some fine-tunes emit: `Multiply`,
+    /// `tools.get_weather`, and the arg-baked `tools__get_weather__city__Paris`
+    /// / `tools__add__a__b__10__10` form. Gated on `knownLower` so only an
+    /// offered tool is ever returned (never a hallucinated name).
+    private static func recoverKnownName(_ raw: String, _ knownLower: [String: String])
+        -> String?
+    {
+        if let c = knownLower[raw.lowercased()] { return c }          // exact / case-only
+        var s = raw
+        for p in ["tools__", "tools.", "functions__", "functions.",
+                  "tool_calls__", "tool__", "tool."] {
+            if s.lowercased().hasPrefix(p) { s = String(s.dropFirst(p.count)); break }
+        }
+        if let c = knownLower[s.lowercased()] { return c }
+        // Split on the `__`/`.` separators the manglers use; a single `_` inside
+        // a real tool name (e.g. get_weather) is preserved. Return the first
+        // segment that is itself an offered tool.
+        let segments = s.components(separatedBy: "__")
+            .flatMap { $0.components(separatedBy: ".") }
+        for seg in segments where !seg.isEmpty {
+            if let c = knownLower[seg.lowercased()] { return c }
+        }
+        return nil
+    }
+
+    /// Pythonic tool-call parser. Recognizes `name(arg=val, ...)`,
+    /// `tools.name(arg=val)`, fenced ```tool_code / ```python blocks, and
+    /// `[f(...), g(...)]` lists (Gemma 3/4's official function-calling form, and
+    /// what some agentic fine-tunes emit). Emits a call ONLY when the
+    /// dotted-tail identifier is in `known` (the offered tools), so arbitrary
+    /// `func(...)` in prose/code is never a false positive. Python kwargs map to
+    /// a JSON object; positional args (no `=`) are skipped.
+    static func extractPythonic(from text: String, known: [String])
+        -> (calls: [ParsedToolCall], cleanedText: String)
+    {
+        guard !known.isEmpty else { return ([], text) }
+        let knownLower = Set(known.map { $0.lowercased() })
+        var body = ReasoningParser.stripGemmaChannels(text).visible
+        for fence in ["```tool_code", "```python", "```json", "```"] {
+            body = body.replacingOccurrences(of: fence, with: " ")
+        }
+        let chars = Array(body)
+        let n = chars.count
+        func isIdentStart(_ c: Character) -> Bool { c.isLetter || c == "_" }
+        func isIdent(_ c: Character) -> Bool {
+            c.isLetter || c.isNumber || c == "_" || c == "."
+        }
+        var calls: [ParsedToolCall] = []
+        var i = 0
+        while i < n {
+            guard isIdentStart(chars[i]) else { i += 1; continue }
+            var j = i
+            while j < n && isIdent(chars[j]) { j += 1 }
+            var k = j
+            while k < n && chars[k] == " " { k += 1 }
+            guard k < n && chars[k] == "(" else { i = j; continue }
+            let raw = String(chars[i ..< j])
+            let name = raw.split(separator: ".").last.map(String.init) ?? raw
+            guard knownLower.contains(name.lowercased()) else { i = j; continue }
+            guard let (inner, end) = balancedParen(chars, k) else { i = j; continue }
+            calls.append(ParsedToolCall(name: name, argumentsJSON: pyKwargsToJSON(inner)))
+            i = end
+        }
+        return (calls, calls.isEmpty ? text : "")
+    }
+
+    /// From `chars[open] == "("`, return the text between the parens and the
+    /// index just past the matching `)`, string-literal aware. nil if unbalanced.
+    private static func balancedParen(_ chars: [Character], _ open: Int)
+        -> (inner: String, end: Int)?
+    {
+        var depth = 0
+        var inStr = false
+        var q: Character = "\""
+        var esc = false
+        var i = open
+        let start = open + 1
+        while i < chars.count {
+            let c = chars[i]
+            if inStr {
+                if esc { esc = false } else if c == "\\" { esc = true }
+                else if c == q { inStr = false }
+            } else {
+                if c == "\"" || c == "'" { inStr = true; q = c }
+                else if c == "(" { depth += 1 }
+                else if c == ")" {
+                    depth -= 1
+                    if depth == 0 { return (String(chars[start ..< i]), i + 1) }
+                }
+            }
+            i += 1
+        }
+        return nil
+    }
+
+    /// `key=val, key2=val2` (Python kwargs) -> JSON object. Positional args
+    /// (no top-level `=`) are skipped. Bracket/string aware.
+    private static func pyKwargsToJSON(_ s: String) -> String {
+        var pairs: [String] = []
+        for part in splitTopLevel(s, on: ",") {
+            let p = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            if p.isEmpty { continue }
+            guard let (key, val) = splitKV(p), !key.isEmpty else { continue }
+            pairs.append("\(jsonStringLiteral(key)): \(pyValueToJSON(val))")
+        }
+        return "{" + pairs.joined(separator: ", ") + "}"
+    }
+
+    /// Split on `sep` at bracket-depth 0, outside string literals.
+    private static func splitTopLevel(_ s: String, on sep: Character) -> [String] {
+        var out: [String] = []
+        var cur = ""
+        var depth = 0
+        var inStr = false
+        var q: Character = "\""
+        var esc = false
+        for c in s {
+            if inStr {
+                cur.append(c)
+                if esc { esc = false } else if c == "\\" { esc = true }
+                else if c == q { inStr = false }
+                continue
+            }
+            switch c {
+            case "\"", "'": inStr = true; q = c; cur.append(c)
+            case "(", "[", "{": depth += 1; cur.append(c)
+            case ")", "]", "}": depth -= 1; cur.append(c)
+            case sep where depth == 0: out.append(cur); cur = ""
+            default: cur.append(c)
+            }
+        }
+        if !cur.trimmingCharacters(in: .whitespaces).isEmpty { out.append(cur) }
+        return out
+    }
+
+    /// Split `key=value` on the first top-level `=` (not `==`/`!=`/`<=`/`>=`).
+    private static func splitKV(_ p: String) -> (key: String, value: String)? {
+        let chars = Array(p)
+        var depth = 0
+        var inStr = false
+        var q: Character = "\""
+        var esc = false
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            if inStr {
+                if esc { esc = false } else if c == "\\" { esc = true }
+                else if c == q { inStr = false }
+            } else {
+                if c == "\"" || c == "'" { inStr = true; q = c }
+                else if c == "(" || c == "[" || c == "{" { depth += 1 }
+                else if c == ")" || c == "]" || c == "}" { depth -= 1 }
+                else if c == "=" && depth == 0 {
+                    let prev = i > 0 ? chars[i - 1] : " "
+                    let next = i + 1 < chars.count ? chars[i + 1] : " "
+                    if prev != "=" && prev != "!" && prev != "<" && prev != ">" && next != "=" {
+                        return (String(chars[0 ..< i]).trimmingCharacters(in: .whitespaces),
+                                String(chars[(i + 1)...]).trimmingCharacters(in: .whitespaces))
+                    }
+                }
+            }
+            i += 1
+        }
+        return nil
+    }
+
+    /// A single Python value -> JSON: quoted string, int/float, True/False/None,
+    /// best-effort list/dict, else a JSON string.
+    private static func pyValueToJSON(_ v0: String) -> String {
+        let v = v0.trimmingCharacters(in: .whitespacesAndNewlines)
+        if v.isEmpty { return "\"\"" }
+        if v.count >= 2, let f = v.first, let l = v.last,
+           (f == "\"" && l == "\"") || (f == "'" && l == "'") {
+            return jsonStringLiteral(String(v.dropFirst().dropLast()))
+        }
+        switch v {
+        case "True", "true": return "true"
+        case "False", "false": return "false"
+        case "None", "null": return "null"
+        default: break
+        }
+        if Int(v) != nil || Double(v) != nil { return v }
+        if v.hasPrefix("[") || v.hasPrefix("{") {
+            let norm = normalizeGemma4Args(v)
+            if let d = norm.data(using: .utf8),
+               (try? JSONSerialization.jsonObject(with: d)) != nil {
+                return norm
+            }
+        }
+        return jsonStringLiteral(v)
+    }
+
+    /// Encode a string as a JSON string literal (with surrounding quotes).
+    private static func jsonStringLiteral(_ s: String) -> String {
+        if let d = try? JSONSerialization.data(withJSONObject: [s]),
+           let arr = String(data: d, encoding: .utf8) {
+            return String(arr.dropFirst().dropLast())   // strip the [ ] of the array
+        }
+        return "\"\""
     }
 
     // MARK: - Response shaping

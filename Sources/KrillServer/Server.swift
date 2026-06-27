@@ -872,6 +872,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         touchKeepAlive(nil)
 
         let toolFormat = ToolCalling.ToolFormat.forFamily(engine.family)
+        // Inject uses the family (trained) format; PARSE uses the per-alias
+        // override (forModel) + the offered tool names (pythonic fallback +
+        // casing/params normalization). Captured as values for the closure.
+        let parseFormat = ToolCalling.ToolFormat.forModel(engine.modelName, family: engine.family)
+        let toolNames = p.tools.map { $0.name }
         var msgs = ToolCalling.injectToolSystem(
             into: p.messages, tools: p.tools, format: toolFormat)
         if p.thinking {
@@ -908,7 +913,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             // (no-tools turns must not misclassify ordinary JSON output as
             // an Anthropic tool_use block - see extractIfToolsOffered).
             let (calls, cleaned) = ToolCalling.extractIfToolsOffered(
-                from: visible, hasTools: !p.tools.isEmpty, format: toolFormat)
+                from: visible, hasTools: !p.tools.isEmpty, format: parseFormat,
+                knownToolNames: toolNames)
             let stats = getStats()
             let inTok = stats?.promptTokens ?? 0
             let outTok = stats?.generatedTokens ?? 0
@@ -988,6 +994,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         touchKeepAlive(nil)
 
         let toolFormat = ToolCalling.ToolFormat.forFamily(engine.family)
+        // Inject = family format; PARSE = per-alias override + offered names.
+        let parseFormat = ToolCalling.ToolFormat.forModel(engine.modelName, family: engine.family)
+        let toolNames = p.tools.map { $0.name }
         let msgs = ToolCalling.injectToolSystem(
             into: p.messages, tools: p.tools, format: toolFormat)
         let modelName = engine.modelName ?? p.model ?? "unknown"
@@ -1013,7 +1022,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
             let (visible, _) = ReasoningParser.strip(full)
             let (calls0, cleaned) = ToolCalling.extractIfToolsOffered(
-                from: visible, hasTools: !p.tools.isEmpty, format: toolFormat)
+                from: visible, hasTools: !p.tools.isEmpty, format: parseFormat,
+                knownToolNames: toolNames)
             // Constrain auto tool-call arguments to the tool's schema (fixes the
             // empty-args "missing field cmd" loop codex hit on small models).
             let calls = await self.constrainToolArgs(
@@ -1180,6 +1190,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         style: ToolChatStyle
     ) {
         let toolFormat = ToolCalling.ToolFormat.forFamily(engine.family)
+        // Inject = family (trained) format; PARSE = per-alias override + names.
+        let parseFormat = ToolCalling.ToolFormat.forModel(engine.modelName, family: engine.family)
+        let toolNames = request.tools.map { $0.name }
         // tool_choice routing: forced calls (.required / .function) are
         // grammar-CONSTRAINED to a valid {name,arguments} JSON (best-effort,
         // name-correct calls); .none suppresses tools; .auto uses the family
@@ -1267,7 +1280,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 calls = []; cleaned = postReasoning   // tools suppressed
             } else {
                 (calls, cleaned) = ToolCalling.extractToolCalls(
-                    from: postReasoning, format: toolFormat)
+                    from: postReasoning, format: parseFormat,
+                    knownToolNames: toolNames)
                 // Constrain auto tool-call arguments to the tool's schema so a
                 // small model cannot emit empty/invalid args (which dead-loop
                 // strict agents like codex).

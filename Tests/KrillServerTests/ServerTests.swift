@@ -1235,6 +1235,115 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(cleaned, "Sure!")
     }
 
+    // MARK: - Pythonic + cross-format normalization (decision 0001)
+
+    private func argsObj(_ c: ToolCalling.ParsedToolCall) -> [String: Any]? {
+        (try? JSONSerialization.jsonObject(with: Data(c.argumentsJSON.utf8)))
+            .flatMap { $0 as? [String: Any] }
+    }
+
+    func testPythonicSimpleKwargCall() {
+        let (calls, _) = ToolCalling.extractToolCalls(
+            from: "get_weather(city=\"Paris\")", format: .pythonic,
+            knownToolNames: ["get_weather"])
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.name, "get_weather")
+        XCTAssertEqual(argsObj(calls[0])?["city"] as? String, "Paris")
+    }
+
+    func testPythonicDottedFencedNumericBool() {
+        let (calls, _) = ToolCalling.extractToolCalls(
+            from: "```tool_code\ntools.add(a=7, b=6, exact=True)\n```",
+            format: .pythonic, knownToolNames: ["add"])
+        XCTAssertEqual(calls.first?.name, "add")
+        XCTAssertEqual(argsObj(calls[0])?["a"] as? Int, 7)
+        XCTAssertEqual(argsObj(calls[0])?["exact"] as? Bool, true)
+    }
+
+    func testPythonicListOfCalls() {
+        let (calls, _) = ToolCalling.extractToolCalls(
+            from: "[add(a=3, b=4), multiply(a=7, b=5)]", format: .pythonic,
+            knownToolNames: ["add", "multiply"])
+        XCTAssertEqual(calls.map { $0.name }, ["add", "multiply"])
+    }
+
+    func testPythonicGatedOnKnownNames() {
+        // `print`/`range` are not offered tools -> never parsed as calls.
+        let (calls, _) = ToolCalling.extractToolCalls(
+            from: "I will print(x) then range(10).", format: .pythonic,
+            knownToolNames: ["get_weather"])
+        XCTAssertTrue(calls.isEmpty)
+    }
+
+    func testPythonicFallbackUnderFamilyFormat() {
+        // Gemma family parser finds nothing; the pythonic fallback catches it.
+        let (calls, _) = ToolCalling.extractToolCalls(
+            from: "get_weather(city=\"Tokyo\")", format: .gemma4,
+            knownToolNames: ["get_weather"])
+        XCTAssertEqual(calls.first?.name, "get_weather")
+        XCTAssertEqual(argsObj(calls[0])?["city"] as? String, "Tokyo")
+    }
+
+    func testCasingCanonicalizedToOfferedSet() {
+        let (calls, _) = ToolCalling.extractToolCalls(
+            from: "<tool_call>{\"name\": \"Multiply\", \"arguments\": {\"a\": 7, \"b\": 6}}</tool_call>",
+            format: .hermes, knownToolNames: ["add", "multiply"])
+        XCTAssertEqual(calls.first?.name, "multiply")
+    }
+
+    func testParametersAliasAccepted() {
+        let (calls, _) = ToolCalling.extractToolCalls(
+            from: "<tool_call>{\"name\": \"add\", \"parameters\": {\"a\": 1, \"b\": 2}}</tool_call>",
+            format: .hermes, knownToolNames: ["add"])
+        XCTAssertEqual(calls.first?.name, "add")
+        XCTAssertEqual(argsObj(calls[0])?["a"] as? Int, 1)
+    }
+
+    func testNameRecoveryFromMangledGemmaName() {
+        // The agentic Gemma fine-tune emits arg-baked names + a `<|"|>` quote
+        // token; recover the real offered tool and parse the arg.
+        let (calls, _) = ToolCalling.extractToolCalls(
+            from: "<|tool_call>call:tools__get_weather__city__Paris{city:<|\"|>Paris<|\"|>}<tool_call|>",
+            format: .gemma4, knownToolNames: ["get_weather", "add"])
+        XCTAssertEqual(calls.first?.name, "get_weather")
+        XCTAssertEqual(argsObj(calls[0])?["city"] as? String, "Paris")
+    }
+
+    func testNameRecoveryStripsToolsPrefix() {
+        let (calls, _) = ToolCalling.extractToolCalls(
+            from: "<|tool_call>call:tools__add__a__b__10__10{a:10,b:10}<tool_call|>",
+            format: .gemma4, knownToolNames: ["add", "multiply"])
+        XCTAssertEqual(calls.first?.name, "add")
+        XCTAssertEqual(argsObj(calls[0])?["a"] as? Int, 10)
+    }
+
+    func testForModelOverrideAndFamilyFallback() {
+        // No alias is pinned today, so forModel falls back to the family default.
+        XCTAssertEqual(
+            ToolCalling.ToolFormat.forModel("gemma-4-12b-agentic", family: "gemma4_unified"),
+            ToolCalling.ToolFormat.forFamily("gemma4_unified"))
+        XCTAssertEqual(
+            ToolCalling.ToolFormat.forModel("gemma-4-e2b", family: "gemma4"), .gemma4)
+        XCTAssertEqual(ToolCalling.ToolFormat.forModel(nil, family: "qwen"), .qwen)
+        // The per-alias override mapping itself (used when an alias sets toolFormat).
+        XCTAssertEqual(ToolCalling.ToolFormat.forName("pythonic"), .pythonic)
+        XCTAssertEqual(ToolCalling.ToolFormat.forName("qwen"), .qwen)
+        XCTAssertNil(ToolCalling.ToolFormat.forName("nope"))
+    }
+
+    func testMistralPhiAdvertiseTools() {
+        XCTAssertTrue(ModelCapabilities.capabilities(for: .mistral).contains(.tools))
+        XCTAssertTrue(ModelCapabilities.capabilities(for: .phi).contains(.tools))
+    }
+
+    func testNoKnownNamesPreservesLegacyBehavior() {
+        // Without offered names, no pythonic fallback and no canonicalization,
+        // so existing callers/tests are unaffected.
+        let (calls, _) = ToolCalling.extractToolCalls(
+            from: "get_weather(city=\"Paris\")", format: .gemma4)
+        XCTAssertTrue(calls.isEmpty)
+    }
+
     func testGemma4NormalizeArgsBareKeysAndPythonLiterals() {
         let j = ToolCalling.normalizeGemma4Args("{a:1, b:'two', c:True, d:None}")
         let obj = (try? JSONSerialization.jsonObject(with: Data(j.utf8)))

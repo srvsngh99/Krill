@@ -181,7 +181,8 @@ public struct AgentLoop: Sendable {
 
             let output = await generator.complete(messages: messages)
             let (calls, cleaned) = ToolCalling.extractIfToolsOffered(
-                from: output, hasTools: hasTools, format: format)
+                from: output, hasTools: hasTools, format: format,
+                knownToolNames: specs.map { $0.name })
             // Strip reasoning (`<think>`/`<thinking>`/Gemma channels) from the
             // text we DISPLAY. The raw `output` still goes into the message
             // history below, so the model keeps its own context and tool-call

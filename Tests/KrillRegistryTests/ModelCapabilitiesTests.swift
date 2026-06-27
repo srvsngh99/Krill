@@ -52,14 +52,17 @@ final class ModelCapabilitiesTests: XCTestCase {
     // MARK: - Native tool template
 
     func testNativeToolTemplateMatchesShippedFamilies() {
-        // The set of families with native tool chat templates landed
-        // in PR #23 (commit 825d1b3). This test pins that set so a
-        // regression in tool-template detection is caught.
+        // The set of families with native tool chat templates. Originally
+        // landed in PR #23 (commit 825d1b3); mistral + phi were promoted to
+        // tool-capable in the tool-calling standardization (decision 0001),
+        // since they ship native inject templates + parsers
+        // (injectMistral/extractMistral, injectPhi/extractPhi). This test pins
+        // the set so an unintended regression is caught.
         XCTAssertTrue(ModelCapabilities.hasNativeToolTemplate(.gemma4))
         XCTAssertTrue(ModelCapabilities.hasNativeToolTemplate(.llama))
         XCTAssertTrue(ModelCapabilities.hasNativeToolTemplate(.qwen))
-        XCTAssertFalse(ModelCapabilities.hasNativeToolTemplate(.mistral))
-        XCTAssertFalse(ModelCapabilities.hasNativeToolTemplate(.phi))
+        XCTAssertTrue(ModelCapabilities.hasNativeToolTemplate(.mistral))
+        XCTAssertTrue(ModelCapabilities.hasNativeToolTemplate(.phi))
         XCTAssertFalse(ModelCapabilities.hasNativeToolTemplate(.glm))
         XCTAssertFalse(ModelCapabilities.hasNativeToolTemplate(.bert))
     }
