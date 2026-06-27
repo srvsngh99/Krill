@@ -91,8 +91,9 @@ final class AgentEventTests: XCTestCase {
 
     func testIterationLimitEmitsLimitEventAndNoFinal() async {
         let sink = EventSink()
-        // Always calls a tool: the cap stops it, so no finalAnswer is emitted.
-        let always = Array(repeating: hermesCall("read_file", #"{"x":"a"}"#), count: 10)
+        // Always calls a tool (varying args so the runaway dedupe does not trip
+        // first): the cap stops it, so no finalAnswer is emitted.
+        let always = (0 ..< 10).map { hermesCall("read_file", "{\"x\":\"\($0)\"}") }
         let loop = AgentLoop(
             generator: EventScriptGen(always),
             tools: ToolRegistry([EchoTool(name: "read_file", isReadOnly: true, reply: "ok")]),

@@ -163,6 +163,12 @@ public struct AgentLoop: Sendable {
         var hitLimit = false
         var cancelled = false
 
+        // Runaway guard: signatures of calls already executed (to drop exact
+        // repeats a looping model re-emits) and a total tool-call budget.
+        var executedSignatures = Set<String>()
+        var executedToolCalls = 0
+        let maxToolCalls = maxIterations * 4
+
         var iteration = 0
         while true {
             // Cooperative cancellation: when the enclosing Task is cancelled
@@ -181,7 +187,8 @@ public struct AgentLoop: Sendable {
 
             let output = await generator.complete(messages: messages)
             let (calls, cleaned) = ToolCalling.extractIfToolsOffered(
-                from: output, hasTools: hasTools, format: format)
+                from: output, hasTools: hasTools, format: format,
+                knownToolNames: specs.map { $0.name })
             // Strip reasoning (`<think>`/`<thinking>`/Gemma channels) from the
             // text we DISPLAY. The raw `output` still goes into the message
             // history below, so the model keeps its own context and tool-call
@@ -195,6 +202,24 @@ public struct AgentLoop: Sendable {
                 break
             }
 
+            // Runaway guard: drop calls whose (name, args) was already executed
+            // - a model re-emitting them is looping, not progressing. If a whole
+            // turn is repeats, or the total budget is spent, stop and take the
+            // visible text as the final answer instead of generating forever.
+            var freshCalls: [ToolCalling.ParsedToolCall] = []
+            for call in calls where executedSignatures.insert(toolSignature(call)).inserted {
+                freshCalls.append(call)
+            }
+            let remaining = maxToolCalls - executedToolCalls
+            if freshCalls.isEmpty || remaining <= 0 {
+                finalText = visible
+                steps.append(AgentStep(assistantText: visible, toolCalls: []))
+                onEvent?(.finalAnswer(visible))
+                break
+            }
+            let toRun = Array(freshCalls.prefix(remaining))
+            executedToolCalls += toRun.count
+
             onEvent?(.assistantTurn(text: visible))
 
             // Record the model's own turn (raw, so it sees the call it made),
@@ -203,7 +228,7 @@ public struct AgentLoop: Sendable {
             // come with the richer multi-turn work in a later PR).
             messages.append(["role": "assistant", "content": output])
             var invocations: [ToolInvocation] = []
-            for call in calls {
+            for call in toRun {
                 // Feed `result` back as the observation, record the invocation,
                 // and emit it, whether the tool ran, was denied, or was unknown.
                 func record(args: String, _ result: ToolResult) {
@@ -259,6 +284,12 @@ public struct AgentLoop: Sendable {
         return AgentTranscript(
             steps: steps, finalText: finalText,
             hitIterationLimit: hitLimit, wasCancelled: cancelled, messages: messages)
+    }
+
+    /// Stable identity for a parsed call: name + raw arguments. Two calls with
+    /// the same signature are treated as the same action for the runaway guard.
+    private func toolSignature(_ call: ToolCalling.ParsedToolCall) -> String {
+        call.name + "\u{1}" + call.argumentsJSON
     }
 
     /// Strip ALL reasoning blocks from text bound for the display surface.

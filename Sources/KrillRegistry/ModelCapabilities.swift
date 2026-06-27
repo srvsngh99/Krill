@@ -84,8 +84,12 @@ public enum ModelCapabilities {
     /// promotion.
     public static func capabilities(for family: ModelFamily) -> Set<Capability> {
         switch family {
-        case .mistral, .gemma, .phi, .glm, .glm4, .deepseek:
+        case .gemma, .glm, .glm4, .deepseek:
             return [.textGeneration]
+        case .mistral, .phi:
+            // Native tool template + parser (injectMistral/extractMistral,
+            // injectPhi/extractPhi) - advertise tools so they can go agentic.
+            return [.textGeneration, .tools]
         case .llama, .qwen:
             return [.textGeneration, .tools]
         case .qwen35:

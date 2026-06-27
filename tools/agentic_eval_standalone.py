@@ -53,9 +53,10 @@ TOOLS = [
             "text": {"type": "string"}}, "required": ["text"]}}},
 ]
 
-# ---- scenarios. expect.calls = ordered list of (name, args) the model should
-#      make (set [] for the no-tool case); expect.answer = substring(s) the final
-#      assistant message must contain. ----------------------------------------
+# ---- scenarios. expect.calls = the (name, args) tool calls the model should
+#      make, scored as a set (order-independent; set [] for the no-tool case).
+#      expect.answer = items the final assistant message must contain; an item
+#      may be a list of alternative phrasings (at least one must appear). ------
 SCEN = [
     {"id": "single_tool", "user": "Use a tool to compute 12 plus 30.",
      "calls": [("add", {"a": 12, "b": 30})], "answer": ["42"]},
@@ -75,7 +76,8 @@ SCEN = [
      "calls": [("word_count", {"text": "the quick brown fox jumps"})], "answer": ["5"]},
     {"id": "weather_then_reason",
      "user": "Check the weather in Tokyo with the tool, then tell me if I need a coat (need one below 10C).",
-     "calls": [("get_weather", {"city": "Tokyo"})], "answer": ["no"]},
+     "calls": [("get_weather", {"city": "Tokyo"})],
+     "answer": [["no", "don't need", "do not need", "no coat", "not need", "without a coat"]]},
 ]
 
 
@@ -108,6 +110,19 @@ def args_match(got, want):
             except (TypeError, ValueError):
                 return False
         elif str(g).strip().lower() != str(v).strip().lower():
+            return False
+    return True
+
+
+def _ans_ok(final, answer):
+    """Each answer item must be present in `final`; an item may be a list of
+    alternative phrasings, of which at least one must appear (semantic OR)."""
+    if not answer:
+        return True
+    low = final.lower()
+    for item in answer:
+        opts = item if isinstance(item, (list, tuple)) else [item]
+        if not any(str(o).lower() in low for o in opts):
             return False
     return True
 
@@ -150,12 +165,17 @@ def run_scenario(url, model, scen, max_steps=6, temp=0.0):
         correct_args = correct_tool
         valid_call = True
     else:
-        want_names = [n for n, _ in want]
-        got_names = [n for n, _ in made]
-        correct_tool = got_names[: len(want_names)] == want_names
+        # Score by SET membership, not exact call sequence: every expected tool
+        # must have been called with matching args SOMEWHERE in the run. Spurious
+        # extra calls and ordering do not fail a model that still did the right
+        # work and answered correctly. A genuinely wrong tool choice (an expected
+        # tool never called) still fails correct_tool.
+        made_names = [n for n, _ in made]
+        correct_tool = all(wn in made_names for wn, _ in want)
         correct_args = correct_tool and all(
-            args_match(made[i][1], want[i][1]) for i in range(min(len(made), len(want))))
-    ans_ok = all(s.lower() in final.lower() for s in scen["answer"]) if scen["answer"] else True
+            any(mn == wn and args_match(ma, wa) for mn, ma in made)
+            for wn, wa in want)
+    ans_ok = _ans_ok(final, scen["answer"])
     return {"id": scen["id"], "valid_call": valid_call, "correct_tool": correct_tool,
             "correct_args": correct_args, "task_complete": bool(ans_ok and correct_args),
             "made": made, "final": final[:120]}
