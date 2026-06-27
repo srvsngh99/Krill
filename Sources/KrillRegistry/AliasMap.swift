@@ -130,6 +130,15 @@ private let aliases: [String: ResolvedModel] = [
         repo: "mlx-community/Qwen2.5-VL-32B-Instruct-4bit",
         name: "qwen2.5-vl-32b", family: .qwen25vl, params: "32B", quant: "4bit", context: 128000),
 
+    // Ornith-9B (qwen3_5): Qwen3-Next-class hybrid (GatedDeltaNet
+    // linear-attention + full attention). Native text decoder; the
+    // vision tower is deferred to mlx_vlm. `repo` points at the Krill-ready
+    // affine-int4 quant we publish under srv-sngh (linked to the upstream
+    // `deepreinforce-ai/Ornith-1.0-9B`); see the HF-publish step.
+    "ornith-9b": ResolvedModel(
+        repo: "srv-sngh/Ornith-1.0-9B-4bit",
+        name: "ornith-9b", family: .qwen35, params: "9B", quant: "4bit", context: 262144),
+
     // Mixture-of-experts (WS6 foundation tier: family detection +
     // clear rejection only; router + expert dispatch lands in
     // follow-up PRs).

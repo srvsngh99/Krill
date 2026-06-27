@@ -96,6 +96,15 @@ final class ArchitectureDetectionTests: XCTestCase {
         XCTAssertEqual(id(modelType: "phi3"), "phi")
     }
 
+    func testQwen35Detection() {
+        // Ornith-9B. Its arch `Qwen3_5ForConditionalGeneration` and model_type
+        // `qwen3_5` (or the nested `qwen3_5_text`) must route to the hybrid
+        // qwen3_5 loader, NOT the generic dense qwen rule.
+        XCTAssertEqual(id(arch: "Qwen3_5ForConditionalGeneration"), "qwen3_5")
+        XCTAssertEqual(id(modelType: "qwen3_5"), "qwen3_5")
+        XCTAssertEqual(id(modelType: "qwen3_5_text"), "qwen3_5")
+    }
+
     func testSpecializedRejectionRule() {
         XCTAssertEqual(id(arch: "WhisperForConditionalGeneration"), "specialized")
         XCTAssertEqual(id(modelType: "whisper"), "specialized")
@@ -118,6 +127,9 @@ final class ArchitectureDetectionTests: XCTestCase {
         XCTAssertEqual(id(arch: "Qwen2MoeForCausalLM"), "qwen2_moe")
         // "gemma4forcausallm" contains both "gemma4" and "gemma".
         XCTAssertEqual(id(arch: "Gemma4ForCausalLM"), "gemma4")
+        // "qwen3_5forconditionalgeneration" contains "qwen"; the hybrid rule
+        // (placed before generic qwen) must claim it, not the dense loader.
+        XCTAssertEqual(id(arch: "Qwen3_5ForConditionalGeneration"), "qwen3_5")
         // model_type only: "qwen3_moe" must not be stolen by the qwen prefix rule.
         XCTAssertEqual(id(modelType: "qwen3_moe"), "qwen3_moe")
     }

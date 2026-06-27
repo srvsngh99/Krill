@@ -1092,15 +1092,22 @@ public final class InferenceEngine: @unchecked Sendable {
         // Grammar masking advances a per-token JSON automaton in the
         // standard serial loop; the multi-token speculative path cannot
         // honor a per-step mask, so a format request disables spec.
+        // Hybrid (SSM) models cannot speculate: a rejected draft truncates the
+        // KV cache back, but `GatedDeltaCache.truncate` is inert (recurrent SSM
+        // state is not position-addressable), so the linear layers would keep the
+        // rejected tokens' state and drift out of sync with the rolled-back
+        // attention layers. Force the plain serial loop for qwen3_5 / Ornith.
+        let hasSSMCacheSpec = (cacheSpec ?? []).contains(.ssm)
         let shouldSpec = wantsSpec && specDecoder != nil && !useInt8KV
             && !params.penaltiesActive && greedyRequest && grammarMask == nil
+            && !hasSSMCacheSpec
         // N-gram (prompt-lookup) speculative decode shares every guard with the
         // draft path (greedy, fp16, no penalties, no grammar), needs no draft
         // model, and yields only when draft spec is NOT taken (a loaded draft
         // pair wins). The decoder + proposer are per-request (the proposer owns
         // generation-local token history), so they are built here, not stored.
         let wantsNgram = useNgramSpeculative ?? autoUseNgram
-        let shouldNgram = wantsNgram && !shouldSpec && !useInt8KV
+        let shouldNgram = wantsNgram && !shouldSpec && !useInt8KV && !hasSSMCacheSpec
             && !params.penaltiesActive && greedyRequest && grammarMask == nil
         let ngramDecoder = shouldNgram ? SpeculativeDecoder.ngram(targetModel: loadedModel) : nil
         let ngramProposer = shouldNgram
@@ -1142,7 +1149,16 @@ public final class InferenceEngine: @unchecked Sendable {
 
         // int8 KV + prefix cache coexist via the quantized snapshot path
         // (PrefixCache.lookupQuantized / storeQuantized).
-        let effectiveUsePrefixCache = usePrefixCache
+        //
+        // HYBRID (SSM) MODELS: a GatedDeltaNet linear-attention layer's state is
+        // a recurrent conv+SSM state, NOT a position-addressable key/value cache,
+        // so `GatedDeltaCache` is non-restorable (snapshot()==nil, truncate inert).
+        // The prefix-cache hit path restores the full-attention KV and then
+        // forwards only the diverging suffix - which leaves the SSM layers COLD
+        // (zero history) while the attention layers carry the full prefix, so the
+        // model degenerates into garbage. Force a cold full-prompt prefill for any
+        // model whose cacheSpec contains an `.ssm` layer (qwen3_5 / Ornith).
+        let effectiveUsePrefixCache = usePrefixCache && !hasSSMCacheSpec
         // Bind the prefix-cache key to all non-text conditioning. Without this,
         // a prompt+image request can mis-hit a prior entry computed under a
         // different image (or no image at all) and serve stale KV state.

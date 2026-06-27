@@ -49,6 +49,17 @@ public enum ModelProfiles {
                             "Vision-language variant (Qwen2.5-VL)"],
                 weaknesses: ["Tool-call format varies by SKU", "Larger sizes are RAM-bound locally"],
                 goodFor: ["Coding", "Multilingual tasks", "Vision-language"])
+        case .qwen35:
+            return ModelProfile(
+                displayName: "ORNITH", vendor: "Ornith", released: "2025 (Ornith 1.0)",
+                trainingCutoff: "not publicly disclosed",
+                tagline: "Qwen3.5-class hybrid (GatedDeltaNet linear-attention + full attention); text served natively.",
+                strengths: ["Efficient linear-attention hybrid decoder",
+                            "Strong multilingual + coding inheritance from the Qwen3.5 lineage",
+                            "Compact 9B that fits a 24GB box at int4"],
+                weaknesses: ["Vision tower runs via mlx_vlm, not the native engine yet",
+                             "Newer lineage with a smaller ecosystem than base Qwen"],
+                goodFor: ["General chat", "Coding", "Multilingual tasks"])
         case .mistral:
             return ModelProfile(
                 displayName: "MISTRAL", vendor: "Mistral AI", released: "2023-2024",

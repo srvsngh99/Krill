@@ -88,6 +88,11 @@ public enum ModelCapabilities {
             return [.textGeneration]
         case .llama, .qwen:
             return [.textGeneration, .tools]
+        case .qwen35:
+            // Ornith-9B (qwen3_5): native text decoder + Qwen tool template.
+            // visionInput is intentionally NOT advertised - the vision tower is
+            // deferred to mlx_vlm, so this build serves the text decoder only.
+            return [.textGeneration, .tools]
         case .gemma4:
             return [.textGeneration, .visionInput, .audioInput, .tools]
         case .gemma4Unified:
@@ -150,6 +155,12 @@ public enum ModelCapabilities {
             // passed the recorded mlx-vlm oracle on a real
             // checkpoint; the Python bridge was then retired.
             return .productionNative
+        case .qwen35:
+            // Ornith-9B (qwen3_5): the native GatedDeltaNet + full-attention
+            // hybrid decoder is parity-verified vs mlx_lm (scan + forward +
+            // decode-cache gates), but real-checkpoint generation and a serving
+            // benchmark are still landing, so `.experimental` until those gate.
+            return .experimental
         case .llava:
             // LLaVA-1.5 has a native Swift+MLX load+run path and an
             // mlx-vlm logit-parity gate (LlavaParityTests, both MLX and
