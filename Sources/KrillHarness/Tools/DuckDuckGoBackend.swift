@@ -41,8 +41,17 @@ public struct DuckDuckGoBackend: SearchBackend {
         request.setValue("text/html", forHTTPHeaderField: "Accept")
 
         let (data, response) = try await fetcher.fetch(request)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw DDGError.httpStatus(http.statusCode)
+        if let http = response as? HTTPURLResponse {
+            // DDG answers 202 (a challenge page, no results) when it rate-limits a
+            // client — which happens quickly under automated / multi-query use such
+            // as deep research. Treat it (and 403/429) as a loud, actionable
+            // rate-limit rather than a silent empty 2xx success.
+            if http.statusCode == 202 || http.statusCode == 429 || http.statusCode == 403 {
+                throw DDGError.rateLimited(http.statusCode)
+            }
+            if !(200...299).contains(http.statusCode) {
+                throw DDGError.httpStatus(http.statusCode)
+            }
         }
         guard let html = String(data: data, encoding: .utf8) else { throw DDGError.badResponse }
         return Self.parse(html, limit: count)
@@ -100,12 +109,16 @@ public struct DuckDuckGoBackend: SearchBackend {
 
     public enum DDGError: Error, CustomStringConvertible, LocalizedError {
         case httpStatus(Int)
+        case rateLimited(Int)
         case badResponse
         public var description: String {
             switch self {
-            case .httpStatus(let c):
-                return "DuckDuckGo returned HTTP \(c)"
-                    + (c == 202 || c == 403 || c == 429 ? " (rate-limited; set search_backend=brave with a free API key for reliable results)" : "")
+            case .httpStatus(let c): return "DuckDuckGo returned HTTP \(c)"
+            case .rateLimited(let c):
+                return "DuckDuckGo rate-limited this client (HTTP \(c)). The keyless "
+                    + "default is best-effort and throttles under repeated/automated use "
+                    + "(e.g. deep research). Set search_backend=brave or tavily with a free "
+                    + "API key for reliable results."
             case .badResponse: return "DuckDuckGo returned an unparseable response"
             }
         }

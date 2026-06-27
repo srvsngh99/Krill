@@ -1,6 +1,18 @@
 import XCTest
 @testable import KrillHarness
 
+/// Canned fetcher returning a fixed HTTP status/body, no network.
+private struct StubHTTPFetcher: WebFetcher {
+    let status: Int
+    let body: Data
+    init(status: Int, body: String = "") { self.status = status; self.body = Data(body.utf8) }
+    func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        let resp = HTTPURLResponse(
+            url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
+        return (body, resp)
+    }
+}
+
 /// Tests for the PUBLIC web-search backends (keyless DuckDuckGo default + BYOK
 /// Brave/Tavily) and the text helpers they share. All offline: parse methods are
 /// pure, and backend selection is driven via env overrides.
@@ -41,6 +53,20 @@ final class PublicSearchBackendTests: XCTestCase {
             "https://a.test/x")
         // A plain (non-redirect) href passes through.
         XCTAssertEqual(DuckDuckGoBackend.decodeRedirect("https://b.test/y"), "https://b.test/y")
+    }
+
+    func testDuckDuckGo202IsRateLimitError() async {
+        // DDG serves HTTP 202 (challenge, no results) when throttling — must be a
+        // loud, actionable error, not a silent empty success.
+        let backend = DuckDuckGoBackend(fetcher: StubHTTPFetcher(status: 202, body: "<html>challenge</html>"))
+        do {
+            _ = try await backend.search(query: "anything", count: 3)
+            XCTFail("expected a rate-limit error on HTTP 202")
+        } catch {
+            let msg = "\(error)".lowercased()
+            XCTAssertTrue(msg.contains("rate-limited"), "actionable rate-limit message; got: \(error)")
+            XCTAssertTrue(msg.contains("brave") || msg.contains("tavily"), "points to a BYOK upgrade")
+        }
     }
 
     func testDuckDuckGoLimit() {
