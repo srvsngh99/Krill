@@ -178,33 +178,12 @@ struct CodeCommand: AsyncParsableCommand {
 
         print("\n> \(task)\n")
         // Render the run live as the loop emits events, instead of dumping the
-        // whole transcript at the end. (The full-screen TUI in a later PR is a
-        // richer consumer of the same seam.)
-        let maxIter = maxIterations
-        let onEvent: @Sendable (AgentEvent) -> Void = { event in
-            switch event {
-            case .assistantTurn(let text):
-                // Preamble of a tool-calling turn; the terminal turn's text is
-                // surfaced by .finalAnswer instead.
-                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    print(text)
-                }
-            case .toolStarted:
-                break
-            case .toolFinished(let inv):
-                let marker = inv.result.isError ? "x" : "*"
-                print("  [\(marker)] \(inv.name)(\(inv.argumentsJSON))")
-                let lines = inv.result.content
-                    .split(separator: "\n", omittingEmptySubsequences: false).prefix(20)
-                for line in lines { print("      \(line)") }
-            case .finalAnswer(let text):
-                print("\n\(text)")
-            case .iterationLimitReached:
-                print("\n[stopped at iteration limit (\(maxIter)) without a final answer]")
-            case .cancelled:
-                print("\n[cancelled]")
-            }
-        }
+        // whole transcript at the end. The renderer folds events through the
+        // shared `foldAgentEvent` seam (same as the full-screen TUI and
+        // background sessions), so a new `AgentEvent` case renders everywhere at
+        // once rather than only in this command's hand-rolled switch.
+        let renderer = LineAgentRenderer()
+        let onEvent: @Sendable (AgentEvent) -> Void = { renderer.handle($0) }
         _ = await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
     }
 }
