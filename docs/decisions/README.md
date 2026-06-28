@@ -58,3 +58,4 @@ Status: proposed | adopted | superseded by NNNN. Date: YYYY-MM-DD. Owner: <name>
 |---|---|---|---|
 | [0001](0001-tool-calling-and-parser.md) | Tool calling and parsing (hybrid: robust default + per-alias parse override) | adopted | 2026-06-27 |
 | [0002](0002-web-search-backends.md) | Web search backends (keyless DuckDuckGo default + BYOK Brave/Tavily; private Kreach behind a build flag) | adopted | 2026-06-28 |
+| [0003](0003-memory-store.md) | Persistent memory (opt-in; text + semantic flavours; native Swift, no ChromaDB; text-as-truth + rebuildable vector cache; BYOM) | proposed | 2026-06-28 |
