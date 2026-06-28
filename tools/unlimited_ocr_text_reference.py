@@ -33,7 +33,12 @@ from huggingface_hub import snapshot_download
 from safetensors.torch import load_file
 
 REPO = "baidu/Unlimited-OCR"
-TOKENS = [0, 17, 285, 1001, 4096, 88, 9, 12345]  # fixed, in-vocab (vocab 129280)
+# Longer fixed sequence (in-vocab, vocab 129280) so positions are large enough to
+# actually exercise RoPE — an 8-token probe under-tests the positional rotation.
+TOKENS = [0, 17, 285, 1001, 4096, 88, 9, 12345, 64, 7777, 100, 256, 512, 2048,
+          333, 9001, 42, 128, 4, 60000, 71, 8, 19, 23456, 900, 1, 6, 31415,
+          271, 828, 14, 99999, 2, 555, 16384, 73, 1024, 40, 11, 65535, 3, 777,
+          12, 88888, 50, 600, 7, 30000]  # 48 tokens
 
 
 def main() -> None:
@@ -83,6 +88,8 @@ def main() -> None:
         "last_argmax": int(last.argmax().item()),
         "last_top10_idx": [int(i) for i in last.topk(10).indices.tolist()],
         "last_top10_val": [float(v) for v in last.topk(10).values.tolist()],
+        # per-position argmax — exercises RoPE across the whole sequence
+        "all_argmax": [int(i) for i in logits.argmax(dim=-1).tolist()],
         # full last-row logits for a strict numeric compare on the Krill side
         "last_logits": [float(v) for v in last.tolist()],
     }
