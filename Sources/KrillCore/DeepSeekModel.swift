@@ -1008,7 +1008,17 @@ class DeepSeekModelInner: Module {
 
     func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil,
                         precomputedMask: MLXArray? = nil, rowOffsets: [Int]? = nil) -> MLXArray {
-        var x = embedTokens(tokens)
+        callAsFunction(inputsEmbeds: embedTokens(tokens), caches: caches,
+                       precomputedMask: precomputedMask, rowOffsets: rowOffsets)
+    }
+
+    /// Token embeddings only (for a multimodal splice before `inputsEmbeds`).
+    func embed(_ tokens: MLXArray) -> MLXArray { embedTokens(tokens) }
+
+    /// Decode from pre-computed input embeddings (vision tokens already spliced).
+    func callAsFunction(inputsEmbeds x0: MLXArray, caches: [KVCache]? = nil,
+                        precomputedMask: MLXArray? = nil, rowOffsets: [Int]? = nil) -> MLXArray {
+        var x = x0
         let mask: MLXArray?
         if let precomputedMask {
             mask = precomputedMask
@@ -1058,6 +1068,20 @@ public class DeepSeekForCausalLM: Module {
         }
         return lmHead(hidden)
     }
+
+    /// Multimodal entry: decode from pre-spliced input embeddings.
+    public func callAsFunction(inputsEmbeds: MLXArray, caches: [KVCache]? = nil,
+                               lastTokenOnly: Bool = false) -> MLXArray {
+        var hidden = model(inputsEmbeds: inputsEmbeds, caches: caches)
+        if lastTokenOnly {
+            let last = hidden.dim(1) - 1
+            hidden = hidden[0..., last ..< (last + 1), 0...]
+        }
+        return lmHead(hidden)
+    }
+
+    /// Token embeddings, exposed for the multimodal splice.
+    public func embedTokens(_ tokens: MLXArray) -> MLXArray { model.embed(tokens) }
 
     public func batchedDecode(
         _ tokens: MLXArray, caches: [KVCache], mask: MLXArray, rowOffsets: [Int]
