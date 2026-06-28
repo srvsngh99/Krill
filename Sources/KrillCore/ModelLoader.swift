@@ -357,6 +357,17 @@ let architectureRules: [ArchitectureRule] = [
         },
         action: .load { try loadDeepSeek(configData: $0, directory: $1) }),
 
+    // Unlimited-OCR (DeepSeek-OCR): TEXT-ONLY native load for now. The language
+    // backbone is a DeepSeek-MoE nested under `language_config` (use_mla:false,
+    // so plain MHA via DeepSeekStandardAttention). The SAM/CLIP DeepEncoder +
+    // projector are a tracked follow-up; until then we load only the language
+    // weights and drop the vision tensors. MUST precede the `specialized` rule,
+    // which would otherwise reject anything matching "ocr".
+    ArchitectureRule(
+        id: "unlimited_ocr",
+        matches: { arch, mt in arch.contains("unlimitedocr") || mt == "unlimited-ocr" },
+        action: .load { try loadUnlimitedOCRText(configData: $0, directory: $1) }),
+
     ArchitectureRule(
         id: "llama",
         matches: { arch, mt in arch.contains("llama") || mt == "llama" },
@@ -1353,6 +1364,55 @@ private func loadDeepSeek(configData: Data, directory: URL) throws -> LoadedMode
     // return that family for the capability / tool-template lookup; the
     // server reaches this loader through the dense engine, not the `.moe`
     // bridge dispatch.
+    return LoadedModel(
+        module: model,
+        numLayers: config.numHiddenLayers,
+        family: "deepseek",
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
+        multimodalForward: nil,
+        batchedDecodeForward: { tokens, caches, mask, rowOffsets in
+            model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
+        vocabSize: config.vocabSize
+    )
+}
+
+/// Unlimited-OCR (DeepSeek-OCR) — TEXT-ONLY native load. The checkpoint nests
+/// its DeepSeek-MoE language backbone under `language_config` (standard
+/// attention, `use_mla:false`) and ships the SAM/CLIP vision towers + projector
+/// alongside it in one safetensors. Until the DeepEncoder vision port lands we
+/// build only the `DeepSeekForCausalLM` language model and drop the vision /
+/// projector / glue tensors before the strict-verify update (so language
+/// coverage is still verified, but the unported vision keys don't trip
+/// `.noUnusedKeys`).
+private func loadUnlimitedOCRText(configData: Data, directory: URL) throws -> LoadedModel {
+    guard let top = try JSONSerialization.jsonObject(with: configData) as? [String: Any],
+          let lang = top["language_config"] as? [String: Any] else {
+        throw ModelLoadError.invalidConfig(
+            "unlimited-ocr: config.json has no `language_config` block")
+    }
+    let langData = try JSONSerialization.data(withJSONObject: lang)
+    let config = try JSONDecoder().decode(DeepSeekConfig.self, from: langData)
+    let model = DeepSeekForCausalLM(config)
+
+    // Vision-tower / projector / multimodal-glue tensors not bound by the
+    // text-only language model.
+    let visionPrefixes = ["model.sam_model.", "model.vision_model.", "model.projector."]
+    let visionExact: Set<String> = ["model.image_newline", "model.view_seperator"]
+    try loadWeights(
+        into: model, from: directory,
+        quantization: config.quantization,
+        keyRewrite: { weights in
+            for key in Array(weights.keys)
+            where visionPrefixes.contains(where: key.hasPrefix) || visionExact.contains(key) {
+                weights.removeValue(forKey: key)
+            }
+        },
+        strictVerify: true)
+
     return LoadedModel(
         module: model,
         numLayers: config.numHiddenLayers,
