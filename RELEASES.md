@@ -7,6 +7,16 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.15.0 — 2026-06-28
+**Web search works out of the box.** `web_search` (and `DeepResearch` /
+`POST /research`) now ships a keyless **DuckDuckGo** backend as the default
+(`search_backend = auto`) — a fresh install can search the web with no setup.
+For reliable, rate-limit-free results, opt into a **BYOK** backend: **Brave** or
+**Tavily** (both free tiers), or self-hosted **SearXNG**. API keys are redacted
+in `/config`. Also surfaces DuckDuckGo rate-limiting instead of returning silent
+empty results, and fixes Ornith-9B (qwen3_5) looping on multi-turn/agentic turns
+by degrading an unrenderable chat template to ChatML rather than Llama-3.
+
 ## v0.14.0 — 2026-06-27
 Adds a **native Swift + MLX runtime for Ornith-1.0-9B** (`krill run ornith-9b`) —
 a Qwen3.5-class hybrid (GatedDeltaNet linear-attention/SSM layers interleaved
