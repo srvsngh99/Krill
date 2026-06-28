@@ -46,3 +46,22 @@ public final class DeepEncoder: Module {
         return projector(vis)                                      // [B,256,nEmbed]
     }
 }
+
+/// Base (single-view, non-tiled) multimodal token assembly (G5), mirroring
+/// modeling_unlimitedocr (lines 551-573): lay the 16x16 feature grid out, append
+/// `imageNewline` as an extra column per row, flatten, then append one
+/// `viewSeparator`. `features`: [1, hw, n]; returns [h*(w+1) + 1, n] (273 for a
+/// 1024 image). These embeddings masked-scatter into `embed_tokens` at the
+/// `<image>` placeholder positions.
+public func assembleBaseViewTokens(
+    features: MLXArray, imageNewline: MLXArray, viewSeparator: MLXArray
+) -> MLXArray {
+    let hw = features.dim(1), n = features.dim(2)
+    let h = Int(Double(hw).squareRoot().rounded())
+    let w = h
+    let grid = features.reshaped(h, w, n)
+    let newlineCol = broadcast(imageNewline.reshaped(1, 1, n), to: [h, 1, n])
+    let withNewlines = concatenated([grid, newlineCol], axis: 1)   // [h, w+1, n]
+    let flat = withNewlines.reshaped(h * (w + 1), n)               // [h*(w+1), n]
+    return concatenated([flat, viewSeparator.reshaped(1, n)], axis: 0)
+}
