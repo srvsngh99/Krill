@@ -163,6 +163,15 @@ private let aliases: [String: ResolvedModel] = [
         repo: "srv-sngh/Ornith-9B-mlx-nvfp4",
         name: "ornith-9b-nvfp4", family: .qwen35, params: "9B", quant: "nvfp4", context: 262144),
 
+    // Qwythos-9B (qwen3_5): same Qwen3.5-class hybrid arch as Ornith — runs on
+    // the native GatedDeltaNet + full-attention text decoder; vision deferred to
+    // mlx_vlm. Mixed-precision nvfp4 build (g16 base + down_proj/o_proj @8-bit,
+    // vision preserved) published under srv-sngh, from the upstream
+    // `empero-ai/Qwythos-9B-Claude-Mythos-5-1M`.
+    "qwythos-9b-nvfp4": ResolvedModel(
+        repo: "srv-sngh/Qwythos-9B-Claude-Mythos-5-1M-mlx-nvfp4",
+        name: "qwythos-9b-nvfp4", family: .qwen35, params: "9B", quant: "nvfp4", context: 262144),
+
     // Unlimited-OCR (DeepSeek-OCR): native multimodal OCR runtime — DeepSeek-MoE
     // backbone (nvfp4 experts) + native DeepEncoder vision tower (SAM-ViT-B +
     // CLIP-L + projector, 8-bit). Mixed-precision Krill blob published under
