@@ -784,6 +784,12 @@ public final class InferenceEngine: @unchecked Sendable {
         let llavaModel = (loadedModel.family == "llava")
             ? (loadedModel.module as? LlavaForCausalLM) : nil
 
+        // Unlimited-OCR builds its own prompt token run (BOS + base-view
+        // `<image>` block + instruction) in the `plain` DeepSeek template, so it
+        // skips both the `<|image|>` text-placeholder injection and the generic
+        // chat-template tokenization, mirroring how LLaVA places its image run.
+        let isUnlimitedOCR = loadedModel.family == "unlimited_ocr"
+
         // WS3: the per-family load-time decisions (prompt tokenization,
         // int8-KV support) are read off the declarative `ModelAdapter` once
         // per request instead of scattered `family == "..."` string compares.
@@ -836,7 +842,7 @@ public final class InferenceEngine: @unchecked Sendable {
         // LLaVA places its image-token run inside `formatLlavaTokenIds`, so it
         // skips the `<|image|>` text-placeholder injection the Gemma 4 / VL
         // path relies on.
-        let preparedMessages = llavaModel != nil
+        let preparedMessages = (llavaModel != nil || isUnlimitedOCR)
             ? messages
             : injectMediaPlaceholders(
                 into: messages, imageData: imageData, audioData: audioData,
@@ -860,7 +866,21 @@ public final class InferenceEngine: @unchecked Sendable {
         // Use direct token ID path for Gemma4 to avoid decode→re-encode
         // round-trip that loses special tokens (105, 106, 107).
         var promptTokensBuilt: [Int]
-        if let overrideTemplate = promptTemplateOverride,
+        if isUnlimitedOCR, imageData != nil {
+            // Base-view OCR prompt: [BOS] + 273 `<image>` tokens + instruction,
+            // in the `plain` DeepSeek template (the instruction lands after the
+            // image block). `encodeNoSpecial` mimics the reference's
+            // `add_special_tokens=False` by stripping a leading auto-BOS.
+            let userText = preparedMessages.last(where: { $0["role"] == "user" })?["content"]
+                ?? preparedMessages.last?["content"] ?? ""
+            let bos = tokenizer.bosTokenId
+            promptTokensBuilt = UnlimitedOCR.promptTokens(userText: userText) { text in
+                guard !text.isEmpty else { return [] }
+                var ids = tokenizer.encode(text)
+                if ids.first == bos { ids.removeFirst() }
+                return ids
+            }
+        } else if let overrideTemplate = promptTemplateOverride,
            !overrideTemplate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            let rendered = renderWithOverrideTemplate(
                overrideTemplate, messages: preparedMessages) {
@@ -1142,6 +1162,11 @@ public final class InferenceEngine: @unchecked Sendable {
                 if let unified = loadedModel.module as? Gemma4UnifiedModel {
                     let mps = unified.visionConfig.modelPatchSize
                     return { try preprocessGemma4UnifiedImage($0, modelPatchSize: mps) }
+                }
+                // Unlimited-OCR (DeepSeek-OCR): pad-to-1024 base view, normalize
+                // to [-1,1], channels-last [1,1024,1024,3] for the DeepEncoder.
+                if loadedModel.family == "unlimited_ocr" {
+                    return { try UnlimitedOCRImagePreprocessor.preprocess($0) }
                 }
                 return { try preprocessImage($0) }
             }()

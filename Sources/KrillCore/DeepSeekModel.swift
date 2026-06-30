@@ -875,13 +875,20 @@ class DeepSeekMoE: Module {
         _gate = ModuleInfo(wrappedValue: DeepSeekMoEGate(config), key: "gate")
         let groupSize = config.quantization?.groupSize ?? 64
         let bits = config.quantization?.bits ?? 4
+        // The born-quantized experts read the top-level quant block. For the
+        // mixed-precision Unlimited-OCR ship checkpoint the experts are nvfp4
+        // (the residency-dominant bulk) while the non-expert Linears carry
+        // per-module 8-bit affine overrides resolved at load time; `mode`
+        // defaults to .affine so every existing DeepSeek/MoE checkpoint is
+        // unchanged.
+        let mode = mlxQuantizationMode(config.quantization?.mode ?? "affine")
         _switchMLP = ModuleInfo(
             wrappedValue: MoESwitchGLU(
                 inputDims: config.hiddenSize,
                 hiddenDims: config.moeIntermediateSize,
                 numExperts: config.nRoutedExperts,
                 groupSize: groupSize, bits: bits,
-                activation: .swiglu),
+                activation: .swiglu, mode: mode),
             key: "switch_mlp")
         if config.nSharedExperts > 0 {
             _sharedExperts = ModuleInfo(

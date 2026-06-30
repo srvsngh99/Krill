@@ -163,6 +163,15 @@ private let aliases: [String: ResolvedModel] = [
         repo: "srv-sngh/Ornith-9B-mlx-nvfp4",
         name: "ornith-9b-nvfp4", family: .qwen35, params: "9B", quant: "nvfp4", context: 262144),
 
+    // Unlimited-OCR (DeepSeek-OCR): native multimodal OCR runtime — DeepSeek-MoE
+    // backbone (nvfp4 experts) + native DeepEncoder vision tower (SAM-ViT-B +
+    // CLIP-L + projector, 8-bit). Mixed-precision Krill blob published under
+    // srv-sngh (from `baidu/Unlimited-OCR`). `krill run unlimited-ocr --image
+    // <page> "document parsing."` parses documents/images to grounded text.
+    "unlimited-ocr": ResolvedModel(
+        repo: "srv-sngh/Unlimited-OCR-mixed-nvfp4",
+        name: "unlimited-ocr", family: .unlimitedOcr, params: "3B", quant: "nvfp4", context: 32768),
+
     // Mixture-of-experts (WS6 foundation tier: family detection +
     // clear rejection only; router + expert dispatch lands in
     // follow-up PRs).

@@ -119,6 +119,12 @@ public enum ModelCapabilities {
             // tools are NOT advertised (no parity-tested tool template -
             // the vicuna-style prompt is built directly).
             return [.textGeneration, .visionInput]
+        case .unlimitedOcr:
+            // Unlimited-OCR (DeepSeek-OCR): native DeepEncoder + DeepSeek-MoE
+            // OCR runtime with engine image-serving wiring (base view). Vision
+            // input is supported; tools are NOT advertised (the OCR prompt is
+            // built directly, no tool template).
+            return [.textGeneration, .visionInput]
         case .llamaVision:
             // Llama-3.2-Vision (mllama) native runtime WITH image serving: tile /
             // aspect-ratio preprocessing, the sparse cross-attention mask, and a
@@ -177,6 +183,12 @@ public enum ModelCapabilities {
             // Native runtime + loader + mlx-vlm synthetic logit parity, but no
             // serving benchmark and no real-checkpoint run yet (RAM-blocked on
             // the dev box), so `.experimental`.
+            return .experimental
+        case .unlimitedOcr:
+            // Unlimited-OCR: full native pipeline (text backbone, both
+            // DeepEncoder towers, projector, splice, end-to-end prefill) is
+            // parity-validated vs the HF reference, but the real-OCR CER gate +
+            // serving benchmark are still landing, so `.experimental`.
             return .experimental
         case .moe:
             // Every MoE family is native Swift+MLX now (Qwen 3 MoE,

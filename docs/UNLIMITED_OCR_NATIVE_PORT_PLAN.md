@@ -167,3 +167,34 @@ not a from-scratch LLM port — it is primarily a **vision-encoder port + multim
 plumbing + a small non-MLA attention branch + a quantization pass**. Still an
 Ornith-scale effort concentrated in the DeepEncoder. Worth doing (real new OCR
 capability, reputable MIT model); the main cost is the release it blocks.
+
+## 11. SHIPPED (2026-06-30)
+
+Native `krill run unlimited-ocr --image <page> "document parsing."` parses
+documents/images to grounded text end-to-end on Apple Silicon — no Python, no
+`trust_remote_code`. Verified reading real multi-line invoices correctly
+(`<|det|>title [..]<|/det|>Invoice 2026`, full line-item tables, totals).
+
+- **Quant (locked §9 honored):** experts → **nvfp4** (gs16, additive `mode`
+  threaded through the shared `MoEQuantizedSwitchedLinear` / `MoESwitchGLU` —
+  default `.affine`, so every other MoE family is byte-for-byte unchanged);
+  attention / dense FFN / embed / lm_head / **vision tower** → **8-bit affine**
+  per-module overrides. **2.2 GB** Krill blob (`srv-sngh/Unlimited-OCR-mixed-nvfp4`)
+  from the 6.67 GB bf16 source. Conversion: `tools/unlimited_ocr_make_ship_checkpoint.py`.
+- **Serving:** `loadUnlimitedOCR` composes the DeepSeek-MoE LM + native
+  DeepEncoder + base-view splice behind `multimodalForward`; family
+  `.unlimitedOcr` wires capabilities, the OCR prompt builder, and the
+  pad-to-1024 `[-1,1]` channels-last preprocessor into the engine.
+- **Scope:** ships the parity-validated **base view** (single 1024 global view,
+  273 image tokens) — reads full pages including wide (e.g. 800×400) layouts.
+  Gundam **tiling** (local crops for very dense/large scans) is a tracked
+  follow-up; the token/feature assembly for it is sketched in §2.4.
+- **Two bugs the first-token parity gates could NOT catch** (they probe synthetic
+  ids, not real generation), found via end-to-end CLI OCR:
+  1. **Prompt format** — the model card's canonical prompt is `<image>document
+     parsing.` (placeholder immediately followed by the instruction, no
+     newline); the wrong instruction/newline made it emit EOS at token 0.
+  2. **Vertical image flip** — the CGContext buffer is already top-to-bottom, so
+     the extra row-flip inverted the page and the model read upside-down text
+     (boxes detected, characters garbled). Guarded now by
+     `UnlimitedOCRPreprocessTests`.

@@ -113,6 +113,17 @@ public enum ModelProfiles {
                 strengths: ["Fast vector embeddings", "Reranking / retrieval scoring"],
                 weaknesses: ["Cannot generate text", "Not usable for chat"],
                 goodFor: ["Embeddings", "RAG retrieval", "Reranking"])
+        case .unlimitedOcr:
+            return ModelProfile(
+                displayName: "UNLIMITED-OCR", vendor: "DeepSeek-OCR", released: "2025",
+                trainingCutoff: "not publicly disclosed",
+                tagline: "Native document/image OCR: DeepEncoder vision + DeepSeek-MoE.",
+                strengths: ["High-fidelity document and image OCR",
+                            "Native Apple-Silicon MLX runtime (no Python)",
+                            "Compact nvfp4 mixed-precision footprint"],
+                weaknesses: ["Single-purpose OCR, not a general chat model",
+                             "Base-view resolution (gundam tiling is a follow-up)"],
+                goodFor: ["Document OCR", "Image-to-markdown", "Layout/text extraction"])
         case .moe:
             // Generic MoE bucket - no single curated story; the deep-dive still
             // shows the live specs derived from the registry.
