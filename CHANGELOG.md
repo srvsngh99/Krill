@@ -6,6 +6,8 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-06-28
+
 ### Added
 
 - **Web search works out of the box.** `web_search` (and `DeepResearch` /
