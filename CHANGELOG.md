@@ -6,6 +6,33 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-06-30
+
+### Added
+
+- **Native Unlimited-OCR (DeepSeek-OCR) runtime.** `krill run unlimited-ocr
+  --image <page> "document parsing."` parses documents/images to grounded text
+  natively on Apple Silicon (no Python, no `trust_remote_code`). A DeepSeek-MoE
+  language backbone (`use_mla:false` standard attention) + the native
+  **DeepEncoder** vision tower (SAM-ViT-B + CLIP-L + linear projector), with
+  base-view vision features spliced at the `<image>` block before the LM.
+  Published as a 2.2 GB mixed-precision Krill blob
+  (`srv-sngh/Unlimited-OCR-mixed-nvfp4`): experts nvfp4, everything else 8-bit
+  affine. New `.unlimitedOcr` family + capabilities, `loadUnlimitedOCR`,
+  `UnlimitedOCRImagePreprocessor` (pad-to-1024 / `[-1,1]` / channels-last), and
+  the `<image>document parsing.` prompt builder. Serves the parity-validated
+  base view; gundam tiling is a tracked follow-up.
+  Conversion: `tools/unlimited_ocr_make_ship_checkpoint.py`.
+
+### Changed
+
+- **MoE switched-expert runtime gains an additive `mode`.**
+  `MoEQuantizedSwitchedLinear` / `MoESwitchGLU` now accept a `QuantizationMode`
+  (default `.affine`, optional biases, uint8 nvfp4 scales) so a checkpoint can
+  run its experts at nvfp4 while the rest stays 8-bit. Every existing MoE family
+  (Qwen3-MoE, Mixtral, Qwen2-MoE, OLMoE, DeepSeek-V2/V3) is byte-for-byte
+  unchanged (they pass no `mode`).
+
 ## [0.15.0] - 2026-06-28
 
 ### Added
