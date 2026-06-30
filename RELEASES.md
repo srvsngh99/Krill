@@ -7,6 +7,16 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.16.1 — 2026-07-01
+Adds the **`qwythos-9b-nvfp4`** model — the `empero-ai/Qwythos-9B-Claude-Mythos-5-1M`
+fine-tune in Krill's mixed-precision **nvfp4** format. It's a Qwen3.5-class hybrid
+(GatedDeltaNet linear-attention + full attention), the same architecture as
+Ornith-9B, so it runs on Krill's existing **native `.qwen35` text decoder** (vision
+deferred to mlx_vlm) — no new runtime. The build is g16 nvfp4 with `down_proj`/`o_proj`
+protected at 8-bit affine and the vision tower preserved (~6.4 GB), published at
+`srv-sngh/Qwythos-9B-Claude-Mythos-5-1M-mlx-nvfp4`. `krill pull qwythos-9b-nvfp4`.
+Built on `empero-ai/Qwythos-9B-Claude-Mythos-5-1M` (Apache-2.0) — credit to the original authors.
+
 ## v0.16.0 — 2026-06-30
 Adds a **native Swift + MLX runtime for Unlimited-OCR (DeepSeek-OCR)** —
 `krill run unlimited-ocr --image <page> "document parsing."` parses documents and

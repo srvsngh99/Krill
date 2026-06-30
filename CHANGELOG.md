@@ -6,6 +6,8 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-07-01
+
 ### Added
 
 - **Qwythos-9B model (`qwythos-9b-nvfp4`).** The `empero-ai/Qwythos-9B-Claude-Mythos-5-1M`
