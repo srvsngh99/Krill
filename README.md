@@ -74,9 +74,15 @@ krill serve --model gemma-4-e2b               # API server on :57455
 
 krill run gemma-4-e2b "what's here?" --image ./photo.png   # vision
 krill run gemma-4-e2b "transcribe this"      --audio ./clip.wav   # audio
+krill pull unlimited-ocr && krill run unlimited-ocr --image page.png "document parsing."   # OCR
 ```
 
 The default port `57455` is unique, so Krill coexists with Ollama on `11434`; run `krill serve --port 11434` for a literal drop-in.
+
+> 📖 **New to Krill?** The **[User Guide](docs/GUIDE.md)** is a single indexed,
+> example-driven walkthrough of every feature — chat & TUI, multimodal (image /
+> audio / OCR), agentic coding, the HTTP server, structured output, embeddings,
+> web search, model management, and configuration.
 
 ## On Mac, vs Ollama
 
@@ -106,6 +112,7 @@ krill pull llama-3.2-3b      # Llama 3.2 / 3.1 (also: llama-3.2-1b, llama-3.1-8b
 krill pull mistral-7b        # Mistral 7B v0.3
 krill pull gemma-2-9b        # Gemma 2 9B
 krill pull phi-4-mini        # Phi-4 Mini
+krill pull unlimited-ocr     # native document/image OCR (DeepSeek-OCR)
 
 krill pull mlx-community/Meta-Llama-3.1-8B-Instruct-4bit   # …or any mlx-community repo
 ```
