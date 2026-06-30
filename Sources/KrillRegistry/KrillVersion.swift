@@ -11,7 +11,7 @@ import Foundation
 /// (`Sources/KrillServer/OllamaCompat.swift` and the CLI's version
 /// command both already `import KrillRegistry`). Keeping the constant
 /// here avoids pulling a new module into either caller.
-public let KrillVersion: String = "0.16.0"
+public let KrillVersion: String = "0.16.1"
 
 /// Convenience: same string with a leading "v", matching git tag
 /// conventions (`v0.6.0`).

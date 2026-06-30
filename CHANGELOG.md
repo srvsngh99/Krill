@@ -6,6 +6,18 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-07-01
+
+### Added
+
+- **Qwythos-9B model (`qwythos-9b-nvfp4`).** The `empero-ai/Qwythos-9B-Claude-Mythos-5-1M`
+  fine-tune (Qwen3.5-class hybrid: GatedDeltaNet linear-attention + full
+  attention, same arch as Ornith-9B) in Krill's mixed-precision nvfp4 format —
+  g16 base, `down_proj`/`o_proj` at 8-bit affine, vision tower preserved.
+  Runs natively on the `.qwen35` text decoder; vision deferred to mlx_vlm.
+  Published at `srv-sngh/Qwythos-9B-Claude-Mythos-5-1M-mlx-nvfp4`.
+  `krill run qwythos-9b-nvfp4`.
+
 ## [0.16.0] - 2026-06-30
 
 ### Added
