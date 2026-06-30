@@ -11,3 +11,4 @@ tools/telegram-manager/.venv/
 __pycache__/
 *.pyc
 .claude/
+scratchpad/

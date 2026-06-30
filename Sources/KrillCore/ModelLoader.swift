@@ -357,6 +357,18 @@ let architectureRules: [ArchitectureRule] = [
         },
         action: .load { try loadDeepSeek(configData: $0, directory: $1) }),
 
+    // Unlimited-OCR (DeepSeek-OCR): native multimodal load. The language
+    // backbone is a DeepSeek-MoE nested under `language_config` (use_mla:false,
+    // so plain MHA via DeepSeekStandardAttention); the vision front-end is the
+    // native DeepEncoder (SAM-ViT-B + CLIP-L + linear projector). The serve
+    // path splices the base-view vision features at the `<image>` block before
+    // the LM (base view; gundam tiling is a follow-up). MUST precede the
+    // `specialized` rule, which would otherwise reject anything matching "ocr".
+    ArchitectureRule(
+        id: "unlimited_ocr",
+        matches: { arch, mt in arch.contains("unlimitedocr") || mt == "unlimited-ocr" },
+        action: .load { try loadUnlimitedOCR(configData: $0, directory: $1) }),
+
     ArchitectureRule(
         id: "llama",
         matches: { arch, mt in arch.contains("llama") || mt == "llama" },
@@ -1364,6 +1376,115 @@ private func loadDeepSeek(configData: Data, directory: URL) throws -> LoadedMode
         multimodalForward: nil,
         batchedDecodeForward: { tokens, caches, mask, rowOffsets in
             model.batchedDecode(tokens, caches: caches, mask: mask, rowOffsets: rowOffsets)
+        },
+        vocabSize: config.vocabSize
+    )
+}
+
+/// Unlimited-OCR (DeepSeek-OCR) — TEXT-ONLY native load. The checkpoint nests
+/// its DeepSeek-MoE language backbone under `language_config` (standard
+/// attention, `use_mla:false`) and ships the SAM/CLIP vision towers + projector
+/// alongside it in one safetensors. Until the DeepEncoder vision port lands we
+/// build only the `DeepSeekForCausalLM` language model and drop the vision /
+/// projector / glue tensors before the strict-verify update (so language
+/// coverage is still verified, but the unported vision keys don't trip
+/// `.noUnusedKeys`).
+private func loadUnlimitedOCR(configData: Data, directory: URL) throws -> LoadedModel {
+    guard let top = try JSONSerialization.jsonObject(with: configData) as? [String: Any],
+          let lang = top["language_config"] as? [String: Any] else {
+        throw ModelLoadError.invalidConfig(
+            "unlimited-ocr: config.json has no `language_config` block")
+    }
+    let langData = try JSONSerialization.data(withJSONObject: lang)
+    let config = try JSONDecoder().decode(DeepSeekConfig.self, from: langData)
+
+    // 1. Language backbone (DeepSeek-MoE, nvfp4 experts + 8-bit non-expert
+    //    overrides resolved at load). Drop the vision/glue tensors so strict
+    //    verify only sees the language keys.
+    let lm = DeepSeekForCausalLM(config)
+    let visionPrefixes = ["model.sam_model.", "model.vision_model.", "model.projector."]
+    let visionExact: Set<String> = ["model.image_newline", "model.view_seperator"]
+    try loadWeights(
+        into: lm, from: directory,
+        quantization: config.quantization,
+        keyRewrite: { weights in
+            for key in Array(weights.keys)
+            where visionPrefixes.contains(where: key.hasPrefix) || visionExact.contains(key) {
+                weights.removeValue(forKey: key)
+            }
+        },
+        strictVerify: true)
+
+    // 2. Vision DeepEncoder. The ship checkpoint stores the SAM/CLIP Linears as
+    //    8-bit affine and the Conv2d kernels already in MLX layout (the
+    //    conversion tool transposed them + dropped CLIP's bypassed
+    //    patch_embedding), so quantize the encoder's Linears to 8-bit and bind
+    //    the pre-quantized tensors directly (the Conv2d weights bind raw).
+    let enc = DeepEncoder()
+    var visionWeights: [String: MLXArray] = [:]
+    var imageNewline = MLXArray.zeros([config.hiddenSize])
+    var viewSeparator = MLXArray.zeros([config.hiddenSize])
+    let shards = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        .filter { $0.hasSuffix(".safetensors") }
+    var visionQuantized = false
+    for shard in shards {
+        for (key, value) in try MLX.loadArrays(url: directory.appendingPathComponent(shard)) {
+            if key == "model.image_newline" { imageNewline = value.asType(.float32); continue }
+            if key == "model.view_seperator" { viewSeparator = value.asType(.float32); continue }
+            guard visionPrefixes.contains(where: key.hasPrefix) else { continue }
+            if key.hasSuffix(".scales") { visionQuantized = true }
+            visionWeights[String(key.dropFirst("model.".count))] = value
+        }
+    }
+    // The DeepEncoder ships either bf16 (OCR-fidelity default) or 8-bit affine
+    // Linears. Quantize the encoder's Linears ONLY when the checkpoint carries
+    // vision `.scales` (8-bit); a bf16 tower binds raw. The CLIP
+    // `position_embedding` is an Embedding read raw, so the quant pass is
+    // restricted to `Linear` (the tool likewise leaves it unquantized).
+    if visionQuantized {
+        quantize(model: enc, groupSize: 64, bits: 8, mode: .affine) { _, module in
+            module is Linear
+        }
+    }
+    try enc.update(
+        parameters: ModuleParameters.unflattened(visionWeights.map { ($0.key, $0.value) }),
+        verify: [.allModelKeysSet, .shapeMismatch, .noUnusedKeys])
+    eval(enc)
+
+    // 3. Multimodal forward: embed tokens, run the vision tower, assemble the
+    //    base-view token grid (image_newline columns + view_seperator), splice
+    //    at the `<image>` block, decode from the spliced embeddings. Text-only
+    //    turns (no pixels) run straight through the LM.
+    let newline = imageNewline
+    let sep = viewSeparator
+    func splice(
+        _ tokens: MLXArray, _ caches: [KVCacheProtocol]?, _ pixels: MLXArray?,
+        lastTokenOnly: Bool
+    ) -> MLXArray {
+        guard let pixels else {
+            return lm(tokens, caches: caches as? [KVCache], lastTokenOnly: lastTokenOnly)
+        }
+        let embeds = lm.embedTokens(tokens).asType(.float32)
+        let vis = enc(image: pixels).asType(.float32)
+        let assembled = assembleBaseViewTokens(
+            features: vis, imageNewline: newline, viewSeparator: sep)
+        let spliced = UnlimitedOCR.spliceBaseView(embeds: embeds, vision: assembled, tokens: tokens)
+        return lm(inputsEmbeds: spliced, caches: caches as? [KVCache], lastTokenOnly: lastTokenOnly)
+    }
+
+    return LoadedModel(
+        module: lm,
+        numLayers: config.numHiddenLayers,
+        family: "unlimited_ocr",
+        forward: { tokens, caches in lm(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            lm(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
+        multimodalForward: { tokens, caches, pixels, _, _, _ in
+            splice(tokens, caches, pixels, lastTokenOnly: false)
+        },
+        multimodalPrefillForward: { tokens, caches, pixels, _, _, _ in
+            splice(tokens, caches, pixels, lastTokenOnly: true)
         },
         vocabSize: config.vocabSize
     )

@@ -54,39 +54,51 @@ enum MoEActivation {
 class MoEQuantizedSwitchedLinear: Module {
     @ParameterInfo(key: "weight") var weight: MLXArray
     @ParameterInfo(key: "scales") var scales: MLXArray
-    @ParameterInfo(key: "biases") var biases: MLXArray
+    // `biases` is nil for non-affine modes (nvfp4/mxfp4): MLX's `mx.quantize`
+    // emits no biases for those, so the checkpoint has no `.biases` key and
+    // `gather_qmm` takes `biases: nil`. Optional, like MLXNN's `Linear.bias`,
+    // so the missing parameter is simply absent rather than a load mismatch.
+    @ParameterInfo(key: "biases") var biases: MLXArray?
 
     let inputDims: Int
     let outputDims: Int
     let numExperts: Int
     let groupSize: Int
     let bits: Int
+    let mode: QuantizationMode
 
     init(
         inputDims: Int, outputDims: Int, numExperts: Int,
-        groupSize: Int, bits: Int
+        groupSize: Int, bits: Int, mode: QuantizationMode = .affine
     ) {
         self.inputDims = inputDims
         self.outputDims = outputDims
         self.numExperts = numExperts
         self.groupSize = groupSize
         self.bits = bits
+        self.mode = mode
 
-        // Pre-allocate the parameter tensors with the SAME shape the
-        // mlx-community checkpoint ships so the loader's
-        // `model.update(parameters:)` binds them by shape match. The fill
-        // values are placeholders overwritten at load time.
+        // Pre-allocate the parameter tensors with the SAME shape/dtype the
+        // checkpoint ships so the loader's `model.update(parameters:)` binds
+        // them by shape match. The fill values are placeholders overwritten at
+        // load time. nvfp4 packs scales as uint8 (e4m3 group scales) with no
+        // biases; affine ships bfloat16 scales + biases.
         let packedIn = inputDims * bits / 32
         let groupsIn = inputDims / groupSize
         _weight = ParameterInfo(
             wrappedValue: MLXArray.zeros([numExperts, outputDims, packedIn], dtype: .uint32),
             key: "weight")
+        let scalesDtype: DType = (mode == .affine) ? .bfloat16 : .uint8
         _scales = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
+            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: scalesDtype),
             key: "scales")
-        _biases = ParameterInfo(
-            wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
-            key: "biases")
+        if mode == .affine {
+            _biases = ParameterInfo(
+                wrappedValue: MLXArray.zeros([numExperts, outputDims, groupsIn], dtype: .bfloat16),
+                key: "biases")
+        } else {
+            _biases = ParameterInfo(wrappedValue: nil, key: "biases")
+        }
     }
 
     /// Per-token expert dispatch. `x` is shaped so the last two dims feed
@@ -104,7 +116,7 @@ class MoEQuantizedSwitchedLinear: Module {
             scales: scales, biases: biases,
             rhsIndices: indices,
             transpose: true,
-            groupSize: groupSize, bits: bits, mode: .affine,
+            groupSize: groupSize, bits: bits, mode: mode,
             sortedIndices: sortedIndices)
     }
 }
@@ -146,23 +158,24 @@ class MoESwitchGLU: Module {
 
     init(
         inputDims: Int, hiddenDims: Int, numExperts: Int,
-        groupSize: Int, bits: Int, activation: MoEActivation
+        groupSize: Int, bits: Int, activation: MoEActivation,
+        mode: QuantizationMode = .affine
     ) {
         self.activation = activation
         _gateProj = ModuleInfo(
             wrappedValue: MoEQuantizedSwitchedLinear(
                 inputDims: inputDims, outputDims: hiddenDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
+                numExperts: numExperts, groupSize: groupSize, bits: bits, mode: mode),
             key: "gate_proj")
         _upProj = ModuleInfo(
             wrappedValue: MoEQuantizedSwitchedLinear(
                 inputDims: inputDims, outputDims: hiddenDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
+                numExperts: numExperts, groupSize: groupSize, bits: bits, mode: mode),
             key: "up_proj")
         _downProj = ModuleInfo(
             wrappedValue: MoEQuantizedSwitchedLinear(
                 inputDims: hiddenDims, outputDims: inputDims,
-                numExperts: numExperts, groupSize: groupSize, bits: bits),
+                numExperts: numExperts, groupSize: groupSize, bits: bits, mode: mode),
             key: "down_proj")
     }
 

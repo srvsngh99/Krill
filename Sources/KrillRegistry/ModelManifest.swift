@@ -131,6 +131,12 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     /// q/k/v/o projections, four-RMSNorm sandwich, partial RoPE, fused gate_up.
     case glm4
     case deepseek
+    /// Unlimited-OCR (DeepSeek-OCR): native multimodal OCR. A DeepSeek-MoE
+    /// language backbone (use_mla:false standard attention) + the native
+    /// DeepEncoder vision tower (SAM-ViT-B + CLIP-L + linear projector). Serves
+    /// document/image OCR by splicing base-view vision features at the
+    /// `<image>` block before the LM. Ships nvfp4 experts + 8-bit everything-else.
+    case unlimitedOcr = "unlimited_ocr"
     /// Dedicated sentence-embedding encoder (BERT/RoBERTa/MiniLM/BGE/E5).
     /// Not a causal LM - served only via the embeddings endpoints.
     case bert

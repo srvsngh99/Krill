@@ -7,6 +7,24 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.16.0 — 2026-06-30
+Adds a **native Swift + MLX runtime for Unlimited-OCR (DeepSeek-OCR)** —
+`krill run unlimited-ocr --image <page> "document parsing."` parses documents and
+images to grounded text **natively on Apple Silicon**: no Python, no
+`trust_remote_code`. It's a DeepSeek-MoE language backbone + the native
+**DeepEncoder** vision tower (SAM-ViT-B + CLIP-L + projector), with the vision
+features spliced at the `<image>` block before the LM. Every stage is
+parity-validated against the HF reference, and it reads real multi-line invoices
+(titles, line-item tables, totals) correctly.
+
+Ships as a **2.2 GB mixed-precision Krill blob** (`srv-sngh/Unlimited-OCR-mixed-nvfp4`,
+from the 6.67 GB bf16 source): MoE experts at **nvfp4**, attention / FFN / embed /
+lm_head / vision tower at 8-bit affine. nvfp4 expert support is an *additive*
+mode on the shared switched-expert runtime, so every other MoE family is
+unchanged. Serves the parity-validated **base view** (full pages, including wide
+layouts); gundam tiling for very dense scans is a tracked follow-up. Built on
+`baidu/Unlimited-OCR` (MIT) — credit to the original authors.
+
 ## v0.15.0 — 2026-06-28
 **Web search works out of the box.** `web_search` (and `DeepResearch` /
 `POST /research`) now ships a keyless **DuckDuckGo** backend as the default

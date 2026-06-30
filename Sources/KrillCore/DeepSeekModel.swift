@@ -49,6 +49,18 @@ public struct DeepSeekRopeScaling: Codable, Sendable {
         originalMaxPositionEmbeddings = try c.decodeIfPresent(
             Int.self, forKey: .originalMaxPositionEmbeddings) ?? 4096
     }
+
+    /// Identity (no-op) scaling, used when a checkpoint omits `rope_scaling`
+    /// entirely (e.g. the DeepSeek-OCR language backbone). `factor <= 1` makes
+    /// every YaRN ramp/mscale collapse to 1, so the rope is plain RoPE.
+    public init() {
+        factor = 1.0
+        betaFast = 32
+        betaSlow = 1
+        mscale = 1
+        mscaleAllDim = 0
+        originalMaxPositionEmbeddings = 4096
+    }
 }
 
 public struct DeepSeekConfig: ModelConfig, Codable, Sendable {
@@ -88,7 +100,24 @@ public struct DeepSeekConfig: ModelConfig, Codable, Sendable {
     public let ropeScaling: DeepSeekRopeScaling
     public let modelType: String
 
+    /// Whether the decoder uses Multi-head Latent Attention. False for the
+    /// DeepSeek-OCR language backbone (`use_mla: false`, `kv_lora_rank: null`,
+    /// `qk_*_head_dim: 0`), which is plain multi-head attention with a DeepSeek
+    /// MoE FFN. Defaults true so existing V2/V2-Lite checkpoints are unaffected.
+    public let useMLA: Bool
+    /// Sliding-window size if the config declares one (the OCR backbone carries
+    /// `sliding_window_size: 128`); nil when absent. See note in
+    /// `DeepSeekStandardAttention` on whether it is actually applied.
+    public let slidingWindowSize: Int?
+
     public var headDim: Int { qkNopeHeadDim + qkRopeHeadDim }
+
+    /// Head dim for the standard (non-MLA) attention path: `v_head_dim` when
+    /// set, else `hidden / heads`. (The MLA `headDim` above is the split
+    /// nope+rope dim, which is 0 for a non-MLA checkpoint.)
+    public var standardHeadDim: Int {
+        vHeadDim > 0 ? vHeadDim : hiddenSize / numAttentionHeads
+    }
 
     /// DeepSeek-V3 (and V3.2) ship an *absorbed* MLA representation
     /// (`embed_q` / `unembed_out` per-head linears, a latent KV cache, and a
@@ -139,6 +168,8 @@ public struct DeepSeekConfig: ModelConfig, Codable, Sendable {
         case moeLayerFreq = "moe_layer_freq"
         case ropeScaling = "rope_scaling"
         case modelType = "model_type"
+        case useMLA = "use_mla"
+        case slidingWindowSize = "sliding_window_size"
     }
 
     public init(from decoder: Decoder) throws {
@@ -176,8 +207,11 @@ public struct DeepSeekConfig: ModelConfig, Codable, Sendable {
         topkGroup = try c.decodeIfPresent(Int.self, forKey: .topkGroup) ?? 1
         firstKDenseReplace = try c.decodeIfPresent(Int.self, forKey: .firstKDenseReplace) ?? 0
         moeLayerFreq = try c.decodeIfPresent(Int.self, forKey: .moeLayerFreq) ?? 1
-        ropeScaling = try c.decode(DeepSeekRopeScaling.self, forKey: .ropeScaling)
+        ropeScaling = try c.decodeIfPresent(DeepSeekRopeScaling.self, forKey: .ropeScaling)
+            ?? DeepSeekRopeScaling()
         modelType = try c.decodeIfPresent(String.self, forKey: .modelType) ?? "deepseek_v2"
+        useMLA = try c.decodeIfPresent(Bool.self, forKey: .useMLA) ?? true
+        slidingWindowSize = try c.decodeIfPresent(Int.self, forKey: .slidingWindowSize)
     }
 }
 
@@ -378,6 +412,100 @@ class DeepSeekAttention: Module {
         let output = MLXFast.scaledDotProductAttention(
             queries: queries, keys: keys, values: vals, scale: scale, mask: mask)
 
+        return oProj(output.transposed(0, 2, 1, 3).reshaped(B, L, -1))
+    }
+}
+
+// MARK: - Standard (non-MLA) attention
+
+/// Plain multi-head attention for DeepSeek configs with `use_mla: false`
+/// (the DeepSeek-OCR language backbone): direct `q/k/v/o_proj`, GQA via
+/// `num_key_value_heads`, and standard half-split (NeoX / `rotate_half`) RoPE
+/// over the full head dim. No latent compression and no split nope/rope slices.
+///
+/// Note on `sliding_window_size`: the OCR backbone's config carries a 128-token
+/// window, but the reference `modeling_deepseekv2` attention is full-causal
+/// (the field is vestigial there). This implementation is full-causal; the
+/// Phase-2 logit-parity gate is what confirms that choice (and the RoPE
+/// convention) against the HF reference before we trust it.
+class DeepSeekStandardAttention: Module {
+    let numHeads: Int
+    let numKVHeads: Int
+    let headDim: Int
+    let scale: Float
+    let ropeTheta: Float
+
+    @ModuleInfo(key: "q_proj") var qProj: Linear
+    @ModuleInfo(key: "k_proj") var kProj: Linear
+    @ModuleInfo(key: "v_proj") var vProj: Linear
+    @ModuleInfo(key: "o_proj") var oProj: Linear
+
+    init(_ config: DeepSeekConfig) {
+        self.numHeads = config.numAttentionHeads
+        self.numKVHeads = config.numKeyValueHeads
+        self.headDim = config.standardHeadDim
+        self.scale = 1.0 / Float(headDim).squareRoot()
+        self.ropeTheta = config.ropeTheta
+
+        let dim = config.hiddenSize
+        let bias = config.attentionBias
+        _qProj = ModuleInfo(
+            wrappedValue: Linear(dim, numHeads * headDim, bias: bias), key: "q_proj")
+        _kProj = ModuleInfo(
+            wrappedValue: Linear(dim, numKVHeads * headDim, bias: bias), key: "k_proj")
+        _vProj = ModuleInfo(
+            wrappedValue: Linear(dim, numKVHeads * headDim, bias: bias), key: "v_proj")
+        _oProj = ModuleInfo(
+            wrappedValue: Linear(numHeads * headDim, dim, bias: bias), key: "o_proj")
+    }
+
+    private func rope(_ x: MLXArray, offset: Int) -> MLXArray {
+        MLXFast.RoPE(
+            x, dimensions: headDim, traditional: false,
+            base: ropeTheta, scale: 1.0, offset: offset)
+    }
+
+    func callAsFunction(_ x: MLXArray, mask: MLXArray? = nil, cache: KVCache? = nil,
+                        rowOffsets: [Int]? = nil) -> MLXArray {
+        let B = x.dim(0)
+        let L = x.dim(1)
+
+        var q = qProj(x).reshaped(B, L, numHeads, headDim).transposed(0, 2, 1, 3)
+        var k = kProj(x).reshaped(B, L, numKVHeads, headDim).transposed(0, 2, 1, 3)
+        var v = vProj(x).reshaped(B, L, numKVHeads, headDim).transposed(0, 2, 1, 3)
+
+        if let rowOffsets {
+            // Batched ragged decode: each row carries its own next position.
+            var qRows: [MLXArray] = []
+            var kRows: [MLXArray] = []
+            qRows.reserveCapacity(rowOffsets.count)
+            kRows.reserveCapacity(rowOffsets.count)
+            for (r, off) in rowOffsets.enumerated() {
+                qRows.append(rope(q[r ..< (r + 1)], offset: off))
+                kRows.append(rope(k[r ..< (r + 1)], offset: off))
+            }
+            q = concatenated(qRows, axis: 0)
+            k = concatenated(kRows, axis: 0)
+        } else {
+            let offset = cache?.sequenceLength ?? 0
+            q = rope(q, offset: offset)
+            k = rope(k, offset: offset)
+        }
+
+        if let cache {
+            (k, v) = cache.update(keys: k, values: v)
+        }
+
+        // GQA: expand the compact KV heads to the query head count (after the
+        // cache update, which stores the compact KV).
+        if numKVHeads < numHeads {
+            let rep = numHeads / numKVHeads
+            k = repeated(k, count: rep, axis: 1)
+            v = repeated(v, count: rep, axis: 1)
+        }
+
+        let output = MLXFast.scaledDotProductAttention(
+            queries: q, keys: k, values: v, scale: scale, mask: mask)
         return oProj(output.transposed(0, 2, 1, 3).reshaped(B, L, -1))
     }
 }
@@ -747,13 +875,20 @@ class DeepSeekMoE: Module {
         _gate = ModuleInfo(wrappedValue: DeepSeekMoEGate(config), key: "gate")
         let groupSize = config.quantization?.groupSize ?? 64
         let bits = config.quantization?.bits ?? 4
+        // The born-quantized experts read the top-level quant block. For the
+        // mixed-precision Unlimited-OCR ship checkpoint the experts are nvfp4
+        // (the residency-dominant bulk) while the non-expert Linears carry
+        // per-module 8-bit affine overrides resolved at load time; `mode`
+        // defaults to .affine so every existing DeepSeek/MoE checkpoint is
+        // unchanged.
+        let mode = mlxQuantizationMode(config.quantization?.mode ?? "affine")
         _switchMLP = ModuleInfo(
             wrappedValue: MoESwitchGLU(
                 inputDims: config.hiddenSize,
                 hiddenDims: config.moeIntermediateSize,
                 numExperts: config.nRoutedExperts,
                 groupSize: groupSize, bits: bits,
-                activation: .swiglu),
+                activation: .swiglu, mode: mode),
             key: "switch_mlp")
         if config.nSharedExperts > 0 {
             _sharedExperts = ModuleInfo(
@@ -806,9 +941,14 @@ class DeepSeekDecoderLayer: Module {
     let isMoE: Bool
 
     init(_ config: DeepSeekConfig, layerIndex: Int) {
-        let attn: Module = config.usesAbsorbedMLA
-            ? DeepSeekV3Attention(config)
-            : DeepSeekAttention(config)
+        let attn: Module
+        if config.usesAbsorbedMLA {
+            attn = DeepSeekV3Attention(config)          // V3 absorbed MLA
+        } else if config.useMLA {
+            attn = DeepSeekAttention(config)            // V2 MLA (kv_b_proj)
+        } else {
+            attn = DeepSeekStandardAttention(config)    // plain MHA (DeepSeek-OCR)
+        }
         _selfAttn = ModuleInfo(wrappedValue: attn, key: "self_attn")
         self.isMoE = config.isMoELayer(layerIndex)
         let mlpModule: Module = isMoE
@@ -831,8 +971,11 @@ class DeepSeekDecoderLayer: Module {
             attnOut = v3(normed, mask: mask, cache: cache, rowOffsets: rowOffsets)
         } else if let v2 = selfAttn as? DeepSeekAttention {
             attnOut = v2(normed, mask: mask, cache: cache, rowOffsets: rowOffsets)
+        } else if let std = selfAttn as? DeepSeekStandardAttention {
+            attnOut = std(normed, mask: mask, cache: cache, rowOffsets: rowOffsets)
         } else {
-            fatalError("DeepSeekDecoderLayer.selfAttn must be DeepSeekAttention or DeepSeekV3Attention")
+            fatalError("DeepSeekDecoderLayer.selfAttn must be DeepSeekAttention, "
+                + "DeepSeekV3Attention, or DeepSeekStandardAttention")
         }
         let h = x + attnOut
         let postAttn = postAttentionLayernorm(h)
@@ -872,7 +1015,17 @@ class DeepSeekModelInner: Module {
 
     func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil,
                         precomputedMask: MLXArray? = nil, rowOffsets: [Int]? = nil) -> MLXArray {
-        var x = embedTokens(tokens)
+        callAsFunction(inputsEmbeds: embedTokens(tokens), caches: caches,
+                       precomputedMask: precomputedMask, rowOffsets: rowOffsets)
+    }
+
+    /// Token embeddings only (for a multimodal splice before `inputsEmbeds`).
+    func embed(_ tokens: MLXArray) -> MLXArray { embedTokens(tokens) }
+
+    /// Decode from pre-computed input embeddings (vision tokens already spliced).
+    func callAsFunction(inputsEmbeds x0: MLXArray, caches: [KVCache]? = nil,
+                        precomputedMask: MLXArray? = nil, rowOffsets: [Int]? = nil) -> MLXArray {
+        var x = x0
         let mask: MLXArray?
         if let precomputedMask {
             mask = precomputedMask
@@ -922,6 +1075,20 @@ public class DeepSeekForCausalLM: Module {
         }
         return lmHead(hidden)
     }
+
+    /// Multimodal entry: decode from pre-spliced input embeddings.
+    public func callAsFunction(inputsEmbeds: MLXArray, caches: [KVCache]? = nil,
+                               lastTokenOnly: Bool = false) -> MLXArray {
+        var hidden = model(inputsEmbeds: inputsEmbeds, caches: caches)
+        if lastTokenOnly {
+            let last = hidden.dim(1) - 1
+            hidden = hidden[0..., last ..< (last + 1), 0...]
+        }
+        return lmHead(hidden)
+    }
+
+    /// Token embeddings, exposed for the multimodal splice.
+    public func embedTokens(_ tokens: MLXArray) -> MLXArray { model.embed(tokens) }
 
     public func batchedDecode(
         _ tokens: MLXArray, caches: [KVCache], mask: MLXArray, rowOffsets: [Int]
