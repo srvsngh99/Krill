@@ -892,6 +892,55 @@ public final class KrillTokenizer: @unchecked Sendable {
         return tokens
     }
 
+    /// Encode messages as Qwen3.5-VL (Ornith) token ids with an image span.
+    /// Mirrors `formatQwen25VLTokenIds` but resolves `<|im_start|>` / `<|im_end|>`
+    /// from the tokenizer (Ornith's ChatML ids are 248045 / 248046, NOT the
+    /// Qwen2.5 151644 / 151645) and takes the vision ids from the model config.
+    /// The image attaches to the FIRST user turn as
+    /// `<|vision_start|>` + `imagePadCount` × `<|image_pad|>` + `<|vision_end|>`.
+    /// `imagePadCount == 0` renders a plain text-only ChatML prompt (identical
+    /// to `chatmlPrompt`, just as token ids).
+    public func formatQwen35VLTokenIds(
+        messages: [[String: String]],
+        imagePadCount: Int,
+        imageTokenId: Int,
+        visionStartTokenId: Int,
+        visionEndTokenId: Int
+    ) -> [Int] {
+        // Single special-token ids (encode() returns exactly one id per marker
+        // for a ChatML tokenizer; verified 248045 / 248046 for Ornith).
+        let imStart = tokenizer.encode(text: "<|im_start|>")
+        let imEnd = tokenizer.encode(text: "<|im_end|>")
+        let newline = tokenizer.encode(text: "\n")
+        let firstUserIndex = messages.firstIndex { $0["role"] == "user" }
+
+        var tokens: [Int] = []
+        for (i, msg) in messages.enumerated() {
+            let rawRole = msg["role"] ?? "user"
+            let content = msg["content"] ?? ""
+            let role: String
+            switch rawRole {
+            case "system", "user", "assistant", "tool": role = rawRole
+            default: role = "user"
+            }
+            tokens += imStart
+            tokens += tokenizer.encode(text: role)
+            tokens += newline
+            if i == firstUserIndex && imagePadCount > 0 {
+                tokens.append(visionStartTokenId)
+                tokens += Array(repeating: imageTokenId, count: imagePadCount)
+                tokens.append(visionEndTokenId)
+            }
+            tokens += tokenizer.encode(text: content)
+            tokens += imEnd
+            tokens += newline
+        }
+        tokens += imStart
+        tokens += tokenizer.encode(text: "assistant")
+        tokens += newline
+        return tokens
+    }
+
     /// Encode messages as LLaVA-1.5 token ids, manually rendering the vicuna-v1
     /// conversation the model was fine-tuned on and placing the image-token run
     /// directly (mirrors `formatQwen25VLTokenIds`).

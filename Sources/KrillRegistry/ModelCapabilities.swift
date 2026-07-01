@@ -93,10 +93,12 @@ public enum ModelCapabilities {
         case .llama, .qwen:
             return [.textGeneration, .tools]
         case .qwen35:
-            // Ornith-9B (qwen3_5): native text decoder + Qwen tool template.
-            // visionInput is intentionally NOT advertised - the vision tower is
-            // deferred to mlx_vlm, so this build serves the text decoder only.
-            return [.textGeneration, .tools]
+            // Ornith-9B (qwen3_5): native text decoder + native vision tower +
+            // Qwen tool template. `.visionInput` is advertised for the family;
+            // the `multimodalForward == nil` guard in InferenceEngine.capabilities
+            // strips it for a text-only checkpoint (no vision_config → loadQwen35),
+            // so only a full VL checkpoint (loadQwen35VL) actually reports vision.
+            return [.textGeneration, .visionInput, .tools]
         case .gemma4:
             return [.textGeneration, .visionInput, .audioInput, .tools]
         case .gemma4Unified:
