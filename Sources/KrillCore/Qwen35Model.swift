@@ -91,6 +91,29 @@ public struct Qwen35Config: Codable {
 
 // MARK: - Helpers
 
+/// Apply interleaved sectioned mRoPE to the first `rotaryDim` dims of a
+/// `[B, H, L, D]` tensor; dims `>= rotaryDim` pass through (partial rotary).
+/// `cos`/`sin` are `[1, 1, L, rotaryDim/2]` tables already gathered per
+/// selected t/h/w axis (see `Qwen35VLMRoPE.buildCosSin`). The pairing is
+/// half-split (`rotate_half`), matching mlx_vlm's interleaved style. For
+/// text-only positions (t == h == w) this equals the standard partial RoPE.
+@inline(__always)
+func applyPartialMRoPE(_ x: MLXArray, cos: MLXArray, sin: MLXArray, rotaryDim: Int) -> MLXArray {
+    let dtype = x.dtype
+    let d = x.dim(-1)
+    let half = rotaryDim / 2
+    let xf = x.asType(.float32)
+    let xRot = xf[.ellipsis, 0 ..< rotaryDim]
+    let x1 = xRot[.ellipsis, 0 ..< half]
+    let x2 = xRot[.ellipsis, half ..< rotaryDim]
+    let y1 = x1 * cos - x2 * sin
+    let y2 = x1 * sin + x2 * cos
+    let rotated = MLX.concatenated([y1, y2], axis: -1)
+    if rotaryDim == d { return rotated.asType(dtype) }
+    let xPass = xf[.ellipsis, rotaryDim ..< d]
+    return MLX.concatenated([rotated, xPass], axis: -1).asType(dtype)
+}
+
 /// RMS-normalise over the last axis with NO learned weight (mlx `rms_norm(x, None, eps)`).
 @inline(__always)
 func rmsNormNoWeight(_ x: MLXArray, eps: Float) -> MLXArray {
@@ -288,6 +311,9 @@ final class Qwen35Attention: Module {
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
     let rope: RoPE
+    /// Number of leading dims rotated (partial rotary). Shared by the standard
+    /// `rope` path and the mRoPE path (`applyPartialMRoPE`).
+    let rotaryDim: Int
 
     init(_ c: Qwen35Config) {
         numHeads = c.numAttentionHeads
@@ -302,11 +328,18 @@ final class Qwen35Attention: Module {
         _kNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: headDim, eps: c.rmsNormEps), key: "k_norm")
         // Partial rotary: rotate the first floor(headDim * partialRotaryFactor) dims.
         // mRoPE collapses to standard RoPE for text-only positions.
-        let rotaryDim = Int(Float(headDim) * c.partialRotaryFactor)
+        self.rotaryDim = Int(Float(headDim) * c.partialRotaryFactor)
         self.rope = RoPE(dimensions: rotaryDim, traditional: false, base: c.ropeTheta)
     }
 
-    func callAsFunction(_ x: MLXArray, cache: KVCache? = nil) -> MLXArray {
+    /// `mropeCosSin`: optional precomputed 3D interleaved-mRoPE `(cos, sin)`
+    /// tables of shape `[1, 1, L, rotaryDim/2]` (built by `Qwen35VLMRoPE` for
+    /// the VL path). When nil, the standard cache-offset `rope` is used — the
+    /// text-only decode path is byte-identical to before.
+    func callAsFunction(
+        _ x: MLXArray, cache: KVCache? = nil,
+        mropeCosSin: (cos: MLXArray, sin: MLXArray)? = nil
+    ) -> MLXArray {
         let B = x.dim(0), L = x.dim(1)
 
         let qp = qProj(x).reshaped(B, L, numHeads, headDim * 2)
@@ -321,8 +354,13 @@ final class Qwen35Attention: Module {
         values = values.transposed(0, 2, 1, 3)
 
         let offset = cache?.sequenceLength ?? 0
-        queries = rope(queries, offset: offset)
-        keys = rope(keys, offset: offset)
+        if let (cos, sin) = mropeCosSin {
+            queries = applyPartialMRoPE(queries, cos: cos, sin: sin, rotaryDim: rotaryDim)
+            keys = applyPartialMRoPE(keys, cos: cos, sin: sin, rotaryDim: rotaryDim)
+        } else {
+            queries = rope(queries, offset: offset)
+            keys = rope(keys, offset: offset)
+        }
         if let cache {
             (keys, values) = cache.update(keys: keys, values: values)
         }
@@ -384,15 +422,20 @@ final class Qwen35DecoderLayer: Module {
         _mlp = ModuleInfo(wrappedValue: Qwen35MLP(c.hiddenSize, c.intermediateSize), key: "mlp")
     }
 
-    func callAsFunction(_ x: MLXArray, cache: KVCacheProtocol? = nil) -> MLXArray {
+    func callAsFunction(
+        _ x: MLXArray, cache: KVCacheProtocol? = nil,
+        mropeCosSin: (cos: MLXArray, sin: MLXArray)? = nil
+    ) -> MLXArray {
         let normed = inputLayernorm(x)
         let r: MLXArray
         if isLinear {
+            // Linear (GatedDeltaNet) layers carry no positional rotary — the
+            // scan itself is causal; mRoPE only applies to full-attn layers.
             r = linearAttn!(normed, cache: cache as? GatedDeltaCache)
         } else {
             // Full-attention layer builds its own causal mask from the cache
             // offset (see Qwen35Attention); the linear layer is causal by scan.
-            r = selfAttn!(normed, cache: cache as? KVCache)
+            r = selfAttn!(normed, cache: cache as? KVCache, mropeCosSin: mropeCosSin)
         }
         let h = x + r
         return h + mlp(postAttentionLayernorm(h))
@@ -429,9 +472,26 @@ final class Qwen35Model: Module {
     /// full-attn layer, one `GatedDeltaCache` per linear layer) this carries
     /// state for incremental decode; without them it is a cacheless prefill.
     func callAsFunction(_ tokens: MLXArray, caches: [KVCacheProtocol]? = nil) -> MLXArray {
-        var h = embedTokens(tokens)
+        forward(embedTokens(tokens), caches: caches, mropeCosSin: nil)
+    }
+
+    /// VL entry point: run the decoder over precomputed `inputsEmbeds`
+    /// (with image features already scattered in) and 3D interleaved-mRoPE
+    /// `(cos, sin)` tables. `embeds`: `[B, L, hidden]`.
+    func callAsFunction(
+        embeds: MLXArray, caches: [KVCacheProtocol]? = nil,
+        mropeCosSin: (cos: MLXArray, sin: MLXArray)? = nil
+    ) -> MLXArray {
+        forward(embeds, caches: caches, mropeCosSin: mropeCosSin)
+    }
+
+    private func forward(
+        _ initial: MLXArray, caches: [KVCacheProtocol]?,
+        mropeCosSin: (cos: MLXArray, sin: MLXArray)?
+    ) -> MLXArray {
+        var h = initial
         for (i, layer) in layers.enumerated() {
-            h = layer(h, cache: caches?[i])
+            h = layer(h, cache: caches?[i], mropeCosSin: mropeCosSin)
         }
         return norm(h)
     }
@@ -451,6 +511,29 @@ public final class Qwen35ForCausalLM: Module {
     public func callAsFunction(_ tokens: MLXArray, caches: [KVCacheProtocol]? = nil) -> MLXArray {
         lmHead(model(tokens, caches: caches))
     }
+
+    /// VL forward: decode over image-augmented `embeds` with 3D mRoPE tables.
+    public func callAsFunction(
+        embeds: MLXArray, caches: [KVCacheProtocol]? = nil,
+        mropeCosSin: (cos: MLXArray, sin: MLXArray)? = nil
+    ) -> MLXArray {
+        lmHead(model(embeds: embeds, caches: caches, mropeCosSin: mropeCosSin))
+    }
+
+    /// Pre-lm_head normed hidden states over image-augmented `embeds` (lets the
+    /// VL wrapper slice to the last token before the wide vocab projection).
+    public func hiddenStates(
+        embeds: MLXArray, caches: [KVCacheProtocol]? = nil,
+        mropeCosSin: (cos: MLXArray, sin: MLXArray)? = nil
+    ) -> MLXArray {
+        model(embeds: embeds, caches: caches, mropeCosSin: mropeCosSin)
+    }
+
+    /// Project normed hidden states to vocab logits via the lm_head.
+    public func project(_ hidden: MLXArray) -> MLXArray { lmHead(hidden) }
+
+    /// Token embedding lookup (for the VL wrapper's image-feature scatter).
+    public func embed(_ tokens: MLXArray) -> MLXArray { model.embedTokens(tokens) }
 
     /// One per-layer cache: `KVCache` for full-attn layers, `GatedDeltaCache`
     /// for GatedDeltaNet layers. Pass to `callAsFunction` for incremental decode.

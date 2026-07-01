@@ -765,6 +765,16 @@ public final class InferenceEngine: @unchecked Sendable {
                 usePrefixCache: usePrefixCache)
         }
 
+        // Qwen3.5-VL (Ornith) native runtime. Same 3D-mRoPE decode reason as
+        // Qwen 2.5-VL above; its hybrid decoder also forbids the prefix cache
+        // (SSM state is non-restorable), so the dedicated driver always full-
+        // prefills. Image and text-only requests both route here.
+        if let vlModel = loadedModel.module as? Qwen35VLForConditionalGeneration {
+            return generateQwen35VL(
+                model: vlModel, tokenizer: tokenizer, messages: messages,
+                params: params, maxTokens: maxTokens, imageData: imageData)
+        }
+
         // Inject media placeholders into the first user message before
         // tokenization so the chat path matches the prompt path. Gemma 4's
         // multimodal forward replaces embeddings at placeholder token positions
@@ -2152,6 +2162,111 @@ public final class InferenceEngine: @unchecked Sendable {
                     decodeTime: output.decodeSeconds)
                 // One terminal event: the stop token id if generation
                 // ended on a stop, else -1 (maxTokens reached).
+                let sawStop = output.tokens.last.map {
+                    capturedStops.contains($0)
+                } ?? false
+                continuation.yield(TokenEvent(
+                    tokenId: sawStop ? (output.tokens.last ?? -1) : -1,
+                    text: "",
+                    elapsed: CFAbsoluteTimeGetCurrent() - startTime,
+                    isEnd: true))
+                continuation.finish()
+            }
+        }
+        return (stream, { statsHolder.stats })
+    }
+
+    private func generateQwen35VL(
+        model: Qwen35VLForConditionalGeneration,
+        tokenizer: KrillTokenizer,
+        messages: [[String: String]],
+        params: SamplingParams,
+        maxTokens: Int,
+        imageData: Data?
+    ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
+        // Preprocess the image (if any) into the flattened patch batch + full
+        // patch grid. The merged grid sizes the `<|image_pad|>` run + mRoPE.
+        var pixelValues: MLXArray? = nil
+        var grid: (t: Int, h: Int, w: Int)? = nil
+        var imagePadCount = 0
+        if let imgData = imageData {
+            do {
+                let prepped = try Qwen35VLImagePreprocessor.preprocess(
+                    imgData, vision: model.config.visionConfig)
+                pixelValues = prepped.patches
+                grid = prepped.grid
+                let ms = model.config.visionConfig.spatialMergeSize
+                imagePadCount = (prepped.grid.h / ms) * (prepped.grid.w / ms)
+            } catch {
+                return Self.mediaErrorStream(
+                    "Error: Qwen3.5-VL image preprocessing failed: \(error)")
+            }
+        }
+
+        let promptTokens = tokenizer.formatQwen35VLTokenIds(
+            messages: messages,
+            imagePadCount: imagePadCount,
+            imageTokenId: model.config.imageTokenId,
+            visionStartTokenId: model.config.visionStartTokenId,
+            visionEndTokenId: model.config.visionEndTokenId)
+        guard !promptTokens.isEmpty else {
+            let empty = AsyncStream<TokenEvent> { c in
+                c.yield(TokenEvent(tokenId: 0, text: "", elapsed: 0, isEnd: true))
+                c.finish()
+            }
+            return (empty, { nil })
+        }
+
+        let stopIds = Self.stopTokenIds(
+            modelDirectory: modelDirectory, tokenizerEOS: tokenizer.eosTokenId)
+        let mediaHash: String? = imageData.map {
+            "img:" + VisionEncoderCache.key(forImageBytes: $0)
+        }
+        let statsHolder = StatsHolder()
+
+        struct Captures: @unchecked Sendable {
+            let model: Qwen35VLForConditionalGeneration
+            let tokenizer: KrillTokenizer
+            let pixels: MLXArray?
+            let grid: (t: Int, h: Int, w: Int)?
+            let prompt: [Int]
+            let stops: Set<Int>
+            let params: SamplingParams
+            let max: Int
+            let mediaHash: String?
+        }
+        let captures = Captures(
+            model: model, tokenizer: tokenizer, pixels: pixelValues, grid: grid,
+            prompt: promptTokens, stops: stopIds, params: params, max: maxTokens,
+            mediaHash: mediaHash)
+
+        let stream = AsyncStream<TokenEvent> { continuation in
+            Task { [statsHolder, captures] in
+                let capturedTokenizer = captures.tokenizer
+                let capturedPrompt = captures.prompt
+                let capturedStops = captures.stops
+                let startTime = CFAbsoluteTimeGetCurrent()
+                let output = Qwen35VLRuntime.generate(
+                    model: captures.model,
+                    promptTokens: capturedPrompt,
+                    pixelValues: captures.pixels,
+                    grid: captures.grid,
+                    maxTokens: captures.max,
+                    stopIds: capturedStops,
+                    params: captures.params,
+                    mediaHash: captures.mediaHash,
+                    onToken: { token in
+                        guard !capturedStops.contains(token) else { return }
+                        continuation.yield(TokenEvent(
+                            tokenId: token,
+                            text: capturedTokenizer.decodeForOutput(token: token),
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                    })
+                statsHolder.stats = GenerationStats(
+                    promptTokens: capturedPrompt.count,
+                    generatedTokens: output.tokens.count,
+                    prefillTime: output.prefillSeconds,
+                    decodeTime: output.decodeSeconds)
                 let sawStop = output.tokens.last.map {
                     capturedStops.contains($0)
                 } ?? false

@@ -388,7 +388,18 @@ let architectureRules: [ArchitectureRule] = [
             (arch.contains("qwen3_5") && !arch.contains("moe"))
                 || mt == "qwen3_5" || mt == "qwen3_5_text"
         },
-        action: .load { try loadQwen35(configData: $0, directory: $1) }),
+        // Ornith's config carries BOTH a `text_config` and a `vision_config`.
+        // When the vision tower is present, load the native VL model (vision
+        // advertised, image inference native); a text-only checkpoint (no
+        // `vision_config`) still loads the lean text decoder. VL-as-default was
+        // the confirmed rollout choice.
+        action: .load { data, dir in
+            let hasVision = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?
+                .keys.contains("vision_config") ?? false
+            return hasVision
+                ? try loadQwen35VL(configData: data, directory: dir)
+                : try loadQwen35(configData: data, directory: dir)
+        }),
 
     ArchitectureRule(
         id: "qwen",
@@ -696,6 +707,92 @@ private func loadQwen25VL(configData: Data, directory: URL) throws -> LoadedMode
                 + "regressed.")
         },
         vocabSize: config.vocabSize
+    )
+}
+
+/// Native Qwen3.5-VL (Ornith) multimodal loader. Unlike `loadQwen35` (which
+/// drops the vision tower and loads only the text decoder), this materializes
+/// the WHOLE checkpoint into `Qwen35VLForConditionalGeneration`: the native
+/// vision tower + the native hybrid text decoder. The mlx_vlm-format int4
+/// checkpoint's on-disk keys (`vision_tower.*`, `language_model.model.*`,
+/// `language_model.lm_head.*`) map straight onto the module tree, so NO prefix
+/// rewrite is needed. Only the language model is quantized (the vision tower
+/// ships fp16, exactly like the Qwen 2.5-VL checkpoints) — the quantize
+/// predicate is restricted to `language_model.*`. The conditional mlx_lm
+/// sanitize (conv1d `moveaxis`, RMSNorm `+1`, torch conv3d transpose) is a
+/// no-op for the mlx_vlm-format int4 and only fires for a raw torch checkpoint.
+private func loadQwen35VL(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(Qwen35VLConfig.self, from: configData)
+    let model = Qwen35VLForConditionalGeneration(config)
+
+    if let q = config.quantization {
+        quantize(model: model, groupSize: q.groupSize, bits: q.bits,
+                 mode: mlxQuantizationMode(q.mode)) { name, _ in
+            name.contains("language_model")
+        }
+    }
+
+    var flat = try loadWeightArrays(from: directory)
+    // Conditional sanitize (fires only for a raw torch-format checkpoint; the
+    // mlx_vlm-format int4 triggers none of these). Detect BEFORE dropping mtp.
+    let hasMTP = flat.keys.contains { $0.hasPrefix("mtp.") || $0.contains(".mtp.") }
+    let hasUnsanitizedConv = flat.contains { key, value in
+        key.hasSuffix("conv1d.weight") && (value.shape.last ?? 1) != 1
+    }
+    let shouldShiftNorms = hasMTP || hasUnsanitizedConv
+    let normSuffixes = [
+        ".input_layernorm.weight", ".post_attention_layernorm.weight",
+        "model.norm.weight", ".q_norm.weight", ".k_norm.weight",
+    ]
+    for key in Array(flat.keys) where key.hasPrefix("mtp.") || key.contains(".mtp.") {
+        flat.removeValue(forKey: key)
+    }
+    for (key, value) in flat {
+        if key.hasSuffix("conv1d.weight") && (value.shape.last ?? 1) != 1 {
+            flat[key] = value.movedAxis(source: 2, destination: 1)
+        } else if key.hasSuffix("patch_embed.proj.weight") && value.ndim == 5
+            && (value.shape.last ?? 0) != model.config.visionConfig.inChannels {
+            // torch Conv3d [O, I, kT, kH, kW] -> mlx [O, kT, kH, kW, I].
+            flat[key] = value.transposed(0, 2, 3, 4, 1)
+        }
+        if shouldShiftNorms, value.ndim == 1,
+            normSuffixes.contains(where: { key.hasSuffix($0) }) {
+            flat[key] = value + 1.0
+        }
+    }
+
+    let nested = ModuleParameters.unflattened(flat.map { ($0.key, $0.value) })
+    // `verify: []` tolerates tied embeddings omitting lm_head (Ornith is untied,
+    // so all keys map, but keep it lax to match loadQwen25VL).
+    try model.update(parameters: nested, verify: [])
+
+    // Per-layer cache kinds for the hybrid text decoder.
+    let tc = config.textConfig
+    let cacheSpec: [KVCacheKind] = (0 ..< tc.numHiddenLayers).map {
+        tc.isLinearLayer($0) ? .ssm : .standard
+    }
+
+    return LoadedModel(
+        module: model,
+        numLayers: tc.numHiddenLayers,
+        family: "qwen3_5",
+        forward: { tokens, caches in
+            // Text-only path (no image): straight through the hybrid decoder.
+            model(tokens, caches: caches)
+        },
+        // Non-nil so `.visionInput` is advertised; the actual multimodal path
+        // is intercepted in InferenceEngine.generate and routed through
+        // Qwen35VLRuntime (which threads the real grid + the decode-step mRoPE
+        // offset the generic closure cannot carry). If ever invoked, VL routing
+        // has regressed — fail loudly rather than run a wrong-grid forward.
+        multimodalForward: { _, _, _, _, _, _ in
+            fatalError(
+                "Qwen3.5-VL must run via Qwen35VLRuntime, not the generic "
+                + "multimodalForward closure. The VL interception in "
+                + "InferenceEngine.generate has regressed.")
+        },
+        vocabSize: tc.vocabSize,
+        cacheSpec: cacheSpec
     )
 }
 

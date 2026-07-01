@@ -1,0 +1,14 @@
+{
+  "head_dim": 256,
+  "partial_rotary_factor": 0.25,
+  "rotary_dim": 64,
+  "mrope_section": [
+    11,
+    11,
+    10
+  ],
+  "theta": 10000000,
+  "L": 7,
+  "heads": 4,
+  "kv": 2
+}
