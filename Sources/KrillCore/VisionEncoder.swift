@@ -105,7 +105,7 @@ public enum MultimodalPreprocessingError: Error, CustomStringConvertible {
         case .imagePreprocessingUnavailable:
             return "Native image preprocessing is not available on this platform."
         case .audioPreprocessingUnavailable:
-            return "Native audio preprocessing is not implemented. Use Gemma 4 through the mlx-vlm Python bridge."
+            return "Native audio preprocessing is not available on this platform."
         }
     }
 }
