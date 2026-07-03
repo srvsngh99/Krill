@@ -34,4 +34,15 @@ final class ToolNameRecoveryTests: XCTestCase {
         // Never resolve to a tool that was not offered.
         XCTAssertEqual(canon("delete_everything"), "delete_everything")
     }
+
+    func testAmbiguousSquashMatchNotRecovered() {
+        // Two offered tools that squash identically: the separator-
+        // insensitive match is ambiguous, so the name must stay
+        // unresolved rather than silently dispatching either one.
+        let ambiguous = ["write_file", "wri_tefile", "bash"]
+        let calls = [ToolCalling.ParsedToolCall(name: "Write-File", argumentsJSON: "{}")]
+        XCTAssertEqual(
+            ToolCalling.canonicalizeNames(calls, known: ambiguous)[0].name,
+            "Write-File")
+    }
 }

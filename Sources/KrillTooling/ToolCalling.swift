@@ -1320,11 +1320,13 @@ public enum ToolCalling {
         if let c = knownLower[s.lowercased()] { return c }
         // Separator-insensitive: `WriteFile` / `write-file` -> `write_file`.
         // Squash `_`/`-` out of both sides so a CamelCase or kebab-case slip
-        // still resolves to the offered snake_case name.
+        // still resolves to the offered snake_case name. Only a UNIQUE hit
+        // resolves: if two offered tools squash identically the match is
+        // ambiguous, and guessing (e.g. alphabetically) would silently
+        // dispatch the wrong tool - fall through instead.
         let squashed = squash(s)
-        for canon in knownLower.values.sorted() where squash(canon) == squashed {
-            return canon
-        }
+        let squashHits = knownLower.values.filter { squash($0) == squashed }
+        if squashHits.count == 1 { return squashHits[0] }
         // Split on the `__`/`.` separators the manglers use; a single `_` inside
         // a real tool name (e.g. get_weather) is preserved. Return the first
         // segment that is itself an offered tool.
