@@ -726,9 +726,17 @@ private func loadQwen35VL(configData: Data, directory: URL) throws -> LoadedMode
     let model = Qwen35VLForConditionalGeneration(config)
 
     if let q = config.quantization {
-        quantize(model: model, groupSize: q.groupSize, bits: q.bits,
-                 mode: mlxQuantizationMode(q.mode)) { name, _ in
-            name.contains("language_model")
+        // Mixed-precision aware: the nvfp4 checkpoint carries per-module
+        // overrides (8-bit affine down_proj with `.biases`) alongside the
+        // top-level mode, so resolve each module's real precision instead of
+        // quantizing uniformly (which builds biases-less nvfp4 layers that
+        // then reject the override layers' `.biases` at update time). The
+        // vision tower ships fp16 and is never quantized. Module paths keep
+        // the `language_model.` prefix here, matching the override keys.
+        quantize(model: model) { path, _ in
+            guard path.contains("language_model") else { return nil }
+            let eff = q.effective(for: path)
+            return (eff.groupSize, eff.bits, mlxQuantizationMode(eff.mode))
         }
     }
 

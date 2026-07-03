@@ -559,10 +559,12 @@ public final class InferenceEngine: @unchecked Sendable {
         var pieces = [String](repeating: "", count: vocabSize)
         for id in 0 ..< vocabSize { pieces[id] = tokenizer.decode(token: id) }
         cachedPieces = pieces
-        FileHandle.standardError.write(Data((
-            "[Krill] built grammar token-piece table (vocab=\(vocabSize)) in "
-            + String(format: "%.0fms", (CFAbsoluteTimeGetCurrent() - start) * 1000)
-            + "\n").utf8))
+        if ProcessInfo.processInfo.environment["KRILL_DEBUG"] != nil {
+            FileHandle.standardError.write(Data((
+                "[Krill] built grammar token-piece table (vocab=\(vocabSize)) in "
+                + String(format: "%.0fms", (CFAbsoluteTimeGetCurrent() - start) * 1000)
+                + "\n").utf8))
+        }
         return pieces
     }
 
@@ -770,9 +772,16 @@ public final class InferenceEngine: @unchecked Sendable {
         // (SSM state is non-restorable), so the dedicated driver always full-
         // prefills. Image and text-only requests both route here.
         if let vlModel = loadedModel.module as? Qwen35VLForConditionalGeneration {
+            // This intercept sits before the generic path's thinking
+            // resolution, so resolve it here (same rule: explicit flag, else
+            // env, else off) — the qwen3_5 template needs the decision to
+            // emit the right think scaffold after the assistant cue.
             return generateQwen35VL(
                 model: vlModel, tokenizer: tokenizer, messages: messages,
-                params: params, maxTokens: maxTokens, imageData: imageData)
+                params: params, maxTokens: maxTokens, imageData: imageData,
+                enableThinking: Self.resolveThinking(
+                    explicit: enableThinking,
+                    env: ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"]))
         }
 
         // Inject media placeholders into the first user message before
@@ -2182,7 +2191,8 @@ public final class InferenceEngine: @unchecked Sendable {
         messages: [[String: String]],
         params: SamplingParams,
         maxTokens: Int,
-        imageData: Data?
+        imageData: Data?,
+        enableThinking: Bool
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         // Preprocess the image (if any) into the flattened patch batch + full
         // patch grid. The merged grid sizes the `<|image_pad|>` run + mRoPE.
@@ -2208,7 +2218,8 @@ public final class InferenceEngine: @unchecked Sendable {
             imagePadCount: imagePadCount,
             imageTokenId: model.config.imageTokenId,
             visionStartTokenId: model.config.visionStartTokenId,
-            visionEndTokenId: model.config.visionEndTokenId)
+            visionEndTokenId: model.config.visionEndTokenId,
+            enableThinking: enableThinking)
         guard !promptTokens.isEmpty else {
             let empty = AsyncStream<TokenEvent> { c in
                 c.yield(TokenEvent(tokenId: 0, text: "", elapsed: 0, isEnd: true))
@@ -2245,6 +2256,7 @@ public final class InferenceEngine: @unchecked Sendable {
                 let capturedTokenizer = captures.tokenizer
                 let capturedPrompt = captures.prompt
                 let capturedStops = captures.stops
+                let openerPending = FlagBox(enableThinking)
                 let startTime = CFAbsoluteTimeGetCurrent()
                 let output = Qwen35VLRuntime.generate(
                     model: captures.model,
@@ -2257,9 +2269,21 @@ public final class InferenceEngine: @unchecked Sendable {
                     mediaHash: captures.mediaHash,
                     onToken: { token in
                         guard !capturedStops.contains(token) else { return }
+                        // When thinking is on, the template pre-opens the
+                        // reasoning block INSIDE the prompt (`<think>\n` after
+                        // the assistant cue), so the raw output would carry
+                        // only the bare `</think>` close. Re-prepend the
+                        // opener so every downstream reasoning parser
+                        // (server strip, streaming filter, TUI) sees a
+                        // balanced block, exactly as if the model emitted it.
+                        var text = capturedTokenizer.decodeForOutput(token: token)
+                        if openerPending.value, !text.isEmpty {
+                            text = "<think>\n" + text
+                            openerPending.value = false
+                        }
                         continuation.yield(TokenEvent(
                             tokenId: token,
-                            text: capturedTokenizer.decodeForOutput(token: token),
+                            text: text,
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime))
                     })
                 statsHolder.stats = GenerationStats(
@@ -3023,4 +3047,11 @@ private func chunkedTextPrefill(
 /// Thread-safe holder for generation statistics.
 private final class StatsHolder: @unchecked Sendable {
     var stats: GenerationStats?
+}
+
+/// Mutable flag box for escaping token callbacks (single generate loop, so
+/// plain mutation is safe).
+private final class FlagBox: @unchecked Sendable {
+    var value: Bool
+    init(_ value: Bool) { self.value = value }
 }

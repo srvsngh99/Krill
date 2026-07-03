@@ -905,7 +905,8 @@ public final class KrillTokenizer: @unchecked Sendable {
         imagePadCount: Int,
         imageTokenId: Int,
         visionStartTokenId: Int,
-        visionEndTokenId: Int
+        visionEndTokenId: Int,
+        enableThinking: Bool = false
     ) -> [Int] {
         // Single special-token ids (encode() returns exactly one id per marker
         // for a ChatML tokenizer; verified 248045 / 248046 for Ornith).
@@ -938,6 +939,14 @@ public final class KrillTokenizer: @unchecked Sendable {
         tokens += imStart
         tokens += tokenizer.encode(text: "assistant")
         tokens += newline
+        // The checkpoint's chat_template.jinja ALWAYS emits a think scaffold
+        // after the assistant cue: `<think>\n` when thinking, or the closed
+        // `<think>\n\n</think>\n\n` pair when `enable_thinking` is false.
+        // Omitting it entirely is off-distribution — the model free-runs into
+        // unstructured reasoning it never closes, burning the whole budget
+        // with nothing visible.
+        tokens += tokenizer.encode(
+            text: enableThinking ? "<think>\n" : "<think>\n\n</think>\n\n")
         return tokens
     }
 
