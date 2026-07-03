@@ -52,6 +52,12 @@ public enum ReasoningParser {
                     cleaned.removeSubrange(s.lowerBound ..< cleaned.endIndex)
                 }
             }
+            // Orphan close marker (the model double-closed a channel, e.g.
+            // `<|channel>t<channel|>answer<channel|>`): the text before it is
+            // the visible answer, so drop just the marker.
+            while let e = cleaned.range(of: close) {
+                cleaned.removeSubrange(e)
+            }
         }
         let t = captured.trimmingCharacters(in: .whitespacesAndNewlines)
         return (cleaned, t.isEmpty ? nil : t)
@@ -154,11 +160,16 @@ public final class StreamingReasoningFilter {
         "<|channel>": "<channel|>",
         "<|think|>": "<think|>",
     ]
+    /// Gemma close markers encountered OUTSIDE a block (the model
+    /// double-closed a channel). Never legitimate visible text; dropped
+    /// silently while the surrounding text is passed through.
+    private static let orphanCloseMarkers = ["<channel|>", "<think|>"]
+    private static let allMarkers = openTags + orphanCloseMarkers
     /// Max prefix length we hold while waiting to disambiguate a
     /// partial opening tag. Equal to the longest possible opening
     /// tag length.
     private static let maxOpenPrefix: Int = {
-        openTags.map(\.count).max() ?? 0
+        allMarkers.map(\.count).max() ?? 0
     }()
 
     private var state: State = .preamble
@@ -179,13 +190,15 @@ public final class StreamingReasoningFilter {
                 buffer.removeAll(keepingCapacity: true)
 
             case .preamble:
-                // Look for an opening tag. If a complete one is
-                // present, flush text before it and switch state.
-                if let (openRange, tag) = firstOpenTag(in: buffer) {
+                // Look for an opening tag (or an orphan close marker to
+                // drop). If a complete one is present, flush text before
+                // it and switch state.
+                if let (openRange, tag) = firstMarker(in: buffer) {
                     emit += buffer[buffer.startIndex ..< openRange.lowerBound]
                     buffer.removeSubrange(buffer.startIndex ..< openRange.upperBound)
-                    let closing = Self.closingFor[tag] ?? "</think>"
-                    state = .insideBlock(closing: closing)
+                    if let closing = Self.closingFor[tag] {
+                        state = .insideBlock(closing: closing)
+                    }  // orphan close: drop the marker, stay in .preamble
                     continue
                 }
                 // No complete tag. If the buffer ends with a prefix
@@ -204,13 +217,17 @@ public final class StreamingReasoningFilter {
 
             case .scanningOpen:
                 // We already held a partial-tag prefix. Either it
-                // completes into a real opening tag, definitely is
-                // NOT one, or we still need more bytes.
-                if let (openRange, tag) = firstOpenTag(in: buffer),
+                // completes into a real opening tag (or an orphan close
+                // marker to drop), definitely is NOT one, or we still
+                // need more bytes.
+                if let (openRange, tag) = firstMarker(in: buffer),
                    openRange.lowerBound == buffer.startIndex {
                     buffer.removeSubrange(buffer.startIndex ..< openRange.upperBound)
-                    let closing = Self.closingFor[tag] ?? "</think>"
-                    state = .insideBlock(closing: closing)
+                    if let closing = Self.closingFor[tag] {
+                        state = .insideBlock(closing: closing)
+                    } else {
+                        state = .preamble
+                    }
                     continue
                 }
                 // Still ambiguous?
@@ -283,9 +300,11 @@ public final class StreamingReasoningFilter {
         }
     }
 
-    private func firstOpenTag(in s: String) -> (Range<String.Index>, String)? {
+    /// Earliest complete marker in `s`: an opening tag (look up its close
+    /// in `closingFor`) or an orphan close marker (no `closingFor` entry).
+    private func firstMarker(in s: String) -> (Range<String.Index>, String)? {
         var best: (Range<String.Index>, String)?
-        for tag in Self.openTags {
+        for tag in Self.allMarkers {
             if let r = s.range(of: tag) {
                 if best == nil || r.lowerBound < best!.0.lowerBound {
                     best = (r, tag)
@@ -296,7 +315,7 @@ public final class StreamingReasoningFilter {
     }
 
     private func isPrefixOfAnyOpenTag(_ s: String) -> Bool {
-        for tag in Self.openTags where tag.hasPrefix(s) {
+        for tag in Self.allMarkers where tag.hasPrefix(s) {
             return true
         }
         return false
@@ -304,11 +323,11 @@ public final class StreamingReasoningFilter {
 
     private func trailingOpenPrefixLength(_ s: String) -> Int {
         // Largest n such that the last n characters of `s` form a
-        // proper prefix of an opening tag.
+        // proper prefix of a marker.
         let limit = min(s.count, Self.maxOpenPrefix)
         for n in stride(from: limit, through: 1, by: -1) {
             let suffix = String(s.suffix(n))
-            if isPrefixOfAnyOpenTag(suffix) && !Self.openTags.contains(suffix) {
+            if isPrefixOfAnyOpenTag(suffix) && !Self.allMarkers.contains(suffix) {
                 return n
             }
         }

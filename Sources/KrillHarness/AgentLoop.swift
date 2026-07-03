@@ -244,7 +244,9 @@ public struct AgentLoop: Sendable {
 
                 guard let tool = tools.tool(named: call.name), let spec = tools.spec(named: call.name) else {
                     record(args: call.argumentsJSON,
-                           ToolResult(content: "Error: unknown tool '\(call.name)'", isError: true))
+                           ToolResult(content: "Error: unknown tool '\(call.name)'. "
+                               + "Available tools: \(tools.names.joined(separator: ", ")).",
+                               isError: true))
                     continue
                 }
 

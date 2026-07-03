@@ -97,6 +97,22 @@ final class ReasoningParserTests: XCTestCase {
         XCTAssertEqual(thinking, "reasoning that never closed")
     }
 
+    func testOrphanGemmaCloseMarkerDropped() {
+        // Observed from gemma-4-12b-agentic in `krill code`: one open, two
+        // closes. The orphan close must not leak into the visible answer.
+        let raw = "<|channel>thought<channel|>The result of 2+2 is 4.\n<channel|>"
+        let (visible, thinking) = ReasoningParser.strip(raw)
+        XCTAssertEqual(visible, "The result of 2+2 is 4.")
+        XCTAssertEqual(thinking, "thought")
+    }
+
+    func testBareGemmaCloseMarkerWithNoOpenDropped() {
+        let raw = "The answer is 4.<channel|>"
+        let (visible, thinking) = ReasoningParser.strip(raw)
+        XCTAssertEqual(visible, "The answer is 4.")
+        XCTAssertNil(thinking)
+    }
+
     func testGemmaChannelWithNoMarkersUnchanged() {
         let raw = "A plain Gemma answer with no channel."
         let (visible, thinking) = ReasoningParser.strip(raw)
@@ -148,6 +164,20 @@ final class ReasoningParserTests: XCTestCase {
         out += f.finish()
         XCTAssertEqual(out, "Answer",
             "Every Gemma channel block must be stripped, even a long run of them")
+    }
+
+    func testStreamingFilterDropsOrphanGemmaCloseMarker() {
+        // Double-close: the orphan close after the visible answer must be
+        // dropped, including when it is split across chunks.
+        let f = StreamingReasoningFilter()
+        var out = ""
+        for chunk in ["<|channel>", "thought", "<channel|>",
+                      "The result is 4.", "<chan", "nel|>", " Done."] {
+            out += f.consume(chunk)
+        }
+        out += f.finish()
+        XCTAssertEqual(out, "The result is 4. Done.",
+            "An orphan Gemma close marker must not leak into streamed output")
     }
 
     // MARK: - Streaming filter

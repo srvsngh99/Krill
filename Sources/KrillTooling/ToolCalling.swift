@@ -1318,6 +1318,13 @@ public enum ToolCalling {
             if s.lowercased().hasPrefix(p) { s = String(s.dropFirst(p.count)); break }
         }
         if let c = knownLower[s.lowercased()] { return c }
+        // Separator-insensitive: `WriteFile` / `write-file` -> `write_file`.
+        // Squash `_`/`-` out of both sides so a CamelCase or kebab-case slip
+        // still resolves to the offered snake_case name.
+        let squashed = squash(s)
+        for canon in knownLower.values.sorted() where squash(canon) == squashed {
+            return canon
+        }
         // Split on the `__`/`.` separators the manglers use; a single `_` inside
         // a real tool name (e.g. get_weather) is preserved. Return the first
         // segment that is itself an offered tool.
@@ -1327,6 +1334,10 @@ public enum ToolCalling {
             if let c = knownLower[seg.lowercased()] { return c }
         }
         return nil
+    }
+
+    private static func squash(_ s: String) -> String {
+        s.lowercased().filter { $0 != "_" && $0 != "-" }
     }
 
     /// Pythonic tool-call parser. Recognizes `name(arg=val, ...)`,

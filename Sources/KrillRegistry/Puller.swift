@@ -86,6 +86,7 @@ public final class Puller: @unchecked Sendable {
 
         let totalSize = essentialFiles.reduce(0) { $0 + $1.size }
         var downloadedBytes: Int64 = 0
+        var actualBytes: Int64 = 0
         var modelFiles: [ModelFile] = []
 
         // Download each file
@@ -106,10 +107,16 @@ public final class Puller: @unchecked Sendable {
             )
             downloadedBytes += file.size
 
+            // Record what actually landed on disk; the API-reported size is
+            // only a fallback (it can be missing for some repos).
+            let attrs = try? fm.attributesOfItem(atPath: fileURL.path)
+            let onDiskSize = (attrs?[.size] as? Int64) ?? file.size
+            actualBytes += onDiskSize
+
             modelFiles.append(ModelFile(
                 path: file.name,
                 sha256: sha256,
-                sizeBytes: file.size
+                sizeBytes: onDiskSize
             ))
         }
 
@@ -142,7 +149,7 @@ public final class Puller: @unchecked Sendable {
             context: context,
             files: modelFiles,
             chatTemplate: family.rawValue,
-            sizeBytes: totalSize,
+            sizeBytes: actualBytes,
             pulledAt: Date()
         )
 
@@ -242,7 +249,9 @@ extension Puller {
 extension Puller {
     /// List files in a HuggingFace repo via the API.
     func listRepoFiles(repo: String) async throws -> [HFFileInfo] {
-        let urlString = "https://huggingface.co/api/models/\(repo)"
+        // `?blobs=true` makes the API include per-file sizes (plain `siblings`
+        // omits them, which used to record every manifest at 0 bytes).
+        let urlString = "https://huggingface.co/api/models/\(repo)?blobs=true"
         guard let url = URL(string: urlString) else {
             throw PullerError.invalidRepo(repo)
         }
