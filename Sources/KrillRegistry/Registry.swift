@@ -216,6 +216,27 @@ public final class Registry: Sendable {
 
     /// Total disk usage of all installed models.
     public func totalDiskUsage() -> Int64 {
-        listModels().reduce(0) { $0 + $1.sizeBytes }
+        listModels().reduce(0) { $0 + diskUsage(of: $1) }
+    }
+
+    /// A model's size: the manifest value when recorded, else the blob
+    /// directory statted on disk (manifests written before v0.16.2 recorded
+    /// 0 bytes because the HF listing API omitted per-file sizes).
+    public func diskUsage(of manifest: ModelManifest) -> Int64 {
+        if manifest.sizeBytes > 0 { return manifest.sizeBytes }
+        return onDiskSize(manifest.name)
+    }
+
+    /// Recursive on-disk size of a model's blob directory.
+    public func onDiskSize(_ name: String) -> Int64 {
+        let dir = blobsDir.appendingPathComponent(name)
+        guard let enumerator = FileManager.default.enumerator(
+            at: dir, includingPropertiesForKeys: [.fileSizeKey]
+        ) else { return 0 }
+        var total: Int64 = 0
+        for case let url as URL in enumerator {
+            total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) ?? 0)
+        }
+        return total
     }
 }

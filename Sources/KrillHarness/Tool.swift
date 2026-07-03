@@ -80,4 +80,7 @@ public struct ToolRegistry: Sendable {
     }
 
     public var isEmpty: Bool { order.isEmpty }
+
+    /// Tool names in registration order (for unknown-tool error feedback).
+    public var names: [String] { order }
 }

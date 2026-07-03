@@ -14,14 +14,15 @@ struct ListCommand: ParsableCommand {
 
         if models.isEmpty {
             print("No models installed.")
-            print("\nPull a model with: krill pull llama-3.2-3b")
+            print("\nPull a model with: krill pull gemma-4-e2b")
             return
         }
 
-        // Header
-        let nameW = 22
+        // Header: name column sized to the longest name so nothing is
+        // truncated into the SIZE column.
+        let nameW = max(22, (models.map { $0.name.count }.max() ?? 0) + 2)
         let sizeW = 10
-        let familyW = 10
+        let familyW = max(10, (models.map { $0.family.rawValue.count }.max() ?? 0) + 2)
         let paramsW = 8
         let quantW = 6
 
@@ -34,7 +35,7 @@ struct ListCommand: ParsableCommand {
         )
 
         for model in models {
-            let sizeMB = Double(model.sizeBytes) / 1_048_576
+            let sizeMB = Double(registry.diskUsage(of: model)) / 1_048_576
             let sizeStr: String
             if sizeMB >= 1024 {
                 sizeStr = String(format: "%.1f GB", sizeMB / 1024)
