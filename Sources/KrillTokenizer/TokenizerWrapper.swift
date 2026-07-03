@@ -942,7 +942,7 @@ public final class KrillTokenizer: @unchecked Sendable {
         // The checkpoint's chat_template.jinja ALWAYS emits a think scaffold
         // after the assistant cue: `<think>\n` when thinking, or the closed
         // `<think>\n\n</think>\n\n` pair when `enable_thinking` is false.
-        // Omitting it entirely is off-distribution — the model free-runs into
+        // Omitting it entirely is off-distribution - the model free-runs into
         // unstructured reasoning it never closes, burning the whole budget
         // with nothing visible.
         tokens += tokenizer.encode(

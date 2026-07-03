@@ -774,7 +774,7 @@ public final class InferenceEngine: @unchecked Sendable {
         if let vlModel = loadedModel.module as? Qwen35VLForConditionalGeneration {
             // This intercept sits before the generic path's thinking
             // resolution, so resolve it here (same rule: explicit flag, else
-            // env, else off) — the qwen3_5 template needs the decision to
+            // env, else off) - the qwen3_5 template needs the decision to
             // emit the right think scaffold after the assistant cue.
             return generateQwen35VL(
                 model: vlModel, tokenizer: tokenizer, messages: messages,
