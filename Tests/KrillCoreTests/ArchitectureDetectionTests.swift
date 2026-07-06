@@ -31,6 +31,15 @@ final class ArchitectureDetectionTests: XCTestCase {
         XCTAssertEqual(id(modelType: "llava"), "llava")
     }
 
+    func testLocateAnythingDetection() {
+        // LocateAnything-3B's text backbone is Qwen2.5, but its arch is
+        // `LocateAnythingForConditionalGeneration` (no "qwen" substring) and
+        // model_type "locateanything"; it must be claimed explicitly and BEFORE
+        // any generic qwen rule, routing to loadLocateAnything.
+        XCTAssertEqual(id(arch: "LocateAnythingForConditionalGeneration"), "locateanything")
+        XCTAssertEqual(id(modelType: "locateanything"), "locateanything")
+    }
+
     func testMllamaDetection() {
         // Llama-3.2-Vision. Its text backbone is Llama, but the arch is
         // `MllamaForConditionalGeneration` and model_type "mllama"; it must be

@@ -60,6 +60,18 @@ public enum ModelProfiles {
                             "Compact 9B that fits a 24GB box at int4"],
                 weaknesses: ["Newer lineage with a smaller ecosystem than base Qwen"],
                 goodFor: ["General chat", "Coding", "Multilingual tasks", "Vision-language"])
+        case .locateAnything:
+            return ModelProfile(
+                displayName: "LOCATEANYTHING", vendor: "NVIDIA", released: "2025 (LocateAnything-3B)",
+                trainingCutoff: "not publicly disclosed",
+                tagline: "Visual-grounding VLM: MoonViT vision + Qwen2.5-3B; locates anything as bounding boxes.",
+                strengths: ["Open-vocabulary object detection and phrase grounding",
+                            "GUI-element / text / point localization across domains",
+                            "Native-resolution MoonViT tower (up to ~2.5K images)",
+                            "Compact 3B that fits a 24GB box"],
+                weaknesses: ["Task-specialized (grounding), not a general chat model",
+                             "NVIDIA non-commercial research license"],
+                goodFor: ["Object detection / grounding", "GUI agents", "Layout / OCR localization"])
         case .mistral:
             return ModelProfile(
                 displayName: "MISTRAL", vendor: "Mistral AI", released: "2023-2024",

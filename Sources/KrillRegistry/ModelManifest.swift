@@ -178,6 +178,17 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     /// aspect-ratio preprocessing + a cross-KV decode driver) is a follow-up, so
     /// this declares text generation only for now.
     case llamaVision = "llama_vision"
+    /// NVIDIA LocateAnything-3B visual-grounding family. MoonViT (Kimi-VL)
+    /// native-resolution vision tower + a 2-layer `mlp1` connector + a Qwen2.5-3B
+    /// text decoder; projected MoonViT features are spliced into the token
+    /// embeddings at the `<image>` positions (LLaVA-style prefix splice) and the
+    /// Qwen stack decodes bounding-box tokens (`<box><x1><y1><x2><y2></box>`,
+    /// coords 0-1000) autoregressively. Native Swift+MLX vision path is
+    /// logit-parity-verified vs the NVIDIA PyTorch reference; the text backbone
+    /// reuses the parity-gated `QwenForCausalLM`. Image-serving wiring
+    /// (native-res patchify + a grid-threading decode driver) is
+    /// `LocateAnythingRuntime`.
+    case locateAnything = "locateanything"
     /// Mixture-of-experts text LMs. Architectural deltas vs the
     /// dense families: each transformer block's MLP is replaced by
     /// a router + N expert FFNs, where the router picks the top-K
@@ -242,6 +253,11 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         if archLower.contains("gemma") { return .gemma }
         if archLower.contains("chatglm") || archLower.contains("glm") { return .glm }
         if archLower.contains("deepseek") { return .deepseek }
+        // LocateAnything-3B before the generic qwen arm: its text backbone is
+        // Qwen2.5 but the arch is `LocateAnythingForConditionalGeneration`
+        // (no "qwen" substring), so an explicit arm keeps it off the dense
+        // `.qwen` loader.
+        if archLower.contains("locateanything") { return .locateAnything }
         // LLaVA-1.5 (`LlavaForConditionalGeneration`) must be matched BEFORE
         // the generic `llama` arm: its text backbone is Llama, so the arch
         // name would otherwise need to (and does not) contain "llama". A

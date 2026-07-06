@@ -215,6 +215,19 @@ let architectureRules: [ArchitectureRule] = [
         },
         action: .load { try loadQwen25VL(configData: $0, directory: $1) }),
 
+    // NVIDIA LocateAnything-3B: MoonViT vision tower + mlp1 connector + a
+    // Qwen2.5-3B text decoder (arch `LocateAnythingForConditionalGeneration`,
+    // model_type "locateanything"). Its text backbone is standard Qwen2.5, so
+    // this rule MUST precede any generic qwen rule — the arch/model_type strings
+    // are unique (no "qwen" substring), but keep it with the VLMs so a future
+    // qwen-substring broadening does not hijack it.
+    ArchitectureRule(
+        id: "locateanything",
+        matches: { arch, mt in
+            arch.contains("locateanythingforconditionalgeneration") || mt == "locateanything"
+        },
+        action: .load { try loadLocateAnything(configData: $0, directory: $1) }),
+
     // Cross-encoder rerankers (BGE Reranker, Cohere Rerank, etc.) load
     // through the dedicated `RerankEngine`, not the causal-LM dispatcher.
     // `loadModel` is only the entry point for causal LMs, so we refuse to
@@ -707,6 +720,68 @@ private func loadQwen25VL(configData: Data, directory: URL) throws -> LoadedMode
                 + "regressed.")
         },
         vocabSize: config.vocabSize
+    )
+}
+
+/// Native NVIDIA LocateAnything-3B loader: MoonViT vision tower + `mlp1`
+/// connector + Qwen2.5-3B text decoder (the parity-gated `QwenForCausalLM`).
+/// The checkpoint is bf16 and ships weights under `vision_model.*`, `mlp1.*`,
+/// `language_model.model.*` / `language_model.lm_head.*` — which map straight
+/// onto the module tree after `sanitize` (reshapes the MoonViT Conv2d kernel to
+/// a matmul weight and renames the `mlp1` `nn.Sequential` indices). The config
+/// declares `tie_word_embeddings: true`, but the checkpoint physically carries
+/// `language_model.lm_head.weight`, so we force UNTIE before decoding the text
+/// config — otherwise the tied path would leave `lm_head.*` unused. Like the
+/// grid-bearing Qwen VL families, the real multimodal path is intercepted in
+/// `InferenceEngine.generate` and routed through `LocateAnythingRuntime` (the
+/// generic six-arg closure cannot carry the per-image MoonViT `(h,w)` grid).
+private func loadLocateAnything(configData: Data, directory: URL) throws -> LoadedModel {
+    // Force untied embeddings: the checkpoint ships a real lm_head.
+    var patched = configData
+    if var root = try JSONSerialization.jsonObject(with: configData) as? [String: Any],
+        var text = root["text_config"] as? [String: Any] {
+        text["tie_word_embeddings"] = false
+        root["text_config"] = text
+        patched = try JSONSerialization.data(withJSONObject: root)
+    }
+    let config = try JSONDecoder().decode(LocateAnythingConfig.self, from: patched)
+    let model = LocateAnythingForConditionalGeneration(config)
+
+    // Only the text decoder is ever quantized (the MoonViT tower stays fp, like
+    // every other Krill VLM); the stock checkpoint is bf16 so this is usually a
+    // no-op, but honor a locally-quantized text stack if present.
+    if let q = config.textConfig.quantization {
+        quantize(model: model, groupSize: q.groupSize, bits: q.bits,
+                 mode: mlxQuantizationMode(q.mode)) { name, _ in
+            name.contains("language_model")
+        }
+    }
+
+    let flatWeights = LocateAnythingForConditionalGeneration.sanitize(
+        try loadWeightArrays(from: directory))
+    let nested = ModuleParameters.unflattened(flatWeights.map { ($0.key, $0.value) })
+    try model.update(parameters: nested, verify: [.all])
+
+    return LoadedModel(
+        module: model,
+        numLayers: config.textConfig.numHiddenLayers,
+        family: "locateanything",
+        forward: { tokens, caches in
+            // Text-only path (no image): straight through the Qwen2.5 decoder.
+            model(tokens, caches: caches as? [KVCache])
+        },
+        // Non-nil so `.visionInput` is advertised; the actual multimodal path is
+        // intercepted in InferenceEngine.generate and routed through
+        // LocateAnythingRuntime (which threads the real MoonViT `(h,w)` grid the
+        // generic closure cannot carry). If ever invoked, VL routing regressed —
+        // fail loudly rather than run a wrong-grid forward.
+        multimodalForward: { _, _, _, _, _, _ in
+            fatalError(
+                "LocateAnything-3B must run via LocateAnythingRuntime, not the "
+                + "generic multimodalForward closure. The VL interception in "
+                + "InferenceEngine.generate has regressed.")
+        },
+        vocabSize: config.textConfig.vocabSize
     )
 }
 
