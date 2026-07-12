@@ -115,11 +115,14 @@ private let aliases: [String: ResolvedModel] = [
     "qwen2.5-14b": ResolvedModel(
         repo: "mlx-community/Qwen2.5-14B-Instruct-4bit",
         name: "qwen2.5-14b", family: .qwen, params: "14B", quant: "4bit", context: 131072),
-    // NVIDIA LocateAnything-3B visual-grounding VLM (bf16 upstream; MoonViT
-    // vision + Qwen2.5-3B). NVIDIA non-commercial research license.
+    // NVIDIA LocateAnything-3B visual-grounding VLM (MoonViT vision + Qwen2.5-3B).
+    // Points at our mixed-precision nvfp4 MLX build (g16 base + o_proj/down_proj
+    // @8-bit affine, vision fp) — ~3.1GB, grounding-parity with bf16, and it
+    // ships tokenizer.json (the upstream repo has only the slow BPE). NVIDIA
+    // non-commercial research license.
     "locateanything-3b": ResolvedModel(
-        repo: "nvidia/LocateAnything-3B",
-        name: "locateanything-3b", family: .locateAnything, params: "3B", quant: "bf16", context: 32768),
+        repo: "srv-sngh/LocateAnything-3B-mlx-nvfp4",
+        name: "locateanything-3b", family: .locateAnything, params: "3B", quant: "nvfp4", context: 32768),
 
     // Qwen 3 (dense variants; MoE variants tracked under WS6)
     // Architecture delta vs Qwen 2.5: no QKV bias, per-head q_norm/k_norm
