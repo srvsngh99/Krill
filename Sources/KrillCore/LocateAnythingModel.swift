@@ -28,11 +28,16 @@ public struct LocateAnythingConfig: Decodable, Sendable {
     public let imageTokenIndex: Int
     public let visionConfig: MoonViTVisionConfig
     public let textConfig: QwenConfig
+    /// Top-level quantization block, present on a `krill quantize` build (the
+    /// only quantized modules are `language_model.*` — the MoonViT tower + mlp1
+    /// connector stay fp, like every other Krill VLM). nil for the bf16 source.
+    public let quantization: QuantizationConfig?
 
     enum CodingKeys: String, CodingKey {
         case imageTokenIndex = "image_token_index"
         case visionConfig = "vision_config"
         case textConfig = "text_config"
+        case quantization
     }
 
     public init(from decoder: Decoder) throws {
@@ -40,6 +45,7 @@ public struct LocateAnythingConfig: Decodable, Sendable {
         imageTokenIndex = try c.decodeIfPresent(Int.self, forKey: .imageTokenIndex) ?? 151665
         visionConfig = try c.decode(MoonViTVisionConfig.self, forKey: .visionConfig)
         textConfig = try c.decode(QwenConfig.self, forKey: .textConfig)
+        quantization = try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantization)
     }
 }
 

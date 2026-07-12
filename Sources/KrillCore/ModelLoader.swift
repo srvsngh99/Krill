@@ -747,13 +747,19 @@ private func loadLocateAnything(configData: Data, directory: URL) throws -> Load
     let config = try JSONDecoder().decode(LocateAnythingConfig.self, from: patched)
     let model = LocateAnythingForConditionalGeneration(config)
 
-    // Only the text decoder is ever quantized (the MoonViT tower stays fp, like
-    // every other Krill VLM); the stock checkpoint is bf16 so this is usually a
-    // no-op, but honor a locally-quantized text stack if present.
-    if let q = config.textConfig.quantization {
-        quantize(model: model, groupSize: q.groupSize, bits: q.bits,
-                 mode: mlxQuantizationMode(q.mode)) { name, _ in
-            name.contains("language_model")
+    // Only the text decoder is ever quantized (the MoonViT tower + mlp1
+    // connector stay fp, like every other Krill VLM). Mixed-precision aware: a
+    // `krill quantize --mode nvfp4` build carries per-module overrides (e.g.
+    // 8-bit affine o_proj/down_proj alongside the nvfp4 base), so resolve each
+    // module's real precision via `effective(for:)` instead of quantizing
+    // uniformly — a uniform pass would build nvfp4 layers that then reject the
+    // override layers' affine `.biases` at update time. The bf16 source has no
+    // block, so this is a no-op there.
+    if let q = config.quantization {
+        quantize(model: model) { path, _ in
+            guard path.contains("language_model") else { return nil }
+            let eff = q.effective(for: path)
+            return (eff.groupSize, eff.bits, mlxQuantizationMode(eff.mode))
         }
     }
 
