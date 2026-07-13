@@ -784,6 +784,17 @@ public final class InferenceEngine: @unchecked Sendable {
                     env: ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"]))
         }
 
+        // LocateAnything-3B native runtime. Uses 1D RoPE (so decode needs no
+        // mRoPE offset), but the per-image MoonViT (h,w) grid must be threaded
+        // into the vision tower — not recoverable from the patch count, so the
+        // generic multimodalForward closure cannot carry it. Image and text-only
+        // requests both route to the dedicated driver.
+        if let laModel = loadedModel.module as? LocateAnythingForConditionalGeneration {
+            return generateLocateAnything(
+                model: laModel, tokenizer: tokenizer, messages: messages,
+                params: params, maxTokens: maxTokens, imageData: imageData)
+        }
+
         // Inject media placeholders into the first user message before
         // tokenization so the chat path matches the prompt path. Gemma 4's
         // multimodal forward replaces embeddings at placeholder token positions
@@ -2179,6 +2190,99 @@ public final class InferenceEngine: @unchecked Sendable {
                     text: "",
                     elapsed: CFAbsoluteTimeGetCurrent() - startTime,
                     isEnd: true))
+                continuation.finish()
+            }
+        }
+        return (stream, { statsHolder.stats })
+    }
+
+    private func generateLocateAnything(
+        model: LocateAnythingForConditionalGeneration,
+        tokenizer: KrillTokenizer,
+        messages: [[String: String]],
+        params: SamplingParams,
+        maxTokens: Int,
+        imageData: Data?
+    ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
+        // Preprocess the image (if any) into the flattened patch batch + the
+        // pre-merge (gridH, gridW). The merged token count sizes the
+        // `<IMG_CONTEXT>` placeholder run.
+        var pixelValues: MLXArray? = nil
+        var grid: (Int, Int)? = nil
+        var imageTokenCount = 0
+        if let imgData = imageData {
+            do {
+                let prepped = try LocateAnythingImagePreprocessor.preprocess(
+                    imgData, config: model.config.visionConfig)
+                pixelValues = prepped.patches
+                grid = (prepped.gridH, prepped.gridW)
+                let mergeArea = model.config.visionConfig.mergeH * model.config.visionConfig.mergeW
+                imageTokenCount = (prepped.gridH * prepped.gridW) / mergeArea
+            } catch {
+                return Self.mediaErrorStream(
+                    "Error: LocateAnything-3B image preprocessing failed: \(error)")
+            }
+        }
+
+        // `<img>`=151666, `</img>`=151667 (added_tokens.json); the image token
+        // `<IMG_CONTEXT>` is the model's configured image_token_index.
+        let promptTokens = tokenizer.formatLocateAnythingTokenIds(
+            messages: messages,
+            imageTokenCount: imageTokenCount,
+            imageTokenId: model.config.imageTokenIndex,
+            imageStartId: 151_666,
+            imageEndId: 151_667)
+        guard !promptTokens.isEmpty else {
+            let empty = AsyncStream<TokenEvent> { c in
+                c.yield(TokenEvent(tokenId: 0, text: "", elapsed: 0, isEnd: true)); c.finish()
+            }
+            return (empty, { nil })
+        }
+
+        let stopIds = Self.stopTokenIds(
+            modelDirectory: modelDirectory, tokenizerEOS: tokenizer.eosTokenId)
+        let statsHolder = StatsHolder()
+        struct Captures: @unchecked Sendable {
+            let model: LocateAnythingForConditionalGeneration
+            let tokenizer: KrillTokenizer
+            let pixels: MLXArray?
+            let grid: (Int, Int)?
+            let prompt: [Int]
+            let stops: Set<Int>
+            let params: SamplingParams
+            let max: Int
+        }
+        let captures = Captures(
+            model: model, tokenizer: tokenizer, pixels: pixelValues, grid: grid,
+            prompt: promptTokens, stops: stopIds, params: params, max: maxTokens)
+
+        let stream = AsyncStream<TokenEvent> { continuation in
+            Task { [statsHolder, captures] in
+                let startTime = CFAbsoluteTimeGetCurrent()
+                let output = LocateAnythingRuntime.generate(
+                    model: captures.model,
+                    promptTokens: captures.prompt,
+                    pixelValues: captures.pixels,
+                    grid: captures.grid,
+                    maxTokens: captures.max,
+                    stopIds: captures.stops,
+                    params: captures.params,
+                    onToken: { token in
+                        guard !captures.stops.contains(token) else { return }
+                        continuation.yield(TokenEvent(
+                            tokenId: token,
+                            text: captures.tokenizer.decodeForOutput(token: token),
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                    })
+                statsHolder.stats = GenerationStats(
+                    promptTokens: captures.prompt.count,
+                    generatedTokens: output.tokens.count,
+                    prefillTime: output.prefillSeconds,
+                    decodeTime: output.decodeSeconds)
+                let sawStop = output.tokens.last.map { captures.stops.contains($0) } ?? false
+                continuation.yield(TokenEvent(
+                    tokenId: sawStop ? (output.tokens.last ?? -1) : -1,
+                    text: "", elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
                 continuation.finish()
             }
         }

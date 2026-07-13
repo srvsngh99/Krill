@@ -121,6 +121,11 @@ public enum ModelCapabilities {
             // tools are NOT advertised (no parity-tested tool template -
             // the vicuna-style prompt is built directly).
             return [.textGeneration, .visionInput]
+        case .locateAnything:
+            // LocateAnything-3B: native MoonViT + connector + Qwen2.5 runtime.
+            // Vision input is supported (visual grounding / box output); tools
+            // are NOT advertised (the grounding prompt is built directly).
+            return [.textGeneration, .visionInput]
         case .unlimitedOcr:
             // Unlimited-OCR (DeepSeek-OCR): native DeepEncoder + DeepSeek-MoE
             // OCR runtime with engine image-serving wiring (base view). Vision
@@ -180,6 +185,13 @@ public enum ModelCapabilities {
             // productionNative until a serving benchmark gate (vs a
             // reference) lands, mirroring how WS5/WS7 families are promoted
             // only after their benchmark gate is green.
+            return .experimental
+        case .locateAnything:
+            // LocateAnything-3B: native MoonViT vision path is logit-parity-
+            // gated vs the NVIDIA PyTorch reference and the Qwen2.5 text stack
+            // reuses the parity-gated QwenForCausalLM, but the end-to-end
+            // grounding runtime + real-checkpoint box gate is still landing, so
+            // `.experimental`.
             return .experimental
         case .llamaVision:
             // Native runtime + loader + mlx-vlm synthetic logit parity, but no

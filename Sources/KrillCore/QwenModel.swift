@@ -270,7 +270,17 @@ class QwenModelInner: Module {
 
     func callAsFunction(_ tokens: MLXArray, caches: [KVCache]? = nil,
                         precomputedMask: MLXArray? = nil, rowOffsets: [Int]? = nil) -> MLXArray {
-        var x = embedTokens(tokens)
+        forwardEmbeds(embedTokens(tokens), caches: caches,
+                      precomputedMask: precomputedMask, rowOffsets: rowOffsets)
+    }
+
+    /// Forward from pre-computed input embeddings (the VLM entry point: a
+    /// vision-language model splices image features into the token embeddings
+    /// before the decoder). Identical to the tokens path minus the embedding
+    /// lookup.
+    func forwardEmbeds(_ inputsEmbeds: MLXArray, caches: [KVCache]? = nil,
+                       precomputedMask: MLXArray? = nil, rowOffsets: [Int]? = nil) -> MLXArray {
+        var x = inputsEmbeds
         // Mask must promote to the hidden state's dtype. Qwen 3
         // checkpoints run inference in bf16 (configs declare
         // `torch_dtype: "bfloat16"`); Qwen 2.5 4-bit MLX checkpoints
@@ -343,6 +353,21 @@ public class QwenForCausalLM: Module {
         }
         // Tied embeddings: reuse embed_tokens. `asLinear` does
         // matmul(hidden, embed_tokens.weight.T) and respects quantization.
+        return model.embedTokens.asLinear(hidden)
+    }
+
+    /// VLM entry point: forward from pre-spliced input embeddings (image
+    /// features already injected at the image-token positions). Mirrors the
+    /// tokens path including the `lastTokenOnly` lm_head slice.
+    public func callAsFunction(
+        inputsEmbeds: MLXArray, caches: [KVCache]? = nil, lastTokenOnly: Bool = false
+    ) -> MLXArray {
+        var hidden = model.forwardEmbeds(inputsEmbeds, caches: caches)
+        if lastTokenOnly {
+            let last = hidden.dim(1) - 1
+            hidden = hidden[0..., last ..< (last + 1), 0...]
+        }
+        if let lmHead { return lmHead(hidden) }
         return model.embedTokens.asLinear(hidden)
     }
 

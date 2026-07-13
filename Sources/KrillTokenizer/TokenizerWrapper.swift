@@ -850,6 +850,60 @@ public final class KrillTokenizer: @unchecked Sendable {
     /// `<|im_start|>` / `<|im_end|>` are 151644 / 151645 in every
     /// Qwen 2 / 2.5 tokenizer; the vision ids come from the model
     /// config and are passed in.
+    /// Build LocateAnything-3B prompt token ids (ChatML). The image run is
+    /// `<img>`(imageStartId) + `imageToken`(imageTokenId)×`imageTokenCount` +
+    /// `</img>`(imageEndId), placed at the front of the first user turn — the
+    /// expansion `processing_locateanything.py` applies to the `<image-N>`
+    /// template placeholder. A default "You are a helpful assistant." system
+    /// turn is prepended when the caller supplies no system message (matching
+    /// the model's chat_template).
+    public func formatLocateAnythingTokenIds(
+        messages: [[String: String]],
+        imageTokenCount: Int,
+        imageTokenId: Int,
+        imageStartId: Int,
+        imageEndId: Int
+    ) -> [Int] {
+        let imStart = 151_644  // <|im_start|>
+        let imEnd = 151_645    // <|im_end|>
+        let newline = tokenizer.encode(text: "\n")
+        let firstUserIndex = messages.firstIndex { $0["role"] == "user" }
+
+        var tokens: [Int] = []
+        if messages.first?["role"] != "system" {
+            tokens.append(imStart)
+            tokens += tokenizer.encode(text: "system")
+            tokens += newline
+            tokens += tokenizer.encode(text: "You are a helpful assistant.")
+            tokens.append(imEnd)
+            tokens += newline
+        }
+        for (i, msg) in messages.enumerated() {
+            let rawRole = msg["role"] ?? "user"
+            let content = msg["content"] ?? ""
+            let role: String
+            switch rawRole {
+            case "system", "user", "assistant", "tool": role = rawRole
+            default: role = "user"
+            }
+            tokens.append(imStart)
+            tokens += tokenizer.encode(text: role)
+            tokens += newline
+            if i == firstUserIndex && imageTokenCount > 0 {
+                tokens.append(imageStartId)
+                tokens += Array(repeating: imageTokenId, count: imageTokenCount)
+                tokens.append(imageEndId)
+            }
+            tokens += tokenizer.encode(text: content)
+            tokens.append(imEnd)
+            tokens += newline
+        }
+        tokens.append(imStart)
+        tokens += tokenizer.encode(text: "assistant")
+        tokens += newline
+        return tokens
+    }
+
     public func formatQwen25VLTokenIds(
         messages: [[String: String]],
         imagePadCount: Int,
