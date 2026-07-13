@@ -7,6 +7,18 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.16.2 — 2026-07-13
+Adds native support for **NVIDIA LocateAnything-3B**, a visual-grounding VLM that
+locates anything in an image as bounding boxes (`<box><x1><y1><x2><y2></box>`,
+coords 0–1000). It's a new native Swift+MLX runtime: the **MoonViT** (Kimi-VL)
+native-resolution vision tower + a 2-layer connector + a **Qwen2.5-3B** text
+decoder, with the vision path logit-parity-verified against the NVIDIA reference.
+Ships as a mixed-precision **nvfp4** build (~3.1 GB, grounding-parity with bf16,
+~50 tok/s) at `srv-sngh/LocateAnything-3B-mlx-nvfp4` under the NVIDIA License
+(non-commercial). `krill pull locateanything-3b`, then
+`krill run locateanything-3b "Locate the red car." --image street.jpg`.
+Built on `nvidia/LocateAnything-3B` — credit to the original authors.
+
 ## v0.16.1 — 2026-07-01
 Adds the **`qwythos-9b-nvfp4`** model — the `empero-ai/Qwythos-9B-Claude-Mythos-5-1M`
 fine-tune in Krill's mixed-precision **nvfp4** format. It's a Qwen3.5-class hybrid
