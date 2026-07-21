@@ -62,6 +62,8 @@ struct LaunchCommand: AsyncParsableCommand {
         let cfg = KrillConfig.load()
         let h = host ?? cfg.serverHost
         let p = port ?? cfg.serverPort
+        let apiKey = ServerSecurity.normalizedAPIKey(cfg.serverAPIKey)
+        let agentAPIKey = apiKey ?? "krill-local"
         let baseURL = "http://\(h):\(p)"
         let registry: Registry = {
             if let md = cfg.modelsDir, !md.isEmpty {
@@ -91,12 +93,14 @@ struct LaunchCommand: AsyncParsableCommand {
         // Ensure the server is up with the model loaded and pinned.
         try await ensureServer(host: h, port: p, baseURL: baseURL,
                                model: modelName, registry: registry,
-                               keepAliveStr: keepAliveStr, keepAliveSecs: keepAliveSecs)
+                               keepAliveStr: keepAliveStr, keepAliveSecs: keepAliveSecs,
+                               apiKey: apiKey)
 
         // Apply the agent's wiring: config files, then env, then setup commands.
-        try applyConfigFiles(profile.configFiles, baseURL: baseURL, model: modelName)
-        let env = profile.env(baseURL, modelName)
-        runPreExec(profile.preExec(baseURL, modelName))
+        try applyConfigFiles(
+            profile.configFiles, baseURL: baseURL, model: modelName, apiKey: agentAPIKey)
+        let env = profile.env(baseURL, modelName, agentAPIKey)
+        runPreExec(profile.preExec(baseURL, modelName, agentAPIKey))
         let agentArgv = [profile.binary] + profile.args(modelName) + agentArgs
 
         print("")
@@ -116,8 +120,9 @@ struct LaunchCommand: AsyncParsableCommand {
 
     private func ensureServer(host: String, port: Int, baseURL: String,
                               model: String, registry: Registry,
-                              keepAliveStr: String, keepAliveSecs: Int) async throws {
-        if let health = await getHealth(baseURL: baseURL) {
+                              keepAliveStr: String, keepAliveSecs: Int,
+                              apiKey: String?) async throws {
+        if let health = await getHealth(baseURL: baseURL, apiKey: apiKey) {
             // Already running: load the requested model if it is not active,
             // and pin it for the agent session either way. The load call
             // carries keep_alive so an already-loaded model is also pinned —
@@ -130,7 +135,7 @@ struct LaunchCommand: AsyncParsableCommand {
                 // Fail loud (like the auto-start branch) so we never exec the
                 // agent against the wrong model on a failed load.
                 let ok = await loadModel(baseURL: baseURL, model: model,
-                                         keepAlive: keepAliveSecs)
+                                         keepAlive: keepAliveSecs, apiKey: apiKey)
                 await spinner.stop()
                 guard ok else {
                     print(Ansi.yellow("Error: server could not load '\(model)'. ")
@@ -142,7 +147,7 @@ struct LaunchCommand: AsyncParsableCommand {
                 // Already active: pin it (best-effort — a stale keep-alive
                 // shouldn't abort an otherwise-ready session).
                 _ = await loadModel(baseURL: baseURL, model: model,
-                                    keepAlive: keepAliveSecs)
+                                    keepAlive: keepAliveSecs, apiKey: apiKey)
             }
             return
         }
@@ -192,7 +197,7 @@ struct LaunchCommand: AsyncParsableCommand {
         let spinner = Spinner("Warming up '\(model)' (first load can take a moment)")
         spinner.start()
         for _ in 0..<120 {
-            if await getHealth(baseURL: baseURL) != nil {
+            if await getHealth(baseURL: baseURL, apiKey: apiKey) != nil {
                 await spinner.stop()
                 print("  " + Ansi.chrome("Server ready."))
                 return
@@ -211,10 +216,11 @@ struct LaunchCommand: AsyncParsableCommand {
         throw ExitCode.failure
     }
 
-    private func getHealth(baseURL: String) async -> [String: Any]? {
+    private func getHealth(baseURL: String, apiKey: String?) async -> [String: Any]? {
         guard let url = URL(string: "\(baseURL)/healthz") else { return nil }
         var req = URLRequest(url: url)
         req.timeoutInterval = 2
+        if let apiKey { req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -223,11 +229,17 @@ struct LaunchCommand: AsyncParsableCommand {
     /// Ask the running server to load `model`, pinning it for the agent
     /// session via `keep_alive` (negative = never evict). Returns true on
     /// HTTP 200.
-    private func loadModel(baseURL: String, model: String, keepAlive: Int) async -> Bool {
+    private func loadModel(
+        baseURL: String,
+        model: String,
+        keepAlive: Int,
+        apiKey: String?
+    ) async -> Bool {
         guard let url = URL(string: "\(baseURL)/v1/models/load") else { return false }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let apiKey { req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
         req.httpBody = try? JSONSerialization.data(
             withJSONObject: ["model": model, "keep_alive": keepAlive])
         guard let (_, resp) = try? await URLSession.shared.data(for: req) else { return false }
@@ -237,13 +249,13 @@ struct LaunchCommand: AsyncParsableCommand {
     // MARK: - Config + setup
 
     private func applyConfigFiles(_ files: [AgentConfigFile],
-                                  baseURL: String, model: String) throws {
+                                  baseURL: String, model: String, apiKey: String) throws {
         for f in files {
             let path = expandTilde(f.path)
             let dir = (path as NSString).deletingLastPathComponent
             try? FileManager.default.createDirectory(
                 atPath: dir, withIntermediateDirectories: true)
-            let rendered = f.render(baseURL, model)
+            let rendered = f.render(baseURL, model, apiKey)
             switch f.mode {
             case .write:
                 try rendered.write(toFile: path, atomically: true, encoding: .utf8)

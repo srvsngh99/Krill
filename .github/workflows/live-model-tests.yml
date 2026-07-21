@@ -1,0 +1,89 @@
+name: live-model-tests
+
+# A real-checkpoint correctness lane. It downloads a small public Qwen model,
+# then runs the env-gated tests that regular PR CI necessarily skips. The job
+# is intentionally scheduled/dispatch-only: it consumes an Apple-Silicon runner
+# and a model download, but it is fully self-contained and needs no repository
+# secret or pre-provisioned checkpoint.
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Built-in plain-text model alias to pull
+        required: true
+        default: qwen2.5-0.5b
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  text-checkpoint:
+    name: text checkpoint (${{ inputs.model || 'qwen2.5-0.5b' }})
+    # Public Apple-Silicon runner. This queue can be slower than macos-15, which
+    # is why it is kept out of the pull-request critical path.
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      KRILL_LIVE_MODEL: ${{ inputs.model || 'qwen2.5-0.5b' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain and hardware
+        run: |
+          swift --version
+          uname -m
+          test "$(uname -m)" = arm64
+
+      - name: Cache SwiftPM build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          key: live-spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            live-spm-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Cache live model
+        uses: actions/cache@v4
+        with:
+          path: ~/.krill/models
+          key: live-model-${{ runner.os }}-${{ runner.arch }}-${{ env.KRILL_LIVE_MODEL }}
+
+      - name: Build release tests
+        run: swift build -c release --build-tests -Xswiftc -enable-testing
+
+      - name: Compile Metal shaders
+        run: make metallib CONFIGURATION=release REQUIRE_METALLIB=1
+
+      - name: Pull checkpoint
+        run: .build/release/krill pull "$KRILL_LIVE_MODEL"
+
+      - name: Run live correctness gates
+        run: |
+          model_path="${HOME}/.krill/models/blobs/${KRILL_LIVE_MODEL}"
+          test -d "$model_path"
+          KRILL_BATCH_MODEL_PATH="$model_path" \
+          KRILL_TEXT_MODEL_PATH="$model_path" \
+          KRILL_NGRAM_MODEL_PATH="$model_path" \
+            swift test -c release --skip-build \
+              --filter BatchedDecodeLiveTests/testBatchedDecodeMatchesSerializedPerRow \
+              --filter BatchedDecodeLiveTests/testBatchedDecodeNoCrossRowContamination \
+              --filter PrefixCachePartialReuseLiveTests/testPartialReuseIsBitExactAndFaster \
+              --filter NgramLiveParityTests/testNgramGreedyOutputMatchesStandardDecode
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-model-test-logs
+          path: .build/**/*.xcresult
+          if-no-files-found: ignore
+          retention-days: 7

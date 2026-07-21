@@ -1,175 +1,140 @@
-# Krill Architecture
+# Krill architecture
 
-## Overview
+Krill is a native Swift + MLX inference runtime for Apple Silicon. The `krill`
+binary contains the model runtimes, tokenizer, caches, sampler, grammar engine,
+HTTP server, coding-agent harness, and terminal UI. Production inference does
+not call Python or `mlx-vlm`.
 
-Krill is a Mac-native LLM inference engine for Apple Silicon built on MLX. It ships as a single CLI binary (`krill`) with an HTTP server, supporting 7 model families with prefix caching and speculative decoding.
+The changing model roster is intentionally not duplicated here. The
+authoritative sources are `AliasMap.swift` for the built-in pull shortcuts and
+`ModelCapabilities.swift` for family capabilities and support tiers. The
+[README model section](../README.md#models) is the user-facing summary.
 
-### Release Status
+## Package boundaries
 
-This is not a production release because the release benchmark gate still fails on three metrics. Server multimodal is implemented for Gemma 4 — native image and bridge-backed audio — as shown in the support matrix below. See the [README support matrix](../README.md#support-matrix) and [`RELEASE_READINESS_REMEDIATION.md`](RELEASE_READINESS_REMEDIATION.md) for the authoritative status and the remaining gate gaps.
+```text
+KrillCLI (executable and command wiring)
+├── KrillTUI          full-screen chat/agent presentation logic
+├── KrillServer       OpenAI, Ollama, and Anthropic HTTP adapters
+│   ├── KrillEngine
+│   ├── KrillTooling
+│   └── KrillHarness
+├── KrillEngine       load/swap lifecycle, prefill, decode, batching
+│   ├── KrillCore     text, vision, audio, embedding, and reranker models
+│   ├── KrillCache    fp16/int8 KV caches and persistent prefix cache
+│   ├── KrillTokenizer
+│   ├── KrillSampler
+│   └── KrillGrammar
+├── KrillHarness      coding-agent loop, permissions, tools, research
+├── KrillAgent        hardware-aware model recommender/operator
+└── KrillRegistry     model catalog, manifests, Hugging Face puller, config
 
-### Gemma 4 Multimodal Support Matrix
-
-| Path | Text | Image | Audio |
-|------|------|-------|-------|
-| CLI native | Supported | Supported (SigLIP2) | — |
-| CLI bridge | — | — | Supported (mlx-vlm) |
-| Server | Supported | Supported (Gemma 4 only, native) | Supported (Gemma 4 only, mlx-vlm bridge) |
-
-Native Swift covers Gemma 4 text and image (text model + SigLIP2 vision encoder). When `--audio` is present, RunCommand routes the entire request (including any `--image`) through the mlx-vlm Python bridge because native audio is not implemented. Image-only requests use the native Swift vision path. The HTTP server mirrors this routing: image-only requests run through the native engine; audio (with or without an image) goes through the bridge.
-
-## Module Dependency Graph
-
-```
-KrillCLI (executable)
-  |-- KrillEngine        (inference orchestration)
-  |     |-- KrillCore    (model architectures)
-  |     |-- KrillCache   (KV cache, prefix cache)
-  |     |-- KrillTokenizer (tokenizer wrapper)
-  |     |-- KrillSampler (greedy, top-k, top-p)
-  |-- KrillServer        (HTTP API)
-  |     |-- KrillEngine
-  |-- KrillRegistry      (model store, HF puller)
-  |-- KrillRuntime       (Metal GPU validation)
-```
-
-## Source Layout
-
-```
-Sources/
-  KrillCLI/             CLI commands (run, serve, launch, pull, bench, etc.)
-  KrillEngine/          Inference engine, speculative decoder, Python fallback
-  KrillCore/            Model architectures (Llama, Gemma4, Qwen, etc.) + model loader
-  KrillCache/           KV cache (batched concat) + prefix cache (LRU + disk)
-  KrillServer/          HTTP server (OpenAI + Ollama APIs)
-  KrillTokenizer/       HuggingFace tokenizer wrapper
-  KrillSampler/         Token sampling (greedy, temperature, top-k, top-p)
-  KrillRegistry/        Model registry, HF puller, manifests
-  KrillRuntime/         Metal runtime validation
-  KrillKernels/         Custom Metal shaders (planned)
+KrillCore
+├── KrillKernels      fused Metal/MLX kernels
+└── KrillRuntime      Metal availability and runtime validation
 ```
 
-## Generation Pipeline
+These boundaries keep model math independent from the CLI and wire protocols.
+`KrillHarness` is also independent of MLX, so its agent loop can be exercised
+with a mock generator.
 
+## Inference path
+
+```text
+messages + attachments + generation options
+                 │
+                 ▼
+       family-aware prompt/template
+                 │
+                 ├── dedicated native VLM driver when position/grid state
+                 │   cannot fit the generic forward interface
+                 ▼
+   exact or longest-shared-prefix KV lookup
+                 │
+                 ▼
+       suffix-only or chunked prefill
+                 │
+                 ├── native image/audio encoder when present
+                 ▼
+       sampling / grammar mask / stop set
+                 │
+                 ├── standard pipelined decode
+                 ├── prompt-lookup or draft-model speculation
+                 └── continuous ragged batching for eligible models
+                 ▼
+      AsyncStream<TokenEvent> + final stats
 ```
-User prompt
-  |
-  v
-Tokenizer (chat template -> token IDs)
-  |  Gemma4 uses direct token ID path to preserve special tokens
-  v
-Prefix Cache Lookup (full-hit only)
-  |  Hit -> restore KV, truncate to last-1, re-forward last token
-  |  Miss -> forward entire prompt
-  v
-Prefill (forward all prompt tokens)
-  |  Multimodal: preprocessImage() -> VisionEncoder -> embedVision -> inject at <|image|> positions
-  |  Graph compaction: MLX.eval() every 5 layers
-  v
-Prefix Cache Store (write-behind, async disk)
-  |
-  v
-Decode Loop
-  |  Standard: one token per forward pass
-  |  Speculative: draft K tokens, verify in single target pass
-  v
-Token Stream (AsyncStream<TokenEvent>)
-  |
-  v
-Output (CLI print / SSE stream / JSON response)
-```
 
-## Model Family Support
+The in-memory prefix-cache tier can restore the longest common token prefix and
+prefill only the divergent suffix. Exact hits can also be hydrated from the
+persistent disk tier. Model id and a hash of all non-text conditioning are part
+of cache identity, preventing an image/audio KV state from being reused for a
+different attachment. Both fp16 and int8 KV paths support shared-prefix reuse.
 
-| Family | File | Attention | MLP | RMSNorm | Notes |
-|--------|------|-----------|-----|---------|-------|
-| Llama | LlamaModel.swift | GQA + RoPE | SwiGLU | Standard | Base architecture |
-| Qwen | QwenModel.swift | GQA + RoPE (with bias) | SwiGLU | Standard | rope_theta=1M |
-| Mistral | MistralModel.swift | GQA + RoPE | SwiGLU | Standard | Aliases LlamaConfig |
-| Gemma | GemmaModel.swift | GQA + RoPE | GeGLU | +1 offset | Embedding scaling |
-| Phi | PhiModel.swift | GQA + RoPE | SwiGLU (fused gate+up) | Standard | Fused QKV |
-| GLM-4 | GLMModel.swift | GQA (fused QKV) + RoPE | SwiGLU (fused) | Standard | Post-norm |
-| Gemma 4 | Gemma4Model.swift | Sliding+Full, KV sharing | GeGLU | 4-norm blocks | PLE, softcap, multimodal |
+Long prompts use chunked prefill to avoid a quadratic attention allocation.
+Gemma 4 sliding-attention layers can use rotating KV storage, while
+full-attention layers retain the full history. See
+[`INFERENCE_ENGINE.md`](INFERENCE_ENGINE.md) for the detailed flow.
 
-## HTTP API
+## Native model runtimes
 
-Default port: 57455
+The native causal-LM set includes dense Llama, Qwen, Mistral, Gemma, Phi and
+GLM variants; Qwen3.5 hybrid linear/full attention; and multiple switched-MoE
+families including Qwen, Mixtral, OLMoE, and DeepSeek. Separate native paths
+serve embedding encoders and cross-encoder rerankers.
 
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/v1/chat/completions` | POST | OpenAI chat (SSE streaming) |
-| `/v1/completions` | POST | OpenAI text completion |
-| `/v1/responses` | POST | OpenAI Responses API (Codex `wire_api="responses"`) |
-| `/v1/messages` | POST | Anthropic Messages API (Claude Code / Anthropic SDK) |
-| `/v1/models` | GET | List models |
-| `/v1/models/load` | POST | Load model by name |
-| `/v1/models/unload` | POST | Unload model |
-| `/v1/status` | GET | Server status + timing |
-| `/api/chat` | POST | Ollama chat |
-| `/api/generate` | POST | Ollama generate (with timing fields) |
-| `/api/tags` | GET | Ollama model list |
-| `/healthz` | GET | Health check |
-| `/metrics` | GET | Prometheus metrics |
+Multimodal routing is also in-process:
 
-The three generation wire protocols share one internal generate path. The
-Anthropic (`/v1/messages`) and Responses (`/v1/responses`) surfaces are thin,
-pure translation layers (`AnthropicCompat.swift`, `ResponsesCompat.swift`) that
-map a foreign request shape onto the internal messages/tools/sampling params and
-format the result back; tool calls on every surface flow through one
-model-agnostic `<tool_call>`/`<tool_response>` sentinel extractor
-(`ToolCalling.swift`). This is what lets a single server back agents that speak
-three different protocols.
-
-## Coding Agent Backend (`krill launch`)
-
-`krill launch <agent>` boots a terminal coding agent (Claude Code, Codex,
-OpenCode, Hermes, Pi, Copilot CLI, Droid) pre-wired to the local server, the way
-`ollama launch` does. The design principle: **the adapter is an endpoint inside
-the server, not a per-agent external proxy.** Each agent speaks one of the three
-generation wire protocols above, and `launch` only points it at the matching
-endpoint.
-
-| Agent's protocol | Endpoint | Agents |
+| Family/path | Native media implementation | Routing detail |
 |---|---|---|
-| Anthropic Messages | `/v1/messages` | Claude Code |
-| OpenAI Chat Completions | `/v1/chat/completions` | OpenCode, Hermes, Pi, Copilot, Droid |
-| OpenAI Responses | `/v1/responses` | Codex (it dropped `wire_api="chat"`) |
+| Gemma 4 e2b/e4b | SigLIP2 vision + USM Conformer audio | Generic multimodal forward; image and audio can be combined |
+| Gemma 4 unified | Raw-patch vision + raw-audio frame projectors | Generic multimodal forward on the unified decoder |
+| Qwen2.5-VL | ViT/merger + 3D mRoPE | Dedicated driver carries image grid and decode position |
+| Qwen3.5-VL | Native vision + hybrid text decoder + 3D mRoPE | Dedicated driver; SSM state precludes prefix restoration |
+| LLaVA-1.5 | CLIP + projector + Llama decoder | Generic 1D-RoPE multimodal decode |
+| Llama 3.2 Vision | Tiled vision + cross-attention | Dedicated driver; supports multiple images |
+| LocateAnything | MoonViT + connector + Qwen2.5 decoder | Dedicated native-resolution grid driver |
+| Unlimited-OCR | SAM/CLIP DeepEncoder + DeepSeek-MoE decoder | Dedicated OCR prompt/splice path |
+| Whisper | Native mel frontend, encoder, decoder, tokenizer | Used for local speech-to-text in voice mode |
 
-**Layout.** Agent knowledge is a declarative table in
-`Sources/KrillCLI/AgentProfiles.swift` (one `AgentProfile` literal per agent:
-wire protocol, env to export, config files to `write`/`mergeJSON`, setup
-`preExec` commands, binary, install hint). `Sources/KrillCLI/LaunchCommand.swift`
-stays generic over the table.
+Capabilities are determined twice: the registry declares what a family can do,
+and the loaded checkpoint can remove capabilities when the necessary tower or
+sub-configuration is absent. The server gates media before generation using
+that effective capability set.
 
-**Flow.** Resolve the profile and model (`--model` or first installed) -> ensure
-a server is up with that model loaded (auto-start a detached `krill serve` and
-poll `/healthz`, or fail loud; `--no-serve` opts out) -> apply the agent's
-config files + env + setup commands -> `execvp` the agent so it inherits the
-real TTY/stdin/signals. The auto-started server survives the exec (it is a
-separate process) and keeps running after the agent exits; the keep-alive
-controller unloads its idle *model* to free memory (and `krill stop` unloads
-it on demand), but the server *process* itself stays resident until killed.
+## Serving and agent surfaces
 
-**Config safety.** `write` targets are krill-owned paths only (e.g. Codex gets
-an isolated `config.toml` under a krill-owned `CODEX_HOME`, so the user's real
-`~/.codex` is never touched). `mergeJSON` deep-merges only our keys into the
-user's config, keeps a `.bak`, and concatenates+dedups arrays (so e.g. Droid's
-`custom_models` never clobbers the user's existing entries).
+The server defaults to `127.0.0.1:57455`. Its OpenAI Chat/Completions/Responses,
+Ollama, and Anthropic Messages adapters translate into the same internal
+generation and tool-call path. Model load/unload, embeddings, reranking, health,
+status, and metrics endpoints live alongside those generation surfaces; see
+[`SERVER_API.md`](SERVER_API.md) for the current endpoint contract.
 
-Adding an agent is a one-literal edit. Two roster members are documented for
-manual setup rather than auto-wired: `codex-app` (the desktop app reads the real
-`~/.codex` and would change the user's default provider) and `openclaw`
-(config surface unverified). See
-[`CONNECT_CODING_AGENTS.md`](CONNECT_CODING_AGENTS.md) for usage and
-[`SERVER_API.md`](SERVER_API.md) for the raw endpoint shapes.
+`krill run` uses the same engine for one-shot generation and the chat TUI.
+`krill code` turns on the in-process agent harness. `krill launch <agent>` starts
+or reuses the local server and points supported external coding agents at the
+appropriate protocol adapter; it does not insert a separate inference proxy.
 
-## Dependencies
+## Distribution and release metadata
 
-| Package | Version | Purpose |
-|---------|---------|---------|
-| mlx-swift | >= 0.21.0 | MLX arrays, NN modules, Metal kernels |
-| swift-transformers | >= 0.1.12 | HuggingFace tokenizer loading |
-| swift-argument-parser | >= 1.5.0 | CLI argument parsing |
-| swift-nio | >= 2.70.0 | HTTP server |
-| swift-crypto | >= 3.8.0 | SHA256 hashing |
-| swift-log | >= 1.6.0 | Structured logging |
+`VERSION` is the repository release source of truth. CI verifies that it agrees
+with the Swift `KrillVersion`, the newest `RELEASES.md` and `CHANGELOG.md`
+entries, and the versioned fields in `Formula/krill.rb`.
+
+The formula in this repository is a tested release snapshot. The installable,
+canonical formula is published in
+[`srvsngh99/homebrew-krill`](https://github.com/srvsngh99/homebrew-krill); release
+automation must update both copies from the same asset digest.
+
+## External packages
+
+| Package | Purpose |
+|---|---|
+| mlx-swift | MLX arrays, neural-network modules, and Metal execution |
+| swift-transformers + Jinja | Hugging Face tokenizer and chat-template rendering |
+| swift-argument-parser | CLI parsing |
+| swift-nio | HTTP server |
+| swift-crypto | download and content hashing |
+| swift-log | structured logs |
+
+Exact dependency constraints live in [`Package.swift`](../Package.swift).

@@ -48,7 +48,7 @@ struct CodeCommand: AsyncParsableCommand {
     var classic: Bool = false
 
     @Option(name: .long,
-            help: "Permission posture: plan (read-only), ask (confirm each mutating tool), accept-edits (auto-apply edits, ask for commands), or auto/accept-all (run every tool).")
+            help: "Permission posture: plan (read-only), ask (confirm each mutating tool), accept-edits (auto-apply edits, ask for commands), or auto/accept-all (run every tool). Defaults to default_agent_posture (plan if unset or invalid).")
     var permissionMode: String?
 
     @Option(name: .customLong("allow-tool"), parsing: .singleValue,
@@ -61,6 +61,7 @@ struct CodeCommand: AsyncParsableCommand {
 
     func run() async throws {
         let registry = Registry()
+        let config = KrillConfig.load()
 
         func nonEmpty(_ s: String?) -> String? {
             guard let s, !s.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
@@ -72,7 +73,7 @@ struct CodeCommand: AsyncParsableCommand {
 
         // Disambiguate the single positional: `krill code <task>` (uses the
         // default model) vs `krill code <model> <task>`.
-        let defaultModel = nonEmpty(KrillConfig.load().defaultModel)
+        let defaultModel = nonEmpty(config.defaultModel)
         var resolvedModel = nonEmpty(modelPath)
         var task = nonEmpty(prompt)
         if task == nil, let only = resolvedModel, let def = defaultModel, !isModelRef(only) {
@@ -96,7 +97,8 @@ struct CodeCommand: AsyncParsableCommand {
         }
 
         // Resolve the permission mode: --plan is shorthand for plan mode and
-        // wins if both are passed.
+        // wins if both are passed. With no CLI override, honor the configured
+        // posture; malformed configuration fails closed to read-only plan.
         let mode: PermissionMode
         if plan {
             mode = .plan
@@ -108,7 +110,11 @@ struct CodeCommand: AsyncParsableCommand {
             }
             mode = parsed
         } else {
-            mode = .acceptAll
+            let configured = nonEmpty(config.defaultAgentPosture)
+            mode = PermissionMode.configuredDefault(configured)
+            if let configured, PermissionMode.parse(configured) == nil {
+                print("Warning: invalid default_agent_posture '\(configured)'; using plan mode.")
+            }
         }
         let policy = PermissionPolicy(
             mode: mode, allow: Set(allowTools), deny: Set(denyTools))
@@ -139,7 +145,7 @@ struct CodeCommand: AsyncParsableCommand {
                 engine: engine, modelName: model, system: nonEmpty(system),
                 params: .greedy, maxTokens: maxTokens, registry: registry,
                 initialImage: nil, initialAudio: nil,
-                thinkingSetting: KrillConfig.load().thinking,
+                thinkingSetting: config.thinking,
                 modeSetting: "agent", agentPostureSetting: mode.rawValue,
                 initialAgentTask: task)
             await tui.run()

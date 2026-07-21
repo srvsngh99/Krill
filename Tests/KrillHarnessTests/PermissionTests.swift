@@ -129,6 +129,15 @@ final class PermissionPostureTests: XCTestCase {
         XCTAssertNil(PermissionMode.parse("nonsense"))
     }
 
+    func testConfiguredPermissionDefaultFailsClosed() {
+        XCTAssertEqual(PermissionMode.configuredDefault(nil), .plan)
+        XCTAssertEqual(PermissionMode.configuredDefault(""), .plan)
+        XCTAssertEqual(PermissionMode.configuredDefault("nonsense"), .plan)
+        XCTAssertEqual(PermissionMode.configuredDefault("ask"), .ask)
+        XCTAssertEqual(PermissionMode.configuredDefault("accept-edits"), .acceptEdits)
+        XCTAssertEqual(PermissionMode.configuredDefault("auto"), .acceptAll)
+    }
+
     func testShiftTabCycleOrderWraps() {
         XCTAssertEqual(PermissionMode.plan.next, .ask)
         XCTAssertEqual(PermissionMode.ask.next, .acceptEdits)

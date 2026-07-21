@@ -7,33 +7,36 @@
 
 <p align="center">
   A Mac-native LLM runtime that's also a coding agent.<br>
-  One Swift + MLX binary — text, vision, and voice. No Python.
+  Chat, serve compatible APIs, or run agent workflows against the same on-device model.
 </p>
 
 ---
 
 ## What makes Krill different
 
-Most local-LLM stacks are one half of a pair:
+Local inference runtimes and agent harnesses are usually separate: one runs and
+serves the model; the other adds tools and actions around it.
 
-- an **engine** (Ollama, llama.cpp) that runs a model but can't *do* anything, and
-- a **harness** (Claude Code, Codex) that drives tools and edits files but borrows someone else's model.
-
-**Krill is both, in one binary.** The same native Swift + MLX engine that serves tokens also runs a full agent loop — tools, file edits, web fetch, permissions — against the model already sitting in your RAM. No second process, no Python bridge, nothing leaves the machine.
+**Krill brings both together in one binary.** In chat and serve modes, its engine
+runs the model for interactive or API inference. In agent mode, the harness adds
+tools, file edits, web access, and permissions while using the same resident model.
+Inference stays on your Mac; web tools make outbound requests only when used.
 
 ## One engine, three modes
 
 | Mode | Command | What you get |
 |------|---------|--------------|
 | **Chat** | `krill run <model>` | Full-screen TUI (or one-shot) — multimodal, streaming, on-device voice |
-| **Serve** | `krill serve` | Drop-in **OpenAI · Ollama · Anthropic** API on `:57455` |
+| **Serve** | `krill serve` | Compatible **OpenAI · Ollama · Anthropic** API on `:57455` |
 | **Agent** | `krill code <task>` | Coding agent — bash, edits, glob/grep, **web**, **deep research** — on your local model |
 
-The agent isn't boxed into your filesystem. **`web_search`** ranks the open web — keyless out of the box (DuckDuckGo), or point it at Brave/Tavily (free-tier API key) or your own SearXNG for reliable results — and **`web_fetch`** reads any page as clean text — both SSRF-guarded and untrusted-framed against prompt injection — while **`/research <question>`** runs a multi-source deep-research pass (plan queries → fetch → summarize each source → synthesize a cited answer). A local model that browses, and cites its work.
+The agent isn't boxed into your filesystem. **`web_search`** ranks the open web — keyless out of the box (DuckDuckGo), or point it at Brave/Tavily (free-tier API key) or your own SearXNG for reliable results — and **`web_fetch`** reads public HTTP(S) pages as text, with SSRF defenses and untrusted-content framing — while **`/research <question>`** runs a multi-source deep-research pass (plan queries → fetch → summarize each source → synthesize a cited answer). A local model that browses, and cites its work.
 
 And the inverse: `krill launch claude` (or `codex`, `opencode`, `copilot`, `droid`, `hermes`, `pi`) points an **external** harness at Krill's engine. Krill is the model *for* other agents, or the agent *on* its own model.
 
-Underneath: a continuous batcher (~2× throughput under load), shared-prefix KV reuse (repeat prompts hit cache instead of re-prefilling — the agentic/RAG fast path), speculative decoding, and native vision (SigLIP2) + audio (USM Conformer). All Swift + MLX.
+Underneath: a continuous batcher for concurrent requests, shared-prefix KV reuse
+(repeat prompts hit cache instead of re-prefilling — the agentic/RAG fast path),
+speculative decoding, and native vision (SigLIP2) + audio (USM Conformer).
 
 > **⚠️ Early release.** Krill is young and still getting its polish — expect some rough edges, and pin a version if you need stability. Bug reports, ideas, and feedback are genuinely welcome → [open an issue](https://github.com/srvsngh99/Krill/issues).
 
@@ -47,9 +50,13 @@ brew tap srvsngh99/krill && brew install krill
 curl -fsSL https://raw.githubusercontent.com/srvsngh99/Krill/main/install.sh | sh
 ```
 
+The installer verifies the release archive against the SHA-256 digest
+published by GitHub before extracting it. Set `KRILL_VERSION` to pin a release.
+
 **Updating:** Homebrew installs update with `brew upgrade krill`; installer
-builds update in place with `krill update` (add `--check` to only see if a
-newer release is available).
+builds update in place with `krill update`, which fetches the installer from
+the target release tag (add `--check` to only see if a newer release is
+available).
 
 <details>
 <summary>Build from source</summary>
@@ -77,29 +84,33 @@ krill run gemma-4-e2b "transcribe this"      --audio ./clip.wav   # audio
 krill pull unlimited-ocr && krill run unlimited-ocr --image page.png "document parsing."   # OCR
 ```
 
-The default port `57455` is unique, so Krill coexists with Ollama on `11434`; run `krill serve --port 11434` for a literal drop-in.
+The default port `57455` is unique, so Krill coexists with Ollama on `11434`.
+Clients that expect port `11434` can use `krill serve --port 11434` with Krill's
+supported Ollama-compatible endpoints.
 
 > 📖 **New to Krill?** The **[User Guide](docs/GUIDE.md)** is a single indexed,
 > example-driven walkthrough of every feature — chat & TUI, multimodal (image /
 > audio / OCR), agentic coding, the HTTP server, structured output, embeddings,
 > web search, model management, and configuration.
 
-## On Mac, vs Ollama
+## On Mac, alongside Ollama
 
-Single-stream decode is **at parity** — both hit the MLX memory-bandwidth roof, and Krill makes no raw-decode-speed claim. Krill leads where real workloads live:
+Krill does not make a blanket "faster than Ollama" claim. Single-stream decode
+approaches the same Apple Silicon memory-bandwidth ceiling. Its architectural
+focus is on workloads where the surrounding runtime matters:
 
-- **Capability** — native vision + audio + voice, grammar-constrained output, schema / `tool_choice` tool calls. Ollama's MLX Gemma tag has none.
-- **Concurrency** — ~2× aggregate throughput under load (continuous batcher vs serialized).
-- **Latency** — faster cold start; shared-prefix KV turns repeat-prefix / agentic / RAG calls into cache hits. Gemma-4-E2B: TTFT ~5×, wall ~1.57× faster.
-- **Memory** — ~3 GB vs ~8.8 GB peak (class-equal gate; capped Metal buffer pool).
+- **Runtime + harness** — serve a model, use the built-in agent, or point an
+  external agent at the same inference engine.
+- **Concurrent inference** — continuous batching serves multiple active requests.
+- **Repeated context** — shared-prefix KV reuse avoids reprocessing the same
+  system prompts, tool schemas, and retrieved context.
+- **Long context** — chunked prefill and sliding-window-aware KV management keep
+  large Gemma contexts within the machine's memory budget.
+- **Capability** — text, vision, audio, grammar-constrained output, and
+  schema-guided tool calling from one runtime.
 
-Numbers track *your* hardware — reproduce them, don't trust a banner:
-
-```bash
-make bench-compare KRILL_MODEL=llama-3.2-1b OLLAMA_MODEL=llama3.2:1b
-```
-
-Full methodology and gates: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md), [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md).
+Benchmark methodology and engineering notes: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md),
+[`docs/BENCHMARKING.md`](docs/BENCHMARKING.md).
 
 ## Models
 
@@ -127,13 +138,14 @@ Native text also runs Phi, GLM-4, Mixtral, OLMoE, and DeepSeek-V2/V3, plus a ~15
 |---------|-------------|
 | `krill run <model> [prompt]` | Chat — interactive TUI or one-shot (`/agent` toggles agent mode) |
 | `krill code [task]` | Open the chat TUI in agent mode (tools, file edits, web) |
-| `krill serve` | Start the OpenAI / Ollama / Anthropic HTTP server |
+| `krill serve` | Start the OpenAI / Ollama / Anthropic-compatible HTTP server |
 | `krill launch <agent>` | Wire an external coding agent (Claude Code, Codex, …) to Krill |
 | `krill pull / list / rm <model>` | Manage models (download from HuggingFace) |
 | `krill quantize <hf-path>` | Convert an HF model to MLX |
 | `krill bench <model>` · `krill version` | Benchmark · version + system info |
 
-**Faster CLI:** `krill run` reloads the model each call. Start a daemon once and subsequent calls auto-route to it — TTFT drops from seconds to milliseconds:
+**Daemon-backed CLI:** `krill run` reloads the model each call. Start a daemon once
+and subsequent calls auto-route to it, avoiding a model reload on every invocation:
 
 ```bash
 KRILL_KEEP_ALIVE=24h krill serve --model qwen2.5-3b &
@@ -142,25 +154,24 @@ krill run qwen2.5-3b "hi"     # auto-routed → "(via daemon @ :57455)"
 
 ## API compatibility
 
-One server speaks three protocols — change the port in your client, nothing else:
+One server exposes three compatible protocol surfaces:
 
 - **OpenAI** — `/v1/chat/completions` (SSE), `/v1/completions`, `/v1/responses`, `/v1/models`
 - **Ollama** — `/api/chat`, `/api/generate`, `/api/tags`
-- **Anthropic** — `/v1/messages` (Claude SDK drop-in)
+- **Anthropic** — `/v1/messages` (Claude SDK-compatible)
 
-```python
-from openai import OpenAI
-client = OpenAI(base_url="http://localhost:57455/v1", api_key="not-used")
-print(client.chat.completions.create(
-    model="llama-3.2-1b", messages=[{"role": "user", "content": "hi"}]
-).choices[0].message.content)
+```bash
+curl http://localhost:57455/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"llama-3.2-1b","messages":[{"role":"user","content":"hi"}]}'
 ```
 
 OpenAI-family SDKs (openai, langchain-openai, llama-index) use `…/v1`; the Anthropic SDK takes the bare host (it appends its own `/v1/messages`). Request shapes and more SDKs: [`docs/SERVER_API.md`](docs/SERVER_API.md), [`docs/CONNECT_CODING_AGENTS.md`](docs/CONNECT_CODING_AGENTS.md).
 
 ## Architecture
 
-One Swift package, no Python. The engine and the agent harness share a process and the *same loaded model*.
+One Swift package. The engine and the agent harness share a process and the
+*same loaded model*.
 
 **Engine**
 - `KrillEngine` — orchestration, continuous batcher, speculative decoding
@@ -184,6 +195,7 @@ The full-screen TUI (themes, slash commands, attachments, push-to-talk voice) ha
 |-----|---------|---------|
 | `KRILL_DEFAULT_MODEL` | — | Model used when none is named |
 | `KRILL_PORT` | `57455` | Server port |
+| `KRILL_API_KEY` | — | Require bearer authentication; needed for safe non-loopback serving |
 | `KRILL_KV_CACHE_DTYPE` | `fp16` | KV cache precision (`fp16` / `int8`) |
 | `KRILL_PREFILL_CHUNK` | `2048` | Prompt tokens per prefill pass — lets 32k+ contexts run without OOM (`0` disables) |
 | `KRILL_ROTATING_KV` | `1` | Windowed KV for Gemma sliding layers — O(window) long-context decode (`0` disables) |

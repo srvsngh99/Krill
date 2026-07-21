@@ -1,171 +1,116 @@
-# Inference Engine Internals
+# Inference engine internals
 
-## InferenceEngine
+`Sources/KrillEngine/InferenceEngine.swift` owns the loaded model, tokenizer,
+cache policy, grammar masks, and streaming generation lifecycle. Model-family
+math is constructed by `KrillCore.loadModel`, which returns a `LoadedModel`
+containing the common forward closures and optional family-specific seams.
 
-`Sources/KrillEngine/InferenceEngine.swift` — the central orchestrator.
+## Model lifecycle
 
-### State
-
-| Property | Type | Purpose |
-|----------|------|---------|
-| `loadedModel` | `LoadedModel?` | Current model (module + forward closures) |
-| `tokenizer` | `KrillTokenizer?` | Tokenizer for the loaded model |
-| `modelDirectory` | `URL` | Path to model weights |
-| `prefixCache` | `PrefixCache` | Shared prefix cache |
-| `specDecoder` | `SpeculativeDecoder?` | Optional draft model |
-| `_isSwapping` | `OSAllocatedUnfairLock<Bool>` | Swap-in-progress guard |
-| `loadedAt` | `Date?` | When model was loaded |
-
-### Model Lifecycle
-
-```
-load() -> load model + tokenizer from disk
-swap(modelDirectory:) -> load new model, then replace (atomic)
-unload() -> release model + tokenizer
-loadDraftModel(from:) -> load speculative decoder
+```text
+load        read config → detect architecture → instantiate → load weights/tokenizer
+swap        load replacement into temporaries → publish it atomically
+unload      release model, tokenizer, and model-specific state
+load draft  construct a SpeculativeDecoder without changing the target model
 ```
 
-`swap()` loads the new model into temporaries first. If loading fails, the old model stays active.
+A failed swap leaves the prior model active. Effective capabilities combine the
+registry family declaration with checkpoint facts discovered by the loader; a
+text-only checkpoint therefore cannot accidentally advertise image or audio.
 
-### Generation Flow
+## Generation dispatch
 
-```swift
-generate(messages:, params:, maxTokens:, imageData:, audioData:)
-  -> (AsyncStream<TokenEvent>, () -> GenerationStats?)
-```
+The public `generate` entry points produce an `AsyncStream<TokenEvent>` and a
+thread-safe accessor for the completed `GenerationStats`.
 
-#### Step 1: Tokenize
-- Gemma4: `formatGemma4TokenIds()` (direct token IDs, no round-trip)
-- Others: `applyChatTemplate()` then `encodeWithoutExtraBOS()`
-- Multimodal (CLI image only): prepend N copies of `<|image|>` based on `computeImageTokenCount()`
-- Audio: handled by Python bridge in RunCommand before reaching InferenceEngine
+Most text and 1D-position multimodal models use the generic pipeline. Dedicated
+native drivers handle state that does not fit its common forward signature:
 
-#### Step 2: Create KV Caches
-- `makeKVCaches(numLayers)` — one empty cache per layer
+- Qwen2.5-VL and Qwen3.5-VL carry image-grid-aware 3D mRoPE positions.
+- Llama 3.2 Vision carries cross-attention KV state and a sparse per-image mask.
+- LocateAnything carries the native-resolution MoonViT grid.
+- Specialized OCR and Gemma 4 media paths build their required placeholder or
+  splice layout before prefill.
 
-#### Step 3: Prefix Cache Lookup
-- Full-hit only (prefixLength == promptTokens.count)
-- Partial hits rejected (causal mask shape mismatch)
-- On hit: restore all layer caches, truncate to length-1, forward last token only
+No driver shells out to Python. Gemma 4 audio is decoded and preprocessed once
+before prefill: e2b/e4b use the native USM log-mel path, while the unified model
+projects decoded waveform frames directly. Native images are preprocessed by
+their corresponding vision family.
 
-#### Step 4: Prefill
-```swift
-if multimodal && imageData != nil {
-    pixelValues = preprocessImage(imageData)
-    logits = multimodalForward(tokens, caches, pixelValues, nil)
-} else {
-    logits = forward(tokens, caches)
-}
-MLX.eval(logits)
-```
+## Generic request pipeline
 
-#### Step 5: Prefix Cache Store (write-behind)
-- If tokens >= 8: snapshot all caches, async write to disk
-- Never blocks generation
+1. Resolve the family chat template, thinking mode, stop-token set, media
+   placeholders, context limit, and requested output grammar.
+2. Allocate the family-appropriate fp16 or int8 KV caches. Gemma sliding layers
+   may use rotating caches; KV-sharing layers preserve their donor topology.
+3. Look for an exact prefix-cache entry. An exact hit restores KV, backs up one
+   token, and forwards that token to recover logits without duplicating a row.
+4. On an exact miss, look in memory for the longest common token prefix for the
+   same model and media hash. Restore and truncate the donor cache, then prefill
+   only the divergent suffix. Unsafe spans or incompatible cache geometry fall
+   back to a cold prefill.
+5. Prefill the remaining prompt. Long prompts are split according to the engine
+   setting exposed as `KRILL_PREFILL_CHUNK`; last-token-only forward closures
+   avoid an unnecessary vocabulary projection for earlier prompt positions.
+6. Snapshot eligible KV state into the bounded prefix cache. Writes to the disk
+   tier are asynchronous.
+7. Sample and stream until a stop id, stop string, cancellation, or token limit.
+   Grammar-constrained requests mask logits before sampling.
+8. Emit the terminal event and publish prompt/decode timing, token counts, TTFT,
+   cache/speculation data, and derived throughput.
 
-#### Step 6: Decode Loop
+## KV and prefix caches
 
-**Standard path:**
-```
-while generatedCount < maxTokens:
-    if nextToken == EOS: break
-    yield TokenEvent(tokenId, text, elapsed)
-    logits = forward([nextToken], caches)
-    nextToken = sampler.sample(logits)
-```
+The ordinary KV layout is `[batch, kvHeads, sequence, headDim]`. `KVCache`
+amortizes decode-time concatenation by collecting pending slices and compacting
+them in batches. `QuantizedKVCache` stores int8 values with scale/zero metadata.
+`RotatingKVCache` bounds storage for sliding-window attention.
 
-**Speculative path:**
-```
-while generatedCount < maxTokens:
-    accepted = specDecoder.step(lastToken, targetCaches, draftCaches)
-    for token in accepted:
-        yield TokenEvent(...)
-    lastToken = accepted.last
-```
+`PrefixCache` has two bounded tiers:
 
-### Stats
+- An in-memory LRU (eight entries by default) supports both exact matches and
+  longest-common-prefix reuse because it retains each entry's tokens.
+- A persistent safetensors tier under `~/.krill/cache` supports exact matches
+  across processes. Hydrated disk entries intentionally do not participate in
+  longest-common-prefix scanning.
 
-`GenerationStats` captures:
-- `promptTokens`, `generatedTokens`
-- `prefillTime`, `decodeTime`
-- Derived: `prefillTokensPerSecond`, `decodeTokensPerSecond`, `ttft`, `totalTime`
+The key covers model id, KV dtype, prompt tokens, and non-text media identity.
+The disk budget defaults to 2 GB and the per-entry memory cap defaults to 4 GB;
+both are configurable. Prefix reuse is skipped when a family has non-restorable
+state (for example Qwen3.5's SSM path) or when cache-span guards reject it.
 
-## KV Cache
+## Decode strategies
 
-`Sources/KrillCache/KVCache.swift`
+The default single-request path overlaps token detokenization/stream delivery
+with the next forward where possible. Greedy generation can additionally use:
 
-### Batched Concatenation Strategy
+- **Prompt-lookup (n-gram) speculation:** propose repeated runs from the prompt
+  or generated context, verify them with the target, and hand back to ordinary
+  decode when a rolling acceptance monitor says lookup is no longer useful.
+- **Draft-model speculation:** a separately loaded small model proposes a run;
+  the target verifies it in one forward, rolls caches back at the first
+  rejection, and emits a bonus token when every proposal is accepted.
 
-Per-token `concatenated()` is expensive (creates new array every step). Instead:
+Non-greedy sampling, penalties, int8 restrictions, grammar requirements, and
+explicit request options determine whether speculation is eligible.
 
-1. New K/V slices go into `_pendingKeys`/`_pendingValues` arrays
-2. `update()` returns the full K/V by concatenating `_keys + pending` for attention
-3. At 8 pending slices, `compact()` merges into `_keys`/`_values`
+For concurrent server traffic, `ContinuousBatcher` groups ready rows into
+ragged epochs. Per-row masks and RoPE offsets isolate left-padded sequences.
+Eligible model families expose batched fp16 and, where implemented, int8 or
+windowed decode closures; other families fall back to serialized generation.
 
-This reduces allocations by ~8x during decode.
+## Sampling and structured output
 
-### Layout
-K/V arrays: `[B, numKVHeads, seqLen, headDim]` — sequence on axis 2.
+`KrillSampler` applies penalties and temperature/top-k/top-p filtering before
+categorical sampling; non-positive temperature is greedy argmax.
+`KrillGrammar` compiles JSON, JSON Schema, regular-expression, CFG, and forced
+tool-call constraints into token masks. The engine memoizes decoded vocabulary
+pieces and the most recent compiled masks for the loaded model.
 
-## Prefix Cache
+## Correctness gates
 
-`Sources/KrillCache/PrefixCache.swift`
-
-### Two-Tier Architecture
-
-1. **Memory LRU** (default 8 entries): fast, no I/O
-2. **Disk** (`~/.krill/cache/`): safetensors, persistent across restarts
-
-### Cache Key
-FNV-1a hash of `modelId + token_bytes`. Not cryptographic, just for keying.
-
-### Lookup
-Progressive from full prompt length, step down by `minPrefixLength/2`:
-```
-checkLen = promptTokens.count
-while checkLen >= 8:
-    check memory -> check disk
-    checkLen -= step
-```
-
-### Write-Behind
-Store happens in `Task.detached` — non-blocking on generation path.
-
-## Speculative Decoding
-
-`Sources/KrillEngine/SpeculativeDecoder.swift`
-
-### Algorithm
-1. Draft model generates K tokens greedily
-2. Target model verifies all K in single batched forward
-3. Accept up to first rejection, replace rejected with target's token
-4. Roll back KV cache on rejection
-5. Bonus token if all K accepted
-
-### Adaptive K
-- Tracks last 16 acceptance rates
-- rate < 0.4 -> K-=1 (min 2)
-- rate > 0.8 -> K+=1 (max 6)
-- Default K=4
-
-### Draft Pairs
-```swift
-"llama-3.1-8b": "llama-3.2-1b",
-"qwen2.5-7b": "qwen2.5-0.5b",
-"gemma-4-e4b": "gemma-2-2b",
-```
-
-## Sampler
-
-`Sources/KrillSampler/Sampler.swift`
-
-### Pipeline
-```
-logits -> temperature scaling -> top-K filter -> top-P filter -> softmax -> categorical sample
-```
-
-If temperature <= 0: greedy (argmax).
-
-### Presets
-- `.greedy`: temp=0
-- `.creative`: temp=0.7, topP=0.9
+Most tests use deterministic synthetic fixtures. Tests that need real weights
+are opt-in through environment paths and run on Apple Silicon. The maintained
+matrix and commands are documented in [`TESTING.md`](TESTING.md); a scheduled
+workflow exercises a small real text checkpoint, while larger multimodal and
+performance gates remain explicit because of download size and runtime.

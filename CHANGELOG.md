@@ -6,6 +6,16 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-07-13
+
+### Added
+
+- **Native NVIDIA LocateAnything-3B visual grounding.** A MoonViT
+  native-resolution vision tower, two-layer connector, and Qwen2.5-3B decoder
+  locate objects as normalized bounding-box tokens. The native Swift+MLX vision
+  path is parity-verified against the NVIDIA reference and ships as the
+  `locateanything-3b` mixed-precision nvfp4 alias.
+
 ## [0.16.1] - 2026-07-01
 
 ### Added
