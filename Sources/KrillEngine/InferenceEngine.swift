@@ -21,16 +21,6 @@ import ImageIO
 /// Performance features wired in:
 /// - Prefix cache: skips prefill for cached token prefixes (TTFT <100ms)
 /// - Speculative decoding: draft model proposes K tokens per step (1.5-3x decode)
-/// One-shot, thread-safe cancellation flag for a single `generate` stream. Set
-/// from the AsyncStream's onTermination (any thread) and polled by the decode
-/// loop so an abandoned reply stops decoding instead of running to maxTokens.
-final class GenerationCancelToken: @unchecked Sendable {
-    private let lock = NSLock()
-    private var cancelled = false
-    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
-    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
-}
-
 public final class InferenceEngine: @unchecked Sendable {
     private var loadedModel: LoadedModel?
     private var tokenizer: KrillTokenizer?
@@ -2428,51 +2418,7 @@ public final class InferenceEngine: @unchecked Sendable {
     }
 }
 
-// MARK: - Errors
-
-public enum EngineError: Error, CustomStringConvertible {
-    case modelNotLoaded
-
-    public var description: String {
-        switch self {
-        case .modelNotLoaded: return "No model loaded. Call load() first."
-        }
-    }
-}
-
 // MARK: - Batched concurrent decode (live streaming entry)
-
-/// One row's request for ``InferenceEngine/generateBatched(_:)`` — the
-/// text-only subset of `generate(...)` arguments the Stage B batched decode
-/// path supports.
-public struct BatchGenRequest: Sendable {
-    public let messages: [[String: String]]
-    public let params: SamplingParams
-    public let maxTokens: Int
-    public let contextLimit: Int?
-    public let promptTemplateOverride: String?
-    /// Carried so the serial fallback (single-row cohort / ineligible model)
-    /// reproduces the request's exact non-batched behavior. The true batched
-    /// path (R > 1) bypasses both by design (Stage B: fp16 KV, no prefix
-    /// cache, no spec).
-    public let useSpeculative: Bool?
-    public let usePrefixCache: Bool
-    public init(messages: [[String: String]],
-                params: SamplingParams = .greedy,
-                maxTokens: Int = 512,
-                contextLimit: Int? = nil,
-                promptTemplateOverride: String? = nil,
-                useSpeculative: Bool? = nil,
-                usePrefixCache: Bool = true) {
-        self.messages = messages
-        self.params = params
-        self.maxTokens = maxTokens
-        self.contextLimit = contextLimit
-        self.promptTemplateOverride = promptTemplateOverride
-        self.useSpeculative = useSpeculative
-        self.usePrefixCache = usePrefixCache
-    }
-}
 
 /// Tiny thread-safe live-stream counter: when every row's consumer has gone
 /// away the shared decode Task can stop early. `NSLock`-backed to avoid
@@ -3098,64 +3044,4 @@ extension InferenceEngine {
             c.conts[r].finish()
         }
     }
-}
-
-// MARK: - Internal Helpers
-
-/// Forward a text prompt through the model in query-chunks so the attention
-/// score matrix stays `[heads, chunk, ctx]` instead of `[heads, L, L]`.
-///
-/// MLX's SDPA has no flash prefill kernel: it materializes the full per-head
-/// `L x L` bf16 score matrix for any query length > 1 (verified - peak grows
-/// quadratically and a single >14.3GB Metal buffer hard-OOMs around L ~ 21k
-/// tokens on a 24GB box, and spikes peak well before that). Chunking bounds the
-/// query dimension to `chunk`; the shared KV cache
-/// accumulates across chunks exactly as a single pass would (the same
-/// cached-suffix forward the partial-prefix-reuse path already relies on), so
-/// the result is numerically the single-pass prefill. Each chunk uses the
-/// `lastTokenOnly` prefill closure (full KV update, cheap single-token LM head)
-/// and is `eval`'d before the next so its scores free first; only the final
-/// chunk's logits are returned.
-///
-/// `chunkSize <= 0` or a prompt that already fits in one chunk forwards in a
-/// single call (zero behavior change for short prompts and prefix-cache hits).
-private func chunkedTextPrefill(
-    input: MLXArray,                                              // [1, L]
-    caches: [KVCacheProtocol],
-    chunkSize: Int,
-    prefillForward: ((MLXArray, [KVCacheProtocol]) -> MLXArray)?,
-    forward: (MLXArray, [KVCacheProtocol]) -> MLXArray
-) -> MLXArray {
-    // Non-escaping closures: select via an explicit branch (a `??` on the
-    // closures would force them to escape).
-    func runChunk(_ toks: MLXArray) -> MLXArray {
-        if let pf = prefillForward { return pf(toks, caches) }
-        return forward(toks, caches)
-    }
-    let total = input.dim(1)
-    if chunkSize <= 0 || total <= chunkSize {
-        return runChunk(input)
-    }
-    var start = 0
-    var last: MLXArray?
-    while start < total {
-        let end = Swift.min(start + chunkSize, total)
-        let logits = runChunk(input[0..., start ..< end])
-        MLX.eval(logits)   // realize this chunk's KV update + free its scores
-        last = logits
-        start = end
-    }
-    return last!
-}
-
-/// Thread-safe holder for generation statistics.
-private final class StatsHolder: @unchecked Sendable {
-    var stats: GenerationStats?
-}
-
-/// Mutable flag box for escaping token callbacks (single generate loop, so
-/// plain mutation is safe).
-private final class FlagBox: @unchecked Sendable {
-    var value: Bool
-    init(_ value: Bool) { self.value = value }
 }

@@ -11,9 +11,9 @@ name: swift-tests
 # require local model checkpoints (KRILL_QWEN25VL_MODEL_PATH,
 # KRILL_GEMMA4_MODEL_PATH, KRILL_MOE_MODEL_PATH,
 # KRILL_RERANKER_MODEL_PATH) skip with XCTSkip when their env
-# variables are not set, so CI runs with ~22 skips out of the
-# 415-ish test suite, exercising every code path that does not
-# need a multi-GB checkpoint download.
+# variables are not set, so regular PR CI exercises every path that does not
+# need a multi-GB checkpoint. `.github/workflows/live-model-tests.yml` supplies
+# a small real checkpoint on a scheduled Apple-Silicon runner.
 
 on:
   pull_request:
@@ -23,6 +23,12 @@ on:
       - 'Package.swift'
       - 'Package.resolved'
       - 'Makefile'
+      - 'VERSION'
+      - 'RELEASES.md'
+      - 'CHANGELOG.md'
+      - 'Formula/krill.rb'
+      - 'install.sh'
+      - 'tools/check_release_consistency.py'
       - '.github/workflows/swift-tests.yml'
   push:
     branches: [main]
@@ -32,6 +38,12 @@ on:
       - 'Package.swift'
       - 'Package.resolved'
       - 'Makefile'
+      - 'VERSION'
+      - 'RELEASES.md'
+      - 'CHANGELOG.md'
+      - 'Formula/krill.rb'
+      - 'install.sh'
+      - 'tools/check_release_consistency.py'
       - '.github/workflows/swift-tests.yml'
   workflow_dispatch:
 
@@ -45,12 +57,14 @@ jobs:
   swift-test:
     name: swift test (macOS)
     # macos-15 is the only public runner image with sub-minute queue
-    # times. macos-26-arm64 has Xcode 26.4 (Swift 6.3) but the
+    # times. The macos-26 ARM64 pool has Xcode 26.4 (Swift 6.3) but the
     # public arm64 pool routinely sits jobs in queue for hours.
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       # Package.swift declares `swift-tools-version: 6.2`, which
       # ships in Xcode 16.3+. Xcode 26.3 is the newest available on
@@ -66,6 +80,17 @@ jobs:
           swift --version
           xcrun --sdk macosx --show-sdk-version
           sysctl -n machdep.cpu.brand_string || echo "no sysctl"
+
+      # Dependency-free repository checks. These catch malformed package,
+      # installer, formula, whitespace, and release metadata
+      # changes without introducing a formatter version as a new CI variable.
+      - name: Static repository checks
+        run: |
+          swift package dump-package >/dev/null
+          sh -n install.sh
+          ruby -c Formula/krill.rb
+          python3 tools/check_release_consistency.py
+          git diff --check HEAD^ HEAD
 
       - name: Cache SwiftPM build artifacts
         uses: actions/cache@v4
@@ -85,8 +110,8 @@ jobs:
       # automatically, but `swift build --build-tests` does not
       # unless we pass it through, and we need build separate
       # from test so the metallib step can slot in between.
-      - name: Build (release, with tests)
-        run: swift build -c release --build-tests -Xswiftc -enable-testing
+      - name: Build (release, tests + coverage)
+        run: swift build -c release --build-tests --enable-code-coverage -Xswiftc -enable-testing
 
       # REQUIRE_METALLIB=1 makes the Makefile exit non-zero when
       # the Metal toolchain or the MLX checkout is missing, instead
@@ -96,7 +121,34 @@ jobs:
         run: make metallib CONFIGURATION=release REQUIRE_METALLIB=1
 
       - name: Run tests (release)
-        run: swift test -c release --skip-build
+        run: swift test -c release --skip-build --enable-code-coverage
+
+      - name: Publish coverage summary
+        id: coverage
+        run: |
+          coverage_json="$(swift test -c release --show-codecov-path)"
+          test -s "$coverage_json"
+          echo "json=$coverage_json" >> "$GITHUB_OUTPUT"
+          python3 - "$coverage_json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import sys
+
+          totals = json.load(open(sys.argv[1], encoding="utf-8"))["data"][0]["totals"]
+          print("## Swift coverage")
+          print("| Metric | Covered | Total | Percent |")
+          print("|---|---:|---:|---:|")
+          for key in ("lines", "functions", "regions"):
+              item = totals[key]
+              print(f"| {key.title()} | {item['covered']} | {item['count']} | {item['percent']:.1f}% |")
+          PY
+
+      - name: Upload Swift coverage JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-coverage-json
+          path: ${{ steps.coverage.outputs.json }}
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Print version
         run: .build/release/krill --version

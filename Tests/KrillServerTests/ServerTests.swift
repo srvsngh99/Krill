@@ -436,6 +436,71 @@ final class ServerTests: XCTestCase {
         try readResponseEnd(from: channel)
     }
 
+    func testServerSecurityRecognizesOnlyLoopbackBinds() {
+        for host in [
+            "localhost", "localhost.", "127.0.0.1", "127.42.0.9",
+            "::1", "[::1]", "0::1", "0:0:0:0:0:0:0:1", "[0000:0:0:0:0:0:0:0001]",
+        ] {
+            XCTAssertTrue(ServerSecurity.isLoopbackHost(host), host)
+        }
+        for host in ["0.0.0.0", "::", "192.168.1.5", "example.com", "127.0.0.999"] {
+            XCTAssertFalse(ServerSecurity.isLoopbackHost(host), host)
+        }
+    }
+
+    func testRemoteUnauthenticatedBindRequiresAcknowledgement() {
+        XCTAssertTrue(ServerSecurity.permitsBinding(
+            host: "127.0.0.1", apiKey: nil, allowRemoteUnauthenticated: false))
+        XCTAssertFalse(ServerSecurity.permitsBinding(
+            host: "0.0.0.0", apiKey: nil, allowRemoteUnauthenticated: false))
+        XCTAssertTrue(ServerSecurity.permitsBinding(
+            host: "0.0.0.0", apiKey: "secret", allowRemoteUnauthenticated: false))
+        XCTAssertFalse(ServerSecurity.permitsBinding(
+            host: "0.0.0.0", apiKey: "not a token", allowRemoteUnauthenticated: false))
+        XCTAssertTrue(ServerSecurity.permitsBinding(
+            host: "0.0.0.0", apiKey: nil, allowRemoteUnauthenticated: true))
+    }
+
+    func testBearerAuthenticationRejectsMissingAndWrongToken() throws {
+        for authorization in [nil, "Basic abc", "Bearer wrong"] as [String?] {
+            let channel = try makeChannel(apiKey: "correct")
+            defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+            var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/healthz")
+            if let authorization {
+                head.headers.add(name: "Authorization", value: authorization)
+            }
+            XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+            XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.end(nil)))
+            let response = try readResponseHead(from: channel)
+            XCTAssertEqual(response.status, .unauthorized)
+            XCTAssertEqual(response.headers.first(name: "WWW-Authenticate"), "Bearer")
+            XCTAssertTrue(try readResponseBody(from: channel).contains("Unauthorized"))
+            try readResponseEnd(from: channel)
+        }
+    }
+
+    func testBearerAuthenticationAllowsCorrectToken() throws {
+        let channel = try makeChannel(apiKey: "correct")
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/healthz")
+        head.headers.add(name: "Authorization", value: "Bearer correct")
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.end(nil)))
+        XCTAssertEqual(try readResponseHead(from: channel).status, .ok)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
+    func testBearerAuthenticationDoesNotBlockCorsPreflight() throws {
+        let channel = try makeChannel(apiKey: "correct")
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        let head = HTTPRequestHead(version: .http1_1, method: .OPTIONS, uri: "/api/chat")
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.end(nil)))
+        XCTAssertEqual(try readResponseHead(from: channel).status, .noContent)
+        try readResponseEnd(from: channel)
+    }
+
     func testCorsHeaderOnJSONResponseForAllowedOrigin() throws {
         let channel = try makeChannel()
         defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
@@ -1727,7 +1792,8 @@ final class ServerTests: XCTestCase {
     private func makeChannel(
         baseDir: URL? = nil,
         registry: Registry? = nil,
-        compat: CompatMode = .both
+        compat: CompatMode = .both,
+        apiKey: String? = nil
     ) throws -> EmbeddedChannel {
         let root = baseDir ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("krill-server-tests-\(UUID().uuidString)")
@@ -1735,7 +1801,8 @@ final class ServerTests: XCTestCase {
         let reg = registry ?? Registry(baseDir: root.appendingPathComponent("registry"))
         let channel = EmbeddedChannel()
         try channel.pipeline.addHandler(
-            KrillServer._makeHTTPHandlerForTesting(engine: engine, registry: reg, compat: compat)
+            KrillServer._makeHTTPHandlerForTesting(
+                engine: engine, registry: reg, compat: compat, apiKey: apiKey)
         ).wait()
         return channel
     }

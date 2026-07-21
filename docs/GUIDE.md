@@ -51,6 +51,8 @@ brew install krill
 ```sh
 curl -fsSL https://raw.githubusercontent.com/srvsngh99/Krill/main/install.sh | sh
 ```
+The installer verifies the downloaded archive against GitHub's published
+SHA-256 digest before extraction. Set `KRILL_VERSION` to pin a release.
 
 **From source** — requires macOS 14+ (Apple Silicon, M1+), Swift 6.2+, and the
 Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`):
@@ -59,8 +61,8 @@ git clone https://github.com/srvsngh99/Krill.git && cd Krill
 make release && make install      # → /usr/local/bin/krill
 ```
 
-Update later with `krill update` (`--check` to only check; Homebrew installs use
-`brew upgrade krill`).
+Update later with `krill update`; it fetches the installer from the exact target
+release tag (`--check` to only check; Homebrew installs use `brew upgrade krill`).
 
 ---
 
@@ -253,6 +255,11 @@ krill code --plan "investigate why the build is slow"     # read-only plan first
 | `accept-edits` | Auto-apply edits; still ask before commands. |
 | `auto` | Run everything without asking. |
 
+With no CLI override, `krill code` uses `default_agent_posture` (which defaults
+to read-only `plan`). Unrestricted execution therefore requires an explicit
+`--permission-mode auto` or a deliberate `default_agent_posture = "auto"`
+configuration.
+
 Key flags: `--max-iterations <n>`, `--no-bash`, `--allow-tool <name>` /
 `--deny-tool <name>` (repeatable), `--system "<prompt>"`.
 
@@ -292,8 +299,16 @@ One server speaks **OpenAI, Ollama, and Anthropic** protocols. Default port
 ```bash
 krill serve --model gemma-4-e2b                 # both compat surfaces
 krill serve --model qwen2.5-3b --port 11434     # Ollama drop-in
-krill serve --compat openai --host 0.0.0.0      # OpenAI-only, all interfaces
+KRILL_API_KEY='choose-a-secret' krill serve --compat openai --host 0.0.0.0
 ```
+
+Loopback (`127.0.0.1`, `::1`, or `localhost`) needs no authentication by
+default. A non-loopback bind is refused unless bearer authentication is enabled
+with `KRILL_API_KEY`, `--api-key`, or `server_api_key`. To knowingly expose an
+unauthenticated server, pass `--allow-remote-unauthenticated`. Prefer the
+environment variable over `--api-key` so the secret does not enter shell
+history or the process list. Authenticated clients send `Authorization: Bearer <key>`; CORS
+preflight requests remain available without the header.
 
 ### 8.1 Endpoints
 
@@ -476,6 +491,7 @@ Common keys (each has a `KRILL_…` env equivalent):
 | `default_mode` | `chat` | Launch surface: `chat` or `agent` |
 | `default_agent_posture` | `plan` | `plan` \| `ask` \| `accept-edits` \| `auto` |
 | `server_port` / `server_host` | `57455` / `127.0.0.1` | HTTP server bind |
+| `server_api_key` | — | Bearer token for all HTTP routes (redacted in config output; prefer `KRILL_API_KEY`) |
 | `keep_alive` | `5m` | Keep a model resident (`30m`, `0`, negative=pin) |
 | `num_parallel` | `1` | Concurrent in-flight requests per model |
 | `max_loaded_models` | `1` | Models resident at once |
@@ -489,7 +505,8 @@ Common keys (each has a `KRILL_…` env equivalent):
 
 Server knobs also read Ollama's env vars (`OLLAMA_HOST`, `OLLAMA_KEEP_ALIVE`,
 `OLLAMA_NUM_PARALLEL`, `OLLAMA_MODELS`, `OLLAMA_ORIGINS`) for drop-in
-compatibility. CORS: `KRILL_ORIGINS` (comma-separated allowlist).
+compatibility. CORS: `KRILL_ORIGINS` (comma-separated allowlist). Server auth:
+`KRILL_API_KEY`.
 
 ---
 

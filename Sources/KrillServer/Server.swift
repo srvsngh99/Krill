@@ -35,6 +35,7 @@ public final class KrillServer: Sendable {
     private let rerankEngine: RerankEngine
     private let logger = Logger(label: "krill.server")
 
+    private let apiKey: String?
     private let corsOrigins: [String]
     private let defaultContextLimit: Int?
     private let genQueue: GenerationQueue
@@ -45,12 +46,14 @@ public final class KrillServer: Sendable {
                 fallbackEngine: InferenceEngine, registry: Registry,
                 embedEngine: EmbeddingEngine = EmbeddingEngine(),
                 rerankEngine: RerankEngine = RerankEngine(),
+                apiKey: String? = nil,
                 corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
                 defaultContextLimit: Int? = nil,
                 numParallel: Int = 1, maxQueue: Int = 512) {
         self.host = host
         self.port = port
         self.compat = compat
+        self.apiKey = apiKey
         self.corsOrigins = corsOrigins
         self.engines = engines
         self.activeRef = activeRef
@@ -68,6 +71,7 @@ public final class KrillServer: Sendable {
         compat: CompatMode = .both,
         embedEngine: EmbeddingEngine = EmbeddingEngine(),
         rerankEngine: RerankEngine = RerankEngine(),
+        apiKey: String? = nil,
         maxBodySizeOverride: Int? = nil
     ) -> any ChannelHandler & Sendable {
         let activeRef = ActiveEngineRef(engine.isLoaded ? engine : nil)
@@ -80,6 +84,7 @@ public final class KrillServer: Sendable {
                     fallbackEngine: engine, registry: registry, compat: compat,
                     embedEngine: embedEngine,
                     rerankEngine: rerankEngine,
+                    apiKey: apiKey,
                     genQueue: GenerationQueue(numParallel: 1, maxQueue: 512),
                     maxBodySizeOverride: maxBodySizeOverride)
     }
@@ -98,6 +103,7 @@ public final class KrillServer: Sendable {
                                     fallbackEngine: self.fallbackEngine, registry: self.registry,
                                     compat: self.compat, embedEngine: self.embedEngine,
                                     rerankEngine: self.rerankEngine,
+                                    apiKey: self.apiKey,
                                     corsOrigins: self.corsOrigins,
                                     defaultContextLimit: self.defaultContextLimit,
                                     genQueue: self.genQueue)
@@ -180,9 +186,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let startedAt = Date()
 
     private let maxBodySize: Int
+    private let apiKey: String?
 
     private var requestHead: HTTPRequestHead?
     private var body: ByteBuffer = ByteBuffer()
+    private var discardingUnauthorizedRequest = false
 
     private let corsOrigins: [String]
     private let defaultContextLimit: Int?
@@ -193,6 +201,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
          fallbackEngine: InferenceEngine, registry: Registry,
          compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
          rerankEngine: RerankEngine = RerankEngine(),
+         apiKey: String? = nil,
          corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
          defaultContextLimit: Int? = nil,
          genQueue: GenerationQueue = GenerationQueue(numParallel: 1, maxQueue: 512),
@@ -204,6 +213,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         self.compat = compat
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
+        self.apiKey = apiKey
         self.corsOrigins = corsOrigins
         self.defaultContextLimit = defaultContextLimit
         self.genQueue = genQueue
@@ -260,7 +270,24 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         case .head(let head):
             requestHead = head
             body.clear()
+            currentOrigin = head.headers.first(name: "Origin")
+            discardingUnauthorizedRequest = false
+            if head.method != .OPTIONS,
+               !ServerSecurity.isAuthorized(
+                    authorization: head.headers.first(name: "Authorization"),
+                    apiKey: apiKey
+               ) {
+                sendJSON(
+                    context: context,
+                    status: .unauthorized,
+                    body: ["error": "Unauthorized"],
+                    extraHeaders: [("WWW-Authenticate", "Bearer")]
+                )
+                requestHead = nil
+                discardingUnauthorizedRequest = true
+            }
         case .body(var buf):
+            guard !discardingUnauthorizedRequest else { return }
             body.writeBuffer(&buf)
             if body.readableBytes > maxBodySize {
                 let head = HTTPResponseHead(version: .http1_1, status: .payloadTooLarge)
@@ -271,6 +298,10 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 return
             }
         case .end:
+            if discardingUnauthorizedRequest {
+                discardingUnauthorizedRequest = false
+                return
+            }
             guard let head = requestHead else { return }
             handleRequest(context: context, head: head, body: body)
             requestHead = nil
@@ -279,7 +310,6 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func handleRequest(context: ChannelHandlerContext, head: HTTPRequestHead, body: ByteBuffer) {
         let path = head.uri.split(separator: "?").first.map(String.init) ?? head.uri
-        currentOrigin = head.headers.first(name: "Origin")
 
         // CORS preflight (WS-G / T3-1): answer any OPTIONS with the grant.
         if head.method == .OPTIONS {
@@ -3034,12 +3064,17 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         ServerParsing.jsonObject(from: buffer)
     }
 
-    private func sendJSON(context: ChannelHandlerContext, status: HTTPResponseStatus, body: [String: Any]) {
+    private func sendJSON(
+        context: ChannelHandlerContext,
+        status: HTTPResponseStatus,
+        body: [String: Any],
+        extraHeaders: [(String, String)] = []
+    ) {
         guard let data = try? JSONSerialization.data(withJSONObject: body) else {
             context.close(promise: nil)
             return
         }
-        sendJSONData(context: context, status: status, data: data)
+        sendJSONData(context: context, status: status, data: data, extraHeaders: extraHeaders)
     }
 
     private func sendJSONOnLoop(
@@ -3058,11 +3093,17 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    private func sendJSONData(context: ChannelHandlerContext, status: HTTPResponseStatus, data: Data) {
+    private func sendJSONData(
+        context: ChannelHandlerContext,
+        status: HTTPResponseStatus,
+        data: Data,
+        extraHeaders: [(String, String)] = []
+    ) {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
         headers.add(name: "Content-Length", value: "\(data.count)")
         for (k, v) in corsHeaders() { headers.add(name: k, value: v) }
+        for (k, v) in extraHeaders { headers.add(name: k, value: v) }
         let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
 
         context.write(wrapOutboundOut(.head(head)), promise: nil)
@@ -3071,77 +3112,4 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         context.write(wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
         context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
     }
-}
-
-// MARK: - SSE Formatting
-
-private func sseChunk(id: String, content: String?, finishReason: String?) -> String {
-    var delta: [String: Any] = [:]
-    if let content { delta["content"] = content }
-    delta["role"] = "assistant"
-
-    var choice: [String: Any] = ["index": 0, "delta": delta]
-    if let reason = finishReason {
-        choice["finish_reason"] = reason
-        choice["delta"] = [String: Any]()
-    }
-
-    let payload: [String: Any] = [
-        "id": id,
-        "object": "chat.completion.chunk",
-        "created": Int(Date().timeIntervalSince1970),
-        "choices": [choice]
-    ]
-
-    guard let data = try? JSONSerialization.data(withJSONObject: payload),
-          let json = String(data: data, encoding: .utf8) else {
-        return ""
-    }
-    return "data: \(json)\n\n"
-}
-
-/// OpenAI `stream_options.include_usage` terminal chunk: a `chat.completion.chunk`
-/// with an empty `choices` array carrying the run's token `usage`, emitted just
-/// before `data: [DONE]`. Lets streaming harnesses (opencode, the OpenAI SDK)
-/// populate their context/token meter, which otherwise reads zero.
-private func sseUsageChunk(id: String, promptTokens: Int, completionTokens: Int) -> String {
-    let payload: [String: Any] = [
-        "id": id,
-        "object": "chat.completion.chunk",
-        "created": Int(Date().timeIntervalSince1970),
-        "choices": [Any](),
-        "usage": [
-            "prompt_tokens": promptTokens,
-            "completion_tokens": completionTokens,
-            "total_tokens": promptTokens + completionTokens,
-        ],
-    ]
-    guard let data = try? JSONSerialization.data(withJSONObject: payload),
-          let json = String(data: data, encoding: .utf8) else {
-        return ""
-    }
-    return "data: \(json)\n\n"
-}
-
-/// Escape a string for safe embedding inside a JSON string value.
-/// Handles backslash, double-quote, and control characters.
-private func escapeJSON(_ s: String) -> String {
-    var result = ""
-    result.reserveCapacity(s.utf8.count)
-    for c in s {
-        switch c {
-        case "\"": result += "\\\""
-        case "\\": result += "\\\\"
-        case "\n": result += "\\n"
-        case "\r": result += "\\r"
-        case "\t": result += "\\t"
-        default:
-            if c.asciiValue != nil && c.asciiValue! < 0x20 {
-                result += String(format: "\\u%04x", c.asciiValue!)
-            } else {
-                result.append(c)
-            }
-        }
-    }
-    return result
 }

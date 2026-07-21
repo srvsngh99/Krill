@@ -9,11 +9,23 @@ on:
   pull_request:
     paths:
       - 'tools/**'
+      - 'VERSION'
+      - 'RELEASES.md'
+      - 'CHANGELOG.md'
+      - 'Formula/krill.rb'
+      - 'install.sh'
+      - 'Sources/KrillRegistry/KrillVersion.swift'
       - '.github/workflows/tools-tests.yml'
   push:
     branches: [main]
     paths:
       - 'tools/**'
+      - 'VERSION'
+      - 'RELEASES.md'
+      - 'CHANGELOG.md'
+      - 'Formula/krill.rb'
+      - 'install.sh'
+      - 'Sources/KrillRegistry/KrillVersion.swift'
       - '.github/workflows/tools-tests.yml'
   workflow_dispatch:
 
@@ -41,7 +53,18 @@ jobs:
         run: |
           python3 -m compileall -q tools/release_gate.py tools/test_release_gate.py
           python3 -m compileall -q tools/gemma4_multimodal_benchmark.py tools/test_memory_sampling.py
+          python3 -m compileall -q tools/check_release_consistency.py
+          python3 -m compileall -q tools/test_installer.py
+
+      - name: Check release metadata
+        run: python3 tools/check_release_consistency.py
 
       - name: Run release-gate + peak-memory-sampling unit tests
         run: |
           python3 -m unittest tools.test_release_gate tools.test_memory_sampling -v
+
+      # install.sh deliberately depends on macOS plutil, so its fully offline
+      # archive/digest fixtures run on the macOS half of the matrix only.
+      - name: Run installer verification tests
+        if: runner.os == 'macOS'
+        run: python3 -m unittest tools.test_installer -v

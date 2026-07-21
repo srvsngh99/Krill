@@ -174,7 +174,8 @@ let package = Package(
                 "KrillRegistry",
                 "KrillKernels",
                 .product(name: "MLX", package: "mlx-swift"),
-            ]
+            ],
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "KrillEngineTests",
@@ -186,7 +187,8 @@ let package = Package(
                 "KrillRuntime",
                 "KrillTokenizer",
                 .product(name: "MLX", package: "mlx-swift"),
-            ]
+            ],
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "KrillServerTests",
@@ -204,6 +206,10 @@ let package = Package(
         .testTarget(
             name: "KrillTUITests",
             dependencies: ["KrillTUI"]
+        ),
+        .testTarget(
+            name: "KrillCLITests",
+            dependencies: ["KrillCLI"]
         ),
         .testTarget(
             name: "KrillToolingTests",

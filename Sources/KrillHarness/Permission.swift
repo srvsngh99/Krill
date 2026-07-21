@@ -35,6 +35,17 @@ public extension PermissionMode {
         }
     }
 
+    /// Resolve a persisted permission posture without ever failing open.
+    /// Invalid or empty configuration falls back to read-only plan mode.
+    static func configuredDefault(_ raw: String?) -> PermissionMode {
+        guard let raw,
+              !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let parsed = parse(raw) else {
+            return .plan
+        }
+        return parsed
+    }
+
     /// Order Shift+Tab cycles the posture through in the TUI: safest -> freest.
     static let cycleOrder: [PermissionMode] = [.plan, .ask, .acceptEdits, .acceptAll]
 
