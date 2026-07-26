@@ -6,6 +6,64 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-07-26
+
+### Fixed
+
+- **`gemma-4-e2b` crashed on its first generation.** The loader skipped
+  quantizing `per_layer_model_projection`, but 4-bit checkpoints such as
+  `mlx-community/gemma-4-e2b-it-4bit` ship that tensor already packed
+  (`uint32 [8960, 192]` with `.scales`/`.biases`). A dense `Linear` then held a
+  packed tensor and the first matmul trapped. Both Gemma 4 loader paths now read
+  the checkpoint before quantizing and quantize the projection exactly when the
+  checkpoint did. This was the model the install caveats recommend, so it hit
+  every new user on the golden path.
+- **Diagnostics no longer corrupt stdout.** With no `LoggingSystem.bootstrap`,
+  swift-log defaulted to `StreamLogHandler.standardOutput`, so lines like
+  `info krill.registry: [KrillRegistry] Saved manifest for …` landed in the
+  middle of `krill pull` and `krill list` output - noise for a human and
+  corruption for `krill list | …`. Logging is now bootstrapped to stderr at
+  `.notice`; raise it with `KRILL_LOG_LEVEL` or `KRILL_DEBUG`.
+- **The installer asked for a password it did not need.** `install.sh` tested
+  `-w` on `$KRILL_PREFIX` itself, which is false for a directory that does not
+  exist yet, so a fresh prefix under a writable `$HOME` escalated to sudo - and
+  then left the tree root-owned, so every later `krill update` asked again.
+  Writability is now judged on the nearest existing ancestor.
+- **The pull progress bar stopped at 99%.** The last callback landed partway
+  through whichever file finished last, so a completed download read as stalled.
+  It now paints a finished bar.
+
+### Added
+
+- **Tool names are constrained at sampling time.** `OutputFormat.toolNames`
+  installs a trigger-activated grammar that idles until a family's tool-call
+  sentinel appears, restricts the name value to the offered tools, then disarms
+  so arguments and prose decode freely. A model trained on another harness's
+  vocabulary (`Read` for `read_file`) can no longer emit a name this harness
+  does not offer. Covers hermes, qwen, gemma4, mistral, phi, and llama's tagged
+  form; `.pythonic` and bare-JSON llama have no unambiguous marker and keep the
+  recovery layers instead. Measured at no detectable decode cost.
+- **[`docs/TOOL_NAME_RESOLUTION.md`](docs/TOOL_NAME_RESOLUTION.md)** - the three
+  resolution layers, per-family coverage, and how to add a family or a tool.
+
+### Changed
+
+- `--constrain-args` now covers the whole tool call: schema-constrained argument
+  repair, plus a constrained re-pick when a name is still unknown. `--no-constrain-args`
+  opts out of all of it, including the sampling-time mask.
+- Speculative-decode and MoE routing counters (`spec:` / `moe:`) moved behind
+  `KRILL_DEBUG`. The throughput line still prints.
+
+## [0.16.2] - 2026-07-13
+
+### Added
+
+- **Native NVIDIA LocateAnything-3B visual grounding.** A MoonViT
+  native-resolution vision tower, two-layer connector, and Qwen2.5-3B decoder
+  locate objects as normalized bounding-box tokens. The native Swift+MLX vision
+  path is parity-verified against the NVIDIA reference and ships as the
+  `locateanything-3b` mixed-precision nvfp4 alias.
+
 ## [0.16.1] - 2026-07-01
 
 ### Added

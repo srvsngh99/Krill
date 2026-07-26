@@ -36,7 +36,7 @@ struct CodeCommand: AsyncParsableCommand {
     var bash: Bool = true
 
     @Flag(name: .long, inversion: .prefixedNo,
-          help: "Grammar-constrain tool-call arguments to the schema when a model emits empty/invalid args (helps small models).")
+          help: "Grammar-constrain malformed tool calls: regenerate args that miss the schema, and re-pick a tool name that is not one of the offered tools (helps small models and models trained on another tool vocabulary).")
     var constrainArgs: Bool = true
 
     @Flag(name: .long,

@@ -543,6 +543,7 @@ Issues & questions: <https://github.com/srvsngh99/Krill/issues>.
 - [`docs/TUI.md`](TUI.md) — full TUI: keys, slash commands, voice, background agents, custom commands
 - [`docs/CONNECT_CODING_AGENTS.md`](CONNECT_CODING_AGENTS.md) — wiring Claude Code / Codex / OpenCode / …
 - [`docs/ADDING_MODELS.md`](ADDING_MODELS.md) — add a model to the registry
+- [`docs/TOOL_NAME_RESOLUTION.md`](TOOL_NAME_RESOLUTION.md) — how a tool call is guaranteed to name a real tool; per-family coverage; adding a family or tool
 - [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — engine + harness internals
 - [`docs/BENCHMARKS.md`](BENCHMARKS.md) — performance vs Ollama
 - [`docs/decisions/`](decisions/) — architecture decision records

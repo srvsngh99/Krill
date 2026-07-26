@@ -405,6 +405,12 @@ private func printStats(_ stats: GenerationStats) {
     TTFT: \(ttft)ms, total: \(total)s
     """)
 
+    // Speculative-decode and MoE routing counters are engine internals -
+    // `final_k`, expert-slot occupancy, peak slot load. They are what you want
+    // when tuning the runtime and noise on a first `krill run`, so they are
+    // opt-in behind KRILL_DEBUG. The throughput line above always prints.
+    guard ProcessInfo.processInfo.environment["KRILL_DEBUG"] != nil else { return }
+
     if let spec = stats.speculative {
         let rate = String(format: "%.2f", spec.acceptanceRate)
         print("spec: rounds=\(spec.rounds), accepted=\(spec.acceptedTokens), final_k=\(spec.finalK), acceptance=\(rate)")

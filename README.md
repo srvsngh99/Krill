@@ -33,6 +33,12 @@ The agent isn't boxed into your filesystem. **`web_search`** ranks the open web 
 
 And the inverse: `krill launch claude` (or `codex`, `opencode`, `copilot`, `droid`, `hermes`, `pi`) points an **external** harness at Krill's engine. Krill is the model *for* other agents, or the agent *on* its own model.
 
+Whichever model you point at it, the agent's **tool names are constrained while
+the model samples them** — so a model trained on some other harness's vocabulary
+can't ask for a tool Krill doesn't offer and die on its first call. It's a
+trigger-activated grammar: idle during prose, armed only inside a tool call, and
+it costs no measurable decode time ([`docs/TOOL_NAME_RESOLUTION.md`](docs/TOOL_NAME_RESOLUTION.md)).
+
 Underneath: a continuous batcher (~2× throughput under load), shared-prefix KV reuse (repeat prompts hit cache instead of re-prefilling — the agentic/RAG fast path), speculative decoding, and native vision (SigLIP2) + audio (USM Conformer). All Swift + MLX.
 
 > **⚠️ Early release.** Krill is young and still getting its polish — expect some rough edges, and pin a version if you need stability. Bug reports, ideas, and feedback are genuinely welcome → [open an issue](https://github.com/srvsngh99/Krill/issues).

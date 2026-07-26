@@ -94,11 +94,15 @@ public struct AgentLoop: Sendable {
     public let generator: any HarnessGenerator
     public let tools: ToolRegistry
     public let maxIterations: Int
-    /// When true, a tool call whose args do not satisfy the tool's JSON schema
-    /// (the empty-`{}` failure small local models produce) triggers a second,
-    /// grammar-constrained pass that regenerates the args. This is the
-    /// in-process differentiator - it is what lets a small model complete an
-    /// agentic task instead of looping on empty arguments.
+    /// When true, a malformed tool call triggers a second, grammar-constrained
+    /// pass that regenerates the bad part:
+    ///   - args that do not satisfy the tool's JSON schema (the empty-`{}` failure
+    ///     small local models produce) are re-emitted against the schema;
+    ///   - a name outside the offered set is re-picked against an enum of the
+    ///     offered names (see `resolvedCall`).
+    /// This is the in-process differentiator - it is what lets a small model, or one
+    /// trained on another harness's tool vocabulary, complete an agentic task instead
+    /// of looping on empty arguments or an unknown tool.
     public let constrainToolArgs: Bool
     /// Permission policy consulted before every tool call. The default
     /// (`.acceptAll`) runs every tool, preserving the autonomous flow the loop
@@ -185,7 +189,15 @@ public struct AgentLoop: Sendable {
             }
             iteration += 1
 
-            let output = await generator.complete(messages: messages)
+            // Constrain the tool-name slot at sampling time so an unknown tool
+            // name cannot be produced (layer 0 of 3; see `resolvedCall` for the
+            // recovery layers that cover backends and families this cannot).
+            // Gated on the same flag as the repair passes: `--no-constrain-args`
+            // means "no grammar in my tool calls", and it would be surprising for
+            // it to leave a mask installed on every decode.
+            let output = constrainToolArgs
+                ? await generator.complete(messages: messages, constrainingToolNames: tools.names)
+                : await generator.complete(messages: messages)
             let (calls, cleaned) = ToolCalling.extractIfToolsOffered(
                 from: output, hasTools: hasTools, format: format,
                 knownToolNames: specs.map { $0.name })
@@ -228,7 +240,11 @@ public struct AgentLoop: Sendable {
             // come with the richer multi-turn work in a later PR).
             messages.append(["role": "assistant", "content": output])
             var invocations: [ToolInvocation] = []
-            for call in toRun {
+            for rawCall in toRun {
+                // Resolve the name BEFORE anything records or reports it, so the
+                // permission gate, the observation fed back, and the emitted event
+                // all agree on the tool that actually ran.
+                let call = await resolvedCall(rawCall, offered: tools.names, history: messages)
                 // Feed `result` back as the observation, record the invocation,
                 // and emit it, whether the tool ran, was denied, or was unknown.
                 func record(args: String, _ result: ToolResult) {
@@ -309,6 +325,49 @@ public struct AgentLoop: Sendable {
             if next == visible { return visible }
             visible = next
         }
+    }
+
+    /// Resolve a tool call whose name is not in the offered set.
+    ///
+    /// A wrong name is usually not a hallucination: a model fine-tuned on another
+    /// harness's vocabulary names the right capability with the wrong word, which is
+    /// how `gemma-4-12b-agentic` asked for `Read` when this harness offers
+    /// `read_file`. Three layers handle it. See `docs/TOOL_NAME_RESOLUTION.md`.
+    ///
+    /// 0. PREVENTION, at sampling time: the generation above constrains the
+    ///    tool-name slot to the offered set (`OutputFormat.toolNames`), so on a
+    ///    masking backend whose family has an unambiguous tool-call sentinel an
+    ///    unknown name is never produced and this function is never needed.
+    /// 1. Deterministic normalization (casing, separators, namespace prefixes, and a
+    ///    small closed alias table) already ran in the parser - no model call.
+    /// 2. If the name is STILL unknown, ask the model to re-pick, grammar-constrained
+    ///    to an enum of the offered names.
+    ///
+    /// Layers 1 and 2 are not redundant: they cover what layer 0 structurally cannot -
+    /// families with no sentinel (`.pythonic`, bare-JSON `.llama`), backends that
+    /// cannot mask logits, and the server's OpenAI-compatible path.
+    ///
+    /// Fail-open at every step: if the re-pick does not yield an offered tool, the
+    /// original call is returned unchanged and the caller's "unknown tool" result
+    /// still reaches the model, which is the conventional recovery signal.
+    private func resolvedCall(
+        _ call: ToolCalling.ParsedToolCall,
+        offered: [String],
+        history: [[String: String]]
+    ) async -> ToolCalling.ParsedToolCall {
+        guard constrainToolArgs, !offered.contains(call.name), !offered.isEmpty
+        else { return call }
+
+        let repairMessages = history + [[
+            "role": "user",
+            "content": ToolCalling.toolNameRegenPrompt(requested: call.name, offered: offered),
+        ]]
+        let reply = await generator.completeConstrained(
+            messages: repairMessages,
+            jsonSchema: ToolCalling.toolNameEnumSchema(offered: offered))
+        guard let name = ToolCalling.parseRepairedToolName(reply, offered: offered)
+        else { return call }
+        return ToolCalling.ParsedToolCall(name: name, argumentsJSON: call.argumentsJSON)
     }
 
     /// Selective, fail-open two-pass arg repair: if the model's free-form args
