@@ -140,7 +140,7 @@ extension Registry {
     /// weight copy - with the Modelfile overrides recorded on the manifest.
     @discardableResult
     public func createModel(name: String, from modelfile: Modelfile) throws -> ModelManifest {
-        let logger = Logger(label: "krill.create")
+        let logger = KrillLogging.makeLogger("krill.create")
         try Registry.requireValidName(name)
         let baseName = modelfile.from
         try Registry.requireValidName(baseName)

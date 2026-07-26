@@ -18,7 +18,7 @@ public final class Registry: Sendable {
     public let manifestsDir: URL
     public let blobsDir: URL
 
-    private let logger = Logger(label: "krill.registry")
+    private let logger = KrillLogging.makeLogger("krill.registry")
 
     /// Initialize registry at the default or custom location.
     ///
@@ -72,7 +72,7 @@ public final class Registry: Sendable {
         if !fm.fileExists(atPath: new.path) {
             do {
                 try fm.moveItem(at: legacy, to: new)
-                Logger(label: "krill.registry").info("Migrated legacy home ~/.krillm -> ~/.krill")
+                KrillLogging.makeLogger("krill.registry").info("Migrated legacy home ~/.krillm -> ~/.krill")
                 return true
             } catch {
                 try? fm.createSymbolicLink(at: new, withDestinationURL: legacy)
@@ -92,7 +92,7 @@ public final class Registry: Sendable {
             }
         }
         if movedAny {
-            Logger(label: "krill.registry").info("Merged legacy home ~/.krillm into ~/.krill")
+            KrillLogging.makeLogger("krill.registry").info("Merged legacy home ~/.krillm into ~/.krill")
             if (try? fm.contentsOfDirectory(atPath: legacy.path))?.isEmpty ?? false {
                 try? fm.removeItem(at: legacy)
             }

@@ -14,6 +14,22 @@ import Logging
 ///
 /// Diagnostics belong on stderr, so stdout carries only what the user asked for.
 public enum KrillLogging {
+    /// Make a Krill logger, bootstrapping the logging system on first use.
+    ///
+    /// Every Krill logger is created through here rather than `Logger(label:)` directly.
+    /// Bootstrapping at logger-creation time (instead of from the CLI entry point) keeps
+    /// this independent of how the process was started: `@main` is not the only way in -
+    /// the executable module is also linked into the test bundle, and taking over
+    /// `main()` there made SwiftPM hand the test runner's own arguments to
+    /// ArgumentParser ("Unknown option '--test-bundle-path'").
+    ///
+    /// Ordering is what matters: swift-log only applies a bootstrap to loggers created
+    /// AFTER it, so the bootstrap must happen before the `Logger` below is constructed.
+    public static func makeLogger(_ label: String) -> Logger {
+        bootstrap()
+        return Logger(label: label)
+    }
+
     /// Bootstrap once. `LoggingSystem.bootstrap` traps if called twice, so the work is
     /// wrapped in a `static let` the runtime initialises exactly once.
     public static func bootstrap() { _ = once }

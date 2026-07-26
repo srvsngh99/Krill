@@ -37,21 +37,4 @@ struct Krill: AsyncParsableCommand {
         defaultSubcommand: RunCommand.self
     )
 
-    /// ArgumentParser's generated entry point runs commands directly, which left no
-    /// place to configure logging before a command could emit its first line. Taking
-    /// over `main()` lets diagnostics be routed to stderr first (see `KrillLogging`);
-    /// the body then reproduces ArgumentParser's own async dispatch.
-    static func main() async {
-        KrillLogging.bootstrap()
-        do {
-            var command = try parseAsRoot(nil)
-            if var asyncCommand = command as? AsyncParsableCommand {
-                try await asyncCommand.run()
-            } else {
-                try command.run()
-            }
-        } catch {
-            exit(withError: error)
-        }
-    }
 }
