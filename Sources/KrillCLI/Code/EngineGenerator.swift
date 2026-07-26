@@ -23,6 +23,28 @@ struct EngineGenerator: HarnessGenerator {
         return await collect(engine.generate(messages: messages, params: .greedy, maxTokens: maxTokens).stream)
     }
 
+    /// Free generation with the tool-name slot constrained (see
+    /// `OutputFormat.toolNames`). Families with no unambiguous tool-call
+    /// sentinel resolve to an empty sentinel list, and the engine then decodes
+    /// unconstrained - identical to `complete(messages:)`.
+    func complete(
+        messages: [[String: String]], constrainingToolNames toolNames: [String]
+    ) async -> String {
+        let sentinels = ToolCallSentinels.sentinels(for: toolFormat)
+        guard !sentinels.isEmpty, !toolNames.isEmpty else {
+            return await complete(messages: messages)
+        }
+        await GenerationGate.shared.acquire()
+        defer { GenerationGate.shared.release() }
+        let (stream, _) = engine.generate(
+            messages: messages, params: .greedy, maxTokens: maxTokens,
+            format: .toolNames(
+                sentinels: sentinels,
+                nameKey: ToolCallSentinels.nameKey(for: toolFormat),
+                names: toolNames))
+        return await collect(stream)
+    }
+
     func completeConstrained(messages: [[String: String]], jsonSchema: String) async -> String {
         // Grammar-constrain decoding to a JSON object matching the tool's
         // parameter schema, so a small model cannot omit required fields.

@@ -31,4 +31,20 @@ extension HarnessGenerator {
     public func completeConstrained(messages: [[String: String]], jsonSchema: String) async -> String {
         await complete(messages: messages)
     }
+
+    /// Free-form generation with the tool-NAME slot constrained to `toolNames`.
+    ///
+    /// This is the primary defence against a model naming a tool this harness
+    /// does not offer: inside a tool call the sampler can only spell one of the
+    /// offered names, so an unknown name is never generated in the first place.
+    /// Prose, reasoning, and argument values decode normally.
+    ///
+    /// The default ignores the constraint, so a backend that cannot mask logits
+    /// (or a test mock) keeps working unchanged and falls back to the recovery
+    /// layers in `AgentLoop`.
+    public func complete(
+        messages: [[String: String]], constrainingToolNames toolNames: [String]
+    ) async -> String {
+        await complete(messages: messages)
+    }
 }

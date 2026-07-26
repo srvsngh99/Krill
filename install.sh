@@ -51,8 +51,23 @@ tar -xzf "$TMP/krill.tar.gz" -C "$TMP" || err "could not extract the tarball."
 [ -f "$TMP/krill" ] || err "tarball did not contain the krill binary."
 
 # 4. Install (escalate with sudo only if the prefix is not writable) ---------
+# `-w` is false for a path that does not exist YET, so testing $PREFIX directly
+# sent a brand-new prefix under a perfectly writable $HOME down the sudo path
+# (and then left the tree root-owned, so every later `krill update` asked for a
+# password too). Judge writability on the nearest EXISTING ancestor instead --
+# that is the directory mkdir -p will actually have to create into.
+needs_sudo_for() {
+  d=$1
+  while [ ! -e "$d" ]; do
+    parent=$(dirname "$d")
+    [ "$parent" = "$d" ] && break
+    d=$parent
+  done
+  [ ! -w "$d" ]
+}
+
 SUDO=""
-if [ ! -w "$PREFIX" ] || { [ -d "$BINDIR" ] && [ ! -w "$BINDIR" ]; }; then
+if needs_sudo_for "$PREFIX" || needs_sudo_for "$BINDIR"; then
   if command -v sudo >/dev/null 2>&1; then
     SUDO="sudo"
     info "Installing to $PREFIX (requires sudo)..."

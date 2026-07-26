@@ -232,6 +232,9 @@ let package = Package(
             name: "KrillGrammarTests",
             dependencies: [
                 "KrillGrammar",
+                // The tool-name grammar tests assert the per-family sentinel
+                // policy, which lives in KrillTooling.
+                "KrillTooling",
                 .product(name: "MLX", package: "mlx-swift"),
             ]
         ),

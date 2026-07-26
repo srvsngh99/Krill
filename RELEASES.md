@@ -7,6 +7,26 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.16.3 — 2026-07-26
+A correctness release, found by installing Krill from scratch and following our
+own instructions. **`gemma-4-e2b` — the model the install caveats tell you to
+pull first — crashed on its first generation.** 4-bit checkpoints ship the
+per-layer projection already quantized; the loader was skipping it, so a dense
+layer held a packed tensor and the first matmul trapped. Fixed, and the golden
+path (`brew install` → `krill pull gemma-4-e2b` → `krill run gemma-4-e2b`) works
+end to end again.
+
+Also: **tool names are now constrained while the model samples them.** A model
+trained on another harness's vocabulary used to ask for `Read` where Krill
+offers `read_file` and die on its first tool call. A trigger-activated grammar
+now makes an unknown tool name unrepresentable rather than something to detect
+and repair — at no measurable decode cost. See
+[`docs/TOOL_NAME_RESOLUTION.md`](docs/TOOL_NAME_RESOLUTION.md).
+
+Plus a quieter CLI: diagnostics go to stderr instead of corrupting `krill list |
+…`, the one-line installer no longer asks for a password it does not need, and
+the pull progress bar reaches 100%.
+
 ## v0.16.2 — 2026-07-13
 Adds native support for **NVIDIA LocateAnything-3B**, a visual-grounding VLM that
 locates anything in an image as bounding boxes (`<box><x1><y1><x2><y2></box>`,

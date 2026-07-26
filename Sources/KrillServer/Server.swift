@@ -33,7 +33,7 @@ public final class KrillServer: Sendable {
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
-    private let logger = Logger(label: "krill.server")
+    private let logger = KrillLogging.makeLogger("krill.server")
 
     private let corsOrigins: [String]
     private let defaultContextLimit: Int?
@@ -176,7 +176,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
-    private let logger = Logger(label: "krill.http")
+    private let logger = KrillLogging.makeLogger("krill.http")
     private let startedAt = Date()
 
     private let maxBodySize: Int

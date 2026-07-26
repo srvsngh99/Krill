@@ -100,7 +100,7 @@ struct LaunchCommand: AsyncParsableCommand {
         let agentArgv = [profile.binary] + profile.args(modelName) + agentArgs
 
         print("")
-        print("  " + Ansi.bold(">_ Launching \(profile.displayName)"))
+        print("  " + Ansi.ember(Ansi.bold(">_ ")) + Ansi.bold("Launching \(profile.displayName)"))
         print("  " + Ansi.chrome("\(baseURL)  (\(profile.wire.rawValue), model \(modelName))"))
         if profile.wire == .openAIResponses || profile.wire == .anthropic {
             print("  " + Ansi.hint("Tip: coding agents want a large context window; prefer a model/serve context >= 64k."))

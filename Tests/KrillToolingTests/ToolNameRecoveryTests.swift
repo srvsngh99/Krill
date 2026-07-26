@@ -45,4 +45,35 @@ final class ToolNameRecoveryTests: XCTestCase {
             ToolCalling.canonicalizeNames(calls, known: ambiguous)[0].name,
             "Write-File")
     }
+
+    // MARK: - Claude-Code-style vocabulary
+
+    // `gemma-4-12b-agentic` emits `Read` for `read_file`. That is a different
+    // WORD, not a casing or separator slip, so none of the rules above can
+    // bridge it and the agent died on its first tool call with
+    // "unknown tool 'Read'".
+    func testClaudeStyleReadAliased() {
+        XCTAssertEqual(canon("Read"), "read_file")
+    }
+
+    func testClaudeStyleEditAliased() {
+        XCTAssertEqual(canon("Edit"), "edit_file")
+    }
+
+    func testClaudeStyleWriteAliased() {
+        XCTAssertEqual(canon("Write"), "write_file")
+    }
+
+    func testShellAliasesToBash() {
+        XCTAssertEqual(canon("Shell"), "bash")
+    }
+
+    func testAliasNeverInventsAnUnofferedTool() {
+        // `read_file` is NOT offered here, so `Read` must stay unresolved
+        // rather than resolving to a tool the caller never exposed.
+        let calls = [ToolCalling.ParsedToolCall(name: "Read", argumentsJSON: "{}")]
+        XCTAssertEqual(
+            ToolCalling.canonicalizeNames(calls, known: ["bash"])[0].name,
+            "Read")
+    }
 }
