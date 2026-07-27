@@ -124,6 +124,17 @@ private let aliases: [String: ResolvedModel] = [
         repo: "srv-sngh/LocateAnything-3B-mlx-nvfp4",
         name: "locateanything-3b", family: .locateAnything, params: "3B", quant: "nvfp4", context: 32768),
 
+    // Nanbeige 4.2 3B: a LOOPED transformer - 22 blocks run twice over the same
+    // weights for 44 effective layers, so it holds 44 KV cache slots and decodes
+    // at roughly half the speed its parameter count suggests. Points at our
+    // nvfp4 MLX build (~2.3GB from 8.3GB bf16). An agentic/reasoning model: its
+    // template opens the assistant turn inside `<think>`, so a small
+    // `--max-tokens` returns an EMPTY reply (the block never closes) - budget
+    // thousands of tokens. Apache 2.0.
+    "nanbeige-4.2-3b": ResolvedModel(
+        repo: "srv-sngh/Nanbeige4.2-3B-mlx-nvfp4",
+        name: "nanbeige-4.2-3b", family: .nanbeige, params: "3B", quant: "nvfp4", context: 262144),
+
     // Qwen 3 (dense variants; MoE variants tracked under WS6)
     // Architecture delta vs Qwen 2.5: no QKV bias, per-head q_norm/k_norm
     // before RoPE, tied embeddings, explicit head_dim. Same Qwen family
