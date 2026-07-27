@@ -100,6 +100,12 @@ public final class InferenceEngine: @unchecked Sendable {
     /// The detected model family (nil if not loaded).
     public var family: String? { loadedModel?.family }
 
+    /// True when the loaded model's chat template opens a reasoning block, so
+    /// output tokens are spent thinking before anything visible is emitted.
+    /// Callers budgeting `maxTokens` must allow headroom for BOTH the hidden
+    /// chain and the answer. False when no model is loaded.
+    public var emitsReasoningBlock: Bool { tokenizer?.emitsReasoningBlock ?? false }
+
     /// Internal access for the Stage B batched decoder (BatchedDecode.swift),
     /// which lives in a separate file and so cannot see the `private` stored
     /// model/tokenizer directly.

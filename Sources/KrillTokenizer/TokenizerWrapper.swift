@@ -731,6 +731,44 @@ public final class KrillTokenizer: @unchecked Sendable {
         return t.contains("<|channel>") || t.contains("<|turn>")
     }
 
+    /// True when the model's chat template opens a REASONING block in the
+    /// assistant turn, so the model thinks before it writes anything visible.
+    ///
+    /// Callers use this to budget output tokens. A thinking model can spend
+    /// hundreds — Nanbeige 4.2's template literally emits `<think>\n` as the last
+    /// thing in the prompt — and `StreamingReasoningFilter` hides every one of
+    /// them. Budget too few and the block never closes, so the user gets an
+    /// EMPTY reply rather than a short one, which reads as a broken model rather
+    /// than a truncated answer.
+    ///
+    /// Detected from the template rather than a family allowlist: the markers are
+    /// exactly the opening sentinels `StreamingReasoningFilter` suppresses, so
+    /// "the template opens one of these" and "output will be hidden" cannot drift
+    /// apart. `enable_thinking` covers templates that gate the block on a flag
+    /// that defaults ON (Nanbeige, Qwen 3).
+    public var emitsReasoningBlock: Bool {
+        Self.templateEmitsReasoningBlock(chatTemplateString)
+    }
+
+    /// The marker test behind ``emitsReasoningBlock``, split out so callers that
+    /// have a model DIRECTORY but no loaded tokenizer can ask the same question.
+    public static func templateEmitsReasoningBlock(_ template: String?) -> Bool {
+        guard let t = template else { return false }
+        return t.contains("<think>") || t.contains("<thinking>")
+            || t.contains("<|think|>") || t.contains("<|channel>")
+            || t.contains("enable_thinking")
+    }
+
+    /// Whether the checkpoint at `directory` ships a reasoning chat template,
+    /// read straight off disk without constructing a tokenizer or loading any
+    /// weights. Used by the `krill run` daemon route, which decides its token
+    /// budget BEFORE (and often instead of) loading the model in-process.
+    public static func emitsReasoningBlock(inDirectory directory: URL) -> Bool {
+        templateEmitsReasoningBlock(
+            readExternalChatTemplate(directory: directory)
+                ?? readEmbeddedChatTemplate(directory: directory))
+    }
+
     /// Build the Gemma-4 "channel" prompt for reasoning fine-tunes (e.g. the
     /// coder) whose `chat_template.jinja` gates chain-of-thought on
     /// `enable_thinking`. We reproduce BOTH renders directly as a string (the
