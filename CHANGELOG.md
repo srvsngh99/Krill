@@ -6,6 +6,55 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-28
+
+### Fixed
+
+- **Every model produced garbage at any temperature above zero.**
+  `MLXRandom.categorical` interprets its input as LOGITS and softmaxes
+  internally, but the sampler handed it `softmax(scaled)`. Probabilities live in
+  `[0, 1]`, so every token collapsed into `exp([0, 1]) = [1, e]` and the draw
+  went nearly UNIFORM over the vocabulary. The filters made it worse rather than
+  better: top-k / top-p / min-p set rejected logits to `-1e9`, which softmaxes
+  to exactly 0 and then re-weights to `exp(0) = 1` — the same weight as a token
+  the model gave 0.9 probability (`exp(0.9)` = 2.46). Greedy decoding never
+  reaches this path, which is why `--temp 0` always looked correct and the bug
+  survived a release. Mirostat had the same defect and now passes `log(p)`.
+- **Per-token decode dropped spaces and newlines on SentencePiece models.**
+  Krill streams one token at a time, which exposes two decoder-chain bugs that
+  whole-string decode hides. A trailing `Strip(" ", start: 1)` — meant to run
+  once over the fused string — ran per token and ate every leading space, so
+  "The capital of France is Paris." arrived as `ThecapitalofFranceisParis.`.
+  And swift-transformers' `ByteFallbackDecoder` never flushes a trailing
+  `<0xHH>` run, so every newline and tab was silently dropped, flattening
+  markdown lists and code blocks onto one line. Affected Mistral as well.
+- **Reasoning models returned an EMPTY single-shot reply.** `krill run <model>
+  "hello"` spent all 512 default tokens inside a `<think>` block the reasoning
+  filter hides, and printed nothing. The multi-turn surfaces already carried
+  4096-token headroom for exactly this; single-shot now follows the model too —
+  a checkpoint whose chat template opens a reasoning block gets the headroom,
+  everything else keeps the lean default, and `--max-tokens` always wins.
+- **`krill quantize` registered every model with `context: 4096`.** Now read
+  from the emitted config (Nanbeige 4.2 advertises 262144). `krill pull` was
+  already correct, so only locally quantized models were affected.
+
+### Added
+
+- **Native Swift + MLX runtime for Nanbeige 4.2 3B** (`nanbeige-4.2-3b`), a
+  LOOPED transformer: the 22-block stack executes twice over the same weights
+  for 44 effective layers, each pass keeping its own KV cache slot (44 caches,
+  not 22), with `model.norm` applied at the end of every loop and `head_dim`
+  (128) decoupled from `hidden_size` (3072). Logit-parity gated against
+  upstream's own `modeling_nanbeige.py` on both a synthetic fixture and the real
+  weights, plus a live smoke gate over the serving path. Ships as
+  `srv-sngh/Nanbeige4.2-3B-mlx-nvfp4` (2.26 GB from 8.3 GB bf16).
+- `tools/verify_nanbeige_parity.py`, including a `--real` mode that documents a
+  trap: `inv_freq` is registered `persistent=False`, so transformers 5.x leaves
+  it zero on every layer after `from_pretrained` and the reference applies no
+  rotary embedding at all.
+- `docs/workstreams/WS8_DIFFUSION_IMAGE_RUNTIME.md` scoping an image-generation
+  runtime (Mage-Flow), which cannot be expressed as a `LoadedModel`.
+
 ## [0.16.3] - 2026-07-26
 
 ### Fixed

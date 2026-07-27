@@ -49,6 +49,14 @@ public final class KrillTokenizer: @unchecked Sendable {
     /// Bert-class). `nil` for the common case where the library handles wrapping.
     private let specialWrap: (cls: Int, sep: Int, pairDoubleSep: Bool)?
 
+    /// True when load removed a trailing whitespace-`Strip` decoder (see
+    /// `sanitizedTokenizerDirectory` Fix 3). The removed decoder existed to drop
+    /// the ONE leading space a Metaspace tokenizer prepends to a full string, so
+    /// full-sequence `decode` re-applies that single trim by hand to stay
+    /// byte-identical to HuggingFace. Per-token decode deliberately does NOT
+    /// trim: that is the whole point of removing it.
+    private let trimsOneLeadingSpaceOnDecode: Bool
+
     /// Load tokenizer from a model directory containing tokenizer.json.
     public init(from directory: URL) async throws {
         let tokenizerConfig = directory.appendingPathComponent("tokenizer.json")
@@ -63,8 +71,9 @@ public final class KrillTokenizer: @unchecked Sendable {
         // XLM-R, MPNet, and the sentence-transformers built on them) load from a
         // temp copy with the post-processor stripped, and re-add the `[cls]..[sep]`
         // wrap in `encode`. Other tokenizers load from the original directory.
-        let (loadDir, wrap) = Self.sanitizedTokenizerDirectory(directory)
+        let (loadDir, wrap, strippedSpaceStrip) = Self.sanitizedTokenizerDirectory(directory)
         self.specialWrap = wrap
+        self.trimsOneLeadingSpaceOnDecode = strippedSpaceStrip
 
         // Load via swift-transformers AutoTokenizer. Some
         // tokenizer_class values (e.g. XLMRobertaTokenizer used by
@@ -145,14 +154,30 @@ public final class KrillTokenizer: @unchecked Sendable {
     /// prepend-scheme logic runs; the scheme value still governs behavior, so
     /// "never" stays a no-op. Tokenizers that already set the field (e.g.
     /// bge-reranker-v2-m3) are untouched, so the reranker is unaffected.
+    ///
+    /// Fix 3 (trailing space-Strip vs PER-TOKEN decode): a Metaspace decoder
+    /// chain can end in `Strip(content: " ", start: 1)`, e.g. Nanbeige 4.2's
+    /// `[Replace ▁→" ", ByteFallback, Fuse, Strip]`. That `Strip` is meant to run
+    /// ONCE over the FUSED whole string, removing the single leading space the
+    /// metaspace prefix produces. Krill streams output one token at a time
+    /// (`decodeForOutput(token:)`), so `Fuse` collapses each single token and
+    /// `Strip` then eats THAT token's leading space - every word loses its
+    /// separator and "The capital of France is Paris." decodes as
+    /// "ThecapitalofFranceisParis.".
+    ///
+    /// Remove the trailing `Strip` so per-token decode keeps its spaces, and
+    /// record it so full-sequence `decode` re-applies the one-space trim by hand
+    /// (see `trimsOneLeadingSpaceOnDecode`). Chains without this shape - Gemma 4
+    /// and DeepSeek ship `[Replace, ByteFallback, Fuse]` and plain `ByteLevel`
+    /// respectively - are untouched.
     private static func sanitizedTokenizerDirectory(
         _ directory: URL
-    ) -> (URL, (cls: Int, sep: Int, pairDoubleSep: Bool)?) {
+    ) -> (URL, (cls: Int, sep: Int, pairDoubleSep: Bool)?, Bool) {
         let tjURL = directory.appendingPathComponent("tokenizer.json")
         guard let data = try? Data(contentsOf: tjURL),
               var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            return (directory, nil)
+            return (directory, nil, false)
         }
 
         // Fix 1: strip a RobertaProcessing/BertProcessing post-processor.
@@ -179,9 +204,25 @@ public final class KrillTokenizer: @unchecked Sendable {
             if metaspaceFixed { obj["pre_tokenizer"] = pre }
         }
 
-        // Neither fix applied: load straight from the original directory.
-        if wrap == nil && !metaspaceFixed {
-            return (directory, nil)
+        // Fix 3: drop a trailing whitespace-Strip decoder that would otherwise
+        // eat the leading space of EVERY streamed token.
+        var spaceStripRemoved = false
+        if var dec = obj["decoder"] as? [String: Any],
+           dec["type"] as? String == "Sequence",
+           var subs = dec["decoders"] as? [[String: Any]],
+           let last = subs.last,
+           last["type"] as? String == "Strip",
+           (last["content"] as? String) == " ",
+           ((last["start"] as? Int) ?? 0) >= 1 {
+            subs.removeLast()
+            dec["decoders"] = subs
+            obj["decoder"] = dec
+            spaceStripRemoved = true
+        }
+
+        // No fix applied: load straight from the original directory.
+        if wrap == nil && !metaspaceFixed && !spaceStripRemoved {
+            return (directory, nil, false)
         }
 
         let tmp = FileManager.default.temporaryDirectory
@@ -204,9 +245,9 @@ public final class KrillTokenizer: @unchecked Sendable {
                 }
             }
         } catch {
-            return (directory, nil)
+            return (directory, nil, false)
         }
-        return (tmp, wrap)
+        return (tmp, wrap, spaceStripRemoved)
     }
 
     /// Recursively set `add_prefix_space: true` on any Metaspace pretokenizer
@@ -505,12 +546,46 @@ public final class KrillTokenizer: @unchecked Sendable {
 
     /// Decode token IDs back to a string.
     public func decode(_ tokens: [Int]) -> String {
-        tokenizer.decode(tokens: tokens)
+        let text = tokenizer.decode(tokens: tokens)
+        // Re-apply the ONE leading-space trim that load removed with the
+        // trailing `Strip` decoder (Fix 3), so whole-string decode stays
+        // byte-identical to HuggingFace. Only the first space goes: the Strip
+        // this stands in for was configured `start: 1`.
+        if trimsOneLeadingSpaceOnDecode, text.hasPrefix(" ") {
+            return String(text.dropFirst())
+        }
+        return text
     }
 
     /// Decode a single token ID to its string representation.
     public func decode(token: Int) -> String {
-        tokenizer.decode(tokens: [token])
+        recoverByteFallback(tokenizer.decode(tokens: [token]), token)
+    }
+
+    /// Recover a SentencePiece BYTE-FALLBACK token (`<0x0A>`, `<0x09>`, ...) that
+    /// single-token decode drops.
+    ///
+    /// swift-transformers' `ByteFallbackDecoder` buffers consecutive `<0xHH>`
+    /// tokens and only flushes them when it reaches a NON-byte token; it never
+    /// flushes a trailing run. Krill streams output one token at a time, so a
+    /// byte token is ALWAYS trailing and always dropped - every newline and tab
+    /// vanished from generated text on SentencePiece checkpoints (Mistral,
+    /// Nanbeige, ...), which silently flattened markdown lists and code blocks
+    /// into one run-on line.
+    ///
+    /// Only single-BYTE (ASCII, < 0x80) fallbacks are recovered: those stand
+    /// alone as valid UTF-8. A multi-byte character arrives as several `<0xHH>`
+    /// tokens that cannot be assembled without carrying state across decode
+    /// calls, so those keep the previous behaviour rather than emitting an
+    /// invalid fragment.
+    private func recoverByteFallback(_ decoded: String, _ token: Int) -> String {
+        guard decoded.isEmpty,
+              let piece = tokenizer.convertIdToToken(token),
+              piece.count == 6, piece.hasPrefix("<0x"), piece.hasSuffix(">"),
+              let byte = UInt8(piece.dropFirst(3).dropLast(), radix: 16),
+              byte < 0x80
+        else { return decoded }
+        return String(UnicodeScalar(byte))
     }
 
     /// Gemma-4 multimodal marker literals (image/audio soft tokens plus the
@@ -553,7 +628,9 @@ public final class KrillTokenizer: @unchecked Sendable {
     /// their literal form, so they cannot leak into the streamed answer.
     public func decodeForOutput(token: Int) -> String {
         if outputSuppressedTokenIDs.contains(token) { return "" }
-        return tokenizer.decode(tokens: [token])
+        // The streaming output path: byte-fallback recovery matters most here,
+        // since this is what actually reaches the user token by token.
+        return recoverByteFallback(tokenizer.decode(tokens: [token]), token)
     }
 
     /// Apply chat template formatting for a conversation.
@@ -652,6 +729,44 @@ public final class KrillTokenizer: @unchecked Sendable {
     public var usesGemmaChannelTemplate: Bool {
         guard let t = externalChatTemplate else { return false }
         return t.contains("<|channel>") || t.contains("<|turn>")
+    }
+
+    /// True when the model's chat template opens a REASONING block in the
+    /// assistant turn, so the model thinks before it writes anything visible.
+    ///
+    /// Callers use this to budget output tokens. A thinking model can spend
+    /// hundreds — Nanbeige 4.2's template literally emits `<think>\n` as the last
+    /// thing in the prompt — and `StreamingReasoningFilter` hides every one of
+    /// them. Budget too few and the block never closes, so the user gets an
+    /// EMPTY reply rather than a short one, which reads as a broken model rather
+    /// than a truncated answer.
+    ///
+    /// Detected from the template rather than a family allowlist: the markers are
+    /// exactly the opening sentinels `StreamingReasoningFilter` suppresses, so
+    /// "the template opens one of these" and "output will be hidden" cannot drift
+    /// apart. `enable_thinking` covers templates that gate the block on a flag
+    /// that defaults ON (Nanbeige, Qwen 3).
+    public var emitsReasoningBlock: Bool {
+        Self.templateEmitsReasoningBlock(chatTemplateString)
+    }
+
+    /// The marker test behind ``emitsReasoningBlock``, split out so callers that
+    /// have a model DIRECTORY but no loaded tokenizer can ask the same question.
+    public static func templateEmitsReasoningBlock(_ template: String?) -> Bool {
+        guard let t = template else { return false }
+        return t.contains("<think>") || t.contains("<thinking>")
+            || t.contains("<|think|>") || t.contains("<|channel>")
+            || t.contains("enable_thinking")
+    }
+
+    /// Whether the checkpoint at `directory` ships a reasoning chat template,
+    /// read straight off disk without constructing a tokenizer or loading any
+    /// weights. Used by the `krill run` daemon route, which decides its token
+    /// budget BEFORE (and often instead of) loading the model in-process.
+    public static func emitsReasoningBlock(inDirectory directory: URL) -> Bool {
+        templateEmitsReasoningBlock(
+            readExternalChatTemplate(directory: directory)
+                ?? readEmbeddedChatTemplate(directory: directory))
     }
 
     /// Build the Gemma-4 "channel" prompt for reasoning fine-tunes (e.g. the

@@ -216,25 +216,28 @@ public final class Sampler: @unchecked Sendable {
             scaled = minPFilter(scaled, minP: params.minP)
         }
 
-        // Grammar-masked sampling. `MLXRandom.categorical` interprets its
-        // input as LOGITS (it softmaxes internally); the unmasked path below
-        // historically feeds it `softmax(scaled)` (probabilities), a harmless
-        // double-softmax for ordinary sampling. But that path gives a
-        // forbidden token (probability ~0) a weight of exp(0)=1 inside
-        // categorical, so it can still be drawn. When a mask is present we
-        // therefore feed categorical the masked LOGITS directly: re-add the
-        // mask so any token a filter let slip back is at ~-2e9, then sample —
-        // masked tokens softmax to 0 and can never win. The unmasked branch
-        // is byte-for-byte unchanged.
+        // Grammar-masked sampling: re-add the mask so any token a filter let
+        // slip back is at ~-2e9 and can never be drawn.
         if let mask {
-            let masked = scaled + mask.asType(scaled.dtype)
-            let token = MLXRandom.categorical(expandedDimensions(masked, axis: 0))
-            return token.asType(.int32)
+            scaled = scaled + mask.asType(scaled.dtype)
         }
 
-        // Sample from the distribution. categorical returns shape [1] uint32.
-        let probs = softmax(scaled)
-        let token = MLXRandom.categorical(expandedDimensions(probs, axis: 0))
+        // Sample. `MLXRandom.categorical` interprets its input as LOGITS (it
+        // softmaxes internally), so it must be handed `scaled` directly.
+        //
+        // This previously passed `softmax(scaled)` — probabilities — which made
+        // categorical compute softmax(softmax(logits)). That is NOT a harmless
+        // double-softmax: probabilities live in [0, 1], so every token collapses
+        // into exp([0,1]) = [1, e] and the distribution goes nearly UNIFORM over
+        // the whole vocabulary. The filters made it worse rather than better —
+        // top-k/top-p/min-p set rejected logits to -1e9, which softmaxes to
+        // exactly 0 and then re-weights to exp(0) = 1, the same weight as a
+        // token the model gave 0.9 probability (exp(0.9) = 2.46). With a large
+        // vocab the rejected mass swamps the nucleus and sampling returns
+        // essentially random tokens: every model emitted fluent-looking garbage
+        // at any temperature > 0, while greedy (which never reaches this path)
+        // stayed correct. Nanbeige's 166k vocab made it unmissable.
+        let token = MLXRandom.categorical(expandedDimensions(scaled, axis: 0))
         return token.asType(.int32)
     }
 
@@ -252,7 +255,12 @@ public final class Sampler: @unchecked Sendable {
         let head = sortedIdx[0 ..< keepCount]
         let headProbs = sortedProbs[0 ..< keepCount]
         let renorm = headProbs / MLX.sum(headProbs)
-        let pick = MLXRandom.categorical(expandedDimensions(renorm, axis: 0)).item(Int.self)
+        // categorical takes LOGITS, so pass log(p) - handing it the normalized
+        // probabilities directly would flatten the truncated head toward uniform
+        // (the same defect fixed in `sampleFrom`). The epsilon keeps log finite
+        // for a probability that underflowed to 0.
+        let pick = MLXRandom.categorical(
+            expandedDimensions(MLX.log(renorm + 1e-20), axis: 0)).item(Int.self)
         let chosen = head[pick].item(Int.self)
         // Update mu from the observed surprise of the chosen token.
         let obs = -Float.log(max(1e-10, sortedProbs[pick].item(Float.self))) / Float.log(2.0)

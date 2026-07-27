@@ -92,11 +92,24 @@ struct QuantizeCommand: AsyncParsableCommand {
         // Register the manifest (size, family from the emitted config.json).
         let totalSize = directorySize(outputDir)
         var family: ModelFamily = .llama
+        // The checkpoint's real context window. A hardcoded default here silently
+        // caps every natively-quantized model at that value in its manifest -
+        // Nanbeige 4.2 advertises 262144 and was being registered as 4096. Read
+        // it from the emitted config; fall back only when the key is absent.
+        var context = 4096
         let configURL = outputDir.appendingPathComponent("config.json")
         if let configData = try? Data(contentsOf: configURL),
-           let json = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
-           let detected = ModelFamily.detect(from: json) {
-            family = detected
+           let json = try? JSONSerialization.jsonObject(with: configData) as? [String: Any] {
+            if let detected = ModelFamily.detect(from: json) {
+                family = detected
+            }
+            // Text-only checkpoints put it at the top level; nested-config VLMs
+            // (mlx_vlm-format `text_config`) put it one level down.
+            let textConfig = json["text_config"] as? [String: Any]
+            if let ctx = (json["max_position_embeddings"] as? Int)
+                ?? (textConfig?["max_position_embeddings"] as? Int) {
+                context = ctx
+            }
         }
 
         let files = try FileManager.default.contentsOfDirectory(
@@ -112,7 +125,7 @@ struct QuantizeCommand: AsyncParsableCommand {
             params: "?",
             quant: mode == "affine" ? "\(bits)bit" : mode,
             source: source,
-            context: 4096,
+            context: context,
             files: modelFiles,
             chatTemplate: family.rawValue,
             sizeBytes: totalSize
