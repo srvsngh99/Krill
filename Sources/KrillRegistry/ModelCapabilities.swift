@@ -92,6 +92,11 @@ public enum ModelCapabilities {
             return [.textGeneration, .tools]
         case .llama, .qwen:
             return [.textGeneration, .tools]
+        case .nanbeige:
+            // Nanbeige 4.2 is trained for agentic tool use and its own chat
+            // template wraps calls in `<tool_call>`, matching the `.hermes`
+            // prompt/parser pair Krill injects verbatim.
+            return [.textGeneration, .tools]
         case .qwen35:
             // Ornith-9B (qwen3_5): native text decoder + native vision tower +
             // Qwen tool template. `.visionInput` is advertised for the family;
@@ -172,6 +177,12 @@ public enum ModelCapabilities {
             // passed the recorded mlx-vlm oracle on a real
             // checkpoint; the Python bridge was then retired.
             return .productionNative
+        case .nanbeige:
+            // Nanbeige 4.2: the native looped-transformer runtime is
+            // logit-parity-gated against the upstream PyTorch reference and runs
+            // a real checkpoint end to end, but there is no serving benchmark vs
+            // a reference yet, so `.experimental` until that gate lands.
+            return .experimental
         case .qwen35:
             // Ornith-9B (qwen3_5): the native GatedDeltaNet + full-attention
             // hybrid decoder is parity-verified vs mlx_lm (scan + forward +

@@ -315,6 +315,18 @@ let architectureRules: [ArchitectureRule] = [
         },
         action: .load { try loadGLM(configData: $0, directory: $1) }),
 
+    // Nanbeige 4.2 (`NanbeigeForCausalLM`, model_type "nanbeige"): a LOOPED dense
+    // decoder. The 22-block stack is executed `num_loops` (2) times over the same
+    // weights for 44 effective layers, each execution holding its own KV cache
+    // slot. Also decouples head_dim (128) from hidden_size (3072). Weight naming
+    // is standard `model.layers.*`, so this rule must claim the checkpoint before
+    // any generic dense fallback: the fallback would load it as a 22-layer Llama
+    // with 64-wide heads and mis-shape every attention projection.
+    ArchitectureRule(
+        id: "nanbeige",
+        matches: { arch, mt in arch.contains("nanbeige") || mt == "nanbeige" },
+        action: .load { try loadNanbeige(configData: $0, directory: $1) }),
+
     // Qwen 3 MoE: native Swift+MLX runtime is the DEFAULT. Expert dispatch is
     // a single `gatherQuantizedMM` per projection (shared `MoESwitchGLU`) --
     // no Swift per-expert loop, no per-layer host sync. Decode benches 2.7x
@@ -1736,6 +1748,37 @@ private func loadGlm4(configData: Data, directory: URL) throws -> LoadedModel {
         module: model,
         numLayers: config.numHiddenLayers,
         family: "glm4",
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
+        multimodalForward: nil,
+        vocabSize: config.vocabSize
+    )
+}
+
+/// Nanbeige 4.2 (`NanbeigeForCausalLM`, model_type "nanbeige"). Native Swift+MLX
+/// looped-transformer runtime in `NanbeigeModel.swift`.
+///
+/// `numLayers` reports `numLoops * numHiddenLayers` (44 for Nanbeige4.2-3B, not
+/// 22): the engine sizes its KV cache array from this field, and the looped
+/// forward indexes `caches[loop * layerCount + i]`. Reporting 22 here would make
+/// the second loop index past the end of the array.
+private func loadNanbeige(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(NanbeigeConfig.self, from: configData)
+    try config.validate()
+    let model = NanbeigeForCausalLM(config)
+    // Strict: a looped model reuses one weight set across every loop, so a
+    // silently-dropped or mis-shaped tensor degrades all `num_loops` passes and
+    // surfaces only as bad text. Fail at load with the offending key instead.
+    try loadWeights(
+        into: model, from: directory, quantization: config.quantization,
+        strictVerify: true)
+
+    return LoadedModel(
+        module: model,
+        numLayers: model.cacheCount,
+        family: "nanbeige",
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
         prefillForward: { tokens, caches in
             model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)

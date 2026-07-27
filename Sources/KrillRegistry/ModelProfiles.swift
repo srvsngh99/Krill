@@ -117,6 +117,16 @@ public enum ModelProfiles {
                 strengths: ["Strong reasoning (GLM-Z1)", "Good coding", "Bilingual"],
                 weaknesses: ["32B is tight on a 24GB box", "Flagship GLM-4.5+ are MoE and far larger"],
                 goodFor: ["Reasoning", "Coding", "Bilingual chat"])
+        case .nanbeige:
+            return ModelProfile(
+                displayName: "NANBEIGE", vendor: "BOSS Zhipin", released: "2026 (4.2)",
+                trainingCutoff: "not publicly disclosed",
+                tagline: "Looped-transformer agentic small models: 3B-class depth from a 22-block stack.",
+                strengths: ["Strong agent / tool-use for the size", "Reuses layers for depth at low memory",
+                            "Long 256K context", "Bilingual (Chinese/English)"],
+                weaknesses: ["Looping costs ~2x compute per token vs its parameter count",
+                             "Small ecosystem and few community quants"],
+                goodFor: ["Agentic workflows", "Tool calling", "On-device assistants"])
         case .bert, .reranker:
             return ModelProfile(
                 displayName: "BERT", vendor: "Encoder", released: "various",

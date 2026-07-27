@@ -191,7 +191,15 @@ public struct LlamaConfig: ModelConfig, Codable, Sendable {
     public let maxPositionEmbeddings: Int
     public let quantization: QuantizationConfig?
 
-    public var headDim: Int { hiddenSize / numAttentionHeads }
+    /// Explicit `head_dim` from config.json, when present. Most Llama-family
+    /// checkpoints omit it and `hiddenSize / numAttentionHeads` is exact, but it
+    /// is NOT an invariant: newer configs carry `head_dim` and some decouple it
+    /// from the hidden size entirely (Nanbeige runs 48 heads x 128 dims against a
+    /// 3072 hidden, so q/o project 3072 <-> 6144). Deriving the ratio there would
+    /// build 64-wide heads and mis-shape every attention projection.
+    public let headDimOverride: Int?
+
+    public var headDim: Int { headDimOverride ?? (hiddenSize / numAttentionHeads) }
 
     enum CodingKeys: String, CodingKey {
         case hiddenSize = "hidden_size"
@@ -204,6 +212,7 @@ public struct LlamaConfig: ModelConfig, Codable, Sendable {
         case ropeTheta = "rope_theta"
         case maxPositionEmbeddings = "max_position_embeddings"
         case quantization
+        case headDim = "head_dim"
     }
 
     public init(from decoder: Decoder) throws {
@@ -220,6 +229,7 @@ public struct LlamaConfig: ModelConfig, Codable, Sendable {
         maxPositionEmbeddings = try c.decodeIfPresent(Int.self, forKey: .maxPositionEmbeddings)
             ?? 131_072
         quantization = try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantization)
+        headDimOverride = try c.decodeIfPresent(Int.self, forKey: .headDim)
     }
 
     /// Convenience initializer for tests and manual construction.
@@ -233,7 +243,8 @@ public struct LlamaConfig: ModelConfig, Codable, Sendable {
         rmsNormEps: Float = 1e-5,
         ropeTheta: Float = 500_000.0,
         maxPositionEmbeddings: Int = 131_072,
-        quantization: QuantizationConfig? = nil
+        quantization: QuantizationConfig? = nil,
+        headDim: Int? = nil
     ) {
         self.hiddenSize = hiddenSize
         self.intermediateSize = intermediateSize
@@ -245,6 +256,26 @@ public struct LlamaConfig: ModelConfig, Codable, Sendable {
         self.ropeTheta = ropeTheta
         self.maxPositionEmbeddings = maxPositionEmbeddings
         self.quantization = quantization
+        self.headDimOverride = headDim
+    }
+
+    /// Written by hand because `headDimOverride` does not share its CodingKey's
+    /// name (`head_dim`), which blocks Swift's `Encodable` synthesis. Omitting a
+    /// nil `headDimOverride` keeps configs that never carried `head_dim`
+    /// round-tripping to their original JSON.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(hiddenSize, forKey: .hiddenSize)
+        try c.encode(intermediateSize, forKey: .intermediateSize)
+        try c.encode(numAttentionHeads, forKey: .numAttentionHeads)
+        try c.encode(numKeyValueHeads, forKey: .numKeyValueHeads)
+        try c.encode(numHiddenLayers, forKey: .numHiddenLayers)
+        try c.encode(vocabSize, forKey: .vocabSize)
+        try c.encode(rmsNormEps, forKey: .rmsNormEps)
+        try c.encode(ropeTheta, forKey: .ropeTheta)
+        try c.encode(maxPositionEmbeddings, forKey: .maxPositionEmbeddings)
+        try c.encodeIfPresent(quantization, forKey: .quantization)
+        try c.encodeIfPresent(headDimOverride, forKey: .headDim)
     }
 }
 
