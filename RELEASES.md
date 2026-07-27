@@ -7,6 +7,35 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.17.0 — 2026-07-28
+**Sampling was broken for every model at any temperature above zero.** The
+sampler handed `MLXRandom.categorical` probabilities where it expects logits, so
+it softmaxed an already-softmaxed distribution — flattening it toward uniform and
+giving tokens the filters had *rejected* the same weight as the model's top
+choice. Greedy decoding never touches that path, which is why `--temp 0` always
+looked right and the bug shipped. If you ever set a temperature and got fluent
+nonsense, this was why.
+
+Two more things that only show up when you stream one token at a time: a
+trailing `Strip` decoder ate the leading space of every token on SentencePiece
+models (`ThecapitalofFranceisParis.`), and byte-fallback newlines were dropped
+entirely, flattening markdown lists onto one line. Mistral was affected too.
+
+Also adds native support for **Nanbeige 4.2 3B** — a *looped* transformer that
+runs its 22 blocks twice over the same weights, giving 44 effective layers from
+3B parameters' worth of memory. It holds 44 KV caches rather than 22, applies its
+final norm at the end of every loop, and decouples `head_dim` from `hidden_size`.
+llama.cpp cannot load the architecture at all and mlx-lm has no port, so Krill's
+runtime is gated against the authors' own PyTorch code — and beats it 3.9x on
+decode at a fifth of the memory. Ships as nvfp4 (2.26 GB from 8.3 GB):
+`krill pull nanbeige-4.2-3b`. Apache 2.0, built on `Nanbeige/Nanbeige4.2-3B` —
+credit to the Nanbeige team at BOSS Zhipin.
+
+One usability note that came with it: a reasoning model can spend an entire
+512-token budget inside a hidden `<think>` block and return *nothing*. Single-shot
+`krill run` now gives thinking models the same headroom interactive chat already
+had.
+
 ## v0.16.3 — 2026-07-26
 A correctness release, found by installing Krill from scratch and following our
 own instructions. **`gemma-4-e2b` — the model the install caveats tell you to
