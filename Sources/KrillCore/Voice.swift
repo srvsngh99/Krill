@@ -82,10 +82,14 @@ public struct VoiceEndpointingConfiguration: Sendable, Equatable {
         self.speechThresholdDecibels = speechThresholdDecibels
         self.silenceThresholdDecibels = min(silenceThresholdDecibels, speechThresholdDecibels)
         self.speechConfirmationDuration = max(0, speechConfirmationDuration)
-        self.preRollDuration = max(0, preRollDuration)
         self.minimumSpeechDuration = max(0, minimumSpeechDuration)
         self.trailingSilenceDuration = max(0, trailingSilenceDuration)
         self.maximumUtteranceDuration = max(0.01, maximumUtteranceDuration)
+        // Pre-roll carried into the next utterance is taken from the tail of the
+        // one that just ended, so it may never reach further back than the
+        // trailing silence that ended it. A longer pre-roll would replay the
+        // previous instruction's speech into the next live recognizer.
+        self.preRollDuration = min(max(0, preRollDuration), self.trailingSilenceDuration)
     }
 }
 

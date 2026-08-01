@@ -107,6 +107,27 @@ final class VoiceSessionTests: XCTestCase {
         XCTAssertEqual(audio.samples.count, 20)
     }
 
+    func testPreRollIsClampedToTrailingSilenceSoSpeechIsNeverReplayed() {
+        // Carried-over pre-roll is taken from the tail of the utterance that
+        // just ended, so a pre-roll longer than the trailing silence would feed
+        // the previous instruction's speech back into the next recognizer.
+        let config = configuration(confirmation: 0.02, preRoll: 0.05, trailing: 0.02, minimum: 0.02)
+        XCTAssertEqual(config.preRollDuration, 0.02, accuracy: 0.0001)
+
+        let detector = VoiceEndpointDetector(configuration: config)
+        XCTAssertEqual(detector.process(frame(0.1, count: 20)).count, 1)
+        XCTAssertEqual(detector.process(frame(0, count: 20)).count, 1)
+
+        let next = detector.process(frame(0.1, count: 20))
+        guard let event = next.first,
+              case let .speechStarted(_, audio) = event else {
+            return XCTFail("expected the next utterance to start")
+        }
+        // 20 silent pre-roll samples + the new 20, never the earlier speech.
+        XCTAssertEqual(audio.samples.count, 40)
+        XCTAssertEqual(Array(audio.samples.prefix(20)), Array(repeating: 0, count: 20))
+    }
+
     func testSentenceChunkerKeepsQuotesAndNeverRepeatsEmission() {
         var chunker = SpeechSentenceChunker()
         XCTAssertEqual(chunker.append("Ship it."), [])

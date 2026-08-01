@@ -45,8 +45,10 @@ enum VoicePanel {
     private static func installMainMenu(on application: NSApplication) {
         let mainMenu = NSMenu()
 
+        // AppKit takes the first item's submenu as the application menu and
+        // displays its title as the app name, so this one must be titled.
         let applicationItem = NSMenuItem()
-        let applicationMenu = NSMenu()
+        let applicationMenu = NSMenu(title: "Krill")
         applicationMenu.addItem(withTitle: "Quit Krill", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         applicationItem.submenu = applicationMenu
         mainMenu.addItem(applicationItem)
@@ -59,7 +61,13 @@ enum VoicePanel {
 
         let editItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(withTitle: "Undo", action: #selector(UndoManager.undo), keyEquivalent: "z")
+        // Undo/redo are responder-chain actions implemented by NSWindow, which
+        // forwards to the field editor's undo manager. They must be spelled
+        // `undo:`/`redo:`; `#selector(UndoManager.undo)` yields `undo` (no
+        // colon), which nothing in the chain answers, leaving the item inert.
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
