@@ -64,6 +64,9 @@ struct CodeCommand: AsyncParsableCommand {
     var denyTools: [String] = []
 
     func run() async throws {
+        guard !(voice && classic) else {
+            throw ValidationError("--voice and --classic select different interaction surfaces and cannot be combined.")
+        }
         let registry = Registry()
 
         func nonEmpty(_ s: String?) -> String? {

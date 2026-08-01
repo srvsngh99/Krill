@@ -26,6 +26,7 @@ enum VoicePanel {
     ) {
         let application = NSApplication.shared
         application.setActivationPolicy(.accessory)
+        installMainMenu(on: application)
 
         let controller = VoicePanelController(
             loop: loop, system: system, modelName: modelName,
@@ -37,6 +38,37 @@ enum VoicePanel {
         application.activate(ignoringOtherApps: true)
         application.run()
         activeController = nil
+    }
+
+    /// Accessory applications do not receive a useful menu automatically, but
+    /// the responder chain still needs one for standard editing shortcuts.
+    private static func installMainMenu(on application: NSApplication) {
+        let mainMenu = NSMenu()
+
+        let applicationItem = NSMenuItem()
+        let applicationMenu = NSMenu()
+        applicationMenu.addItem(withTitle: "Quit Krill", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        applicationItem.submenu = applicationMenu
+        mainMenu.addItem(applicationItem)
+
+        let fileItem = NSMenuItem()
+        let fileMenu = NSMenu(title: "File")
+        fileMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        fileItem.submenu = fileMenu
+        mainMenu.addItem(fileItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: #selector(UndoManager.undo), keyEquivalent: "z")
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+
+        application.mainMenu = mainMenu
     }
 }
 
@@ -62,12 +94,7 @@ private final class VoiceAgentEventBuffer: @unchecked Sendable {
 /// AppKit controller kept on the main actor. The microphone callback arrives
 /// off-main, then explicitly hops here before it may affect UI or turn state.
 @MainActor
-private final class VoicePanelController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
-    private enum UtteranceResolution {
-        case instruction(String)
-        case discarded
-    }
-
+private final class VoicePanelController: NSObject, NSWindowDelegate {
     private let loop: AgentLoop
     private let system: String?
     private let modelName: String
@@ -97,8 +124,7 @@ private final class VoicePanelController: NSObject, NSWindowDelegate, NSTextFiel
     private var endpointedAudio: [UUID: VoiceAudioFrame] = [:]
     private var liveFinals: [UUID: String] = [:]
     private var finalizationTasks: [UUID: Task<Void, Never>] = [:]
-    private var utteranceOrder: [UUID] = []
-    private var utteranceResolutions: [UUID: UtteranceResolution] = [:]
+    private var utteranceQueue = VoiceUtteranceQueue()
     private var provisionalTranscript = ""
     private var provisionalSpeechID: UUID?
 
@@ -194,8 +220,13 @@ private final class VoicePanelController: NSObject, NSWindowDelegate, NSTextFiel
 
         approvalLabel = NSTextField(wrappingLabelWithString: "")
         approvalLabel.font = .systemFont(ofSize: 12)
+        approvalLabel.maximumNumberOfLines = 3
+        approvalLabel.lineBreakMode = .byTruncatingTail
+        approvalLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let allow = NSButton(title: "Allow", target: self, action: #selector(allowApproval))
         let deny = NSButton(title: "Deny", target: self, action: #selector(denyApproval))
+        allow.setContentCompressionResistancePriority(.required, for: .horizontal)
+        deny.setContentCompressionResistancePriority(.required, for: .horizontal)
         approvalBox = NSStackView(views: [approvalLabel, allow, deny])
         approvalBox.orientation = .horizontal
         approvalBox.alignment = .centerY
@@ -204,7 +235,6 @@ private final class VoicePanelController: NSObject, NSWindowDelegate, NSTextFiel
 
         inputField = NSTextField()
         inputField.placeholderString = "Type an instruction, even while Krill is working…"
-        inputField.delegate = self
         inputField.target = self
         inputField.action = #selector(sendTypedTurn)
 
@@ -238,10 +268,6 @@ private final class VoicePanelController: NSObject, NSWindowDelegate, NSTextFiel
             controls.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         refreshUI()
-    }
-
-    func controlTextDidEndEditing(_ obj: Notification) {
-        if obj.object as? NSTextField === inputField { sendTypedTurn() }
     }
 
     @objc private func sendTypedTurn() {
@@ -330,8 +356,7 @@ private final class VoicePanelController: NSObject, NSWindowDelegate, NSTextFiel
         liveRecognizers.removeAll()
         endpointedAudio.removeAll()
         liveFinals.removeAll()
-        utteranceOrder.removeAll()
-        utteranceResolutions.removeAll()
+        utteranceQueue.reset()
         for task in finalizationTasks.values { task.cancel() }
         finalizationTasks.removeAll()
         speaker.stop()
@@ -350,6 +375,8 @@ private final class VoicePanelController: NSObject, NSWindowDelegate, NSTextFiel
                 refreshUI()
             case let .utteranceReady(samples, sampleRate):
                 finishUtterance(samples: samples, sampleRate: sampleRate)
+            case .utteranceDiscarded:
+                discardActiveUtterance()
             }
         }
     }
@@ -362,7 +389,7 @@ private final class VoicePanelController: NSObject, NSWindowDelegate, NSTextFiel
         lastLevel = level
         let id = UUID()
         activeSpeechID = id
-        utteranceOrder.append(id)
+        utteranceQueue.begin(id)
         provisionalTranscript = ""
         provisionalSpeechID = id
         refreshPartialTranscript()
@@ -446,22 +473,17 @@ private final class VoicePanelController: NSObject, NSWindowDelegate, NSTextFiel
         resolveUtterance(id, as: .instruction(confirmed))
     }
 
-    private func resolveUtterance(_ id: UUID, as resolution: UtteranceResolution) {
-        guard utteranceOrder.contains(id), utteranceResolutions[id] == nil else { return }
-        cleanupUtterance(id)
-        utteranceResolutions[id] = resolution
-        drainResolvedUtterances()
+    private func discardActiveUtterance() {
+        guard let id = activeSpeechID else { return }
+        activeSpeechID = nil
+        resolveUtterance(id, as: .discarded)
     }
 
-    /// Preserve spoken order even when Apple's live final for a later utterance
-    /// beats an earlier turn's one-shot fallback.
-    private func drainResolvedUtterances() {
-        while let first = utteranceOrder.first,
-              let resolution = utteranceResolutions.removeValue(forKey: first) {
-            utteranceOrder.removeFirst()
-            if case let .instruction(text) = resolution {
-                acceptInstruction(text, source: "spoken")
-            }
+    private func resolveUtterance(_ id: UUID, as resolution: VoiceUtteranceResolution) {
+        guard utteranceQueue.contains(id) else { return }
+        cleanupUtterance(id)
+        for text in utteranceQueue.resolve(id, as: resolution) {
+            acceptInstruction(text, source: "spoken")
         }
     }
 
@@ -607,20 +629,44 @@ private final class VoicePanelController: NSObject, NSWindowDelegate, NSTextFiel
     }
 
     private func requestApproval(runID: UUID, toolName: String, argumentsJSON: String) async -> Bool {
-        guard !closing, !Task.isCancelled, activeRunID == runID, workTask != nil,
-              pendingApproval == nil else { return false }
-        approvalLabel.stringValue = "Allow \(toolName)(\(argumentsJSON))?"
+        guard !closing, !Task.isCancelled, activeRunID == runID, workTask != nil else {
+            return false
+        }
+        guard pendingApproval == nil else {
+            append(.note("Denied overlapping approval request for \(toolName); another approval is already pending."))
+            return false
+        }
+
+        append(.note("Approval requested for \(toolName).\nArguments:\n\(argumentsJSON)"))
+        approvalLabel.stringValue = approvalPrompt(toolName: toolName, argumentsJSON: argumentsJSON)
         approvalBox.isHidden = false
         refreshUI()
         return await withCheckedContinuation { continuation in
             // The gate can be reached after a cancellation race. Recheck in the
             // continuation creation path and fail closed for that stale run.
             guard !closing, activeRunID == runID, workTask != nil else {
+                hideApprovalPrompt()
                 continuation.resume(returning: false)
                 return
             }
             pendingApproval = (runID, continuation)
         }
+    }
+
+    private func approvalPrompt(toolName: String, argumentsJSON: String) -> String {
+        let collapsed = argumentsJSON
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        let limit = 240
+        let arguments = collapsed.count > limit ? String(collapsed.prefix(limit)) + "…" : collapsed
+        return "Allow \(toolName)(\(arguments))?"
+    }
+
+    private func hideApprovalPrompt() {
+        approvalLabel.stringValue = ""
+        approvalBox.isHidden = true
+        refreshUI()
     }
 
     @objc private func allowApproval() { resolveApproval(true) }
@@ -630,12 +676,11 @@ private final class VoicePanelController: NSObject, NSWindowDelegate, NSTextFiel
         guard let pendingApproval else { return }
         if let expectedRunID, pendingApproval.runID != expectedRunID { return }
         self.pendingApproval = nil
-        approvalBox.isHidden = true
+        hideApprovalPrompt()
         // Stale/cancelled runs can never be approved, even if an old button
         // action arrives after a new run has already begun.
         let valid = !closing && activeRunID == pendingApproval.runID && workTask != nil
         pendingApproval.continuation.resume(returning: allowed && valid)
-        refreshUI()
     }
 
     @objc private func interrupt() {
@@ -660,7 +705,21 @@ private final class VoicePanelController: NSObject, NSWindowDelegate, NSTextFiel
         narrationTask?.cancel()
         if let runID = activeRunID { resolveApproval(false, expectedRunID: runID) }
         workTask?.cancel()
-        NSApplication.shared.stop(nil)
+        let application = NSApplication.shared
+        application.stop(nil)
+        if let wakeEvent = NSEvent.otherEvent(
+            with: .applicationDefined,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: 0,
+            context: nil,
+            subtype: 0,
+            data1: 0,
+            data2: 0
+        ) {
+            application.postEvent(wakeEvent, atStart: false)
+        }
     }
 
     private func refreshUI() {

@@ -258,6 +258,10 @@ queued visibly and run at the next safe agent boundary; they are not injected
 inside an active model/tool turn. Tool approvals still require the panel's
 Allow/Deny controls.
 
+The floating panel currently uses Apple's on-device streaming speech recognizer.
+`voice_engine = "whisper"` selects native MLX Whisper for terminal TUI dictation;
+it does not change the floating panel's recognizer yet.
+
 **Permission postures** (cycle with `Shift+Tab` in the TUI, or set with
 `--permission-mode`):
 

@@ -57,7 +57,7 @@ final class VoiceSessionTests: XCTestCase {
             confirmation: 0.02, preRoll: 0, trailing: 0.03, minimum: 0.08))
         XCTAssertEqual(detector.process(frame(0.1, count: 20)).count, 1)
         XCTAssertEqual(detector.process(frame(0, count: 20)).count, 1)
-        XCTAssertTrue(detector.process(frame(0, count: 20)).isEmpty)
+        XCTAssertEqual(detector.process(frame(0, count: 20)), [.utteranceDiscarded])
 
         // The rejected blip did not poison the next genuine instruction.
         XCTAssertEqual(detector.process(frame(0.1, count: 80)).count, 1)
@@ -78,6 +78,35 @@ final class VoiceSessionTests: XCTestCase {
         XCTAssertEqual(samples.count, 100)
     }
 
+    func testEndpointingRetainsRecentAudioAcrossUtterances() {
+        let detector = VoiceEndpointDetector(configuration: configuration(
+            confirmation: 0.02, preRoll: 0.02, trailing: 0.02, minimum: 0.02))
+        XCTAssertEqual(detector.process(frame(0.1, count: 20)).count, 1)
+        XCTAssertEqual(detector.process(frame(0, count: 20)).count, 1)
+
+        let next = detector.process(frame(0.1, count: 20))
+        guard let event = next.first,
+              case let .speechStarted(_, audio) = event else {
+            return XCTFail("expected the next utterance to start")
+        }
+        XCTAssertEqual(audio.samples.count, 40)
+        XCTAssertEqual(Array(audio.samples.prefix(20)), Array(repeating: 0, count: 20))
+    }
+
+    func testMaximumDurationSplitDoesNotReplaySpeechAsPreRoll() {
+        let detector = VoiceEndpointDetector(configuration: configuration(
+            confirmation: 0.02, preRoll: 0.02, trailing: 1, minimum: 0.02, maximum: 0.04))
+        XCTAssertEqual(detector.process(frame(0.1, count: 20)).count, 1)
+        XCTAssertEqual(detector.process(frame(0.1, count: 20)).count, 1)
+
+        let next = detector.process(frame(0.1, count: 20))
+        guard let event = next.first,
+              case let .speechStarted(_, audio) = event else {
+            return XCTFail("expected speech to continue in a fresh utterance")
+        }
+        XCTAssertEqual(audio.samples.count, 20)
+    }
+
     func testSentenceChunkerKeepsQuotesAndNeverRepeatsEmission() {
         var chunker = SpeechSentenceChunker()
         XCTAssertEqual(chunker.append("Ship it."), [])
@@ -92,6 +121,30 @@ final class VoiceSessionTests: XCTestCase {
         var chunker = SpeechSentenceChunker()
         XCTAssertEqual(chunker.append("One. Two? Three!) Four"), ["One.", "Two?", "Three!)"])
         XCTAssertEqual(chunker.finish(), ["Four"])
+    }
+
+    func testUtteranceQueuePreservesSpokenOrderAcrossOutOfOrderFinals() {
+        var queue = VoiceUtteranceQueue()
+        let first = UUID()
+        let second = UUID()
+        queue.begin(first)
+        queue.begin(second)
+
+        XCTAssertEqual(queue.resolve(second, as: .instruction("second")), [])
+        XCTAssertEqual(queue.resolve(first, as: .instruction("first")), ["first", "second"])
+        XCTAssertTrue(queue.isEmpty)
+    }
+
+    func testDiscardedUtteranceUnblocksLaterInstruction() {
+        var queue = VoiceUtteranceQueue()
+        let blip = UUID()
+        let instruction = UUID()
+        queue.begin(blip)
+        queue.begin(instruction)
+
+        XCTAssertEqual(queue.resolve(instruction, as: .instruction("continue")), [])
+        XCTAssertEqual(queue.resolve(blip, as: .discarded), ["continue"])
+        XCTAssertTrue(queue.isEmpty)
     }
 
     private func configuration(

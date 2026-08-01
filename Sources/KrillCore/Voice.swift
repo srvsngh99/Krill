@@ -14,17 +14,12 @@ public protocol VoiceOutput: Sendable {
     func stop()
 }
 
-/// The result of one VAD analysis window. This is intentionally small: Phase 2
-/// only establishes the seam; Phase 3 supplies continuous capture and EOU.
-public enum VoiceActivityEvent: Sendable, Equatable {
-    case speech
-    case silence
-}
-
-/// A forward-looking VAD seam. Detectors must not retain the buffer passed to
-/// `accept`; capture owns that memory only for the duration of this call.
+/// Replaceable voice-activity/endpointing seam extracted from the native energy
+/// detector used by the Phase 3 panel. A learned Core ML detector can conform
+/// without changing capture or conversation scheduling.
 public protocol VoiceActivityDetector: Sendable {
-    func accept(_ samples: UnsafeBufferPointer<Float>) -> VoiceActivityEvent
+    func process(_ frame: VoiceAudioFrame) -> [VoiceEndpointEvent]
+    func reset()
 }
 
 /// A mono block of PCM audio produced by the continuous microphone path. Audio
@@ -104,6 +99,9 @@ public enum VoiceEndpointEvent: Sendable, Equatable {
     /// `audio` is the newly received frame, suitable for direct live-STT append.
     case speechContinued(level: VoiceSignalLevel, audio: VoiceAudioFrame)
     case utteranceReady(samples: [Float], sampleRate: Double)
+    /// Speech crossed the confirmation threshold but was too short to become an
+    /// instruction. Consumers must close any live STT/order state for the turn.
+    case utteranceDiscarded
 }
 
 /// Deterministic, pure-native energy endpointing for a serial stream of mono
@@ -112,7 +110,7 @@ public enum VoiceEndpointEvent: Sendable, Equatable {
 /// silence or the configured maximum length. This is intentionally a small
 /// baseline VAD rather than a learned model; callers can replace it later
 /// without changing capture or transcript APIs.
-public final class VoiceEndpointDetector: @unchecked Sendable {
+public final class VoiceEndpointDetector: VoiceActivityDetector, @unchecked Sendable {
     /// Reference storage avoids copying the full utterance for every 1,024-frame
     /// callback. Audio is copied only when it crosses the public event boundary.
     private final class BufferedUtterance {
@@ -134,6 +132,7 @@ public final class VoiceEndpointDetector: @unchecked Sendable {
     }
 
     public let configuration: VoiceEndpointingConfiguration
+    private let lock = NSLock()
     private var state: State = .idle
     private var recentSamples: [Float] = []
     private var activeSampleRate: Double?
@@ -143,11 +142,17 @@ public final class VoiceEndpointDetector: @unchecked Sendable {
     }
 
     /// Feed one frame in capture order. The detector is intentionally mutable
-    /// and should be used from the capture session's serial processing queue.
+    /// and serializes its state so callers cannot accidentally race the capture
+    /// and UI paths despite the detector being Sendable.
     public func process(_ frame: VoiceAudioFrame) -> [VoiceEndpointEvent] {
+        lock.lock(); defer { lock.unlock() }
+        return processUnlocked(frame)
+    }
+
+    private func processUnlocked(_ frame: VoiceAudioFrame) -> [VoiceEndpointEvent] {
         guard frame.sampleRate > 0, !frame.samples.isEmpty else { return [] }
         if let rate = activeSampleRate, abs(rate - frame.sampleRate) > 0.5 {
-            reset()
+            resetUnlocked()
         }
         activeSampleRate = frame.sampleRate
 
@@ -200,11 +205,21 @@ public final class VoiceEndpointDetector: @unchecked Sendable {
             }
             let maxSamples = Int((configuration.maximumUtteranceDuration * frame.sampleRate).rounded(.up))
             let endpointSamples = Int((configuration.trailingSilenceDuration * frame.sampleRate).rounded(.up))
-            if utterance.samples.count >= maxSamples || utterance.trailingSilenceSamples >= endpointSamples {
+            let reachedMaximum = utterance.samples.count >= maxSamples
+            if reachedMaximum || utterance.trailingSilenceSamples >= endpointSamples {
                 state = .idle
-                recentSamples.removeAll(keepingCapacity: true)
+                // Silence endpoints retain natural context for a quick follow-up.
+                // A forced maximum-duration split must not replay speech from
+                // the previous clip into the next live recognizer.
+                if reachedMaximum {
+                    recentSamples.removeAll(keepingCapacity: true)
+                } else {
+                    replaceRecent(with: utterance.samples, sampleRate: frame.sampleRate)
+                }
                 let minSpeechSamples = Int((configuration.minimumSpeechDuration * frame.sampleRate).rounded(.up))
-                guard utterance.speechSamples >= minSpeechSamples else { return [] }
+                guard utterance.speechSamples >= minSpeechSamples else {
+                    return [.utteranceDiscarded]
+                }
                 // Max duration must be a real cap, not merely a notification.
                 return [.utteranceReady(samples: Array(utterance.samples.prefix(maxSamples)), sampleRate: frame.sampleRate)]
             }
@@ -214,6 +229,11 @@ public final class VoiceEndpointDetector: @unchecked Sendable {
 
     /// Discard an in-progress utterance and any pre-roll. Reuse is immediate.
     public func reset() {
+        lock.lock(); defer { lock.unlock() }
+        resetUnlocked()
+    }
+
+    private func resetUnlocked() {
         state = .idle
         recentSamples.removeAll(keepingCapacity: true)
         activeSampleRate = nil
@@ -224,6 +244,55 @@ public final class VoiceEndpointDetector: @unchecked Sendable {
         let limit = Int((configuration.preRollDuration * sampleRate).rounded(.up))
         guard recentSamples.count > limit else { return }
         recentSamples.removeFirst(recentSamples.count - limit)
+    }
+
+    private func replaceRecent(with samples: [Float], sampleRate: Double) {
+        let limit = Int((configuration.preRollDuration * sampleRate).rounded(.up))
+        recentSamples = limit > 0 ? Array(samples.suffix(limit)) : []
+    }
+}
+
+/// Resolution of one endpointed voice turn. A discarded turn still participates
+/// in ordering so it can unblock later completed instructions.
+public enum VoiceUtteranceResolution: Sendable, Equatable {
+    case instruction(String)
+    case discarded
+}
+
+/// Pure FIFO release policy for independently-finalized speech turns. Apple can
+/// finalize a later short utterance before an earlier fallback transcription;
+/// this queue preserves spoken order and treats explicit discards as completed.
+public struct VoiceUtteranceQueue: Sendable {
+    private var order: [UUID] = []
+    private var resolutions: [UUID: VoiceUtteranceResolution] = [:]
+
+    public init() {}
+
+    public var isEmpty: Bool { order.isEmpty }
+    public func contains(_ id: UUID) -> Bool { order.contains(id) }
+
+    public mutating func begin(_ id: UUID) {
+        guard !order.contains(id) else { return }
+        order.append(id)
+    }
+
+    /// Resolve a turn and return every newly-unblocked instruction in spoken
+    /// order. Discarded turns release the queue without producing text.
+    public mutating func resolve(_ id: UUID, as resolution: VoiceUtteranceResolution) -> [String] {
+        guard order.contains(id), resolutions[id] == nil else { return [] }
+        resolutions[id] = resolution
+        var ready: [String] = []
+        while let first = order.first,
+              let next = resolutions.removeValue(forKey: first) {
+            order.removeFirst()
+            if case let .instruction(text) = next { ready.append(text) }
+        }
+        return ready
+    }
+
+    public mutating func reset() {
+        order.removeAll(keepingCapacity: true)
+        resolutions.removeAll(keepingCapacity: true)
     }
 }
 

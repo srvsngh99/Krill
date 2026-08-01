@@ -15,6 +15,8 @@ public enum VoiceNarrationPolicy: String, Sendable, CaseIterable {
 ///
 /// Precedence: CLI flags > environment variables (KRILL_*) > config.toml > defaults.
 public struct KrillConfig: Sendable {
+    private static let defaultVoiceWhisperModel = "base.en"
+
     /// Default model to use when none specified.
     public var defaultModel: String?
 
@@ -185,7 +187,7 @@ public struct KrillConfig: Sendable {
         self.voiceLanguage = "auto"
         self.voiceIdentifier = ""
         self.voiceRate = 0
-        self.voiceWhisperModel = "base.en"
+        self.voiceWhisperModel = Self.defaultVoiceWhisperModel
         self.voiceNarration = .final
         self.defaultMode = "chat"
         self.defaultAgentPosture = "plan"
@@ -274,7 +276,7 @@ public struct KrillConfig: Sendable {
             case "voice_rate":
                 if let rate = Float(value) { voiceRate = rate }
             case "voice_whisper_model":
-                voiceWhisperModel = value.isEmpty ? "base.en" : value
+                voiceWhisperModel = value.isEmpty ? Self.defaultVoiceWhisperModel : value
             case "voice_narration":
                 voiceNarration = VoiceNarrationPolicy.parse(value)
             case "default_mode":
@@ -512,7 +514,9 @@ public struct KrillConfig: Sendable {
         if let v = env["KRILL_VOICE_LANGUAGE"] { voiceLanguage = v.isEmpty ? "auto" : v }
         if let v = env["KRILL_VOICE_IDENTIFIER"] { voiceIdentifier = v }
         if let v = env["KRILL_VOICE_RATE"], let rate = Float(v) { voiceRate = rate }
-        if let v = env["KRILL_VOICE_WHISPER_MODEL"] { voiceWhisperModel = v.isEmpty ? "base.en" : v }
+        if let v = env["KRILL_VOICE_WHISPER_MODEL"] {
+            voiceWhisperModel = v.isEmpty ? Self.defaultVoiceWhisperModel : v
+        }
         if let v = env["KRILL_VOICE_NARRATION"] { voiceNarration = VoiceNarrationPolicy.parse(v) }
         if let v = env["KRILL_ENABLE_THINKING"] {
             let s = v.lowercased()
