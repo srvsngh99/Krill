@@ -139,12 +139,16 @@ final class ChatTUI {
     // Whisper runtime (best accuracy; downloads an English model on first use).
     private enum VoiceEngine { case apple, whisper }
     private var voiceEngine: VoiceEngine = .apple
+    private var voiceLanguage = "auto"
+    private var voiceIdentifier = ""
+    private var voiceRate: Float = AppleSpeechSettings.systemRate
+    private var voiceNarration: VoiceNarrationPolicy = .final
     // Live voice action shown in the footer (Listening / Transcribing /
     // Sending...). Empty when idle, where the footer shows the posture instead.
     private var voiceActivity = ""
     // Advanced each tick while recording to animate the footer VU meter.
     private var voiceFrame = 0
-    private let speech = SpeechRecognizer()
+    private var speech = SpeechRecognizer()
     // Lazily loaded native Whisper runtime + its SKU (English dictation).
     private var whisper: WhisperRuntime?
     private var whisperSKU = WhisperModelManager.defaultSKU
@@ -158,7 +162,7 @@ final class ChatTUI {
     // Ctrl-T, seeded from the `thinking` config key. Passed to each generate()
     // so the model reasons before answering when on.
     private var thinkingOn = true
-    private lazy var synth = SpeechSynthesizer()
+    private lazy var synth = SpeechSynthesizer(language: voiceLanguage, voiceIdentifier: voiceIdentifier, rate: voiceRate)
     private var inputHistory: [String] = []
     private var historyIndex = 0
     private var scrollOffset = 0     // lines scrolled up from bottom
@@ -200,6 +204,10 @@ final class ChatTUI {
          params: SamplingParams, maxTokens: Int, registry: Registry,
          initialImage: Data?, initialAudio: Data?, theme: String? = nil,
          voiceModeSetting: String = "off", speakRepliesSetting: Bool = false,
+         voiceEngineSetting: String = "apple", voiceLanguageSetting: String = "auto",
+         voiceIdentifierSetting: String = "", voiceRateSetting: Float = AppleSpeechSettings.systemRate,
+         voiceWhisperModelSetting: String = WhisperModelManager.defaultSKU,
+         voiceNarrationSetting: VoiceNarrationPolicy = .final,
          thinkingSetting: Bool = true,
          modeSetting: String = "chat", agentPostureSetting: String = "plan",
          initialAgentTask: String? = nil) {
@@ -211,7 +219,17 @@ final class ChatTUI {
         self.registry = registry
         self.themeOverride = theme
         self.voiceMode = Self.parseVoiceMode(voiceModeSetting)
+        // A persisted `send` posture is valid only for an audio-capable model.
+        // Start safely in text mode when the configured/default model changes.
+        if self.voiceMode == .send, !engine.canUseNativeAudio { self.voiceMode = .type }
         self.speakReplies = speakRepliesSetting
+        self.voiceEngine = voiceEngineSetting.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "whisper" ? .whisper : .apple
+        self.voiceLanguage = voiceLanguageSetting
+        self.voiceIdentifier = voiceIdentifierSetting
+        self.voiceRate = voiceRateSetting
+        self.voiceNarration = voiceNarrationSetting
+        self.speech = SpeechRecognizer(language: voiceLanguageSetting)
+        self.whisperSKU = WhisperModelManager.sku(voiceWhisperModelSetting)?.id ?? WhisperModelManager.defaultSKU
         self.thinkingOn = thinkingSetting
         self.surface = modeSetting.lowercased() == "agent" ? .agent : .chat
         self.posture = PermissionMode.parse(agentPostureSetting) ?? .plan
@@ -336,7 +354,7 @@ final class ChatTUI {
         case .ctrlU:
             input = ""; cursor = 0; menu.update(for: input); return nil
         case .ctrlV:
-            if engine.canUseNativeAudio { cycleVoiceMode() }   // Ctrl-V: cycle voice posture
+            cycleVoiceMode()   // dictation is independent of model audio input
             return nil
         case .ctrlT:
             setThinking(!thinkingOn)   // Ctrl-T: toggle the reasoning channel
@@ -392,10 +410,10 @@ final class ChatTUI {
             input = ""; cursor = 0; menu.close(); scrollOffset = 0
             return text.isEmpty ? nil : text
         case .char(let c):
-            // On a voice-capable model, Space on an empty composer is push-to-talk
+            // In a speech-to-text posture, Space on an empty composer is push-to-talk
             // (hold to talk, release to send) - UNLESS the posture is .type, where
             // Space is just a typed space (the "don't hijack my Space" posture).
-            if c == " " && input.isEmpty && engine.canUseNativeAudio && voiceMode != .type {
+            if c == " " && input.isEmpty && canCaptureVoice {
                 pendingVoiceCapture = true
                 return nil
             }
@@ -1578,7 +1596,14 @@ final class ChatTUI {
     private var engineLabel: String { voiceEngine == .whisper ? "Whisper" : "Apple" }
 
     /// Set the voice posture and confirm it on screen.
-    private func setVoiceMode(_ m: VoiceMode) { voiceMode = m; note(voiceModeNote()) }
+    private func setVoiceMode(_ m: VoiceMode) {
+        guard m != .send || engine.canUseNativeAudio else {
+            note("Voice send needs an audio-capable model. Use dictate or hands-free for local speech-to-text.")
+            return
+        }
+        voiceMode = m
+        note(voiceModeNote())
+    }
 
     /// Turn spoken replies (TTS) on or off and confirm it on screen. Stops any
     /// in-flight speech when turning off.
@@ -1609,7 +1634,9 @@ final class ChatTUI {
     /// at `.type` (voice off) so one key both enables voice and turns it back off:
     /// off -> dictate -> handsfree -> send -> off.
     private func cycleVoiceMode() {
-        let cycle: [VoiceMode] = [.type, .dictate, .handsfree, .send]
+        let cycle: [VoiceMode] = engine.canUseNativeAudio
+            ? [.type, .dictate, .handsfree, .send]
+            : [.type, .dictate, .handsfree]
         let i = cycle.firstIndex(of: voiceMode) ?? 0
         voiceMode = cycle[(i + 1) % cycle.count]
         note(voiceModeNote())
@@ -1626,6 +1653,10 @@ final class ChatTUI {
         case .send:
             return "Voice: Send audio. Hold Space; the clip is sent as audio the model answers. Ctrl-V to cycle."
         }
+    }
+
+    private var canCaptureVoice: Bool {
+        voiceMode == .dictate || voiceMode == .handsfree || (voiceMode == .send && engine.canUseNativeAudio)
     }
 
     /// Footer halves: the voice posture / live activity on the LEFT (a mono dot
@@ -1656,9 +1687,8 @@ final class ChatTUI {
         // Background-agent count, with a marker when one needs approval.
         let agentsTag = bgAgentsTag(sep)
         let cleanRight = "\(agentsTag)\(agentTag)\(thinkTag)\(speakTag)\(cwdLabel)\(sep)\(KrillVersionTag)"
-        // Voice OFF (text mode) or a non-audio model: no voice chrome at all - the
-        // footer is just the generation status and cwd/version (plus speak tag).
-        guard engine.canUseNativeAudio, voiceMode != .type || !voiceActivity.isEmpty else {
+        // Dictation is local STT and remains available on text-only models.
+        guard voiceMode != .type || !voiceActivity.isEmpty else {
             return (lastStatus.isEmpty ? modelContextStatus() : lastStatus, cleanRight)
         }
         let dot = Ansi.ember("\u{25CF}")
@@ -1703,8 +1733,7 @@ final class ChatTUI {
     }
 
     /// Short contextual hint shown faded + italic, right-aligned above the input
-    /// box: what Space does in the current posture (and how to reach voice when
-    /// it is off). Empty on non-audio models, where there is nothing to hint.
+    /// box: what Space does in the current posture (and how to reach local STT).
     /// One-line preview of a queued type-ahead message for the composer hint:
     /// newlines/tabs flattened to spaces and clipped so a long message never
     /// blows out the single hint row.
@@ -1735,7 +1764,6 @@ final class ChatTUI {
         if surface == .agent {
             return "agent:\(posture.label)\(sep)Shift+Tab posture\(sep)/agent to exit"
         }
-        guard engine.canUseNativeAudio else { return "" }
         switch voiceMode {
         case .type:      return "activate voice mode: Ctrl-V"
         case .dictate:   return "hold Space to dictate\(sep)Ctrl-V to cycle"
@@ -1749,13 +1777,16 @@ final class ChatTUI {
     /// card. Replaces the old silent dictate<->send toggle.
     private func voiceStatusCard() -> String {
         func mark(_ on: Bool) -> String { on ? ">" : " " }
-        let eng = voiceEngine == .whisper ? "Whisper (\(whisperSKU))" : "Apple on-device"
+        let eng = voiceEngine == .whisper ? "Whisper (\(whisperSKU))" : "Apple on-device (\(AppleSpeechSettings(language: voiceLanguage).localeIdentifier))"
+        let send = engine.canUseNativeAudio
+            ? "hold Space -> talk to it; the model answers your speech in text"
+            : "unavailable: this model has no native audio input (use dictate)"
         return """
         Voice posture               Ctrl-V to cycle  |  /voice-mode <name>
         \(mark(voiceMode == .type)) type       keyboard only - Space types a space, Enter sends
         \(mark(voiceMode == .dictate)) dictate    hold Space -> transcribe to composer -> review -> Enter (engine: \(eng))
         \(mark(voiceMode == .handsfree)) handsfree  hold Space -> transcribe -> auto-send (Esc cancels)
-        \(mark(voiceMode == .send)) send       hold Space -> talk to it; the model answers your speech in text
+        \(mark(voiceMode == .send)) send       \(send)
 
         \(voiceEngineInfo())
         """
@@ -1890,7 +1921,7 @@ final class ChatTUI {
             if let st = gen.stats() { lastStats = st; lastStatus = statusText(st, images: usedImgs, audio: usedAud) }
             // Read the reply aloud when speaking is on (voice phase 2). Cleaned of
             // markdown that reads badly; a new reply interrupts the previous one.
-            if speakReplies, !assistant.isEmpty { synth.speak(assistant) }
+            if speakReplies, voiceNarration != .off, !assistant.isEmpty { synth.speak(assistant) }
         }
         pendingImages.removeAll(); pendingAudio = nil
         render()
@@ -1995,6 +2026,10 @@ final class ChatTUI {
         do {
             try await newEngine.load()
             engine = newEngine; modelName = name
+            if voiceMode == .send, !engine.canUseNativeAudio {
+                voiceMode = .type
+                note("Voice send was disabled because \(name) has no native audio input. Dictate and hands-free remain available.")
+            }
             contextWindow = AliasMap.resolve(name)?.context ?? 0
             note("Switched to \(name). Conversation kept.")
         } catch { note("Failed to load \(name): \(error)") }
@@ -2004,7 +2039,7 @@ final class ChatTUI {
     /// Terminals report no key-release, so we use the OS key-repeat stream as the
     /// "still held" signal and treat a short gap with no Space as the release.
     private func holdToTalk() async {
-        guard engine.canUseNativeAudio, voiceMode != .type else { return }
+        guard canCaptureVoice else { return }
         // Show this BEFORE the access await: a re-signed bundle resets TCC, so the
         // system mic/Speech prompt may sit behind the terminal - without a hint the
         // app looks frozen ("nothing happens" on Space).
@@ -2129,8 +2164,8 @@ final class ChatTUI {
     /// Hands-free: transcribe the clip, drop the text in the composer so the user
     /// always SEES what will be sent, then auto-send after a short grace window.
     /// Esc (or editing the text) cancels the auto-send and keeps it in the
-    /// composer; Enter sends immediately. The reply is shown on screen - spoken
-    /// replies (TTS) are a planned follow-up to make this fully hands-free.
+    /// composer; Enter sends immediately. The reply is shown on screen and is
+    /// spoken when `/speak` and the narration policy enable local TTS.
     private func handsfreeVoice(_ wav: Data) async {
         await transcribeVoice(wav)            // fills `input` with the transcript (or notes a miss)
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2186,7 +2221,7 @@ final class ChatTUI {
         // Prefer Apple's on-device speech-to-text: accurate, fully local, no
         // download. Falls through to the multimodal model only when the Speech
         // framework is unavailable or yields nothing.
-        if SpeechRecognizer.isAvailable, await SpeechRecognizer.requestAuthorization() {
+        if SpeechRecognizer.isAvailable(language: voiceLanguage), await SpeechRecognizer.requestAuthorization() {
             if let text = await speech.transcribe(wav: wav) {
                 voiceActivity = ""
                 let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2194,6 +2229,11 @@ final class ChatTUI {
                 setInput(clean)
                 return
             }
+        }
+        guard engine.canUseNativeAudio else {
+            voiceActivity = ""
+            note("Local \(engineLabel) transcription is unavailable for language '\(voiceLanguage)'. Install/enable on-device Speech Recognition or choose /voice engine whisper; this text model cannot accept raw audio.")
+            return
         }
         // Force verbatim transcription. Gemma 4's audio path will otherwise
         // ANSWER the speech (its default behaviour) rather than transcribe it;

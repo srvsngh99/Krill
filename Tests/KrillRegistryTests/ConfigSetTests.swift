@@ -91,4 +91,38 @@ final class ConfigSetTests: XCTestCase {
         cfg.mergeFromTOML(out)
         XCTAssertEqual(cfg.defaultAgentPosture, "accept-edits")
     }
+
+    func testVoiceSettingsDefaultsAndTOMLRoundTrip() {
+        var cfg = KrillConfig()
+        XCTAssertEqual(cfg.voiceEngine, "apple")
+        XCTAssertEqual(cfg.voiceLanguage, "auto")
+        XCTAssertEqual(cfg.voiceIdentifier, "")
+        XCTAssertEqual(cfg.voiceRate, 0)
+        XCTAssertEqual(cfg.voiceWhisperModel, "base.en")
+        XCTAssertEqual(cfg.voiceNarration, .final)
+
+        let keys = [
+            ("voice_engine", "whisper"), ("voice_language", "en-GB"),
+            ("voice_identifier", "com.example.voice"), ("voice_rate", "0.45"),
+            ("voice_whisper_model", "small.en"), ("voice_narration", "important"),
+        ]
+        let toml = keys.reduce("") { KrillConfig.upsertTOML($0, key: $1.0, value: $1.1) }
+        cfg.mergeFromTOML(toml)
+        XCTAssertEqual(cfg.voiceEngine, "whisper")
+        XCTAssertEqual(cfg.voiceLanguage, "en-GB")
+        XCTAssertEqual(cfg.voiceIdentifier, "com.example.voice")
+        XCTAssertEqual(cfg.voiceRate, 0.45)
+        XCTAssertEqual(cfg.voiceWhisperModel, "small.en")
+        XCTAssertEqual(cfg.voiceNarration, .important)
+        let display = Dictionary(uniqueKeysWithValues: cfg.displayPairs())
+        XCTAssertEqual(display["voice_engine"], "whisper")
+        XCTAssertEqual(display["voice_narration"], "important")
+        XCTAssertTrue(KrillConfig.writableKeys.contains("voice_rate"))
+    }
+
+    func testUnknownNarrationFallsBackToFinal() {
+        var cfg = KrillConfig()
+        cfg.mergeFromTOML("voice_narration = \"not-a-policy\"")
+        XCTAssertEqual(cfg.voiceNarration, .final)
+    }
 }

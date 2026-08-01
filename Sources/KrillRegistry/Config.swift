@@ -1,5 +1,16 @@
 import Foundation
 
+/// How much of an agent session is narrated. `important` is a distinct value
+/// now so Phase 3 can attach tool/blocker status events without another config
+/// migration; it currently has the same final-answer behavior as `final`.
+public enum VoiceNarrationPolicy: String, Sendable, CaseIterable {
+    case off, final, important
+
+    public static func parse(_ value: String) -> VoiceNarrationPolicy {
+        VoiceNarrationPolicy(rawValue: value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) ?? .final
+    }
+}
+
 /// Krill configuration loaded from ~/.krill/config.toml.
 ///
 /// Precedence: CLI flags > environment variables (KRILL_*) > config.toml > defaults.
@@ -82,6 +93,23 @@ public struct KrillConfig: Sendable {
     /// talk/listen loop. `speak_replies` in config; `KRILL_SPEAK_REPLIES` env.
     public var speakReplies: Bool
 
+    /// Dictation backend: `apple` for on-device Speech or `whisper` for the
+    /// downloaded native MLX runtime. `KRILL_VOICE_ENGINE`.
+    public var voiceEngine: String
+    /// Apple recognition/TTS locale. Empty or `auto` follows the current locale.
+    /// `KRILL_VOICE_LANGUAGE`.
+    public var voiceLanguage: String
+    /// Preferred AVSpeech voice identifier; empty means system default.
+    /// `KRILL_VOICE_IDENTIFIER`.
+    public var voiceIdentifier: String
+    /// AVSpeech rate, where `0` is the system-default sentinel.
+    /// `KRILL_VOICE_RATE`.
+    public var voiceRate: Float
+    /// Native MLX Whisper SKU selected for dictation. `KRILL_VOICE_WHISPER_MODEL`.
+    public var voiceWhisperModel: String
+    /// Automatic reply narration policy. `KRILL_VOICE_NARRATION`.
+    public var voiceNarration: VoiceNarrationPolicy
+
     /// Which surface the interactive TUI launches in: "chat" (default, pure
     /// inference) or "agent" (tools + file edits, the unified coding mode).
     /// `default_mode` in config. `krill code` always starts in agent mode
@@ -153,6 +181,12 @@ public struct KrillConfig: Sendable {
         self.flashAttention = false
         self.voiceMode = "off"
         self.speakReplies = false
+        self.voiceEngine = "apple"
+        self.voiceLanguage = "auto"
+        self.voiceIdentifier = ""
+        self.voiceRate = 0
+        self.voiceWhisperModel = "base.en"
+        self.voiceNarration = .final
         self.defaultMode = "chat"
         self.defaultAgentPosture = "plan"
         self.searchBackend = "auto"
@@ -231,6 +265,18 @@ public struct KrillConfig: Sendable {
                 voiceMode = value
             case "speak_replies":
                 speakReplies = value == "true" || value == "1"
+            case "voice_engine":
+                voiceEngine = value
+            case "voice_language":
+                voiceLanguage = value.isEmpty ? "auto" : value
+            case "voice_identifier":
+                voiceIdentifier = value
+            case "voice_rate":
+                if let rate = Float(value) { voiceRate = rate }
+            case "voice_whisper_model":
+                voiceWhisperModel = value.isEmpty ? "base.en" : value
+            case "voice_narration":
+                voiceNarration = VoiceNarrationPolicy.parse(value)
             case "default_mode":
                 defaultMode = value
             case "default_agent_posture":
@@ -280,7 +326,8 @@ public struct KrillConfig: Sendable {
             "default_model", "default_quant", "default_mode", "default_agent_posture",
             "search_backend", "searxng_url", "brave_api_key", "tavily_api_key",
             "kv_cache_dtype", "context_length", "thinking",
-            "voice_mode", "speak_replies",
+            "voice_mode", "speak_replies", "voice_engine", "voice_language",
+            "voice_identifier", "voice_rate", "voice_whisper_model", "voice_narration",
             "prefix_cache_size_gb", "prefix_cache_max_entry_gb",
             "speculative_decoding", "decode_pipeline", "ngram_spec", "flash_attention",
             "server_port", "server_host", "idle_timeout", "keep_alive",
@@ -377,6 +424,12 @@ public struct KrillConfig: Sendable {
             "thinking": b(thinking),
             "voice_mode": voiceMode,
             "speak_replies": b(speakReplies),
+            "voice_engine": voiceEngine,
+            "voice_language": voiceLanguage,
+            "voice_identifier": voiceIdentifier.isEmpty ? "(system default)" : voiceIdentifier,
+            "voice_rate": voiceRate == 0 ? "(system default)" : "\(voiceRate)",
+            "voice_whisper_model": voiceWhisperModel,
+            "voice_narration": voiceNarration.rawValue,
             "prefix_cache_size_gb": "\(prefixCacheSizeGB)",
             "prefix_cache_max_entry_gb": "\(prefixCacheMaxEntryGB)",
             "speculative_decoding": b(speculativeDecoding),
@@ -455,6 +508,12 @@ public struct KrillConfig: Sendable {
         if let v = env["KRILL_SPEAK_REPLIES"] {
             speakReplies = v == "1" || v.lowercased() == "true"
         }
+        if let v = env["KRILL_VOICE_ENGINE"] { voiceEngine = v }
+        if let v = env["KRILL_VOICE_LANGUAGE"] { voiceLanguage = v.isEmpty ? "auto" : v }
+        if let v = env["KRILL_VOICE_IDENTIFIER"] { voiceIdentifier = v }
+        if let v = env["KRILL_VOICE_RATE"], let rate = Float(v) { voiceRate = rate }
+        if let v = env["KRILL_VOICE_WHISPER_MODEL"] { voiceWhisperModel = v.isEmpty ? "base.en" : v }
+        if let v = env["KRILL_VOICE_NARRATION"] { voiceNarration = VoiceNarrationPolicy.parse(v) }
         if let v = env["KRILL_ENABLE_THINKING"] {
             let s = v.lowercased()
             thinking = s == "1" || s == "true" || s == "yes" || s == "on"

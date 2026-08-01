@@ -47,6 +47,10 @@ struct CodeCommand: AsyncParsableCommand {
           help: "Use the classic line renderer instead of the full-screen TUI (also the default for non-interactive output, or when tool allow/deny flags are set).")
     var classic: Bool = false
 
+    @Flag(name: .long,
+          help: "Open the native floating voice panel. Typed and spoken turns use the local agent loop.")
+    var voice: Bool = false
+
     @Option(name: .long,
             help: "Permission posture: plan (read-only), ask (confirm each mutating tool), accept-edits (auto-apply edits, ask for commands), or auto/accept-all (run every tool).")
     var permissionMode: String?
@@ -127,6 +131,44 @@ struct CodeCommand: AsyncParsableCommand {
         ]
         if bash { tools.append(BashTool()) }
 
+        // Steer the model in plan mode; surface the posture inline. This is
+        // shared by the native voice panel and the classic renderer so both
+        // execution surfaces preserve exactly the same permission semantics.
+        var effectiveSystem = system
+        switch mode {
+        case .plan:
+            let planNote =
+                "You are in PLAN MODE (read-only). You may read and search files with the "
+                + "read-only tools, but you must NOT write files, edit files, or run shell "
+                + "commands - those are denied. Investigate as needed, then present a clear, "
+                + "concise step-by-step plan as your final answer."
+            effectiveSystem = [planNote, nonEmpty(system)].compactMap { $0 }.joined(separator: "\n\n")
+        case .ask, .acceptEdits, .acceptAll:
+            break
+        }
+
+        // Voice is intentionally selected before terminal detection: it is a
+        // native AppKit surface and must remain usable when stdout is piped.
+        // It shares the loaded engine, full coding toolset and policy with
+        // `krill code --classic`; only the interaction surface changes.
+        if voice {
+            let voiceConfig = KrillConfig.load()
+            let loop = AgentLoop(
+                generator: EngineGenerator(engine: engine, maxTokens: maxTokens),
+                tools: ToolRegistry(tools),
+                maxIterations: maxIterations,
+                constrainToolArgs: constrainArgs,
+                permission: policy)
+            await VoicePanel.run(
+                loop: loop, initialTask: task, system: effectiveSystem,
+                modelName: model, permissionMode: mode,
+                voiceLanguage: voiceConfig.voiceLanguage,
+                voiceIdentifier: voiceConfig.voiceIdentifier,
+                voiceRate: voiceConfig.voiceRate,
+                narration: voiceConfig.voiceNarration)
+            return
+        }
+
         // On an interactive terminal with the default toolset, `krill code` is
         // just the unified chat TUI launched in agent mode - same surface as
         // `krill`, hands already on. The full-screen TUI hosts every posture
@@ -135,11 +177,20 @@ struct CodeCommand: AsyncParsableCommand {
         // to the classic line renderer below, which honors them.
         let defaultToolset = bash && allowTools.isEmpty && denyTools.isEmpty
         if RawTerminal.isInteractive && !classic && defaultToolset {
+            let voiceConfig = KrillConfig.load()
             let tui = ChatTUI(
                 engine: engine, modelName: model, system: nonEmpty(system),
                 params: .greedy, maxTokens: maxTokens, registry: registry,
                 initialImage: nil, initialAudio: nil,
-                thinkingSetting: KrillConfig.load().thinking,
+                voiceModeSetting: voiceConfig.voiceMode,
+                speakRepliesSetting: voiceConfig.speakReplies,
+                voiceEngineSetting: voiceConfig.voiceEngine,
+                voiceLanguageSetting: voiceConfig.voiceLanguage,
+                voiceIdentifierSetting: voiceConfig.voiceIdentifier,
+                voiceRateSetting: voiceConfig.voiceRate,
+                voiceWhisperModelSetting: voiceConfig.voiceWhisperModel,
+                voiceNarrationSetting: voiceConfig.voiceNarration,
+                thinkingSetting: voiceConfig.thinking,
                 modeSetting: "agent", agentPostureSetting: mode.rawValue,
                 initialAgentTask: task)
             await tui.run()
@@ -147,17 +198,10 @@ struct CodeCommand: AsyncParsableCommand {
         }
 
         // Classic line renderer (--classic, non-interactive, or tool flags set).
-        // Steer the model in plan mode; surface the posture inline.
-        var effectiveSystem = system
+        // Surface the posture inline.
         switch mode {
         case .plan:
             print("Plan mode: read-only. The agent can inspect files but cannot edit them or run commands.")
-            let planNote =
-                "You are in PLAN MODE (read-only). You may read and search files with the "
-                + "read-only tools, but you must NOT write files, edit files, or run shell "
-                + "commands - those are denied. Investigate as needed, then present a clear, "
-                + "concise step-by-step plan as your final answer."
-            effectiveSystem = [planNote, nonEmpty(system)].compactMap { $0 }.joined(separator: "\n\n")
         case .ask:
             print("Ask mode: you will be prompted to approve each file edit or shell command.")
         case .acceptEdits:

@@ -235,15 +235,20 @@ multi-image models (mllama); single-image models use the first. `--image` /
 
 ## Voice
 
+This section describes the terminal's push-to-talk controls. The separate
+`krill code --voice` floating panel uses continuous native endpointing and live
+partial transcription; see the Voice section in [GUIDE.md](GUIDE.md#6-agentic-coding-krill-code).
+
 **Voice is off by default** - Krill is a text chat first. In the default
 **`type`** posture Space is a typed space, Enter sends, and the footer shows no
 voice chrome. Turn voice on with **`Ctrl-V`** (which then cycles the postures) or
 set a default with the `voice_mode` config key (`off` / `dictate` / `handsfree`).
-On an audio-capable Gemma 4 model the active posture rides the footer's left side
-(a dot when on, an animated meter while recording). Bare `/voice` prints the
-current state without changing it.
+The active posture rides the footer's left side (a dot when on, an animated
+meter while recording). Bare `/voice` prints the current state without changing
+it.
 
-`Ctrl-V` cycles **off (text) -> dictate -> handsfree -> send -> off**.
+On text-only models, `Ctrl-V` cycles **off (text) -> dictate -> handsfree ->
+off**. Audio-capable models add `send` before returning to off.
 
 - **`type`** (default) - keyboard only. **Space is a typed space** and Enter
   sends; there is no push-to-talk. The footer stays clean.
@@ -252,11 +257,11 @@ current state without changing it.
   Whisper; see below).
 - **`handsfree`** - hold Space to talk; the transcript is shown and then
   **auto-sent** after a short grace window (press **Esc** to cancel, **Enter** to
-  send immediately). The reply is shown on screen; spoken replies (TTS) are a
-  planned follow-up.
+  send immediately). Toggle local spoken replies with `/speak`.
 - **`send`** - the clip is sent as an audio turn and the model **answers your
   spoken input** (shown as a `[voice message]` turn). Use this to "talk to" an
-  audio-capable model rather than dictate.
+  audio-capable model rather than dictate. Krill rejects this posture on a
+  text-only model; dictation and hands-free remain available.
 
 ### Dictation engine
 

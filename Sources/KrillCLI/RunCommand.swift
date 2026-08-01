@@ -248,6 +248,12 @@ struct RunCommand: AsyncParsableCommand {
                 initialImage: imageData, initialAudio: audioData, theme: theme,
                 voiceModeSetting: tuiConfig.voiceMode,
                 speakRepliesSetting: tuiConfig.speakReplies,
+                voiceEngineSetting: tuiConfig.voiceEngine,
+                voiceLanguageSetting: tuiConfig.voiceLanguage,
+                voiceIdentifierSetting: tuiConfig.voiceIdentifier,
+                voiceRateSetting: tuiConfig.voiceRate,
+                voiceWhisperModelSetting: tuiConfig.voiceWhisperModel,
+                voiceNarrationSetting: tuiConfig.voiceNarration,
                 thinkingSetting: tuiConfig.thinking,
                 modeSetting: tuiConfig.defaultMode,
                 agentPostureSetting: tuiConfig.defaultAgentPosture)

@@ -213,7 +213,8 @@ Audio input (speech understanding) runs on **Gemma 4** (native USM):
 krill run gemma-4-e2b --audio clip.wav "transcribe and summarize"   # wav/mp3/flac/ogg/m4a
 ```
 
-In the TUI, **push-to-talk** voice is available on audio-capable models:
+In the TUI, local **push-to-talk** dictation works with every model. Only the
+raw-audio `send` posture requires an audio-capable model:
 
 | Voice mode | Hold `Space` to… |
 |---|---|
@@ -242,6 +243,20 @@ task.
 krill code "add a --verbose flag to the CLI and update the README"
 krill code --plan "investigate why the build is slow"     # read-only plan first
 ```
+
+Add `--voice` for the native floating conversation panel:
+
+```bash
+krill code qwen3.5-4b --voice
+```
+
+The panel continuously listens after microphone/Speech permission is granted,
+shows provisional on-device transcription, and commits a turn after confirmed
+speech followed by a short silence. Speaking while Krill narrates stops the
+voice immediately. Instructions spoken while the foreground agent is busy are
+queued visibly and run at the next safe agent boundary; they are not injected
+inside an active model/tool turn. Tool approvals still require the panel's
+Allow/Deny controls.
 
 **Permission postures** (cycle with `Shift+Tab` in the TUI, or set with
 `--permission-mode`):
@@ -484,7 +499,11 @@ Common keys (each has a `KRILL_…` env equivalent):
 | `thinking` | `true` | Reasoning channel on/off |
 | `search_backend` | `auto` | `auto` \| `brave` \| `tavily` \| `searxng` |
 | `brave_api_key` / `tavily_api_key` | — | BYOK search keys (redacted in output) |
-| `voice_mode` / `speak_replies` | `off` / `false` | Voice posture · TTS |
+| `voice_mode` / `speak_replies` | `off` / `false` | Voice posture · enable TTS |
+| `voice_engine` / `voice_language` | `apple` / `auto` | Apple or native MLX Whisper STT · locale |
+| `voice_identifier` / `voice_rate` | system / system | Apple synthetic voice and speaking rate |
+| `voice_whisper_model` | `base.en` | Native MLX Whisper model SKU |
+| `voice_narration` | `final` | `off` · `final` · `important` narration policy |
 | `models_dir` | `~/.krill/models` | Where models live |
 
 Server knobs also read Ollama's env vars (`OLLAMA_HOST`, `OLLAMA_KEEP_ALIVE`,
