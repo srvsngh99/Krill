@@ -65,12 +65,12 @@ final class PrefixCacheTests: XCTestCase {
             let cache = makeTempCache()
             let tokens = Array(0 ..< 6)
             let keys = [
-                [makeKV(seqLen: tokens.count, start: 10)],
-                [makeKV(seqLen: tokens.count, start: 100)],
+                [Self.makeKV(seqLen: tokens.count, start: 10)],
+                [Self.makeKV(seqLen: tokens.count, start: 100)],
             ]
             let values = [
-                [makeKV(seqLen: tokens.count, start: 1_000)],
-                [makeKV(seqLen: tokens.count, start: 2_000)],
+                [Self.makeKV(seqLen: tokens.count, start: 1_000)],
+                [Self.makeKV(seqLen: tokens.count, start: 2_000)],
             ]
 
             cache.store(tokens: tokens, modelId: "model-a", keys: keys, values: values)
@@ -96,8 +96,8 @@ final class PrefixCacheTests: XCTestCase {
         try withMLXCPU {
             let cache = makeTempCache()
             let tokens = Array(0 ..< 6)
-            let storedKeys = makeKV(seqLen: tokens.count, start: 10)
-            let storedValues = makeKV(seqLen: tokens.count, start: 100)
+            let storedKeys = Self.makeKV(seqLen: tokens.count, start: 10)
+            let storedValues = Self.makeKV(seqLen: tokens.count, start: 100)
             cache.store(
                 tokens: tokens,
                 modelId: "model-a",
@@ -133,10 +133,10 @@ final class PrefixCacheTests: XCTestCase {
         try withMLXCPU {
             let cache = makeTempCache()
             let tokens = Array(0 ..< 5)
-            let modelAKeys = makeKV(seqLen: tokens.count, start: 10)
-            let modelAValues = makeKV(seqLen: tokens.count, start: 100)
-            let modelBKeys = makeKV(seqLen: tokens.count, start: 1_000)
-            let modelBValues = makeKV(seqLen: tokens.count, start: 2_000)
+            let modelAKeys = Self.makeKV(seqLen: tokens.count, start: 10)
+            let modelAValues = Self.makeKV(seqLen: tokens.count, start: 100)
+            let modelBKeys = Self.makeKV(seqLen: tokens.count, start: 1_000)
+            let modelBValues = Self.makeKV(seqLen: tokens.count, start: 2_000)
 
             cache.store(
                 tokens: tokens,
@@ -189,8 +189,8 @@ final class PrefixCacheTests: XCTestCase {
             let cache = makeCappedCache(maxEntryGB: 1e-6)
             let tokens = Array(0 ..< 6)
             cache.store(tokens: tokens, modelId: "m",
-                        keys: [[makeKV(seqLen: tokens.count, start: 10)]],
-                        values: [[makeKV(seqLen: tokens.count, start: 100)]])
+                        keys: [[Self.makeKV(seqLen: tokens.count, start: 10)]],
+                        values: [[Self.makeKV(seqLen: tokens.count, start: 100)]])
             XCTAssertEqual(cache.memoryCount, 1, "under-cap entry must be retained")
             XCTAssertNotNil(cache.lookup(tokens: tokens, modelId: "m"))
         }
@@ -209,8 +209,8 @@ final class PrefixCacheTests: XCTestCase {
             let cache = makeCappedCache(maxEntryGB: 1e-7)
             let tokens = Array(0 ..< 6)
             cache.store(tokens: tokens, modelId: "m",
-                        keys: [[makeKV(seqLen: tokens.count, start: 10)]],
-                        values: [[makeKV(seqLen: tokens.count, start: 100)]])
+                        keys: [[Self.makeKV(seqLen: tokens.count, start: 10)]],
+                        values: [[Self.makeKV(seqLen: tokens.count, start: 100)]])
             cache.waitForDiskWrites()
             XCTAssertEqual(cache.memoryCount, 0, "over-cap entry must not be retained")
             XCTAssertNil(cache.lookup(tokens: tokens, modelId: "m"))
@@ -229,8 +229,8 @@ final class PrefixCacheTests: XCTestCase {
             let cache = makeCappedCache(maxEntryGB: 0)
             let tokens = Array(0 ..< 6)
             cache.store(tokens: tokens, modelId: "m",
-                        keys: [[makeKV(seqLen: tokens.count, start: 10)]],
-                        values: [[makeKV(seqLen: tokens.count, start: 100)]])
+                        keys: [[Self.makeKV(seqLen: tokens.count, start: 10)]],
+                        values: [[Self.makeKV(seqLen: tokens.count, start: 100)]])
             XCTAssertEqual(cache.memoryCount, 1, "cap disabled -> entry stored regardless of size")
             XCTAssertNotNil(cache.lookup(tokens: tokens, modelId: "m"))
         }
@@ -260,8 +260,8 @@ final class PrefixCacheTests: XCTestCase {
             let cache = makeTempCache()  // minPrefixLength = 4
             let shared = Array(0 ..< 10)
             let stored = shared + [100, 101]                 // prefix + tail A
-            let storedKeys = makeKV(seqLen: stored.count, start: 10)
-            let storedValues = makeKV(seqLen: stored.count, start: 100)
+            let storedKeys = Self.makeKV(seqLen: stored.count, start: 10)
+            let storedValues = Self.makeKV(seqLen: stored.count, start: 100)
             cache.store(tokens: stored, modelId: "m",
                         keys: [[storedKeys]], values: [[storedValues]])
 
@@ -287,8 +287,8 @@ final class PrefixCacheTests: XCTestCase {
             let cache = makeTempCache()  // minPrefixLength = 4
             let stored = Array(0 ..< 8)
             cache.store(tokens: stored, modelId: "m",
-                        keys: [[makeKV(seqLen: stored.count, start: 1)]],
-                        values: [[makeKV(seqLen: stored.count, start: 9)]])
+                        keys: [[Self.makeKV(seqLen: stored.count, start: 1)]],
+                        values: [[Self.makeKV(seqLen: stored.count, start: 9)]])
             // Shares only 3 leading tokens -> below minPrefixLength -> miss.
             let query = [0, 1, 2, 77, 78, 79, 80, 81]
             XCTAssertNil(cache.lookupLongestPrefix(tokens: query, modelId: "m"))
@@ -304,8 +304,8 @@ final class PrefixCacheTests: XCTestCase {
             let cache = makeTempCache()
             let stored = Array(0 ..< 10) + [5, 6]
             cache.store(tokens: stored, modelId: "model-a",
-                        keys: [[makeKV(seqLen: stored.count, start: 1)]],
-                        values: [[makeKV(seqLen: stored.count, start: 9)]])
+                        keys: [[Self.makeKV(seqLen: stored.count, start: 1)]],
+                        values: [[Self.makeKV(seqLen: stored.count, start: 9)]])
             // Same shared prefix, different model -> must not match.
             XCTAssertNil(cache.lookupLongestPrefix(
                 tokens: Array(0 ..< 10) + [9, 9], modelId: "model-b"))
@@ -325,12 +325,12 @@ final class PrefixCacheTests: XCTestCase {
             let short = Array(0 ..< 6) + [50]            // shares 6 with query
             let long = Array(0 ..< 9) + [60]             // shares 9 with query
             cache.store(tokens: short, modelId: "m",
-                        keys: [[makeKV(seqLen: short.count, start: 1)]],
-                        values: [[makeKV(seqLen: short.count, start: 5)]])
-            let longKeys = makeKV(seqLen: long.count, start: 200)
+                        keys: [[Self.makeKV(seqLen: short.count, start: 1)]],
+                        values: [[Self.makeKV(seqLen: short.count, start: 5)]])
+            let longKeys = Self.makeKV(seqLen: long.count, start: 200)
             cache.store(tokens: long, modelId: "m",
                         keys: [[longKeys]],
-                        values: [[makeKV(seqLen: long.count, start: 400)]])
+                        values: [[Self.makeKV(seqLen: long.count, start: 400)]])
 
             let query = Array(0 ..< 9) + [99, 99]
             let hit = try XCTUnwrap(cache.lookupLongestPrefix(tokens: query, modelId: "m"))
@@ -363,8 +363,8 @@ final class PrefixCacheTests: XCTestCase {
                     let modelId = "m\(i % 3)"
                     cache.store(
                         tokens: tokens, modelId: modelId,
-                        keys: [[self.makeKV(seqLen: tokens.count, start: Int32(i))]],
-                        values: [[self.makeKV(seqLen: tokens.count, start: Int32(i + 5000))]])
+                        keys: [[Self.makeKV(seqLen: tokens.count, start: Int32(i))]],
+                        values: [[Self.makeKV(seqLen: tokens.count, start: Int32(i + 5000))]])
                     _ = cache.lookup(tokens: tokens, modelId: modelId)
                     _ = cache.lookup(tokens: Array(0 ..< 6), modelId: modelId)
                     if i % 50 == 0 { cache.clear() }
@@ -398,8 +398,8 @@ final class PrefixCacheTests: XCTestCase {
             let tokens = Array(0 ..< 8)
             cache.store(
                 tokens: tokens, modelId: "m",
-                keys: [[makeKV(seqLen: tokens.count, start: 1)]],
-                values: [[makeKV(seqLen: tokens.count, start: 9)]])
+                keys: [[Self.makeKV(seqLen: tokens.count, start: 1)]],
+                values: [[Self.makeKV(seqLen: tokens.count, start: 9)]])
             cache.waitForDiskWrites()
 
             XCTAssertEqual(cache.diskBytes, 0, "budget=0 must write nothing to disk")
@@ -422,8 +422,8 @@ final class PrefixCacheTests: XCTestCase {
                 cacheDir: tempDir(), maxMemoryEntries: 16, minPrefixLength: 4, diskBudgetGB: -1)
             probe.store(
                 tokens: [0, 1, 2, 3, 4, 5], modelId: "m",
-                keys: [[makeKV(seqLen: 6, start: 1)]],
-                values: [[makeKV(seqLen: 6, start: 9)]])
+                keys: [[Self.makeKV(seqLen: 6, start: 1)]],
+                values: [[Self.makeKV(seqLen: 6, start: 9)]])
             probe.waitForDiskWrites()
             let oneSize = probe.diskBytes
             XCTAssertGreaterThan(oneSize, 0, "probe entry should have written to disk")
@@ -437,8 +437,8 @@ final class PrefixCacheTests: XCTestCase {
                 let tokens = (0 ..< 6).map { i * 100 + $0 }  // distinct prefix per i
                 cache.store(
                     tokens: tokens, modelId: "m",
-                    keys: [[makeKV(seqLen: 6, start: Int32(i))]],
-                    values: [[makeKV(seqLen: 6, start: Int32(i + 1000))]])
+                    keys: [[Self.makeKV(seqLen: 6, start: Int32(i))]],
+                    values: [[Self.makeKV(seqLen: 6, start: Int32(i + 1000))]])
             }
             cache.waitForDiskWrites()
 
@@ -464,7 +464,7 @@ final class PrefixCacheTests: XCTestCase {
         }
     }
 
-    private func makeKV(
+    private static func makeKV(
         batch: Int = 1,
         heads: Int = 2,
         seqLen: Int,

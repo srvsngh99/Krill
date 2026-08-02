@@ -27,7 +27,7 @@ final class FusedQ4KernelTests: XCTestCase {
         let (w, scales, biases) = quantize(O: O, I: I, groupSize: gs)
         let x = MLXRandom.normal([1, I], key: MLXRandom.key(7))
 
-        let ref = MLX.quantizedMatmul(
+        let ref = MLX.quantizedMM(
             x, w, scales: scales, biases: biases,
             transpose: true, groupSize: gs, bits: 4, mode: .affine)
         let got = KrillKernels.fusedQ4Gemv(
@@ -57,7 +57,7 @@ final class FusedQ4KernelTests: XCTestCase {
             let O = 256, I = 256
             let (w, scales, biases) = quantize(O: O, I: I, groupSize: gs)
             let x = MLXRandom.normal([1, I], key: MLXRandom.key(11))
-            let ref = MLX.quantizedMatmul(
+            let ref = MLX.quantizedMM(
                 x, w, scales: scales, biases: biases,
                 transpose: true, groupSize: gs, bits: 4, mode: .affine)
             let got = KrillKernels.fusedQ4Gemv(
@@ -90,7 +90,7 @@ final class FusedQ4KernelTests: XCTestCase {
         }
 
         let builtinUs = time {
-            MLX.quantizedMatmul(
+            MLX.quantizedMM(
                 x, w, scales: scales, biases: biases,
                 transpose: true, groupSize: gs, bits: 4, mode: .affine)
         }
