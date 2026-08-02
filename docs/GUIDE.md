@@ -521,6 +521,7 @@ Common keys (each has a `KRILL_…` env equivalent):
 | `search_backend` | `auto` | `auto` \| `brave` \| `tavily` \| `searxng` |
 | `brave_api_key` / `tavily_api_key` | — | BYOK search keys (redacted in output) |
 | `voice_mode` / `speak_replies` | `off` / `false` | Voice posture · enable TTS |
+| `voice_orb` | `balanced` | Voice-panel orb persona: `calm` \| `balanced` \| `lively` |
 | `voice_engine` / `voice_language` | `apple` / `auto` | Apple or native MLX Whisper STT · locale |
 | `voice_identifier` / `voice_rate` | system / system | Apple synthetic voice and speaking rate |
 | `voice_whisper_model` | `base.en` | Native MLX Whisper model SKU |

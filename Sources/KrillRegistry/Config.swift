@@ -115,6 +115,10 @@ public struct KrillConfig: Sendable {
     public var voiceWhisperModel: String
     /// Automatic reply narration policy. `KRILL_VOICE_NARRATION`.
     public var voiceNarration: VoiceNarrationPolicy
+    /// Voice-panel orb persona: `calm`, `balanced`, or `lively` — how much
+    /// the orb moves and glows. Unknown values fall back to `balanced` at the
+    /// presentation layer. `KRILL_VOICE_ORB`.
+    public var voiceOrb: String
 
     /// Which surface the interactive TUI launches in: "chat" (default, pure
     /// inference) or "agent" (tools + file edits, the unified coding mode).
@@ -194,6 +198,7 @@ public struct KrillConfig: Sendable {
         self.voiceRate = 0
         self.voiceWhisperModel = Self.defaultVoiceWhisperModel
         self.voiceNarration = .final
+        self.voiceOrb = "balanced"
         self.defaultMode = "chat"
         self.defaultAgentPosture = "plan"
         self.searchBackend = "auto"
@@ -286,6 +291,8 @@ public struct KrillConfig: Sendable {
                 voiceWhisperModel = value.isEmpty ? Self.defaultVoiceWhisperModel : value
             case "voice_narration":
                 voiceNarration = VoiceNarrationPolicy.parse(value)
+            case "voice_orb":
+                voiceOrb = value.isEmpty ? "balanced" : value
             case "default_mode":
                 defaultMode = value
             case "default_agent_posture":
@@ -337,6 +344,7 @@ public struct KrillConfig: Sendable {
             "kv_cache_dtype", "context_length", "thinking",
             "voice_mode", "speak_replies", "voice_engine", "voice_language",
             "voice_identifier", "voice_rate", "voice_whisper_model", "voice_narration",
+            "voice_orb",
             "prefix_cache_size_gb", "prefix_cache_max_entry_gb",
             "speculative_decoding", "decode_pipeline", "ngram_spec", "flash_attention",
             "server_port", "server_host", "server_api_key", "idle_timeout", "keep_alive",
@@ -439,6 +447,7 @@ public struct KrillConfig: Sendable {
             "voice_rate": voiceRate == 0 ? "(system default)" : "\(voiceRate)",
             "voice_whisper_model": voiceWhisperModel,
             "voice_narration": voiceNarration.rawValue,
+            "voice_orb": voiceOrb,
             "prefix_cache_size_gb": "\(prefixCacheSizeGB)",
             "prefix_cache_max_entry_gb": "\(prefixCacheMaxEntryGB)",
             "speculative_decoding": b(speculativeDecoding),
@@ -526,6 +535,7 @@ public struct KrillConfig: Sendable {
             voiceWhisperModel = v.isEmpty ? Self.defaultVoiceWhisperModel : v
         }
         if let v = env["KRILL_VOICE_NARRATION"] { voiceNarration = VoiceNarrationPolicy.parse(v) }
+        if let v = env["KRILL_VOICE_ORB"] { voiceOrb = v.isEmpty ? "balanced" : v }
         if let v = env["KRILL_ENABLE_THINKING"] {
             let s = v.lowercased()
             thinking = s == "1" || s == "true" || s == "yes" || s == "on"

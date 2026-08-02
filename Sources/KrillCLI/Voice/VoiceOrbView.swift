@@ -10,6 +10,50 @@ import AppKit
 ///  - listening: brighter, breathing plus a scale response to the mic level
 ///  - thinking:  the highlight orbits the core while the agent works
 ///  - speaking:  a steady metronome pulse while narration plays
+/// Motion parameters for one orb temperament. The brand gradient never
+/// changes between personas — only how much the orb moves and glows.
+struct VoiceOrbPersona: Sendable {
+    let breathingPeriod: Double   // seconds per breath cycle
+    let breathingAmplitude: Double
+    let micBoost: Double          // extra scale at full mic level
+    let orbitPeriod: Double       // highlight orbit while thinking
+    let speakPeriod: Double       // narration pulse cycle
+    let speakAmplitude: Double
+    let glowIdle: Float
+    let glowListenBase: Float
+    let glowListenBoost: Float
+    let glowThink: Float
+    let glowSpeak: Float
+
+    static let calm = VoiceOrbPersona(
+        breathingPeriod: 5.0, breathingAmplitude: 0.01, micBoost: 0.08,
+        orbitPeriod: 5.0, speakPeriod: 1.4, speakAmplitude: 0.03,
+        glowIdle: 0.2, glowListenBase: 0.45, glowListenBoost: 0.2,
+        glowThink: 0.35, glowSpeak: 0.45)
+
+    static let balanced = VoiceOrbPersona(
+        breathingPeriod: 3.4, breathingAmplitude: 0.02, micBoost: 0.16,
+        orbitPeriod: 2.6, speakPeriod: 0.9, speakAmplitude: 0.05,
+        glowIdle: 0.25, glowListenBase: 0.55, glowListenBoost: 0.35,
+        glowThink: 0.45, glowSpeak: 0.6)
+
+    static let lively = VoiceOrbPersona(
+        breathingPeriod: 2.2, breathingAmplitude: 0.03, micBoost: 0.30,
+        orbitPeriod: 1.4, speakPeriod: 0.6, speakAmplitude: 0.09,
+        glowIdle: 0.4, glowListenBase: 0.65, glowListenBoost: 0.35,
+        glowThink: 0.55, glowSpeak: 0.75)
+
+    /// `voice_orb` config values map here; anything unknown is `balanced`
+    /// so a typo degrades to the default rather than a dead orb.
+    static func named(_ name: String) -> VoiceOrbPersona {
+        switch name.trimmingCharacters(in: .whitespaces).lowercased() {
+        case "calm": return .calm
+        case "lively": return .lively
+        default: return .balanced
+        }
+    }
+}
+
 @MainActor
 final class VoiceOrbView: NSView {
     enum State {
@@ -18,6 +62,8 @@ final class VoiceOrbView: NSView {
         case thinking
         case speaking
     }
+
+    var persona: VoiceOrbPersona = .balanced
 
     private let glowLayer = CALayer()
     private let coreLayer = CAGradientLayer()
@@ -124,28 +170,28 @@ final class VoiceOrbView: NSView {
         phase += 1.0 / 30.0
         level *= 0.88   // meter release
 
-        let breathing = sin(phase * 2 * .pi / 3.4) * 0.02   // ~3.4 s cycle
+        let breathing = sin(phase * 2 * .pi / persona.breathingPeriod) * persona.breathingAmplitude
         let targetScale: Double
         let targetGlow: Float
         switch state {
         case .idle:
             targetScale = 0.94 + breathing
-            targetGlow = 0.25
+            targetGlow = persona.glowIdle
         case .listening:
-            targetScale = 1.0 + breathing + level * 0.16
-            targetGlow = 0.55 + Float(level) * 0.35
+            targetScale = 1.0 + breathing + level * persona.micBoost
+            targetGlow = persona.glowListenBase + Float(level) * persona.glowListenBoost
         case .thinking:
             orbitPhase += 1.0 / 30.0
             targetScale = 0.98 + breathing
-            targetGlow = 0.45
+            targetGlow = persona.glowThink
         case .speaking:
-            targetScale = 1.0 + sin(phase * 2 * .pi / 0.9) * 0.05   // metronome
-            targetGlow = 0.6
+            targetScale = 1.0 + sin(phase * 2 * .pi / persona.speakPeriod) * persona.speakAmplitude
+            targetGlow = persona.glowSpeak
         }
         displayedScale += (targetScale - displayedScale) * 0.25   // ease toward target
 
         // Orbit the highlight while thinking; park it otherwise.
-        let angle = orbitPhase * 2 * .pi / 2.6
+        let angle = orbitPhase * 2 * .pi / persona.orbitPeriod
         let hx = 0.5 + cos(angle) * 0.25
         let hy = 0.5 + sin(angle) * 0.25
 

@@ -22,7 +22,8 @@ enum VoicePanel {
         voiceLanguage: String = "auto",
         voiceIdentifier: String = "",
         voiceRate: Float = AppleSpeechSettings.systemRate,
-        narration: VoiceNarrationPolicy = .final
+        narration: VoiceNarrationPolicy = .final,
+        orbPersona: String = "balanced"
     ) {
         let application = NSApplication.shared
         application.setActivationPolicy(.accessory)
@@ -32,7 +33,7 @@ enum VoicePanel {
             loop: loop, system: system, modelName: modelName,
             permissionMode: permissionMode, voiceLanguage: voiceLanguage,
             voiceIdentifier: voiceIdentifier, voiceRate: voiceRate,
-            narration: narration)
+            narration: narration, orbPersona: VoiceOrbPersona.named(orbPersona))
         activeController = controller
         controller.show(initialTask: initialTask)
         application.activate(ignoringOtherApps: true)
@@ -156,9 +157,12 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
     private var approvalBox: NSStackView!
     private var approvalLabel: NSTextField!
 
+    private let orbPersona: VoiceOrbPersona
+
     init(loop: AgentLoop, system: String?, modelName: String, permissionMode: PermissionMode,
          voiceLanguage: String, voiceIdentifier: String, voiceRate: Float,
-         narration: VoiceNarrationPolicy) {
+         narration: VoiceNarrationPolicy, orbPersona: VoiceOrbPersona = .balanced) {
+        self.orbPersona = orbPersona
         self.loop = loop
         self.system = system
         self.modelName = modelName
@@ -202,6 +206,7 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
         panel.contentView = content
 
         orbView = VoiceOrbView(frame: .zero)
+        orbView.persona = orbPersona
         orbView.translatesAutoresizingMaskIntoConstraints = false
         orbView.start()
 

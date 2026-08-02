@@ -189,7 +189,8 @@ struct CodeCommand: AsyncParsableCommand {
                 voiceLanguage: config.voiceLanguage,
                 voiceIdentifier: config.voiceIdentifier,
                 voiceRate: config.voiceRate,
-                narration: config.voiceNarration)
+                narration: config.voiceNarration,
+                orbPersona: config.voiceOrb)
             return
         }
 
