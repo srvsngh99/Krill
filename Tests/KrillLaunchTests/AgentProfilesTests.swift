@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import KrillCLI
+@testable import KrillLaunch
 
 final class AgentProfilesTests: XCTestCase {
     private let baseURL = "http://127.0.0.1:57455"

@@ -56,8 +56,11 @@ jobs:
           python3 -m compileall -q tools/check_release_consistency.py
           python3 -m compileall -q tools/test_installer.py
 
-      - name: Check release metadata
-        run: python3 tools/check_release_consistency.py
+      - name: Check release metadata, installer, and formula syntax
+        run: |
+          python3 tools/check_release_consistency.py
+          sh -n install.sh
+          ruby -c Formula/krill.rb
 
       - name: Run release-gate + peak-memory-sampling unit tests
         run: |

@@ -30,8 +30,9 @@ curl -H 'Authorization: Bearer choose-a-secret' http://127.0.0.1:57455/v1/status
 
 The equivalent CLI/config settings are `--api-key` and `server_api_key`.
 Prefer `KRILL_API_KEY` so the token is not stored in shell history, the process
-list, or a config file. When a key is configured, every API route requires it; CORS `OPTIONS`
-preflight is the sole exception. An unauthenticated non-loopback bind is refused
+list, or a config file. When a key is configured, every API route requires it;
+the exceptions are CORS `OPTIONS` preflights and `GET /healthz`, which stays
+open for liveness probes. An unauthenticated non-loopback bind is refused
 unless the operator explicitly passes `--allow-remote-unauthenticated`.
 
 ### Compat mode and the Ollama port

@@ -50,8 +50,11 @@ their corresponding vision family.
    only the divergent suffix. Unsafe spans or incompatible cache geometry fall
    back to a cold prefill.
 5. Prefill the remaining prompt. Long prompts are split according to the engine
-   setting exposed as `KRILL_PREFILL_CHUNK`; last-token-only forward closures
-   avoid an unnecessary vocabulary projection for earlier prompt positions.
+   setting exposed as `KRILL_PREFILL_CHUNK` — MLX's SDPA has no flash prefill
+   kernel and materializes the full per-head `L × L` score matrix, so chunking
+   bounds the query dimension to keep peak memory linear; last-token-only
+   forward closures avoid an unnecessary vocabulary projection for earlier
+   prompt positions.
 6. Snapshot eligible KV state into the bounded prefix cache. Writes to the disk
    tier are asynchronous.
 7. Sample and stream until a stop id, stop string, cancellation, or token limit.
@@ -62,9 +65,13 @@ their corresponding vision family.
 ## KV and prefix caches
 
 The ordinary KV layout is `[batch, kvHeads, sequence, headDim]`. `KVCache`
-amortizes decode-time concatenation by collecting pending slices and compacting
-them in batches. `QuantizedKVCache` stores int8 values with scale/zero metadata.
-`RotatingKVCache` bounds storage for sliding-window attention.
+writes into a preallocated `[B, H, capacity, D]` buffer in place at an offset
+(mlx-lm's pattern) and returns sliced views — amortized O(1) per decode step,
+with O(1) `truncate`; buffers grow in 256-row steps plus ~25% headroom.
+`QuantizedKVCache` stores int8 values with scale/zero metadata.
+`RotatingKVCache` bounds storage for sliding-window attention. One cache per
+transformer layer — a looped family like Nanbeige 4.2 allocates one per *pass*
+(44 slots for its 22 blocks × 2 loops).
 
 `PrefixCache` has two bounded tiers:
 
@@ -74,7 +81,9 @@ them in batches. `QuantizedKVCache` stores int8 values with scale/zero metadata.
   across processes. Hydrated disk entries intentionally do not participate in
   longest-common-prefix scanning.
 
-The key covers model id, KV dtype, prompt tokens, and non-text media identity.
+The key is an FNV-1a hash over
+`schema version || KV dtype || model id || media hash || token bytes` (fast,
+non-cryptographic — keying only).
 The disk budget defaults to 2 GB and the per-entry memory cap defaults to 4 GB;
 both are configurable. Prefix reuse is skipped when a family has non-restorable
 state (for example Qwen3.5's SSM path) or when cache-span guards reject it.

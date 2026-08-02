@@ -53,10 +53,22 @@ final class FlagBox: @unchecked Sendable {
     }
 }
 
-/// Forward a text prompt through the model in query chunks so the attention
-/// score matrix stays `[heads, chunk, context]` instead of `[heads, L, L]`.
-/// The shared cache accumulates across chunks exactly as in a single prefill;
-/// only the final chunk's logits are returned.
+/// Forward a text prompt through the model in query-chunks so the attention
+/// score matrix stays `[heads, chunk, ctx]` instead of `[heads, L, L]`.
+///
+/// MLX's SDPA has no flash prefill kernel: it materializes the full per-head
+/// `L x L` bf16 score matrix for any query length > 1 (verified - peak grows
+/// quadratically and a single >14.3GB Metal buffer hard-OOMs around L ~ 21k
+/// tokens on a 24GB box, and spikes peak well before that). Chunking bounds the
+/// query dimension to `chunk`; the shared KV cache accumulates across chunks
+/// exactly as a single pass would (the same cached-suffix forward the
+/// partial-prefix-reuse path already relies on), so the result is numerically
+/// the single-pass prefill. Each chunk uses the `lastTokenOnly` prefill closure
+/// (full KV update, cheap single-token LM head) and is `eval`'d before the next
+/// so its scores free first; only the final chunk's logits are returned.
+///
+/// `chunkSize <= 0` or a prompt that already fits in one chunk forwards in a
+/// single call (zero behavior change for short prompts and prefix-cache hits).
 func chunkedTextPrefill(
     input: MLXArray,
     caches: [KVCacheProtocol],

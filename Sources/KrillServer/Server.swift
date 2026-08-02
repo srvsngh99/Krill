@@ -272,7 +272,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             body.clear()
             currentOrigin = head.headers.first(name: "Origin")
             discardingUnauthorizedRequest = false
-            if head.method != .OPTIONS,
+            // OPTIONS stays open so CORS preflights (which cannot carry
+            // credentials) succeed; /healthz stays open so liveness probes
+            // (launchd, uptime monitors) keep working — it leaks nothing
+            // beyond liveness and the active model name.
+            let requestPath = head.uri.split(separator: "?").first.map(String.init) ?? head.uri
+            if head.method != .OPTIONS, requestPath != "/healthz",
                !ServerSecurity.isAuthorized(
                     authorization: head.headers.first(name: "Authorization"),
                     apiKey: apiKey

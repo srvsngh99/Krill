@@ -465,7 +465,7 @@ final class ServerTests: XCTestCase {
         for authorization in [nil, "Basic abc", "Bearer wrong"] as [String?] {
             let channel = try makeChannel(apiKey: "correct")
             defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
-            var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/healthz")
+            var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/models")
             if let authorization {
                 head.headers.add(name: "Authorization", value: authorization)
             }
@@ -482,8 +482,19 @@ final class ServerTests: XCTestCase {
     func testBearerAuthenticationAllowsCorrectToken() throws {
         let channel = try makeChannel(apiKey: "correct")
         defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
-        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/healthz")
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/v1/models")
         head.headers.add(name: "Authorization", value: "Bearer correct")
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
+        XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.end(nil)))
+        XCTAssertEqual(try readResponseHead(from: channel).status, .ok)
+        _ = try readResponseBody(from: channel)
+        try readResponseEnd(from: channel)
+    }
+
+    func testHealthzIsExemptFromBearerAuthentication() throws {
+        let channel = try makeChannel(apiKey: "correct")
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/healthz")
         XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.head(head)))
         XCTAssertNoThrow(try channel.writeInbound(HTTPServerRequestPart.end(nil)))
         XCTAssertEqual(try readResponseHead(from: channel).status, .ok)

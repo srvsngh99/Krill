@@ -23,12 +23,6 @@ on:
       - 'Package.swift'
       - 'Package.resolved'
       - 'Makefile'
-      - 'VERSION'
-      - 'RELEASES.md'
-      - 'CHANGELOG.md'
-      - 'Formula/krill.rb'
-      - 'install.sh'
-      - 'tools/check_release_consistency.py'
       - '.github/workflows/swift-tests.yml'
   push:
     branches: [main]
@@ -38,12 +32,6 @@ on:
       - 'Package.swift'
       - 'Package.resolved'
       - 'Makefile'
-      - 'VERSION'
-      - 'RELEASES.md'
-      - 'CHANGELOG.md'
-      - 'Formula/krill.rb'
-      - 'install.sh'
-      - 'tools/check_release_consistency.py'
       - '.github/workflows/swift-tests.yml'
   workflow_dispatch:
 
@@ -81,15 +69,11 @@ jobs:
           xcrun --sdk macosx --show-sdk-version
           sysctl -n machdep.cpu.brand_string || echo "no sysctl"
 
-      # Dependency-free repository checks. These catch malformed package,
-      # installer, formula, whitespace, and release metadata
-      # changes without introducing a formatter version as a new CI variable.
+      # Dependency-free package checks. Installer, formula, and release
+      # metadata checks live in tools-tests.yml, which triggers on those paths.
       - name: Static repository checks
         run: |
           swift package dump-package >/dev/null
-          sh -n install.sh
-          ruby -c Formula/krill.rb
-          python3 tools/check_release_consistency.py
           git diff --check HEAD^ HEAD
 
       - name: Cache SwiftPM build artifacts

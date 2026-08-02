@@ -18,7 +18,7 @@ func jsonString(_ obj: [String: Any]) -> String {
 /// ``LaunchCommand`` flow stays generic over the table.
 
 /// The HTTP surface an agent talks to, mapped to a Krill endpoint.
-enum WireProtocol: String, Sendable {
+public enum WireProtocol: String, Sendable {
     case anthropic        // -> POST /v1/messages
     case openAIChat       // -> POST /v1/chat/completions
     case openAIResponses  // -> POST /v1/responses
@@ -26,29 +26,29 @@ enum WireProtocol: String, Sendable {
 
 /// A config file the launcher writes or merges before exec. `render` is given
 /// the server root URL (`http://host:port`), model id, and resolved API key.
-struct AgentConfigFile: Sendable {
-    enum Mode: Sendable {
+public struct AgentConfigFile: Sendable {
+    public enum Mode: Sendable {
         case write       // create/overwrite verbatim (krill-owned paths)
         case mergeJSON   // deep-merge the rendered JSON into existing JSON
     }
-    let path: String        // may start with ~, expanded at apply time
-    let mode: Mode
-    let render: @Sendable (_ baseURL: String, _ model: String, _ apiKey: String) -> String
+    public let path: String        // may start with ~, expanded at apply time
+    public let mode: Mode
+    public let render: @Sendable (_ baseURL: String, _ model: String, _ apiKey: String) -> String
 }
 
-struct AgentProfile: Sendable {
-    let id: String
-    let displayName: String
-    let summary: String
-    let wire: WireProtocol
+public struct AgentProfile: Sendable {
+    public let id: String
+    public let displayName: String
+    public let summary: String
+    public let wire: WireProtocol
     /// Env to export before exec (values may contain ~, expanded at apply time).
-    let env: @Sendable (_ baseURL: String, _ model: String, _ apiKey: String) -> [String: String]
-    let configFiles: [AgentConfigFile]
+    public let env: @Sendable (_ baseURL: String, _ model: String, _ apiKey: String) -> [String: String]
+    public let configFiles: [AgentConfigFile]
     /// Setup commands to run (and wait for) before exec, e.g. `hermes config set`.
-    let preExec: @Sendable (_ baseURL: String, _ model: String, _ apiKey: String) -> [[String]]
-    let binary: String
-    let args: @Sendable (_ model: String) -> [String]
-    let notInstalledHint: String
+    public let preExec: @Sendable (_ baseURL: String, _ model: String, _ apiKey: String) -> [[String]]
+    public let binary: String
+    public let args: @Sendable (_ model: String) -> [String]
+    public let notInstalledHint: String
 
     init(id: String, displayName: String, summary: String, wire: WireProtocol,
          env: @escaping @Sendable (String, String, String) -> [String: String] = { _, _, _ in [:] },
@@ -69,13 +69,13 @@ struct AgentProfile: Sendable {
     }
 }
 
-enum AgentProfiles {
+public enum AgentProfiles {
 
     // Claude Code: Anthropic Messages API. Claude Code appends /v1/messages to
     // ANTHROPIC_BASE_URL, so the base is the server root (no /v1). The
     // small/fast + default model aliases all point at the one local model so
     // background "haiku" calls route to it too.
-    static let claude = AgentProfile(
+    public static let claude = AgentProfile(
         id: "claude",
         displayName: "Claude Code",
         summary: "Anthropic's coding tool with subagents",
@@ -96,7 +96,7 @@ enum AgentProfiles {
     // Codex: OpenAI Responses API (it dropped Chat Completions). CODEX_HOME
     // relocates Codex's config dir, so we write a complete, isolated config.toml
     // into a krill-owned dir and never touch the user's real ~/.codex.
-    static let codex = AgentProfile(
+    public static let codex = AgentProfile(
         id: "codex",
         displayName: "Codex",
         summary: "OpenAI's open-source coding agent",
@@ -123,7 +123,7 @@ enum AgentProfiles {
     // OpenCode: OpenAI Chat Completions via the @ai-sdk/openai-compatible
     // provider. Deep-merge only the `krill` provider + default model into the
     // user's opencode.json (a .bak is written first).
-    static let opencode = AgentProfile(
+    public static let opencode = AgentProfile(
         id: "opencode",
         displayName: "OpenCode",
         summary: "Anomaly's open-source coding agent",
@@ -148,7 +148,7 @@ enum AgentProfiles {
 
     // Hermes Agent (Nous Research): OpenAI-compatible custom endpoint,
     // configured via its own `hermes config set` subcommands before launch.
-    static let hermes = AgentProfile(
+    public static let hermes = AgentProfile(
         id: "hermes",
         displayName: "Hermes Agent",
         summary: "Self-improving AI agent built by Nous Research",
@@ -165,7 +165,7 @@ enum AgentProfiles {
 
     // Pi: minimal coding agent, OpenAI-compatible. Configured by merging a
     // provider + model into ~/.pi/agent/models.json.
-    static let pi = AgentProfile(
+    public static let pi = AgentProfile(
         id: "pi",
         displayName: "Pi",
         summary: "Minimal AI agent toolkit with plugin support",
@@ -191,7 +191,7 @@ enum AgentProfiles {
 
     // Copilot CLI (GitHub): OpenAI-compatible BYOK via env. Copilot's system
     // prompt + tools are large, so it wants a >= 32k context model.
-    static let copilot = AgentProfile(
+    public static let copilot = AgentProfile(
         id: "copilot",
         displayName: "Copilot CLI",
         summary: "GitHub's AI coding agent for the terminal",
@@ -209,7 +209,7 @@ enum AgentProfiles {
     // into ~/.factory/config.json (the array concatenates, so existing custom
     // models are preserved). Select it in Droid via /model or
     // `droid --model custom:<display name>`.
-    static let droid = AgentProfile(
+    public static let droid = AgentProfile(
         id: "droid",
         displayName: "Droid",
         summary: "Factory's coding agent across terminal and IDEs",
@@ -234,9 +234,9 @@ enum AgentProfiles {
     /// their documented OpenAI-compatible config and may need per-version tweaks.
     /// (codex-app and openclaw need manual setup for now - see the connect-an-
     /// agent docs.)
-    static let all: [AgentProfile] = [claude, codex, opencode, hermes, pi, copilot, droid]
+    public static let all: [AgentProfile] = [claude, codex, opencode, hermes, pi, copilot, droid]
 
-    static func find(_ id: String) -> AgentProfile? {
+    public static func find(_ id: String) -> AgentProfile? {
         all.first { $0.id.lowercased() == id.lowercased() }
     }
 }

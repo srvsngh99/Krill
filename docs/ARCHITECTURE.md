@@ -27,6 +27,7 @@ KrillCLI (executable and command wiring)
 │   └── KrillGrammar
 ├── KrillHarness      coding-agent loop, permissions, tools, research
 ├── KrillAgent        hardware-aware model recommender/operator
+├── KrillLaunch       `krill launch` profiles for external coding agents
 └── KrillRegistry     model catalog, manifests, Hugging Face puller, config
 
 KrillCore
@@ -79,9 +80,16 @@ full-attention layers retain the full history. See
 ## Native model runtimes
 
 The native causal-LM set includes dense Llama, Qwen, Mistral, Gemma, Phi and
-GLM variants; Qwen3.5 hybrid linear/full attention; and multiple switched-MoE
-families including Qwen, Mixtral, OLMoE, and DeepSeek. Separate native paths
-serve embedding encoders and cross-encoder rerankers.
+GLM variants; Qwen3.5 hybrid linear/full attention; Nanbeige 4.2's looped
+transformer (the block stack executes twice over the same weights, each pass
+with its own KV cache slot); and multiple switched-MoE families including
+Qwen, Mixtral, OLMoE, and DeepSeek. Separate native paths serve embedding
+encoders and cross-encoder rerankers.
+
+Architecture detection is a declarative, ordered table
+(`ArchitectureDetection.swift`), evaluated first-match-wins and ordered
+specific-before-generic; `detectedArchitectureID` exposes the pure matcher so
+tests can pin the ordering without a checkpoint.
 
 Multimodal routing is also in-process:
 

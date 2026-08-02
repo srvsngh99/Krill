@@ -308,7 +308,8 @@ with `KRILL_API_KEY`, `--api-key`, or `server_api_key`. To knowingly expose an
 unauthenticated server, pass `--allow-remote-unauthenticated`. Prefer the
 environment variable over `--api-key` so the secret does not enter shell
 history or the process list. Authenticated clients send `Authorization: Bearer <key>`; CORS
-preflight requests remain available without the header.
+preflight requests and `GET /healthz` (liveness probes) remain available
+without the header.
 
 ### 8.1 Endpoints
 

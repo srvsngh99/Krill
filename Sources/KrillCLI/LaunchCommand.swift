@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import KrillLaunch
 import KrillRegistry
 import KrillServer
 #if canImport(Darwin)

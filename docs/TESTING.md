@@ -4,9 +4,11 @@
 
 `swift-tests.yml` builds the release test bundle, compiles the packaged Metal
 library, runs the deterministic Swift suite, publishes SwiftPM's coverage JSON
-and a coverage summary, and performs dependency-free repository/release checks.
-`tools-tests.yml` runs the Python helper tests on Linux and macOS. Large model
-tests use `XCTSkip` unless their documented environment path is present.
+and a coverage summary, and runs dependency-free package checks.
+`tools-tests.yml` runs the Python helper tests on Linux and macOS, plus the
+release-metadata, installer-syntax, and formula-syntax checks (it triggers on
+those paths). Large model tests use `XCTSkip` unless their documented
+environment path is present.
 
 Local equivalents:
 

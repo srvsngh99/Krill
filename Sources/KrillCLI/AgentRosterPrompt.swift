@@ -1,4 +1,5 @@
 import Foundation
+import KrillLaunch
 import KrillTUI
 #if canImport(Darwin)
 import Darwin

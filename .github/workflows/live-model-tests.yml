@@ -77,13 +77,16 @@ jobs:
               --filter BatchedDecodeLiveTests/testBatchedDecodeMatchesSerializedPerRow \
               --filter BatchedDecodeLiveTests/testBatchedDecodeNoCrossRowContamination \
               --filter PrefixCachePartialReuseLiveTests/testPartialReuseIsBitExactAndFaster \
-              --filter NgramLiveParityTests/testNgramGreedyOutputMatchesStandardDecode
+              --filter NgramLiveParityTests/testNgramGreedyOutputMatchesStandardDecode \
+              2>&1 | tee live-model-tests.log
+          exit "${PIPESTATUS[0]}"
+        shell: bash
 
-      - name: Upload test logs on failure
+      - name: Upload test log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: live-model-test-logs
-          path: .build/**/*.xcresult
+          path: live-model-tests.log
           if-no-files-found: ignore
           retention-days: 7
