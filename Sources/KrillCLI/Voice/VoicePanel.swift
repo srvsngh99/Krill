@@ -144,6 +144,7 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
     private var lastError: String?
 
     private var panel: NSPanel!
+    private var orbView: VoiceOrbView!
     private var transcriptView: NSTextView!
     private var inputField: NSTextField!
     private var statusLabel: NSTextField!
@@ -182,7 +183,7 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
     }
 
     private func buildPanel() {
-        let rect = NSRect(x: 0, y: 0, width: 680, height: 660)
+        let rect = NSRect(x: 0, y: 0, width: 680, height: 760)
         panel = NSPanel(
             contentRect: rect,
             styleMask: [.titled, .closable, .resizable, .utilityWindow],
@@ -200,9 +201,14 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
         content.translatesAutoresizingMaskIntoConstraints = false
         panel.contentView = content
 
+        orbView = VoiceOrbView(frame: .zero)
+        orbView.translatesAutoresizingMaskIntoConstraints = false
+        orbView.start()
+
         statusLabel = NSTextField(labelWithString: "Preparing voice…")
         statusLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         statusLabel.textColor = .secondaryLabelColor
+        statusLabel.alignment = .center
 
         partialLabel = NSTextField(wrappingLabelWithString: "")
         partialLabel.font = .systemFont(ofSize: 12)
@@ -257,7 +263,7 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
         inputField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         inputField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let stack = NSStackView(views: [statusLabel, partialLabel, aecLabel, scroll, approvalBox, controls])
+        let stack = NSStackView(views: [orbView, statusLabel, partialLabel, aecLabel, scroll, approvalBox, controls])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
@@ -268,6 +274,8 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
             stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
+            orbView.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            statusLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
             scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
             scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 360),
             partialLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
@@ -379,6 +387,7 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
                 beginUtterance(level: level, audio: audio)
             case let .speechContinued(level, audio):
                 lastLevel = level
+                orbView.setLevel(decibels: level.decibels)
                 if let id = activeSpeechID { liveRecognizers[id]?.append(audio) }
                 refreshUI()
             case let .utteranceReady(samples, sampleRate):
@@ -707,6 +716,7 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         closing = true
+        orbView.stop()
         permissionTask?.cancel()
         pauseListening()
         speaker.stop()
@@ -732,6 +742,15 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
 
     private func refreshUI() {
         guard panel != nil else { return }
+        if speaker.isSpeaking {
+            orbView.setState(.speaking)
+        } else if workTask != nil || pendingApproval != nil {
+            orbView.setState(.thinking)
+        } else if isListening {
+            orbView.setState(.listening)
+        } else {
+            orbView.setState(.idle)
+        }
         var states: [String] = [isListening ? "Listening" : "Paused"]
         if activeSpeechID != nil { states.append("speech detected") }
         if pendingApproval != nil { states.append("awaiting approval") }

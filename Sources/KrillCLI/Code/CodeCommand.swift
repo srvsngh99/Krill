@@ -126,21 +126,27 @@ struct CodeCommand: AsyncParsableCommand {
             mode: mode, allow: Set(allowTools), deny: Set(denyTools))
 
         // Fail fast before the (expensive) model load when no task was given
-        // and the selected surface cannot start idle: only the full-screen
-        // TUI launches without one (bare `krill code`, like other agents).
-        let opensTUI = RawTerminal.isInteractive && !classic && !voice
-            && bash && allowTools.isEmpty && denyTools.isEmpty
-        if task == nil && !opensTUI {
+        // and the selected surface cannot start idle. The voice panel and the
+        // full-screen TUI both launch idle (bare `krill code`, like other
+        // agents); only the classic line renderer needs a task up front.
+        let opensIdleSurface = voice
+            || (RawTerminal.isInteractive && !classic
+                && bash && allowTools.isEmpty && denyTools.isEmpty)
+        if task == nil && !opensIdleSurface {
             print("Error: no task. Usage: krill code [<model>] \"<task>\"")
             print("(bare `krill code` opens the interactive TUI in a terminal)")
             throw ExitCode.failure
         }
 
-        print("Loading model from \(model)...")
+        print("")
+        print("  " + Ansi.ember(Ansi.bold(">_ ")) + Ansi.bold("Krill Code")
+            + Ansi.chrome("  ·  local · private · Sourav AI Labs"))
+        print("  " + Ansi.chrome("Loading \(model)…"))
         let engine = InferenceEngine(modelDirectory: modelDir)
         let loadStart = CFAbsoluteTimeGetCurrent()
         try await engine.load()
-        print(String(format: "Ready (%.1fs).", CFAbsoluteTimeGetCurrent() - loadStart))
+        print("  " + Ansi.chrome(String(format: "Ready in %.1fs.", CFAbsoluteTimeGetCurrent() - loadStart)))
+        print("")
 
         // Filesystem toolset is always available; bash is opt-out. The
         // permission layer (below) governs whether mutating tools actually run.
@@ -171,10 +177,6 @@ struct CodeCommand: AsyncParsableCommand {
         // It shares the loaded engine, full coding toolset and policy with
         // `krill code --classic`; only the interaction surface changes.
         if voice {
-            guard let task else {
-                print("Error: no task. The voice panel needs one: krill code --voice \"<task>\"")
-                throw ExitCode.failure
-            }
             let loop = AgentLoop(
                 generator: EngineGenerator(engine: engine, maxTokens: maxTokens),
                 tools: ToolRegistry(tools),
@@ -182,7 +184,7 @@ struct CodeCommand: AsyncParsableCommand {
                 constrainToolArgs: constrainArgs,
                 permission: policy)
             await VoicePanel.run(
-                loop: loop, initialTask: task, system: effectiveSystem,
+                loop: loop, initialTask: task ?? "", system: effectiveSystem,
                 modelName: model, permissionMode: mode,
                 voiceLanguage: config.voiceLanguage,
                 voiceIdentifier: config.voiceIdentifier,
