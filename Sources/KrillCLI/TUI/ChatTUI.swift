@@ -1181,9 +1181,14 @@ final class ChatTUI {
         ToolRegistry([
             ReadTool(), ListTool(), GlobTool(), GrepTool(), WebFetchTool(), WebSearchTool(),
             EditTool(), MultiEditTool(), WriteTool(), BashTool(),
+            NowTool(), todoTool,
             DispatchTool(queue: spawnQueue),
         ])
     }
+
+    /// One todo list per TUI session — the tool instance carries the state, so
+    /// it must survive across `agentTools()` rebuilds.
+    private let todoTool = TodoTool()
 
     /// Prime the agent thread once, carrying the chat so far so context is not
     /// lost when hands turn on. Injects the tool system over `[system] + chat
@@ -1192,7 +1197,17 @@ final class ChatTUI {
         guard !agentSeeded else { return }
         agentSeeded = true
         var msgs: [[String: String]] = []
-        if let system, !system.isEmpty { msgs.append(["role": "system", "content": system]) }
+        // Ambient facts first (date/time, cwd, platform, model) so the model
+        // never wastes a turn — or a thinking budget — inferring them.
+        let envLine = AgentEnvironment.contextLine(modelName: modelName)
+        if let system, !system.isEmpty {
+            msgs.append(["role": "system", "content": envLine + "\n\n" + system])
+        } else {
+            // Bringing our own system turn suppresses the tooling layer's
+            // fallback directive — carry it explicitly.
+            msgs.append(["role": "system",
+                         "content": envLine + "\n\n" + AgentEnvironment.toolDirective])
+        }
         for t in modelTurns { msgs.append(["role": t.role, "content": t.content]) }
         let format = ToolCalling.ToolFormat.forFamily(engine.family)
         agentMessages = ToolCalling.injectToolSystem(

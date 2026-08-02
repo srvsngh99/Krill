@@ -153,24 +153,31 @@ struct CodeCommand: AsyncParsableCommand {
         var tools: [any Tool] = [
             ReadTool(), ListTool(), GlobTool(), GrepTool(), WebFetchTool(), WebSearchTool(),
             EditTool(), MultiEditTool(), WriteTool(),
+            NowTool(), TodoTool(),
         ]
         if bash { tools.append(BashTool()) }
 
         // Steer the model in plan mode; surface the posture inline. This is
         // shared by the native voice panel and the classic renderer so both
         // execution surfaces preserve exactly the same permission semantics.
-        var effectiveSystem = system
-        switch mode {
-        case .plan:
-            let planNote =
+        // Ambient facts first (date/time, cwd, platform, model), then posture
+        // steering, then the user's system prompt. Since this always yields a
+        // system turn, the tooling layer's fallback anti-over-calling directive
+        // never fires — carry it explicitly when the user supplied no prompt.
+        var systemParts = [AgentEnvironment.contextLine(modelName: model)]
+        if mode == .plan {
+            systemParts.append(
                 "You are in PLAN MODE (read-only). You may read and search files with the "
                 + "read-only tools, but you must NOT write files, edit files, or run shell "
                 + "commands - those are denied. Investigate as needed, then present a clear, "
-                + "concise step-by-step plan as your final answer."
-            effectiveSystem = [planNote, nonEmpty(system)].compactMap { $0 }.joined(separator: "\n\n")
-        case .ask, .acceptEdits, .acceptAll:
-            break
+                + "concise step-by-step plan as your final answer.")
         }
+        if let userSystem = nonEmpty(system) {
+            systemParts.append(userSystem)
+        } else {
+            systemParts.append(AgentEnvironment.toolDirective)
+        }
+        let effectiveSystem = systemParts.joined(separator: "\n\n")
 
         // Voice is intentionally selected before terminal detection: it is a
         // native AppKit surface and must remain usable when stdout is piped.
