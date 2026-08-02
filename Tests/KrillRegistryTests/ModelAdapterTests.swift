@@ -133,8 +133,20 @@ final class ModelAdapterTests: XCTestCase {
         }
     }
 
+    /// A family that advertises `.tools` should be driven by a template it was
+    /// actually trained on, not by the generic Hermes fallback.
+    ///
+    /// Exempt families are those for which `.hermes` is the NATIVE format rather
+    /// than a fallback, so the "hermes implies fallback" reading does not hold:
+    ///   - `.nanbeige`: its own chat template wraps calls in `<tool_call>`, and
+    ///     its `tool_call_format='json'` mode emits exactly
+    ///     `<tool_call>{"name": …, "arguments": {…}}</tool_call>` - the string
+    ///     `ToolCalling.toolSystemPrompt` asks for and `.hermes` parses.
+    private static let nativeHermesFamilies: Set<ModelFamily> = [.qwen25vl, .nanbeige]
+
     func testNativeToolCapabilityAgreesWithTemplate() {
-        for family in ModelFamily.allCases where family != .qwen25vl {
+        for family in ModelFamily.allCases
+        where !Self.nativeHermesFamilies.contains(family) {
             if ModelCapabilities.capabilities(for: family).contains(.tools) {
                 XCTAssertNotEqual(ModelAdapter(family: family).chatTemplate, .hermes,
                     "\(family) declares the tools capability but falls back to the Hermes template")

@@ -4,6 +4,7 @@ import KrillEngine
 import KrillCore
 import KrillSampler
 import KrillRegistry
+import KrillTokenizer
 import KrillServer
 import KrillTooling
 
@@ -145,13 +146,22 @@ struct RunCommand: AsyncParsableCommand {
         // in-process krill run path below does not. Routing only
         // when both paths would produce identical behaviour keeps the
         // optimisation observability-free.
+        // An explicit `--max-tokens` always wins over any default below.
+        let userPinnedMaxTokens = CommandLine.arguments.contains("--max-tokens")
+
         let aliasHasOverrides = registry.getModel(model)?.overrides != nil
         if let prompt,
            image == nil, audio == nil, draftModel == nil,
            registry.hasModel(model),
            !aliasHasOverrides,
            ProcessInfo.processInfo.environment["KRILL_NO_AUTO_DAEMON"] != "1" {
-            if try await tryDaemonRoute(modelName: model, prompt: prompt) {
+            // Same reasoning-headroom rule as the in-process path below, but
+            // decided from the checkpoint on disk: this route answers WITHOUT
+            // loading the model, so there is no engine to ask.
+            let daemonMaxTokens = (userPinnedMaxTokens || !KrillTokenizer
+                .emitsReasoningBlock(inDirectory: modelDir)) ? maxTokens : 4096
+            if try await tryDaemonRoute(
+                modelName: model, prompt: prompt, maxTokens: daemonMaxTokens) {
                 return
             }
         }
@@ -207,14 +217,23 @@ struct RunCommand: AsyncParsableCommand {
         // word, and a 512-token cap can be exhausted mid-reasoning (the reply then
         // comes back empty). Default the multi-turn surfaces to 4096; single-shot
         // CLI stays lean at 512. An explicit `--max-tokens` always wins.
-        let userPinnedMaxTokens = CommandLine.arguments.contains("--max-tokens")
         let chatMaxTokens = userPinnedMaxTokens ? maxTokens : 4096
+
+        // ...and SINGLE-SHOT needs the same headroom on a thinking model, for the
+        // same reason. Staying lean at 512 is right when every generated token is
+        // visible, but on a model whose template opens the assistant turn inside
+        // `<think>` the whole budget is spent on hidden reasoning and
+        // `krill run <model> "hello"` prints NOTHING — indistinguishable from a
+        // broken model. Nanbeige 4.2 does exactly this. Non-reasoning models keep
+        // the lean 512 default; an explicit `--max-tokens` still always wins.
+        let effectiveMaxTokens =
+            (userPinnedMaxTokens || !engine.emitsReasoningBlock) ? maxTokens : 4096
 
         if let prompt {
             // Single-shot mode
             try await generateAndPrint(
                 engine: engine, prompt: prompt, system: system,
-                params: params, maxTokens: maxTokens,
+                params: params, maxTokens: effectiveMaxTokens,
                 imageData: imageData, audioData: audioData
             )
         } else if RawTerminal.isInteractive && !classic {
@@ -256,7 +275,9 @@ struct RunCommand: AsyncParsableCommand {
     /// did not match and the caller should fall through to the
     /// in-process path. A mid-stream failure throws so the user
     /// gets a clear error instead of a silent partial output.
-    private func tryDaemonRoute(modelName: String, prompt: String) async throws -> Bool {
+    private func tryDaemonRoute(
+        modelName: String, prompt: String, maxTokens: Int
+    ) async throws -> Bool {
         let port = Int(ProcessInfo.processInfo.environment["KRILL_PORT"] ?? "") ?? 57455
         let apiKey = KrillConfig.load().serverAPIKey
         guard let status = await DaemonClient.probeStatus(port: port, apiKey: apiKey) else { return false }
@@ -406,6 +427,12 @@ private func printStats(_ stats: GenerationStats) {
     decode: \(stats.generatedTokens) tokens at \(decodeTps) tok/s, \
     TTFT: \(ttft)ms, total: \(total)s
     """)
+
+    // Speculative-decode and MoE routing counters are engine internals -
+    // `final_k`, expert-slot occupancy, peak slot load. They are what you want
+    // when tuning the runtime and noise on a first `krill run`, so they are
+    // opt-in behind KRILL_DEBUG. The throughput line above always prints.
+    guard ProcessInfo.processInfo.environment["KRILL_DEBUG"] != nil else { return }
 
     if let spec = stats.speculative {
         let rate = String(format: "%.2f", spec.acceptanceRate)

@@ -48,6 +48,10 @@ public final class InferenceEngine: @unchecked Sendable {
     private var cachedRegexMask: (pattern: String, mask: any GrammarLogitMask)?
     /// Memoized most-recent Stage D CFG mask, keyed by (grammar, stop set).
     private var cachedCFGMask: (grammar: String, mask: any GrammarLogitMask)?
+    /// Memoized tool-name mask. The offered tool set is stable across an agent
+    /// run, so this hits on every turn after the first.
+    private var cachedToolNameMask:
+        (sentinels: [String], names: [String], mask: any GrammarLogitMask)?
     private let jsonMaskLock = NSLock()
 
     /// Display name of the loaded draft model (alias or directory name).
@@ -85,6 +89,12 @@ public final class InferenceEngine: @unchecked Sendable {
 
     /// The detected model family (nil if not loaded).
     public var family: String? { loadedModel?.family }
+
+    /// True when the loaded model's chat template opens a reasoning block, so
+    /// output tokens are spent thinking before anything visible is emitted.
+    /// Callers budgeting `maxTokens` must allow headroom for BOTH the hidden
+    /// chain and the answer. False when no model is loaded.
+    public var emitsReasoningBlock: Bool { tokenizer?.emitsReasoningBlock ?? false }
 
     /// Internal access for the Stage B batched decoder (BatchedDecode.swift),
     /// which lives in a separate file and so cannot see the `private` stored
@@ -637,6 +647,21 @@ public final class InferenceEngine: @unchecked Sendable {
             let mask = GrammarTokenMask(automaton: grammar, pieces: pieces, stopIds: stopIds,
                                         outputWidth: loadedModel?.vocabSize)
             cachedCFGMask = (grammarText, mask)
+            return mask
+
+        case .toolNames(let sentinels, let nameKey, let names):
+            // No sentinel (family has no unambiguous marker) or no tools on
+            // offer means there is nothing to constrain: decode unconstrained
+            // rather than install a mask that can only ever pass through.
+            guard !sentinels.isEmpty, !names.isEmpty else { return nil }
+            if let cached = cachedToolNameMask, cached.sentinels == sentinels,
+               cached.names == names, cached.mask.stopIdSet == stopIds {
+                return cached.mask
+            }
+            let grammar = ToolNameAutomaton(sentinels: sentinels, nameKey: nameKey, names: names)
+            let mask = GrammarTokenMask(automaton: grammar, pieces: pieces, stopIds: stopIds,
+                                        outputWidth: loadedModel?.vocabSize)
+            cachedToolNameMask = (sentinels, names, mask)
             return mask
         }
     }

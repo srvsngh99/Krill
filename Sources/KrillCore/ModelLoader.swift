@@ -174,6 +174,7 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
     }
 }
 
+
 // MARK: - Per-Family Loaders
 
 func loadLlama(configData: Data, directory: URL) throws -> LoadedModel {
@@ -775,6 +776,25 @@ private func gemma4CacheSpec(config: Gemma4Config) -> [KVCacheKind]? {
     }
 }
 
+/// True when the checkpoint ships `per_layer_model_projection` ALREADY quantized.
+///
+/// Gemma 4 checkpoints disagree here. Some export the PLE projection dense, which is
+/// why the loader skips it when quantizing. But 4-bit community exports such as
+/// `mlx-community/gemma-4-e2b-it-4bit` ship it packed - `.weight` as uint32 with a
+/// companion `.scales`/`.biases` pair - and skipping it there left a dense `Linear`
+/// holding a packed tensor: `[8960, 192]` where `[8960, 1536]` was expected (192 =
+/// 1536 / 8 values per uint32). Because weights load with `verify: []`, the mismatch
+/// was silent until the first matmul, which then trapped:
+///
+///     [matmul] Last dimension of first input with shape (1,N,1536) must match second
+///     to last dimension of second input with shape (192,8960)
+///
+/// The presence of `.scales` is the reliable signal, so quantize the module exactly
+/// when the checkpoint did.
+private func checkpointQuantizesPLE(_ keys: some Collection<String>) -> Bool {
+    keys.contains { $0.hasSuffix("per_layer_model_projection.scales") }
+}
+
 func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(Gemma4Config.self, from: configData)
 
@@ -804,10 +824,19 @@ func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel {
         // not `Linear`, so without this skip the call would no-op on
         // them anyway -- the explicit `nil` makes the intent obvious
         // and saves the path-string match.
+        // Load ALL weights — key structure matches module hierarchy directly.
+        // This happens BEFORE `quantize` so the predicate can ask what the
+        // checkpoint actually ships (see `checkpointQuantizesPLE`).
+        var flatWeights = try loadWeightArrays(from: directory)
+        let pleIsPacked = checkpointQuantizesPLE(flatWeights.keys)
+
         if let q = config.quantization {
             quantize(model: model) { path, _ in
                 let isLangModel = path.contains("language_model.")
-                let isPLE = path.contains("per_layer_model_projection") || path.contains("per_layer_projection_norm")
+                // The norm is never a quantizable leaf; only the projection is
+                // conditional, and only when the checkpoint packed it.
+                let isPLE = (path.contains("per_layer_model_projection") && !pleIsPacked)
+                    || path.contains("per_layer_projection_norm")
                 let isEmbedProj = path.contains("embed_vision.embedding_projection") || path.contains("embed_audio.embedding_projection")
                 let isMoEExpert = path.contains(".experts.switch_glu.")
                 let shouldQuant = (isLangModel && !isPLE && !isMoEExpert) || isEmbedProj
@@ -816,9 +845,6 @@ func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel {
                 return (eff.groupSize, eff.bits, mlxQuantizationMode(eff.mode))
             }
         }
-
-        // Load ALL weights — key structure matches module hierarchy directly
-        var flatWeights = try loadWeightArrays(from: directory)
 
         // Strip "model." prefix if present (some checkpoints use it)
         var cleaned: [String: MLXArray] = [:]
@@ -914,6 +940,12 @@ func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel {
 
     // Fallback: text-only Gemma4 (no vision_config in checkpoint)
     let model = Gemma4ForCausalLM(config)
+
+    // Loaded before `quantize` so the predicate can see whether this checkpoint
+    // packed the PLE projection (see `checkpointQuantizesPLE`).
+    var flatWeights = try loadWeightArrays(from: directory)
+    let pleIsPacked = checkpointQuantizesPLE(flatWeights.keys)
+
     if let q = config.quantization {
         quantize(model: model) { path, _ in
             // Skip PLE in the text-only path too. After `language_model.`
@@ -926,7 +958,7 @@ func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel {
             // there, try the prefixed form so 26B-A4B's `language_model.
             // model.layers.0.mlp.gate_proj` override still binds when
             // the same checkpoint is loaded text-only.
-            if path.contains("per_layer_model_projection")
+            if (path.contains("per_layer_model_projection") && !pleIsPacked)
                 || path.contains("per_layer_projection_norm") { return nil }
             let eff: (groupSize: Int, bits: Int, mode: String)
             if q.moduleOverrides[path] != nil {
@@ -940,7 +972,6 @@ func loadGemma4(configData: Data, directory: URL) throws -> LoadedModel {
         }
     }
 
-    var flatWeights = try loadWeightArrays(from: directory)
     var stripped: [String: MLXArray] = [:]
     for (key, value) in flatWeights {
         if key.hasPrefix("language_model.") {
@@ -1406,6 +1437,37 @@ func loadGlm4(configData: Data, directory: URL) throws -> LoadedModel {
         module: model,
         numLayers: config.numHiddenLayers,
         family: "glm4",
+        forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)
+        },
+        multimodalForward: nil,
+        vocabSize: config.vocabSize
+    )
+}
+
+/// Nanbeige 4.2 (`NanbeigeForCausalLM`, model_type "nanbeige"). Native Swift+MLX
+/// looped-transformer runtime in `NanbeigeModel.swift`.
+///
+/// `numLayers` reports `numLoops * numHiddenLayers` (44 for Nanbeige4.2-3B, not
+/// 22): the engine sizes its KV cache array from this field, and the looped
+/// forward indexes `caches[loop * layerCount + i]`. Reporting 22 here would make
+/// the second loop index past the end of the array.
+func loadNanbeige(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(NanbeigeConfig.self, from: configData)
+    try config.validate()
+    let model = NanbeigeForCausalLM(config)
+    // Strict: a looped model reuses one weight set across every loop, so a
+    // silently-dropped or mis-shaped tensor degrades all `num_loops` passes and
+    // surfaces only as bad text. Fail at load with the offending key instead.
+    try loadWeights(
+        into: model, from: directory, quantization: config.quantization,
+        strictVerify: true)
+
+    return LoadedModel(
+        module: model,
+        numLayers: model.cacheCount,
+        family: "nanbeige",
         forward: { tokens, caches in model(tokens, caches: caches as? [KVCache]) },
         prefillForward: { tokens, caches in
             model(tokens, caches: caches as? [KVCache], lastTokenOnly: true)

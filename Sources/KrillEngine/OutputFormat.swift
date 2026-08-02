@@ -35,4 +35,17 @@ public enum OutputFormat: Sendable {
     case jsonSchemaCompact(String)
     case regex(String)
     case cfg(String)
+    /// Trigger-activated constraint on the tool-NAME slot only.
+    ///
+    /// Unlike every case above, this does not constrain the shape of the whole
+    /// output: the model stays free to answer in prose, reason, and choose its
+    /// own argument values. The grammar idles until one of `sentinels` marks the
+    /// start of a tool call, restricts the name value to `names`, then idles
+    /// again. That makes an unknown tool name unrepresentable rather than
+    /// something to detect and repair afterwards.
+    ///
+    /// `sentinels` come from `ToolCallSentinels` (KrillTooling), which also
+    /// records the families that have no unambiguous marker and are therefore
+    /// left unconstrained.
+    case toolNames(sentinels: [String], nameKey: String, names: [String])
 }

@@ -34,7 +34,8 @@ struct PullCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        print(Ansi.bold(">_ ") + "Pulling " + Ansi.bold(resolved.name) + Ansi.dim(" from \(resolved.repo)"))
+        // The `>_` mark carries the Ember accent, matching `›Krill_` in the TUI.
+        print(Ansi.ember(Ansi.bold(">_ ")) + "Pulling " + Ansi.bold(resolved.name) + Ansi.dim(" from \(resolved.repo)"))
         print(Ansi.dim("   \(resolved.family.rawValue) \u{00B7} \(resolved.params) \u{00B7} \(resolved.quant)"))
         print()
 
@@ -44,14 +45,26 @@ struct PullCommand: AsyncParsableCommand {
 
         let manifest = try await puller.pull(resolved, force: force) { downloaded, total, file in
             if file == "done" {
+                // The final progress callback lands partway through whichever
+                // file finished last, so the bar's last painted frame was that
+                // file's fraction - typically "99%  tokenizer_config.json",
+                // which reads like the download stalled just short. Paint a
+                // completed bar before breaking the line.
+                let barW = 24
+                print(Ansi.clearLine + "  " + Ansi.dim("[") + Ansi.ember(String(repeating: "=", count: barW))
+                    + Ansi.dim("]") + String(format: " %3d%%  ", 100))
                 print()
             } else {
                 let pct = total > 0 ? Int(Double(downloaded) / Double(total) * 100) : 0
                 let barW = 24
                 let filled = max(0, min(barW, pct * barW / 100))
-                let bar = String(repeating: "=", count: filled)
-                    + String(repeating: " ", count: barW - filled)
-                let line = "  " + Ansi.dim("[\(bar)]") + String(format: " %3d%%  ", pct) + Ansi.dim(file)
+                // Ember fills the completed span, the remainder stays dim. The
+                // `=` glyphs and the percentage still carry the reading on their
+                // own, so NO_COLOR / piped output loses nothing (Ansi.enabled).
+                let bar = Ansi.ember(String(repeating: "=", count: filled))
+                    + Ansi.dim(String(repeating: " ", count: barW - filled))
+                let line = "  " + Ansi.dim("[") + bar + Ansi.dim("]")
+                    + String(format: " %3d%%  ", pct) + Ansi.dim(file)
                 print(Ansi.clearLine + line, terminator: "")
                 fflush(stdout)
             }

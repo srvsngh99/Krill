@@ -209,6 +209,15 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     /// endpoint land in follow-up PRs (see
     /// docs/workstreams/WS7_SPECIALIZED_MODEL_TYPES.md).
     case reranker
+    /// Nanbeige 4.2: a LOOPED dense text decoder (`NanbeigeForCausalLM`,
+    /// model_type "nanbeige"). Its blocks are Llama-shaped - no-bias q/k/v/o,
+    /// SwiGLU MLP, two-RMSNorm pre-norm sandwich - but the whole stack is
+    /// executed `num_loops` times over the SAME weights (22 blocks x 2 = 44
+    /// effective layers), each execution keeping its own KV cache slot, and
+    /// `head_dim` (128) is decoupled from `hidden_size` (3072). Native
+    /// Swift+MLX runtime (`NanbeigeForCausalLM`), logit-parity-verified against
+    /// the upstream PyTorch reference.
+    case nanbeige
 
     /// Detect model family from HuggingFace config.json's `architectures` field.
     public static func detect(from configJSON: [String: Any]) -> ModelFamily? {
@@ -252,6 +261,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         if archLower.contains("gemma4") { return .gemma4 }
         if archLower.contains("gemma") { return .gemma }
         if archLower.contains("chatglm") || archLower.contains("glm") { return .glm }
+        if archLower.contains("nanbeige") { return .nanbeige }
         if archLower.contains("deepseek") { return .deepseek }
         // LocateAnything-3B before the generic qwen arm: its text backbone is
         // Qwen2.5 but the arch is `LocateAnythingForConditionalGeneration`
@@ -302,6 +312,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         case "phi", "phi3": return .phi
         case "glm4": return .glm4
         case "chatglm", "glm", "glm4_moe": return .glm
+        case "nanbeige": return .nanbeige
         case "deepseek_v3": return .deepseek
         case "bert", "roberta", "xlm-roberta", "mpnet", "distilbert": return .bert
         // nomic-embed-text: RoPE encoder, still a sentence-embedding (.bert)

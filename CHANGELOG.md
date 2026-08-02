@@ -6,6 +6,103 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-28
+
+### Fixed
+
+- **Every model produced garbage at any temperature above zero.**
+  `MLXRandom.categorical` interprets its input as LOGITS and softmaxes
+  internally, but the sampler handed it `softmax(scaled)`. Probabilities live in
+  `[0, 1]`, so every token collapsed into `exp([0, 1]) = [1, e]` and the draw
+  went nearly UNIFORM over the vocabulary. The filters made it worse rather than
+  better: top-k / top-p / min-p set rejected logits to `-1e9`, which softmaxes
+  to exactly 0 and then re-weights to `exp(0) = 1` — the same weight as a token
+  the model gave 0.9 probability (`exp(0.9)` = 2.46). Greedy decoding never
+  reaches this path, which is why `--temp 0` always looked correct and the bug
+  survived a release. Mirostat had the same defect and now passes `log(p)`.
+- **Per-token decode dropped spaces and newlines on SentencePiece models.**
+  Krill streams one token at a time, which exposes two decoder-chain bugs that
+  whole-string decode hides. A trailing `Strip(" ", start: 1)` — meant to run
+  once over the fused string — ran per token and ate every leading space, so
+  "The capital of France is Paris." arrived as `ThecapitalofFranceisParis.`.
+  And swift-transformers' `ByteFallbackDecoder` never flushes a trailing
+  `<0xHH>` run, so every newline and tab was silently dropped, flattening
+  markdown lists and code blocks onto one line. Affected Mistral as well.
+- **Reasoning models returned an EMPTY single-shot reply.** `krill run <model>
+  "hello"` spent all 512 default tokens inside a `<think>` block the reasoning
+  filter hides, and printed nothing. The multi-turn surfaces already carried
+  4096-token headroom for exactly this; single-shot now follows the model too —
+  a checkpoint whose chat template opens a reasoning block gets the headroom,
+  everything else keeps the lean default, and `--max-tokens` always wins.
+- **`krill quantize` registered every model with `context: 4096`.** Now read
+  from the emitted config (Nanbeige 4.2 advertises 262144). `krill pull` was
+  already correct, so only locally quantized models were affected.
+
+### Added
+
+- **Native Swift + MLX runtime for Nanbeige 4.2 3B** (`nanbeige-4.2-3b`), a
+  LOOPED transformer: the 22-block stack executes twice over the same weights
+  for 44 effective layers, each pass keeping its own KV cache slot (44 caches,
+  not 22), with `model.norm` applied at the end of every loop and `head_dim`
+  (128) decoupled from `hidden_size` (3072). Logit-parity gated against
+  upstream's own `modeling_nanbeige.py` on both a synthetic fixture and the real
+  weights, plus a live smoke gate over the serving path. Ships as
+  `srv-sngh/Nanbeige4.2-3B-mlx-nvfp4` (2.26 GB from 8.3 GB bf16).
+- `tools/verify_nanbeige_parity.py`, including a `--real` mode that documents a
+  trap: `inv_freq` is registered `persistent=False`, so transformers 5.x leaves
+  it zero on every layer after `from_pretrained` and the reference applies no
+  rotary embedding at all.
+- `docs/workstreams/WS8_DIFFUSION_IMAGE_RUNTIME.md` scoping an image-generation
+  runtime (Mage-Flow), which cannot be expressed as a `LoadedModel`.
+
+## [0.16.3] - 2026-07-26
+
+### Fixed
+
+- **`gemma-4-e2b` crashed on its first generation.** The loader skipped
+  quantizing `per_layer_model_projection`, but 4-bit checkpoints such as
+  `mlx-community/gemma-4-e2b-it-4bit` ship that tensor already packed
+  (`uint32 [8960, 192]` with `.scales`/`.biases`). A dense `Linear` then held a
+  packed tensor and the first matmul trapped. Both Gemma 4 loader paths now read
+  the checkpoint before quantizing and quantize the projection exactly when the
+  checkpoint did. This was the model the install caveats recommend, so it hit
+  every new user on the golden path.
+- **Diagnostics no longer corrupt stdout.** With no `LoggingSystem.bootstrap`,
+  swift-log defaulted to `StreamLogHandler.standardOutput`, so lines like
+  `info krill.registry: [KrillRegistry] Saved manifest for …` landed in the
+  middle of `krill pull` and `krill list` output - noise for a human and
+  corruption for `krill list | …`. Logging is now bootstrapped to stderr at
+  `.notice`; raise it with `KRILL_LOG_LEVEL` or `KRILL_DEBUG`.
+- **The installer asked for a password it did not need.** `install.sh` tested
+  `-w` on `$KRILL_PREFIX` itself, which is false for a directory that does not
+  exist yet, so a fresh prefix under a writable `$HOME` escalated to sudo - and
+  then left the tree root-owned, so every later `krill update` asked again.
+  Writability is now judged on the nearest existing ancestor.
+- **The pull progress bar stopped at 99%.** The last callback landed partway
+  through whichever file finished last, so a completed download read as stalled.
+  It now paints a finished bar.
+
+### Added
+
+- **Tool names are constrained at sampling time.** `OutputFormat.toolNames`
+  installs a trigger-activated grammar that idles until a family's tool-call
+  sentinel appears, restricts the name value to the offered tools, then disarms
+  so arguments and prose decode freely. A model trained on another harness's
+  vocabulary (`Read` for `read_file`) can no longer emit a name this harness
+  does not offer. Covers hermes, qwen, gemma4, mistral, phi, and llama's tagged
+  form; `.pythonic` and bare-JSON llama have no unambiguous marker and keep the
+  recovery layers instead. Measured at no detectable decode cost.
+- **[`docs/TOOL_NAME_RESOLUTION.md`](docs/TOOL_NAME_RESOLUTION.md)** - the three
+  resolution layers, per-family coverage, and how to add a family or a tool.
+
+### Changed
+
+- `--constrain-args` now covers the whole tool call: schema-constrained argument
+  repair, plus a constrained re-pick when a name is still unknown. `--no-constrain-args`
+  opts out of all of it, including the sampling-time mask.
+- Speculative-decode and MoE routing counters (`spec:` / `moe:`) moved behind
+  `KRILL_DEBUG`. The throughput line still prints.
+
 ## [0.16.2] - 2026-07-13
 
 ### Added

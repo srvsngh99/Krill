@@ -92,6 +92,11 @@ public enum ModelCapabilities {
             return [.textGeneration, .tools]
         case .llama, .qwen:
             return [.textGeneration, .tools]
+        case .nanbeige:
+            // Nanbeige 4.2 is trained for agentic tool use and its own chat
+            // template wraps calls in `<tool_call>`, matching the `.hermes`
+            // prompt/parser pair Krill injects verbatim.
+            return [.textGeneration, .tools]
         case .qwen35:
             // Ornith-9B (qwen3_5): native text decoder + native vision tower +
             // Qwen tool template. `.visionInput` is advertised for the family;
@@ -171,6 +176,21 @@ public enum ModelCapabilities {
             // merger, 3D mRoPE, and image preprocessing shipped and
             // passed the recorded mlx-vlm oracle on a real
             // checkpoint; the Python bridge was then retired.
+            return .productionNative
+        case .nanbeige:
+            // Nanbeige 4.2: native looped-transformer runtime, logit-parity-gated
+            // against the upstream PyTorch reference on BOTH a synthetic fixture
+            // and the real 3B weights, plus a live smoke gate
+            // (`NanbeigeSmokeTests`) covering the serving path end to end.
+            //
+            // The benchmark is against the PyTorch reference rather than Ollama
+            // because llama.cpp cannot load this architecture at all ("unknown
+            // model architecture: 'nanbeige'") and mlx-lm has no nanbeige port -
+            // the authors' own `modeling_nanbeige.py` is the only other runtime
+            // that can serve it on Apple Silicon. Same machine, 512-token prompt:
+            // Krill nvfp4 294.6 tok/s prefill / 37.5 tok/s decode / 0.15s load
+            // vs the reference (fp16, MPS) 204.0 / 9.73 / 10.2s - 1.4x prefill,
+            // 3.9x decode, and 1.7GB peak against ~8GB.
             return .productionNative
         case .qwen35:
             // Ornith-9B (qwen3_5): the native GatedDeltaNet + full-attention

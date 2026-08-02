@@ -375,6 +375,40 @@ public enum ToolCalling {
             + "concrete values for the required arguments - no prose, no code fences."
     }
 
+    /// Ask the model to re-pick a tool by name from the offered set.
+    ///
+    /// Paired with `toolNameEnumSchema`, which constrains the reply so a name
+    /// outside the offered set is not representable - the same "make it
+    /// unrepresentable rather than repair it after the fact" approach the
+    /// arguments path takes.
+    public static func toolNameRegenPrompt(requested: String, offered: [String]) -> String {
+        return "The tool \"\(escapeForPrompt(requested))\" does not exist. The available "
+            + "tools are: \(offered.map { escapeForPrompt($0) }.joined(separator: ", ")). "
+            + "Pick the one that performs the action you intended and respond with a "
+            + "single JSON object of the form {\"tool\": \"<name>\"} - no prose, no code fences."
+    }
+
+    /// JSON Schema constraining a reply to `{"tool": "<one of the offered names>"}`.
+    public static func toolNameEnumSchema(offered: [String]) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let names = (try? encoder.encode(offered)).flatMap { String(data: $0, encoding: .utf8) }
+            ?? "[]"
+        return #"{"type":"object","properties":{"tool":{"enum":\#(names)}},"required":["tool"]}"#
+    }
+
+    /// Pull the `tool` field out of a `toolNameEnumSchema` reply, accepting it only
+    /// when it names an offered tool. Returns nil otherwise so callers can fail open.
+    public static func parseRepairedToolName(_ text: String, offered: [String]) -> String? {
+        guard let objectJSON = parseArgsObject(text),
+              let data = objectJSON.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let name = obj["tool"] as? String,
+              offered.contains(name)
+        else { return nil }
+        return name
+    }
+
     /// Parse a bare arguments object (pass-2 output) into a compact JSON
     /// string. Tolerant of surrounding whitespace and a stray code fence.
     /// Returns nil if no JSON object is present.
@@ -1335,8 +1369,48 @@ public enum ToolCalling {
         for seg in segments where !seg.isEmpty {
             if let c = knownLower[seg.lowercased()] { return c }
         }
+        // Last resort: models fine-tuned on the widely-published Claude Code tool
+        // vocabulary emit `Read`/`Edit`/`Bash` for what this harness offers as
+        // `read_file`/`edit_file`/`bash`. Those are different WORDS, not casing or
+        // separator slips, so none of the rules above can bridge them and the agent
+        // died on its first tool call with "unknown tool 'Read'". Still gated on
+        // `knownLower`, so an alias only resolves to a tool actually on offer.
+        if let target = agentToolAliases[s.lowercased()],
+           let c = knownLower[target] {
+            return c
+        }
         return nil
     }
+
+    /// Claude-Code-style tool names -> this harness's equivalents. Lowercased keys;
+    /// every VALUE must be a real registered tool name, or the entry is dead weight
+    /// that silently never fires. `AliasTargetsAreRealToolsTests` pins that against
+    /// the actual `ToolRegistry`, so renaming a tool fails the build rather than
+    /// quietly rotting this table.
+    ///
+    /// Deliberately a small, closed set of well-known synonyms - not fuzzy matching.
+    /// The guarantee that an unknown name resolves correctly comes from the
+    /// grammar-constrained re-pick in `AgentLoop`, not from guessing here.
+    static let agentToolAliases: [String: String] = [
+        "read": "read_file",
+        "readfile": "read_file",
+        "write": "write_file",
+        "edit": "edit_file",
+        "multiedit": "multi_edit",
+        "str_replace_editor": "edit_file",
+        "str_replace_based_edit_tool": "edit_file",
+        "ls": "list_dir",
+        "listdir": "list_dir",
+        "task": "dispatch_agent",
+        "agent": "dispatch_agent",
+        "webfetch": "web_fetch",
+        "fetch": "web_fetch",
+        "websearch": "web_search",
+        "search": "web_search",
+        "shell": "bash",
+        "run_command": "bash",
+        "terminal": "bash",
+    ]
 
     private static func squash(_ s: String) -> String {
         s.lowercased().filter { $0 != "_" && $0 != "-" }

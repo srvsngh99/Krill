@@ -141,6 +141,18 @@ let architectureRules: [ArchitectureRule] = [
         },
         action: .load { try loadGLM(configData: $0, directory: $1) }),
 
+    // Nanbeige 4.2 (`NanbeigeForCausalLM`, model_type "nanbeige"): a LOOPED dense
+    // decoder. The 22-block stack is executed `num_loops` (2) times over the same
+    // weights for 44 effective layers, each execution holding its own KV cache
+    // slot. Also decouples head_dim (128) from hidden_size (3072). Weight naming
+    // is standard `model.layers.*`, so this rule must claim the checkpoint before
+    // any generic dense fallback: the fallback would load it as a 22-layer Llama
+    // with 64-wide heads and mis-shape every attention projection.
+    ArchitectureRule(
+        id: "nanbeige",
+        matches: { arch, mt in arch.contains("nanbeige") || mt == "nanbeige" },
+        action: .load { try loadNanbeige(configData: $0, directory: $1) }),
+
     // Qwen 3 MoE: native Swift+MLX runtime is the DEFAULT. Expert dispatch is
     // a single `gatherQuantizedMM` per projection (shared `MoESwitchGLU`) --
     // no Swift per-expert loop, no per-layer host sync. Decode benches 2.7x
@@ -213,10 +225,11 @@ let architectureRules: [ArchitectureRule] = [
         matches: { arch, mt in arch.contains("llama") || mt == "llama" },
         action: .load { try loadLlama(configData: $0, directory: $1) }),
 
-    // Qwen 3.5 (Ornith-9B) native Swift+MLX runtime: a Qwen3-Next-class hybrid
-    // decoder (GatedDeltaNet plus periodic full attention) and, when the config
-    // includes it, the native vision tower. Text-only checkpoints still load
-    // the lean text decoder. MUST precede the generic `qwen` rule: it matches
+    // Qwen 3.5 (Ornith-9B) native Swift+MLX TEXT runtime: a Qwen3-Next-class
+    // HYBRID decoder - GatedDeltaNet linear-attention (SSM) layers interleaved
+    // with full softmax-attention every `full_attention_interval`. The vision
+    // tower is deferred (image inference stays on mlx_vlm), so this serves the
+    // text decoder only. MUST precede the generic `qwen` rule: that rule matches
     // `arch.contains("qwen")`, so a qwen3_5 checkpoint would otherwise load as a
     // dense Qwen and emit garbage. The `!moe` guard keeps a future
     // `qwen3_5_moe` (which also contains "qwen3_5") out of this dense loader.
@@ -275,8 +288,8 @@ let architectureRules: [ArchitectureRule] = [
                 + "runtime in this build (of the WS7 types, only rerankers "
                 + "have shipped - use POST /v1/rerank for those; see "
                 + "docs/workstreams/WS7_SPECIALIZED_MODEL_TYPES.md). Krill "
-                + "serves causal text LMs, supported native multimodal models, "
-                + "embeddings, and rerankers. Detected arch=\(arch), model_type=\(mt).")
+                + "serves causal text LMs, Gemma 4 vision/audio, embeddings, "
+                + "and rerankers. Detected arch=\(arch), model_type=\(mt).")
         }),
 
     // Fallback: most checkpoints in the wild are Llama-architecture, so an
@@ -293,7 +306,7 @@ let architectureRules: [ArchitectureRule] = [
 /// no disk, no weights, no model instantiation. Exposed so tests can pin the
 /// detection table's ordering without a real checkpoint -- the regression net
 /// for "a generic rule shadows a specific one".
-func detectedArchitectureID(architectures: [String], modelType: String) -> String {
+public func detectedArchitectureID(architectures: [String], modelType: String) -> String {
     let arch = architectures.first?.lowercased() ?? ""
     // Force-unwrap is safe: the table's last rule matches any input.
     return architectureRules.first(where: { $0.matches(arch, modelType) })!.id

@@ -133,8 +133,15 @@ final class AgentLoopTests: XCTestCase {
     }
 
     func testUnknownToolYieldsErrorObservationAndContinues() async {
+        // An unresolvable name now gets one grammar-constrained re-pick before the
+        // loop gives up. `MockGenerator` does not override `completeConstrained`,
+        // so that attempt falls back to unconstrained generation and consumes a
+        // scripted response; it returns prose rather than {"tool": "..."}, so
+        // resolution fails open and the unknown-tool observation still reaches the
+        // model exactly as before.
         let gen = MockGenerator(responses: [
             hermesCall("nonexistent", #"{}"#),
+            "I am not sure which tool to use",  // consumed by the re-pick attempt
             "recovered",
         ])
         let loop = AgentLoop(generator: gen, tools: ToolRegistry([StubTool()]))
@@ -335,5 +342,85 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(specs.map(\.name), ["read", "bash"])
         XCTAssertNotNil(reg.tool(named: "bash"))
         XCTAssertNil(reg.tool(named: "missing"))
+    }
+
+    // MARK: - Unknown tool name: grammar-constrained re-pick
+    //
+    // A model trained on another harness's vocabulary names the right capability
+    // with the wrong word. Two layers handle it, cheapest first: deterministic
+    // normalization, then a constrained re-pick against an enum of the offered
+    // names. These tests pin the layering, not just the outcome - a re-pick that
+    // fires when normalization already had the answer costs a whole generation.
+
+    func testUnresolvableNameIsRepairedByConstrainedRepick() async {
+        // "ReadTheFile" is not a casing/separator/alias variant of "read_file",
+        // so no deterministic rule can bridge it and the re-pick must run.
+        let gen = RepairMockGenerator(
+            freeResponses: [hermesCall("ReadTheFile", "{}"), "done"],
+            constrainedReply: #"{"tool":"read_file"}"#)
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([StubTool(name: "read_file")]))
+        let t = await loop.run(user: "go")
+
+        let inv = t.steps[0].toolCalls[0]
+        XCTAssertEqual(inv.name, "read_file", "the unknown name must resolve to the offered tool")
+        XCTAssertFalse(inv.result.isError, "the tool should actually run, not report unknown")
+        let calls = await gen.recordedConstrainedCalls()
+        XCTAssertEqual(calls, 1, "the constrained re-pick should fire exactly once")
+    }
+
+    func testAliasResolvesWithoutSpendingAGeneration() async {
+        // `Read` -> `read_file` is in the deterministic alias table, so the cheap
+        // layer must settle it and the model must NOT be asked to re-pick.
+        let gen = RepairMockGenerator(
+            freeResponses: [hermesCall("Read", "{}"), "done"],
+            constrainedReply: #"{"tool":"SHOULD_NOT_BE_USED"}"#)
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([StubTool(name: "read_file")]))
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps[0].toolCalls[0].name, "read_file")
+        let calls = await gen.recordedConstrainedCalls()
+        XCTAssertEqual(calls, 0, "a deterministic alias must not cost a repair pass")
+    }
+
+    func testKnownNameSkipsTheRepick() async {
+        let gen = RepairMockGenerator(
+            freeResponses: [hermesCall("read_file", "{}"), "done"],
+            constrainedReply: #"{"tool":"SHOULD_NOT_BE_USED"}"#)
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([StubTool(name: "read_file")]))
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps[0].toolCalls[0].name, "read_file")
+        let calls = await gen.recordedConstrainedCalls()
+        XCTAssertEqual(calls, 0, "an offered name must not trigger a re-pick")
+    }
+
+    func testFailOpenWhenRepickDoesNotNameAnOfferedTool() async {
+        // The constrained pass returns a name outside the offered set. Keep the
+        // original and let the "unknown tool" observation reach the model, which
+        // is the conventional recovery signal - never dispatch a guess.
+        let gen = RepairMockGenerator(
+            freeResponses: [hermesCall("ReadTheFile", "{}"), "done"],
+            constrainedReply: #"{"tool":"not_a_real_tool"}"#)
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([StubTool(name: "read_file")]))
+        let t = await loop.run(user: "go")
+
+        let inv = t.steps[0].toolCalls[0]
+        XCTAssertEqual(inv.name, "ReadTheFile", "an unusable re-pick must not rename the call")
+        XCTAssertTrue(inv.result.isError)
+        XCTAssertTrue(inv.result.content.contains("unknown tool"))
+    }
+
+    func testRepickIsDisabledWithConstrainToolArgsOff() async {
+        let gen = RepairMockGenerator(
+            freeResponses: [hermesCall("ReadTheFile", "{}"), "done"],
+            constrainedReply: #"{"tool":"read_file"}"#)
+        let loop = AgentLoop(
+            generator: gen, tools: ToolRegistry([StubTool(name: "read_file")]),
+            constrainToolArgs: false)
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps[0].toolCalls[0].name, "ReadTheFile")
+        let calls = await gen.recordedConstrainedCalls()
+        XCTAssertEqual(calls, 0, "--no-constrain-args must opt out of the re-pick too")
     }
 }
