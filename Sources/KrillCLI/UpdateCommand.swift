@@ -39,7 +39,6 @@ struct UpdateCommand: AsyncParsableCommand {
     var version: String?
 
     private static let repo = "srvsngh99/Krill"
-    private static let installURL = "https://raw.githubusercontent.com/srvsngh99/Krill/main/install.sh"
 
     func run() async throws {
         let current = KrillVersion
@@ -53,6 +52,11 @@ struct UpdateCommand: AsyncParsableCommand {
             print("Checking for updates...")
             target = try await latestReleaseVersion()
             print("Latest version:  \(target)")
+        }
+        guard isReleaseVersion(target) else {
+            throw ValidationError(
+                "Invalid release version '\(target)'. Expected a numeric version such as 0.16.2."
+            )
         }
 
         // Up-to-date short-circuit (unless the user pinned a version or forced it).
@@ -87,7 +91,7 @@ struct UpdateCommand: AsyncParsableCommand {
 
         print("")
         print("Installing Krill \(target)...")
-        try runInstaller(version: target)
+        try await runInstaller(version: target)
         print("")
         print("Done. Run `krill version` to confirm.")
     }
@@ -114,15 +118,50 @@ struct UpdateCommand: AsyncParsableCommand {
         return tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
     }
 
-    /// Re-run install.sh pinned to `version` via `curl … | sh`, reusing
-    /// the same path documented in the README.
-    private func runInstaller(version: String) throws {
+    /// Download and run the installer from the exact release tag being
+    /// installed. Avoiding the mutable `main` branch keeps an update pinned to
+    /// reviewed release contents, and passing the script as a Process argument
+    /// avoids interpolating a version into a shell command.
+    private func runInstaller(version: String) async throws {
+        guard let installerURL = URL(
+            string: "https://raw.githubusercontent.com/\(Self.repo)/v\(version)/install.sh"
+        ) else {
+            throw ValidationError("Could not construct the installer URL for v\(version).")
+        }
+
+        var request = URLRequest(url: installerURL)
+        request.setValue("krill-update/\(KrillVersion)", forHTTPHeaderField: "User-Agent")
+        let (script, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode),
+              !script.isEmpty else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw ValidationError("Could not download the v\(version) installer (HTTP \(code)).")
+        }
+        guard let installerSource = String(data: script, encoding: .utf8),
+              installerSource.contains("# KRILL_INSTALLER_VERIFIES_SHA256=1") else {
+            throw ValidationError(
+                "Release v\(version) predates verified self-updates; refusing to run its installer. "
+                + "Install that version manually after verifying its release digest."
+            )
+        }
+
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(
+            "krill-update-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempDir) }
+        let scriptURL = tempDir.appendingPathComponent("install.sh")
+        try script.write(to: scriptURL, options: .atomic)
+
         var env = ProcessInfo.processInfo.environment
         env["KRILL_VERSION"] = version
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/sh")
-        proc.arguments = ["-c", "curl -fsSL \(Self.installURL) | sh"]
+        proc.arguments = [scriptURL.path]
         proc.environment = env
 
         try proc.run()
@@ -138,6 +177,15 @@ struct UpdateCommand: AsyncParsableCommand {
         guard let path = Bundle.main.executablePath else { return false }
         let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
         return resolved.contains("/Cellar/")
+    }
+}
+
+/// Release tags are deliberately limited to the project's numeric x.y.z
+/// scheme before they are embedded in a raw.githubusercontent URL.
+func isReleaseVersion(_ version: String) -> Bool {
+    let parts = version.split(separator: ".", omittingEmptySubsequences: false)
+    return parts.count == 3 && parts.allSatisfy { part in
+        !part.isEmpty && part.allSatisfy { $0 >= "0" && $0 <= "9" }
     }
 }
 

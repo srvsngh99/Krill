@@ -53,9 +53,13 @@ brew tap srvsngh99/krill && brew install krill
 curl -fsSL https://raw.githubusercontent.com/srvsngh99/Krill/main/install.sh | sh
 ```
 
+The installer verifies the release archive against the SHA-256 digest
+published by GitHub before extracting it. Set `KRILL_VERSION` to pin a release.
+
 **Updating:** Homebrew installs update with `brew upgrade krill`; installer
-builds update in place with `krill update` (add `--check` to only see if a
-newer release is available).
+builds update in place with `krill update`, which fetches the installer from
+the target release tag (add `--check` to only see if a newer release is
+available).
 
 <details>
 <summary>Build from source</summary>
@@ -190,6 +194,7 @@ The full-screen TUI (themes, slash commands, attachments, push-to-talk voice) ha
 |-----|---------|---------|
 | `KRILL_DEFAULT_MODEL` | — | Model used when none is named |
 | `KRILL_PORT` | `57455` | Server port |
+| `KRILL_API_KEY` | — | Require bearer authentication; needed for safe non-loopback serving |
 | `KRILL_KV_CACHE_DTYPE` | `fp16` | KV cache precision (`fp16` / `int8`) |
 | `KRILL_PREFILL_CHUNK` | `2048` | Prompt tokens per prefill pass — lets 32k+ contexts run without OOM (`0` disables) |
 | `KRILL_ROTATING_KV` | `1` | Windowed KV for Gemma sliding layers — O(window) long-context decode (`0` disables) |

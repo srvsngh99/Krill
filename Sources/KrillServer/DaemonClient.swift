@@ -61,6 +61,7 @@ public struct DaemonClient {
     /// in-process fallback noticeably.
     public static func probeStatus(
         port: Int,
+        apiKey: String? = nil,
         timeout: TimeInterval = 0.2
     ) async -> Status? {
         guard let url = URL(string: "http://127.0.0.1:\(port)/v1/status") else {
@@ -69,6 +70,9 @@ public struct DaemonClient {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = timeout
+        if let apiKey = ServerSecurity.normalizedAPIKey(apiKey) {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
@@ -106,6 +110,7 @@ public struct DaemonClient {
         topP: Float,
         maxTokens: Int,
         seed: UInt64?,
+        apiKey: String? = nil,
         onToken: @Sendable (String) -> Void
     ) async throws -> ChatResult {
         guard let url = URL(string: "http://127.0.0.1:\(port)/v1/chat/completions") else {
@@ -131,6 +136,9 @@ public struct DaemonClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        if let apiKey = ServerSecurity.normalizedAPIKey(apiKey) {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.httpBody = bodyData
 
         let start = Date()

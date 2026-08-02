@@ -145,19 +145,23 @@ is being able to watch, steer, and switch between them).
 The agent searches, gets a ranked list of titles/URLs/snippets, then fetches the
 promising ones to read them.
 
-Search is **off until you point Krill at a backend** - it is local-first, with no
-API key. Today the backend is a self-hosted [SearXNG](https://docs.searxng.org/)
-instance:
+Search works with no setup. `search_backend = auto` (the default) selects the
+keyless DuckDuckGo backend. It is best-effort and can be rate-limited; for more
+predictable results select Brave or Tavily with your own API key:
 
 ```
-/config searxng_url=http://localhost:8888
+/config search_backend=brave
+/config brave_api_key=YOUR_KEY
 ```
 
-(or export `KRILL_SEARXNG_URL`). The instance must have `json` enabled in its
-`search.formats` - SearXNG ships HTML-only, so add `json` to that list in its
-`settings.yml`. The backend is pluggable behind `search_backend` (default
-`searxng`); when no backend is configured the tool returns a one-line note
-telling you how to enable it rather than failing silently.
+Tavily uses `search_backend=tavily` plus `tavily_api_key`. The corresponding
+`KRILL_BRAVE_API_KEY` and `KRILL_TAVILY_API_KEY` environment variables are also
+accepted. To keep search self-hosted, use `search_backend=searxng` and set
+`searxng_url` (or `KRILL_SEARXNG_URL`) to an instance whose `search.formats`
+includes `json`. Provider selection is behind one backend interface, so
+`web_search` and deep research behave the same after configuration. See
+[`decisions/0002-web-search-backends.md`](decisions/0002-web-search-backends.md)
+for the public/private backend policy.
 
 ### Deep research
 
@@ -177,9 +181,9 @@ It runs in the foreground with a live progress trail (planning -> searching ->
 reading [n/total] -> synthesizing); press `Esc` or `Ctrl-C` to stop. The search
 and fetch steps are driven by code, not by the model agentically - each model
 call is a single bounded step, which is far more reliable on a small local model
-than asking it to drive a long tool loop itself. Needs `searxng_url` set (same as
-`web_search`); without it `/research` tells you how to enable search. The answer
-is added to the conversation, so you can ask follow-ups that build on it.
+than asking it to drive a long tool loop itself. It uses the same default or
+configured backend as `web_search`. The answer is added to the conversation, so
+you can ask follow-ups that build on it.
 
 ## Model deep-dive
 
