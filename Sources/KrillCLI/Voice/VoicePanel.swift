@@ -188,11 +188,16 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
 
     private func buildPanel() {
         let rect = NSRect(x: 0, y: 0, width: 680, height: 760)
+        // Codex-class chrome: a normal rounded window with traffic lights but a
+        // hidden, transparent title bar over a full-bleed translucent material.
         panel = NSPanel(
             contentRect: rect,
-            styleMask: [.titled, .closable, .resizable, .utilityWindow],
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
-        panel.title = "Krill Code Voice — \(modelName)"
+        panel.title = "Krill Voice — \(modelName)"   // app switcher only
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isMovableByWindowBackground = true
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.hidesOnDeactivate = false
@@ -201,7 +206,10 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
         panel.delegate = self
         panel.center()
 
-        let content = NSView()
+        let content = NSVisualEffectView()
+        content.material = .hudWindow
+        content.blendingMode = .behindWindow
+        content.state = .active
         content.translatesAutoresizingMaskIntoConstraints = false
         panel.contentView = content
 
@@ -228,11 +236,14 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
 
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
+        scroll.borderType = .noBorder
+        scroll.drawsBackground = false
         transcriptView = NSTextView()
         transcriptView.isEditable = false
         transcriptView.isSelectable = true
         transcriptView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        transcriptView.textColor = .labelColor
+        transcriptView.drawsBackground = false
         transcriptView.textContainerInset = NSSize(width: 10, height: 10)
         transcriptView.autoresizingMask = [.width]
         scroll.documentView = transcriptView
@@ -253,18 +264,38 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
         approvalBox.isHidden = true
 
         inputField = NSTextField()
-        inputField.placeholderString = "Type an instruction, even while Krill is working…"
+        inputField.placeholderString = "Ask anything — speak, or type here…"
+        inputField.isBezeled = false
+        inputField.drawsBackground = false
+        inputField.focusRingType = .none
+        inputField.font = .systemFont(ofSize: 13)
         inputField.target = self
         inputField.action = #selector(sendTypedTurn)
 
-        recordButton = NSButton(title: "Pause conversation", target: self, action: #selector(toggleListening))
-        sendButton = NSButton(title: "Send", target: self, action: #selector(sendTypedTurn))
-        interruptButton = NSButton(title: "Interrupt", target: self, action: #selector(interrupt))
+        recordButton = Self.symbolButton(
+            "mic.fill", tooltip: "Pause the conversation",
+            target: self, action: #selector(toggleListening))
+        sendButton = Self.symbolButton(
+            "arrow.up.circle.fill", tooltip: "Send",
+            target: self, action: #selector(sendTypedTurn))
+        sendButton.contentTintColor = Self.emberTint
+        interruptButton = Self.symbolButton(
+            "stop.fill", tooltip: "Interrupt the agent",
+            target: self, action: #selector(interrupt))
         interruptButton.isEnabled = false
-        let controls = NSStackView(views: [recordButton, inputField, sendButton, interruptButton])
+
+        // The Codex-style input pill: mic · text · stop · send inside one
+        // rounded capsule, so the bottom edge reads as a single control.
+        let controls = NSStackView(views: [recordButton, inputField, interruptButton, sendButton])
         controls.orientation = .horizontal
         controls.alignment = .centerY
         controls.spacing = 8
+        controls.edgeInsets = NSEdgeInsets(top: 0, left: 14, bottom: 0, right: 12)
+        controls.wantsLayer = true
+        controls.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
+        controls.layer?.cornerRadius = 22
+        controls.layer?.borderWidth = 1
+        controls.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
         inputField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         inputField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -275,10 +306,12 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
-            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -18),
+            // The title bar is transparent full-size content; keep the orb
+            // clear of the traffic lights.
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 34),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
             orbView.widthAnchor.constraint(equalTo: stack.widthAnchor),
             statusLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
             scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
@@ -287,8 +320,30 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
             aecLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
             approvalBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
             controls.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            controls.heightAnchor.constraint(equalToConstant: 44),
         ])
         refreshUI()
+    }
+
+    private static let emberTint = NSColor(srgbRed: 1.00, green: 0.49, blue: 0.36, alpha: 1)
+
+    /// A borderless SF Symbol button — the pill's circular controls.
+    private static func symbolButton(
+        _ symbolName: String, tooltip: String, target: AnyObject, action: Selector
+    ) -> NSButton {
+        let button = NSButton(
+            image: NSImage(systemSymbolName: symbolName, accessibilityDescription: tooltip)
+                ?? NSImage(),
+            target: target, action: action)
+        button.isBordered = false
+        button.bezelStyle = .regularSquare
+        button.imageScaling = .scaleProportionallyUpOrDown
+        button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+        button.contentTintColor = .secondaryLabelColor
+        button.toolTip = tooltip
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        return button
     }
 
     @objc private func sendTypedTurn() {
@@ -316,7 +371,7 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
             return
         }
         recordButton.isEnabled = false
-        recordButton.title = "Preparing voice…"
+        statusLabel.stringValue = "Preparing voice…"
         permissionTask = Task { [weak self] in
             guard let self else { return }
             let microphoneAllowed = await MicrophoneRecorder.requestAccess()
@@ -765,13 +820,21 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
         if let level = lastLevel, isListening { states.append(String(format: "%.0f dB", level.decibels)) }
         statusLabel.stringValue = "\(states.joined(separator: " · ")) · \(permissionMode.label)"
         statusLabel.textColor = lastError == nil ? .secondaryLabelColor : .systemRed
-        recordButton.title = isListening ? "Pause conversation" : "Resume conversation"
+        let micTooltip = isListening ? "Pause the conversation" : "Resume the conversation"
+        recordButton.image = NSImage(
+            systemSymbolName: isListening ? "mic.fill" : "mic.slash.fill",
+            accessibilityDescription: micTooltip) ?? recordButton.image
+        recordButton.contentTintColor = isListening ? Self.emberTint : .secondaryLabelColor
+        recordButton.toolTip = micTooltip
         recordButton.isEnabled = !closing && permissionTask == nil
         // Typed follow-ups intentionally stay enabled while an agent is running;
         // they are queued just like completed spoken instructions.
         inputField.isEnabled = !closing
         sendButton.isEnabled = !closing
         interruptButton.isEnabled = workTask != nil || pendingApproval != nil || speaker.isSpeaking
+        interruptButton.contentTintColor = interruptButton.isEnabled ? .systemRed : .tertiaryLabelColor
+        // The stop control only occupies the pill while there is work to stop.
+        interruptButton.isHidden = !interruptButton.isEnabled
     }
 
     private func fail(_ message: String) {
