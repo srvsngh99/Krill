@@ -13,43 +13,6 @@ import KrillTUI
 private nonisolated(unsafe) var tuiWinchFlag: sig_atomic_t = 0
 private func tuiWinchHandler(_ sig: Int32) { tuiWinchFlag = 1 }
 
-/// Thread-safe hand-off of `AgentEvent`s from the background agent-run Task to
-/// the main render loop (the run Task only ever touches this; all UI state lives
-/// on the main task). Mirrors the code TUI's queue.
-final class EventQueue: @unchecked Sendable {
-    private let lock = NSLock()
-    private var events: [AgentEvent] = []
-    private var done = false
-    private var result: AgentTranscript?
-    func push(_ e: AgentEvent) { lock.lock(); events.append(e); lock.unlock() }
-    func markDone() { lock.lock(); done = true; lock.unlock() }
-    /// Mark done AND stash the final transcript (so a synchronous pump can pick
-    /// up the continued message history without awaiting the run Task).
-    func finish(_ t: AgentTranscript) { lock.lock(); result = t; done = true; lock.unlock() }
-    func drain() -> [AgentEvent] {
-        lock.lock(); defer { lock.unlock() }
-        let out = events; events.removeAll(); return out
-    }
-    var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return done && events.isEmpty }
-    var finishedResult: AgentTranscript? { lock.lock(); defer { lock.unlock() }; return result }
-}
-
-/// Thread-safe hand-off of `DeepResearch.Progress` (and the final `Report`) from
-/// the research-run Task to the render loop (same pattern as `EventQueue`).
-final class ResearchProgressQueue: @unchecked Sendable {
-    private let lock = NSLock()
-    private var items: [DeepResearch.Progress] = []
-    private var done = false
-    private var report: DeepResearch.Report?
-    func push(_ p: DeepResearch.Progress) { lock.lock(); items.append(p); lock.unlock() }
-    func finish(_ r: DeepResearch.Report) { lock.lock(); report = r; done = true; lock.unlock() }
-    func drain() -> [DeepResearch.Progress] {
-        lock.lock(); defer { lock.unlock() }
-        let out = items; items.removeAll(); return out
-    }
-    var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return done && items.isEmpty }
-}
-
 /// Full-screen opencode-style chat TUI for Krill, in the Sourav AI Labs
 /// monochrome identity: a branded masthead, a scrollable conversation pane, a
 /// bottom input box with a slash-command autosuggest popup (Up/Down to cycle),

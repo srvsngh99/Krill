@@ -48,8 +48,14 @@ these agents use, and `launch` just points each agent at the matching endpoint:
 | `opencode` | OpenCode | OpenAI Chat | `krill` provider deep-merged into `~/.config/opencode/opencode.json` (`.bak` kept) |
 | `hermes` | Hermes Agent | OpenAI Chat | `hermes config set model.*` |
 | `pi` | Pi | OpenAI Chat | `krill` provider merged into `~/.pi/agent/models.json` |
-| `copilot` | Copilot CLI | OpenAI Chat | `COPILOT_PROVIDER_BASE_URL` + `COPILOT_MODEL` env |
+| `copilot` | Copilot CLI | OpenAI Chat | `COPILOT_PROVIDER_BASE_URL` + `COPILOT_PROVIDER_API_KEY` + `COPILOT_MODEL` env |
 | `droid` | Droid (Factory) | OpenAI Chat | `custom_models` entry appended to `~/.factory/config.json` |
+
+When server bearer authentication is configured with `KRILL_API_KEY` or
+`server_api_key`, `krill launch` forwards the resolved credential through each
+agent's native key surface (environment, generated provider config, or setup
+command). The unauthenticated local default continues to use the harmless
+`krill-local` placeholder expected by clients that require a non-empty key.
 
 `claude`, `codex`, and `opencode` are verified end-to-end. `hermes`, `pi`,
 `copilot`, and `droid` follow each tool's documented local-endpoint config and

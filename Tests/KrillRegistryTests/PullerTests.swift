@@ -149,6 +149,126 @@ final class PullerTests: XCTestCase {
                       "registry must not be touched by a rejected pull")
     }
 
+    func testForcedPullFailurePreservesExistingModelAndCleansStaging() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let registry = Registry(baseDir: tempDir)
+        try seedInstalledModel(named: "test-model", registry: registry, contents: "old weights")
+
+        let client = MockPullerHTTPClient(
+            tempDir: tempDir,
+            dataResponses: [
+                .init(
+                    statusCode: 200,
+                    body: Data(#"{"siblings":[{"rfilename":"model.safetensors","size":11}]}"#.utf8)
+                )
+            ],
+            downloadResponses: [
+                .init(statusCode: 500, body: Data()),
+                .init(statusCode: 500, body: Data()),
+                .init(statusCode: 500, body: Data()),
+            ]
+        )
+        let puller = Puller(
+            registry: registry,
+            httpClient: client,
+            tokenProvider: { nil },
+            sleeper: { _ in }
+        )
+        let resolved = ResolvedModel(
+            repo: "org/new-model", name: "test-model", family: .llama,
+            params: "1B", quant: "4bit", context: 4096
+        )
+
+        do {
+            _ = try await puller.pull(resolved, force: true)
+            XCTFail("expected forced pull to fail")
+        } catch {
+            // expected after all retry attempts fail
+        }
+
+        let weight = registry.modelPath("test-model").appendingPathComponent("model.safetensors")
+        XCTAssertEqual(try String(contentsOf: weight, encoding: .utf8), "old weights")
+        XCTAssertEqual(registry.getModel("test-model")?.source, "org/old-model")
+        XCTAssertEqual(client.recordedDownloadRequests().count, 3)
+        let entries = try FileManager.default.contentsOfDirectory(atPath: registry.modelsDir.path)
+        XCTAssertFalse(entries.contains { $0.hasPrefix(".pull-") })
+    }
+
+    func testForcedPullCommitsStagedBlobAndManifestAfterSuccessfulDownload() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let registry = Registry(baseDir: tempDir)
+        try seedInstalledModel(named: "test-model", registry: registry, contents: "old weights")
+
+        let newWeights = Data("new weights".utf8)
+        let client = MockPullerHTTPClient(
+            tempDir: tempDir,
+            dataResponses: [
+                .init(
+                    statusCode: 200,
+                    body: Data(#"{"siblings":[{"rfilename":"model.safetensors","size":11}]}"#.utf8)
+                )
+            ],
+            downloadResponses: [.init(statusCode: 200, body: newWeights)]
+        )
+        let puller = Puller(
+            registry: registry,
+            httpClient: client,
+            tokenProvider: { nil },
+            sleeper: { _ in }
+        )
+        let resolved = ResolvedModel(
+            repo: "org/new-model", name: "test-model", family: .llama,
+            params: "1B", quant: "4bit", context: 4096
+        )
+
+        let manifest = try await puller.pull(resolved, force: true)
+
+        let weight = registry.modelPath("test-model").appendingPathComponent("model.safetensors")
+        XCTAssertEqual(try Data(contentsOf: weight), newWeights)
+        XCTAssertEqual(manifest.source, "org/new-model")
+        XCTAssertEqual(registry.getModel("test-model")?.source, "org/new-model")
+        XCTAssertEqual(manifest.files.first?.sha256,
+                       "75f585ae1855ec1d1ba5e4fc9861e07fbdba3919a965042b2ba78b6fc3e9a18f")
+        let entries = try FileManager.default.contentsOfDirectory(atPath: registry.modelsDir.path)
+        XCTAssertFalse(entries.contains { $0.hasPrefix(".pull-") })
+    }
+
+    func testPullRejectsUnsafeRepoFilenameWithoutEscapingStagingDirectory() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let registry = Registry(baseDir: tempDir)
+        let client = MockPullerHTTPClient(
+            tempDir: tempDir,
+            dataResponses: [
+                .init(
+                    statusCode: 200,
+                    body: Data(#"{"siblings":[{"rfilename":"../escape.safetensors","size":4}]}"#.utf8)
+                )
+            ]
+        )
+        let puller = Puller(
+            registry: registry,
+            httpClient: client,
+            tokenProvider: { nil },
+            sleeper: { _ in }
+        )
+        let resolved = ResolvedModel(
+            repo: "org/model", name: "safe-name", family: .llama,
+            params: "1B", quant: "4bit", context: 4096
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await puller.pull(resolved)
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: registry.modelsDir.appendingPathComponent("escape.safetensors").path
+        ))
+        XCTAssertTrue(client.recordedDownloadRequests().isEmpty)
+    }
+
     func testIsEssentialFileAcceptsCoreAndShardedWeights() {
         // Weight shards and the shard map both ride along.
         XCTAssertTrue(Puller.isEssentialFile("model.safetensors"))
@@ -220,6 +340,41 @@ final class PullerTests: XCTestCase {
             .appendingPathComponent("krill-puller-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
+    }
+
+    private func seedInstalledModel(
+        named name: String,
+        registry: Registry,
+        contents: String
+    ) throws {
+        try registry.ensureDirectories()
+        let blob = registry.modelPath(name)
+        try FileManager.default.createDirectory(at: blob, withIntermediateDirectories: true)
+        try Data(contents.utf8).write(to: blob.appendingPathComponent("model.safetensors"))
+        try registry.saveManifest(ModelManifest(
+            name: name,
+            family: .llama,
+            params: "1B",
+            quant: "4bit",
+            source: "org/old-model",
+            context: 4096,
+            files: [],
+            chatTemplate: "llama",
+            sizeBytes: Int64(contents.utf8.count)
+        ))
+    }
+}
+
+private func XCTAssertThrowsErrorAsync(
+    _ expression: () async throws -> Void,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) async {
+    do {
+        try await expression()
+        XCTFail("expected expression to throw", file: file, line: line)
+    } catch {
+        // expected
     }
 }
 

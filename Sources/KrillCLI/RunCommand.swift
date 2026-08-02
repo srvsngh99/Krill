@@ -279,7 +279,8 @@ struct RunCommand: AsyncParsableCommand {
         modelName: String, prompt: String, maxTokens: Int
     ) async throws -> Bool {
         let port = Int(ProcessInfo.processInfo.environment["KRILL_PORT"] ?? "") ?? 57455
-        guard let status = await DaemonClient.probeStatus(port: port) else { return false }
+        let apiKey = KrillConfig.load().serverAPIKey
+        guard let status = await DaemonClient.probeStatus(port: port, apiKey: apiKey) else { return false }
         guard status.modelLoaded, status.model == modelName else { return false }
 
         var messages: [(role: String, content: String)] = []
@@ -296,6 +297,7 @@ struct RunCommand: AsyncParsableCommand {
             topP: topP,
             maxTokens: maxTokens,
             seed: seed,
+            apiKey: apiKey,
             onToken: { token in
                 print(token, terminator: "")
                 fflush(stdout)

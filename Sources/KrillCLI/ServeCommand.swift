@@ -20,6 +20,12 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Host to bind to (default: $OLLAMA_HOST / config / 127.0.0.1)")
     var host: String?
 
+    @Option(name: .long, help: "Require this bearer token on HTTP API requests (also KRILL_API_KEY / server_api_key; prefer the environment variable).")
+    var apiKey: String?
+
+    @Flag(name: .long, help: "Acknowledge the risk of binding beyond loopback without authentication.")
+    var allowRemoteUnauthenticated: Bool = false
+
     @Option(name: .long, help: "Client compat surface: ollama | openai | both (default both). Krill's default port is 57455; for a drop-in Ollama replacement pass --port 11434.")
     var compat: String = "both"
 
@@ -56,6 +62,26 @@ struct ServeCommand: AsyncParsableCommand {
         }
         let host = self.host ?? config.serverHost
         let port = self.port ?? config.serverPort
+        let rawAPIKey = self.apiKey ?? config.serverAPIKey
+        let apiKey = ServerSecurity.normalizedAPIKey(rawAPIKey)
+        if rawAPIKey != nil, apiKey == nil {
+            print("Error: the server API key must be a non-empty token with no whitespace.")
+            throw ExitCode.failure
+        }
+        guard ServerSecurity.permitsBinding(
+            host: host,
+            apiKey: apiKey,
+            allowRemoteUnauthenticated: allowRemoteUnauthenticated
+        ) else {
+            print("Error: refusing unauthenticated non-loopback bind on '\(host)'.")
+            print("Set --api-key / KRILL_API_KEY, or explicitly pass --allow-remote-unauthenticated.")
+            throw ExitCode.failure
+        }
+        if apiKey != nil {
+            print("HTTP bearer authentication enabled.")
+        } else if !ServerSecurity.isLoopbackHost(host) {
+            print("WARNING: serving without authentication on non-loopback host '\(host)'.")
+        }
         let registry: Registry
         if let md = config.modelsDir, !md.isEmpty {
             registry = Registry(modelsDir: URL(fileURLWithPath: md))
@@ -152,6 +178,7 @@ struct ServeCommand: AsyncParsableCommand {
         let server = KrillServer(host: host, port: port, compat: compatMode,
                                engines: engines, activeRef: activeRef,
                                fallbackEngine: engine, registry: registry,
+                               apiKey: apiKey,
                                corsOrigins: config.origins,
                                defaultContextLimit: config.contextLength,
                                numParallel: config.numParallel,
@@ -159,4 +186,3 @@ struct ServeCommand: AsyncParsableCommand {
         try await server.start()
     }
 }
-

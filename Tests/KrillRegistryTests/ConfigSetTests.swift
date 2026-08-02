@@ -91,4 +91,13 @@ final class ConfigSetTests: XCTestCase {
         cfg.mergeFromTOML(out)
         XCTAssertEqual(cfg.defaultAgentPosture, "accept-edits")
     }
+
+    func testServerAPIKeyParsesAndIsRedacted() {
+        var cfg = KrillConfig()
+        cfg.mergeFromTOML("server_api_key = \"top-secret\"\n")
+        XCTAssertEqual(cfg.serverAPIKey, "top-secret")
+        let displayed = Dictionary(uniqueKeysWithValues: cfg.displayPairs())
+        XCTAssertEqual(displayed["server_api_key"], "(set)")
+        XCTAssertFalse(cfg.displayPairs().description.contains("top-secret"))
+    }
 }

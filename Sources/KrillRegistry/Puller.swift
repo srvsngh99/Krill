@@ -56,8 +56,8 @@ public final class Puller: @unchecked Sendable {
         progress: ProgressHandler? = nil
     ) async throws -> ModelManifest {
         // Guard the resolved name BEFORE any filesystem op: a crafted ref
-        // (e.g. "x/..") can reduce to ".." and make modelPath() resolve to
-        // the registry root, which the removeItem below would then wipe.
+        // (e.g. "x/..") can reduce to ".." and make staging, backup, or final
+        // paths resolve outside the intended registry subtree.
         try Registry.requireValidName(resolved.name)
 
         // Check if already installed
@@ -69,14 +69,17 @@ public final class Puller: @unchecked Sendable {
         }
 
         try registry.ensureDirectories()
-        let destDir = registry.modelPath(resolved.name)
-
-        // Create destination directory
         let fm = FileManager.default
-        if fm.fileExists(atPath: destDir.path) {
-            try fm.removeItem(at: destDir)
-        }
+        // Keep a forced re-download completely separate from the installed
+        // model. The existing blob and manifest are not touched until every
+        // remote file and the new manifest have been written successfully.
+        let stagingRoot = registry.modelsDir.appendingPathComponent(
+            ".pull-\(resolved.name)-\(UUID().uuidString)"
+        )
+        let destDir = stagingRoot.appendingPathComponent("blob")
+        let stagedManifestURL = stagingRoot.appendingPathComponent("manifest.json")
         try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: stagingRoot) }
 
         // List files in the HF repo
         let fileList = try await listRepoFiles(repo: resolved.repo)
@@ -91,7 +94,7 @@ public final class Puller: @unchecked Sendable {
 
         // Download each file
         for file in essentialFiles {
-            let fileURL = destDir.appendingPathComponent(file.name)
+            let fileURL = try Self.safeDestination(for: file.name, under: destDir)
 
             // Create subdirectories if needed
             let parentDir = fileURL.deletingLastPathComponent()
@@ -139,7 +142,7 @@ public final class Puller: @unchecked Sendable {
             context = maxPos
         }
 
-        // Build and save manifest
+        // Build the manifest that will be staged alongside the blob.
         let manifest = ModelManifest(
             name: resolved.name,
             family: family,
@@ -153,8 +156,107 @@ public final class Puller: @unchecked Sendable {
             pulledAt: Date()
         )
 
-        try registry.saveManifest(manifest)
+        // Stage and decode the manifest before committing. This catches an
+        // encoding/write problem while the previous installation is still
+        // intact, just like a failed model-file download.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let manifestData = try encoder.encode(manifest)
+        try manifestData.write(to: stagedManifestURL, options: .atomic)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        _ = try decoder.decode(ModelManifest.self, from: Data(contentsOf: stagedManifestURL))
+
+        try commitStagedModel(
+            name: resolved.name,
+            blob: destDir,
+            manifest: stagedManifestURL
+        )
+        logger.info("Installed model \(resolved.name)")
         return manifest
+    }
+
+    /// Resolve a HuggingFace filename beneath the staging directory. Repos are
+    /// untrusted input and may contain absolute paths or `..` components.
+    private static func safeDestination(for filename: String, under root: URL) throws -> URL {
+        let components = filename.split(separator: "/", omittingEmptySubsequences: false)
+        guard !filename.hasPrefix("/"),
+              !filename.contains("\\"),
+              !components.isEmpty,
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            throw PullerError.invalidResponse("Unsafe repository filename: \(filename)")
+        }
+
+        let candidate = root.appendingPathComponent(filename).standardizedFileURL
+        let rootPath = root.standardizedFileURL.path + "/"
+        guard candidate.path.hasPrefix(rootPath) else {
+            throw PullerError.invalidResponse("Unsafe repository filename: \(filename)")
+        }
+        return candidate
+    }
+
+    /// Commit a fully staged blob directory and manifest as one transaction.
+    /// Both old items are retained in a same-filesystem backup until both new
+    /// moves succeed; any error restores the previous installation.
+    private func commitStagedModel(name: String, blob: URL, manifest: URL) throws {
+        let fm = FileManager.default
+        let destinationBlob = registry.modelPath(name)
+        let destinationManifest = registry.manifestsDir.appendingPathComponent("\(name).json")
+        let backupRoot = registry.modelsDir.appendingPathComponent(
+            ".pull-backup-\(name)-\(UUID().uuidString)"
+        )
+        let backupBlob = backupRoot.appendingPathComponent("blob")
+        let backupManifest = backupRoot.appendingPathComponent("manifest.json")
+
+        try fm.createDirectory(at: backupRoot, withIntermediateDirectories: true)
+        var backedUpBlob = false
+        var backedUpManifest = false
+        var installedBlob = false
+
+        do {
+            if fm.fileExists(atPath: destinationBlob.path) {
+                try fm.moveItem(at: destinationBlob, to: backupBlob)
+                backedUpBlob = true
+            }
+            if fm.fileExists(atPath: destinationManifest.path) {
+                try fm.moveItem(at: destinationManifest, to: backupManifest)
+                backedUpManifest = true
+            }
+
+            // These are atomic renames because staging, backups, and final
+            // destinations all live under the registry's models directory.
+            try fm.moveItem(at: blob, to: destinationBlob)
+            installedBlob = true
+            try fm.moveItem(at: manifest, to: destinationManifest)
+
+            // Cleanup is not part of the commit. If it fails, the new model is
+            // still valid and the backup is safer left for manual recovery.
+            try? fm.removeItem(at: backupRoot)
+        } catch {
+            // Best-effort removal of partially committed new state, followed
+            // by restoration of the exact old blob and manifest.
+            if installedBlob { try? fm.removeItem(at: destinationBlob) }
+
+            var rollbackError: Error?
+            if backedUpBlob {
+                do { try fm.moveItem(at: backupBlob, to: destinationBlob) }
+                catch { rollbackError = error }
+            }
+            if backedUpManifest {
+                do { try fm.moveItem(at: backupManifest, to: destinationManifest) }
+                catch { if rollbackError == nil { rollbackError = error } }
+            }
+            if let rollbackError {
+                throw PullerError.transactionFailed(
+                    "Install failed (\(error)); restoring the previous model also failed "
+                    + "(\(rollbackError)). Backup retained at \(backupRoot.path)"
+                )
+            }
+            try? fm.removeItem(at: backupRoot)
+            throw error
+        }
     }
 }
 
@@ -396,6 +498,7 @@ public enum PullerError: Error, CustomStringConvertible {
     case httpError(Int, String)
     case invalidResponse(String)
     case verificationFailed(String, expected: String, got: String)
+    case transactionFailed(String)
 
     public var description: String {
         switch self {
@@ -407,6 +510,8 @@ public enum PullerError: Error, CustomStringConvertible {
             return "Invalid response: \(msg)"
         case .verificationFailed(let file, let expected, let got):
             return "SHA256 mismatch for \(file): expected \(expected), got \(got)"
+        case .transactionFailed(let message):
+            return "Model install transaction failed: \(message)"
         }
     }
 }

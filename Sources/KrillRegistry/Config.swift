@@ -48,6 +48,10 @@ public struct KrillConfig: Sendable {
     /// HTTP server host.
     public var serverHost: String
 
+    /// Optional bearer token required by every HTTP API route. Prefer the
+    /// `KRILL_API_KEY` environment variable to avoid persisting this secret.
+    public var serverAPIKey: String?
+
     /// Idle timeout for models in serve mode (seconds).
     public var idleTimeout: Int
 
@@ -143,6 +147,7 @@ public struct KrillConfig: Sendable {
         self.modelsDir = nil
         self.serverPort = 57455   // "KRILL" on a phone keypad; unique vs Ollama's 11434
         self.serverHost = "127.0.0.1"
+        self.serverAPIKey = nil
         self.idleTimeout = 300
         self.contextLength = nil
         self.keepAlive = "5m"
@@ -220,6 +225,8 @@ public struct KrillConfig: Sendable {
                 if let v = Int(value) { serverPort = v }
             case "server_host", "host":
                 serverHost = value
+            case "server_api_key":
+                serverAPIKey = value.isEmpty ? nil : value
             case "idle_timeout":
                 if let v = Int(value) { idleTimeout = v }
             case "max_loaded_models":
@@ -283,7 +290,7 @@ public struct KrillConfig: Sendable {
             "voice_mode", "speak_replies",
             "prefix_cache_size_gb", "prefix_cache_max_entry_gb",
             "speculative_decoding", "decode_pipeline", "ngram_spec", "flash_attention",
-            "server_port", "server_host", "idle_timeout", "keep_alive",
+            "server_port", "server_host", "server_api_key", "idle_timeout", "keep_alive",
             "num_parallel", "max_loaded_models", "max_queue", "models_dir",
         ]
         #if KREACH
@@ -385,6 +392,7 @@ public struct KrillConfig: Sendable {
             "flash_attention": b(flashAttention),
             "server_port": "\(serverPort)",
             "server_host": serverHost,
+            "server_api_key": secret(serverAPIKey),
             "idle_timeout": "\(idleTimeout)",
             "keep_alive": keepAlive,
             "num_parallel": "\(numParallel)",
@@ -493,6 +501,9 @@ public struct KrillConfig: Sendable {
         }
         if let v = ProcessInfo.processInfo.environment["KRILL_HOST"] {
             serverHost = v
+        }
+        if let v = ProcessInfo.processInfo.environment["KRILL_API_KEY"] {
+            serverAPIKey = v.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : v
         }
     }
 }

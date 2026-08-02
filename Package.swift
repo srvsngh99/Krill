@@ -42,6 +42,7 @@ let package = Package(
         // Pure, dependency-free TUI logic (key decoding, text wrap, slash menu)
         // split out so it is unit-testable without a terminal.
         .target(name: "KrillTUI", dependencies: []),
+        .target(name: "KrillLaunch", dependencies: []),
         .target(
             name: "KrillRuntime",
             dependencies: []
@@ -160,6 +161,7 @@ let package = Package(
                 "KrillHarness",
                 "CEditLine",
                 "KrillTUI",
+                "KrillLaunch",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
@@ -174,7 +176,8 @@ let package = Package(
                 "KrillRegistry",
                 "KrillKernels",
                 .product(name: "MLX", package: "mlx-swift"),
-            ]
+            ],
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "KrillEngineTests",
@@ -186,7 +189,8 @@ let package = Package(
                 "KrillRuntime",
                 "KrillTokenizer",
                 .product(name: "MLX", package: "mlx-swift"),
-            ]
+            ],
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "KrillServerTests",
@@ -204,6 +208,10 @@ let package = Package(
         .testTarget(
             name: "KrillTUITests",
             dependencies: ["KrillTUI"]
+        ),
+        .testTarget(
+            name: "KrillLaunchTests",
+            dependencies: ["KrillLaunch"]
         ),
         .testTarget(
             name: "KrillToolingTests",
