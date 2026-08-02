@@ -91,10 +91,9 @@ struct CodeCommand: AsyncParsableCommand {
             print("Error: no model. Pass one (krill code <model> \"<task>\") or set default_model in ~/.krill/config.toml.")
             throw ExitCode.failure
         }
-        guard let task else {
-            print("Error: no task. Usage: krill code [<model>] \"<task>\"")
-            throw ExitCode.failure
-        }
+        // A task is optional for the full-screen TUI (bare `krill code` opens
+        // it idle, like other coding agents). The voice panel and the classic
+        // line renderer still require one and fail below with a clear error.
 
         let modelDir = registry.hasModel(model)
             ? registry.modelPath(model) : URL(fileURLWithPath: model)
@@ -125,6 +124,17 @@ struct CodeCommand: AsyncParsableCommand {
         }
         let policy = PermissionPolicy(
             mode: mode, allow: Set(allowTools), deny: Set(denyTools))
+
+        // Fail fast before the (expensive) model load when no task was given
+        // and the selected surface cannot start idle: only the full-screen
+        // TUI launches without one (bare `krill code`, like other agents).
+        let opensTUI = RawTerminal.isInteractive && !classic && !voice
+            && bash && allowTools.isEmpty && denyTools.isEmpty
+        if task == nil && !opensTUI {
+            print("Error: no task. Usage: krill code [<model>] \"<task>\"")
+            print("(bare `krill code` opens the interactive TUI in a terminal)")
+            throw ExitCode.failure
+        }
 
         print("Loading model from \(model)...")
         let engine = InferenceEngine(modelDirectory: modelDir)
@@ -161,6 +171,10 @@ struct CodeCommand: AsyncParsableCommand {
         // It shares the loaded engine, full coding toolset and policy with
         // `krill code --classic`; only the interaction surface changes.
         if voice {
+            guard let task else {
+                print("Error: no task. The voice panel needs one: krill code --voice \"<task>\"")
+                throw ExitCode.failure
+            }
             let loop = AgentLoop(
                 generator: EngineGenerator(engine: engine, maxTokens: maxTokens),
                 tools: ToolRegistry(tools),
@@ -217,6 +231,11 @@ struct CodeCommand: AsyncParsableCommand {
             if bash {
                 print("Note: the bash tool and file edits run with no sandbox. Use --no-bash to disable shell access, or --plan / --permission-mode ask to gate tools.")
             }
+        }
+
+        guard let task else {
+            print("Error: no task. Usage: krill code [<model>] \"<task>\"")
+            throw ExitCode.failure
         }
 
         let loop = AgentLoop(
