@@ -179,7 +179,7 @@ private final class VoicePanelController: NSObject, NSWindowDelegate {
     func show(initialTask: String) {
         buildPanel()
         panel.makeKeyAndOrderFront(nil)
-        append(.note("Voice Code ready — \(permissionMode.postureNote)"))
+        append(.note("Voice Code ready — \(permissionMode.summary)"))
         beginListening()
         if !initialTask.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             acceptInstruction(initialTask, source: "initial")

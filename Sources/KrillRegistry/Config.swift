@@ -126,11 +126,12 @@ public struct KrillConfig: Sendable {
     /// regardless of this default.
     public var defaultMode: String
 
-    /// Which permission posture agent mode opens on: "plan" (default, read-only),
+    /// Which permission level agent mode opens on: "plan" (default, read-only),
     /// "ask" (confirm each mutating tool), "accept-edits" (auto-apply edits, ask
     /// for commands), or "auto"/"accept-all" (run everything). Shift+Tab cycles
-    /// it live in the TUI. `default_agent_posture` in config.
-    public var defaultAgentPosture: String
+    /// it live in the TUI. `default_agent_permissions` in config
+    /// (`default_agent_posture` accepted as a legacy alias).
+    public var defaultAgentPermissions: String
 
     /// Which web-search backend `web_search` uses: "auto" (default → keyless
     /// DuckDuckGo, works out of the box), "brave"/"tavily" (BYOK, need an API
@@ -200,7 +201,7 @@ public struct KrillConfig: Sendable {
         self.voiceNarration = .final
         self.voiceOrb = "balanced"
         self.defaultMode = "agent"
-        self.defaultAgentPosture = "plan"
+        self.defaultAgentPermissions = "plan"
         self.searchBackend = "auto"
         self.searxngURL = nil
         self.braveAPIKey = nil
@@ -295,8 +296,8 @@ public struct KrillConfig: Sendable {
                 voiceOrb = value.isEmpty ? "balanced" : value
             case "default_mode":
                 defaultMode = value
-            case "default_agent_posture":
-                defaultAgentPosture = value
+            case "default_agent_permissions", "default_agent_posture":
+                defaultAgentPermissions = value
             case "search_backend":
                 searchBackend = value
             case "searxng_url":
@@ -339,7 +340,8 @@ public struct KrillConfig: Sendable {
     /// offered here to keep the surface small and unambiguous.
     public static let writableKeys: [String] = {
         var keys = [
-            "default_model", "default_quant", "default_mode", "default_agent_posture",
+            "default_model", "default_quant", "default_mode", "default_agent_permissions",
+            "default_agent_posture",  // legacy alias, still settable
             "search_backend", "searxng_url", "brave_api_key", "tavily_api_key",
             "kv_cache_dtype", "context_length", "thinking",
             "voice_mode", "speak_replies", "voice_engine", "voice_language",
@@ -431,7 +433,7 @@ public struct KrillConfig: Sendable {
             "default_model": defaultModel ?? "(none)",
             "default_quant": "\(defaultQuant)",
             "default_mode": defaultMode,
-            "default_agent_posture": defaultAgentPosture,
+            "default_agent_permissions": defaultAgentPermissions,
             "search_backend": searchBackend,
             "searxng_url": searxngURL ?? "(none)",
             "brave_api_key": secret(braveAPIKey),

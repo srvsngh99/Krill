@@ -85,11 +85,15 @@ final class ConfigSetTests: XCTestCase {
     }
 
     func testWritableKeysRoundTripThroughParser() {
-        // A value written for default_agent_posture is read back by load's parser.
+        // Both the new key and the legacy alias are read back by load's parser.
         let out = KrillConfig.upsertTOML("", key: "default_agent_posture", value: "accept-edits")
         var cfg = KrillConfig()
         cfg.mergeFromTOML(out)
-        XCTAssertEqual(cfg.defaultAgentPosture, "accept-edits")
+        XCTAssertEqual(cfg.defaultAgentPermissions, "accept-edits",
+                       "legacy default_agent_posture key still parses")
+        var cfg2 = KrillConfig()
+        cfg2.mergeFromTOML("default_agent_permissions = \"ask\"\n")
+        XCTAssertEqual(cfg2.defaultAgentPermissions, "ask")
     }
 
     func testServerAPIKeyParsesAndIsRedacted() {

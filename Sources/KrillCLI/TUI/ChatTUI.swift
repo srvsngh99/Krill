@@ -39,14 +39,14 @@ final class ChatTUI {
     private var modelTurns: [(role: String, content: String)] = []
 
     // Agent mode: the same surface with tools + file edits turned on. `surface`
-    // is the chat/agent toggle (`/agent`); `posture` is the permission leash
+    // is the chat/agent toggle (`/agent`); `permissions` is the leash
     // cycled with Shift+Tab. The agent thread keeps its own model-facing history
     // (`agentMessages`, carried across turns via AgentLoop's priorMessages seam),
     // separate from chat's `modelTurns`. The on-screen `view` is shared so the
     // transcript reads continuously across both modes.
     private enum Surface { case chat, agent }
     private var surface: Surface = .chat
-    private var posture: PermissionMode = .plan
+    private var permissions: PermissionMode = .plan
     private var agentMessages: [[String: String]] = []
     private var agentSeeded = false
     private var agentChipShown = false          // a chip was emitted for the in-flight call
@@ -172,7 +172,7 @@ final class ChatTUI {
          voiceWhisperModelSetting: String = WhisperModelManager.defaultSKU,
          voiceNarrationSetting: VoiceNarrationPolicy = .final,
          thinkingSetting: Bool = true,
-         modeSetting: String = "chat", agentPostureSetting: String = "plan",
+         modeSetting: String = "chat", agentPermissionsSetting: String = "plan",
          initialAgentTask: String? = nil) {
         self.engine = engine
         self.modelName = modelName
@@ -195,7 +195,7 @@ final class ChatTUI {
         self.whisperSKU = WhisperModelManager.sku(voiceWhisperModelSetting)?.id ?? WhisperModelManager.defaultSKU
         self.thinkingOn = thinkingSetting
         self.surface = modeSetting.lowercased() == "agent" ? .agent : .chat
-        self.posture = PermissionMode.parse(agentPostureSetting) ?? .plan
+        self.permissions = PermissionMode.parse(agentPermissionsSetting) ?? .plan
         self.initialAgentTask = initialAgentTask
         self.contextWindow = AliasMap.resolve(modelName)?.context ?? 0
         self.customCommands = CustomCommandStore.load(from: Self.commandsDir)
@@ -330,13 +330,13 @@ final class ChatTUI {
                 : "tool output collapsed \u{00B7} \u{2303}O to expand"
             return nil
         case .backTab:
-            // Shift+Tab cycles the agent permission posture; no-op in chat mode
+            // Shift+Tab cycles the agent permissions; no-op in chat mode
             // (there is no leash to set when the model has no hands).
             if surface == .agent {
-                posture = posture.next
+                permissions = permissions.next
                 // Footer-only: the agent chip already shows the new state
                 // permanently; a transcript note per Shift+Tab is just litter.
-                lastStatus = "permissions: \(posture.postureNote)"
+                lastStatus = "permissions: \(permissions.summary)"
             }
             return nil
         case .ctrlL:
@@ -801,7 +801,7 @@ final class ChatTUI {
             if surface == .agent {
                 ensureAgentSeed()
                 note("Agent mode ON - tools enabled (read · edit · bash). "
-                    + "Permissions: \(posture.label) (\(posture.postureNote)). "
+                    + "Permissions: \(permissions.label) (\(permissions.summary)). "
                     + "Shift+Tab cycles permissions; /agent to exit.")
             } else {
                 note("Agent mode OFF - back to plain chat.")
@@ -1048,7 +1048,7 @@ final class ChatTUI {
             "  directory      \(FileManager.default.currentDirectoryPath)",
             "  surface        \(surface == .agent ? "agent" : "chat")",
         ]
-        if surface == .agent { lines.append("  posture        \(posture.label) - \(posture.postureNote)") }
+        if surface == .agent { lines.append("  permissions    \(permissions.label) - \(permissions.summary)") }
         if contextWindow > 0 { lines.append("  context window \(formatContext(contextWindow))") }
         lines.append("  thinking       \(thinkingOn ? "on" : "off")")
         if !extraDirs.isEmpty {
@@ -1176,8 +1176,11 @@ final class ChatTUI {
         let task =
             "Survey this repository and write a concise Krill.md at the repo root for future "
             + "coding agents. Cover: the build and test commands, the high-level architecture and "
-            + "where the main modules live, and any important conventions. Use the read-only tools "
-            + "to inspect the repo first, then write the file. Keep it tight and skimmable."
+            + "where the main modules live, and any important conventions. Include a 'Repo map' "
+            + "section: a compact tree of the significant directories (skip build output and "
+            + "dependencies), each with a one-line role — enough that an agent can route any task "
+            + "to the right files without searching. Use the read-only tools to inspect the repo "
+            + "first, then write the file. Keep it tight and skimmable."
         await runAgentTurn(task)
     }
 
@@ -1216,14 +1219,18 @@ final class ChatTUI {
         var msgs: [[String: String]] = []
         // Ambient facts first (date/time, cwd, platform, model) so the model
         // never wastes a turn — or a thinking budget — inferring them.
+        // Env line, then the project brief (Krill.md — the file /init writes),
+        // then the user's system prompt or the tool directive.
+        var seedSystem = [sessionEnvLine]
+        if let brief = AgentEnvironment.projectBrief() { seedSystem.append(brief) }
         if let system, !system.isEmpty {
-            msgs.append(["role": "system", "content": sessionEnvLine + "\n\n" + system])
+            seedSystem.append(system)
         } else {
             // Bringing our own system turn suppresses the tooling layer's
             // fallback directive — carry it explicitly.
-            msgs.append(["role": "system",
-                         "content": sessionEnvLine + "\n\n" + AgentEnvironment.toolDirective])
+            seedSystem.append(AgentEnvironment.toolDirective)
         }
+        msgs.append(["role": "system", "content": seedSystem.joined(separator: "\n\n")])
         for t in modelTurns { msgs.append(["role": t.role, "content": t.content]) }
         let format = ToolCalling.ToolFormat.forFamily(engine.family)
         agentMessages = ToolCalling.injectToolSystem(
@@ -1240,7 +1247,7 @@ final class ChatTUI {
 
         // Plan posture: steer the model up front (the permission layer also
         // hard-denies mutating tools, so this is a nudge, not the enforcement).
-        let runTask = posture == .plan
+        let runTask = permissions == .plan
             ? "(Plan mode: read-only. Investigate with the read-only tools and propose a clear, "
               + "step-by-step plan. Do not edit files or run commands.)\n\n\(task)"
             : task
@@ -1248,7 +1255,7 @@ final class ChatTUI {
         let loop = AgentLoop(
             generator: EngineGenerator(engine: engine, maxTokens: maxTokens),
             tools: agentTools(),
-            permission: PermissionPolicy(mode: posture),
+            permission: PermissionPolicy(mode: permissions),
             gate: approver)
 
         let queue = EventQueue()
@@ -1477,11 +1484,11 @@ final class ChatTUI {
     private func spawnSession(title: String, task: String) {
         let s = AgentSession(
             id: nextSessionID, title: title, engine: engine,
-            maxTokens: maxTokens, posture: posture, tools: agentTools())
+            maxTokens: maxTokens, permissions: permissions, tools: agentTools())
         nextSessionID += 1
         sessions.append(s)
         s.start(task: task)
-        note("Started background agent [\(s.id)] '\(title)' (posture: \(posture.label)). "
+        note("Started background agent [\(s.id)] '\(title)' (permissions: \(permissions.label)). "
             + "/agents to attach, /switch \(s.id) to jump in.")
     }
 
@@ -1498,7 +1505,7 @@ final class ChatTUI {
     private func switcherEntries() -> [AgentSwitcher.Entry] {
         var out = [AgentSwitcher.Entry(
             id: nil, title: "main",
-            status: surface == .agent ? "agent:\(posture.label)" : "chat")]
+            status: surface == .agent ? "agent:\(permissions.label)" : "chat")]
         for s in sessions {
             out.append(.init(id: s.id, title: "[\(s.id)] \(s.title)", status: s.statusLabel()))
         }
@@ -1663,7 +1670,7 @@ final class ChatTUI {
             case .idle:              left = "done\(sep)type to continue\(sep)/main to return"
             case .cancelled:         left = "cancelled\(sep)/main to return"
             }
-            return (left, "agent[\(s.id)]:\(s.posture.label)\(sep)\(cwdLabel)\(sep)\(KrillVersionTag)")
+            return (left, "agent[\(s.id)]:\(s.permissions.label)\(sep)\(cwdLabel)\(sep)\(KrillVersionTag)")
         }
         // Spoken-replies (TTS) indicator: independent of the mic, so it shows even
         // on text-only models. Leads the right half when on.
@@ -1675,7 +1682,7 @@ final class ChatTUI {
         // Agent chip: the permission state + its key, whenever hands are on
         // (the one place agent status lives — claude-code-style, below the bar).
         let agentTag = surface == .agent
-            ? "\u{25CF} agent:\(posture.label) shift+tab\(sep)" : ""
+            ? "\u{25CF} agent:\(permissions.label) shift+tab\(sep)" : ""
         // Background-agent count, with a marker when one needs approval.
         let agentsTag = bgAgentsTag(sep)
         let cleanRight = "\(agentsTag)\(agentTag)\(thinkTag)\(speakTag)\(cwdLabel)\(sep)\(KrillVersionTag)"
@@ -2715,7 +2722,7 @@ final class ChatTUI {
         let keys: [(String, String)] = [
             ("Up / Down", "History, or cycle the slash menu"),
             ("Tab", "Accept the highlighted command"),
-            ("Shift+Tab", "Agent mode: cycle posture (plan/ask/accept-edits/auto)"),
+            ("Shift+Tab", "Agent mode: cycle permissions (plan/ask/accept-edits/auto)"),
             ("Enter", "Send the message"),
             ("Hold Space", "Push-to-talk (dictate/handsfree/send postures)"),
             ("Ctrl-V", "Cycle voice posture: type/dictate/handsfree/send"),

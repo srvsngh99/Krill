@@ -274,9 +274,9 @@ it does not change the floating panel's recognizer yet.
 | `accept-edits` | Auto-apply edits; still ask before commands. |
 | `auto` | Run everything without asking. |
 
-With no CLI override, `krill code` uses `default_agent_posture` (which defaults
+With no CLI override, `krill code` uses `default_agent_permissions` (which defaults
 to read-only `plan`). Unrestricted execution therefore requires an explicit
-`--permission-mode auto` or a deliberate `default_agent_posture = "auto"`
+`--permission-mode auto` or a deliberate `default_agent_permissions = "auto"`
 configuration.
 
 Key flags: `--max-iterations <n>`, `--no-bash`, `--allow-tool <name>` /
@@ -516,7 +516,7 @@ Common keys (each has a `KRILL_…` env equivalent):
 |---|---|---|
 | `default_model` | — | Model when none is named |
 | `default_mode` | `agent` | Launch surface: `agent` (default) or `chat` |
-| `default_agent_posture` | `plan` | `plan` \| `ask` \| `accept-edits` \| `auto` |
+| `default_agent_permissions` | `plan` | `plan` \| `ask` \| `accept-edits` \| `auto` (legacy alias: `default_agent_posture`) |
 | `server_port` / `server_host` | `57455` / `127.0.0.1` | HTTP server bind |
 | `server_api_key` | — | Bearer token for all HTTP routes (redacted in config output; prefer `KRILL_API_KEY`) |
 | `keep_alive` | `5m` | Keep a model resident (`30m`, `0`, negative=pin) |

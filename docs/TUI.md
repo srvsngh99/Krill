@@ -116,8 +116,10 @@ bar appears above the input box: `[y]es` runs it, `[n]o` (or `Esc`) denies it,
 `[a]lways` allows that tool for the rest of the session.
 
 The launch defaults come from `~/.krill/config.toml`: `default_mode`
-(`chat` or `agent`) and `default_agent_posture` (`plan` / `ask` / `accept-edits`
-/ `auto`). Set them in place with `/config default_mode=agent`.
+(`agent` by default, or `chat`) and `default_agent_permissions` (`plan` / `ask` /
+`accept-edits` / `auto`; legacy alias `default_agent_posture`). Set them in
+place with `/config default_mode=chat`. The agent also reads `Krill.md` at the
+repo root into every session — generate one with `/init`.
 
 ## Background agents
 

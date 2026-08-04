@@ -15,6 +15,22 @@ public enum AgentEnvironment {
         + "(office-holders, prices, versions, news), verify with web_search "
         + "instead of answering from memory."
 
+    /// The project brief: `Krill.md` at the working-directory root (the file
+    /// `/init` generates — Krill's CLAUDE.md), loaded into every agent session
+    /// so its build commands, architecture notes, and conventions are simply
+    /// known. Capped so a runaway file cannot eat the context window; nil when
+    /// absent or unreadable.
+    public static func projectBrief(maxChars: Int = 12_000) -> String? {
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Krill.md")
+        guard let raw = try? String(contentsOf: url, encoding: .utf8),
+              !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let clipped = raw.count > maxChars
+            ? String(raw.prefix(maxChars)) + "\n… (Krill.md truncated)"
+            : raw
+        return "Project brief (Krill.md):\n\(clipped)"
+    }
+
     public static func contextLine(modelName: String? = nil) -> String {
         let now = Date()
         // Month spelled out: numeric MM/DD reads as DD/MM to many models

@@ -2,7 +2,7 @@ import Foundation
 import KrillEngine
 import KrillHarness
 
-/// A background agent: its own transcript, message history, permission posture,
+/// A background agent: its own transcript, message history, permissions,
 /// approver, and run Task. Created by `/bg` or the `dispatch_agent` tool, pumped
 /// by the main loop each tick, and attachable from the agent switcher so the
 /// user can watch it, answer its approval prompts, and continue it.
@@ -13,7 +13,7 @@ final class AgentSession {
     var title: String
     private(set) var status: Status = .idle
     private(set) var entries: [AgentEntry] = []
-    let posture: PermissionMode
+    let permissions: PermissionMode
     let approver = TUIApprover()
 
     private let engine: InferenceEngine
@@ -27,12 +27,12 @@ final class AgentSession {
     private(set) var startedAt = CFAbsoluteTimeGetCurrent()
 
     init(id: Int, title: String, engine: InferenceEngine, maxTokens: Int,
-         posture: PermissionMode, tools: ToolRegistry) {
+         permissions: PermissionMode, tools: ToolRegistry) {
         self.id = id
         self.title = title
         self.engine = engine
         self.maxTokens = maxTokens
-        self.posture = posture
+        self.permissions = permissions
         self.tools = tools
     }
 
@@ -47,7 +47,7 @@ final class AgentSession {
         chipShown = false
         startedAt = CFAbsoluteTimeGetCurrent()
 
-        let steered = posture == .plan
+        let steered = permissions == .plan
             ? "(Plan mode: read-only. Investigate with the read-only tools and propose a clear, "
               + "step-by-step plan. Do not edit files or run commands.)\n\n\(task)"
             : task
@@ -55,7 +55,7 @@ final class AgentSession {
         let loop = AgentLoop(
             generator: EngineGenerator(engine: engine, maxTokens: maxTokens),
             tools: tools,
-            permission: PermissionPolicy(mode: posture),
+            permission: PermissionPolicy(mode: permissions),
             gate: approver)
         // Capture only locals (loop/queue/strings) so the run closure stays
         // Sendable - no `self` capture. The transcript is stashed in the queue.

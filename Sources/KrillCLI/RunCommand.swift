@@ -256,7 +256,7 @@ struct RunCommand: AsyncParsableCommand {
                 voiceNarrationSetting: tuiConfig.voiceNarration,
                 thinkingSetting: tuiConfig.thinking,
                 modeSetting: tuiConfig.defaultMode,
-                agentPostureSetting: tuiConfig.defaultAgentPosture)
+                agentPermissionsSetting: tuiConfig.defaultAgentPermissions)
             await tui.run()
         } else {
             // Classic line REPL (forced with --classic, or auto when stdout is

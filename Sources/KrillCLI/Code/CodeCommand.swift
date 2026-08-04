@@ -52,7 +52,7 @@ struct CodeCommand: AsyncParsableCommand {
     var voice: Bool = false
 
     @Option(name: .long,
-            help: "Permission posture: plan (read-only), ask (confirm each mutating tool), accept-edits (auto-apply edits, ask for commands), or auto/accept-all (run every tool). Defaults to default_agent_posture (plan if unset or invalid).")
+            help: "Permission level: plan (read-only), ask (confirm each mutating tool), accept-edits (auto-apply edits, ask for commands), or auto/accept-all (run every tool). Defaults to default_agent_permissions (plan if unset or invalid).")
     var permissionMode: String?
 
     @Option(name: .customLong("allow-tool"), parsing: .singleValue,
@@ -116,10 +116,10 @@ struct CodeCommand: AsyncParsableCommand {
             }
             mode = parsed
         } else {
-            let configured = nonEmpty(config.defaultAgentPosture)
+            let configured = nonEmpty(config.defaultAgentPermissions)
             mode = PermissionMode.configuredDefault(configured)
             if let configured, PermissionMode.parse(configured) == nil {
-                print("Warning: invalid default_agent_posture '\(configured)'; using plan mode.")
+                print("Warning: invalid default_agent_permissions '\(configured)'; using plan mode.")
             }
         }
         let policy = PermissionPolicy(
@@ -165,6 +165,7 @@ struct CodeCommand: AsyncParsableCommand {
         // system turn, the tooling layer's fallback anti-over-calling directive
         // never fires — carry it explicitly when the user supplied no prompt.
         var systemParts = [AgentEnvironment.contextLine(modelName: model)]
+        if let brief = AgentEnvironment.projectBrief() { systemParts.append(brief) }
         if mode == .plan {
             systemParts.append(
                 "You are in PLAN MODE (read-only). You may read and search files with the "
@@ -222,7 +223,7 @@ struct CodeCommand: AsyncParsableCommand {
                 voiceWhisperModelSetting: config.voiceWhisperModel,
                 voiceNarrationSetting: config.voiceNarration,
                 thinkingSetting: config.thinking,
-                modeSetting: "agent", agentPostureSetting: mode.rawValue,
+                modeSetting: "agent", agentPermissionsSetting: mode.rawValue,
                 initialAgentTask: task)
             await tui.run()
             return
