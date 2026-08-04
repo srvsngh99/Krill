@@ -762,13 +762,24 @@ final class ChatTUI {
             return
         }
         if surface == .agent {
-            // Agent mode is text-driven (tools, not multimodal); drop any
-            // pending media so it is not silently lost.
-            if !pendingImages.isEmpty || pendingAudio != nil {
-                pendingImages.removeAll(); pendingAudio = nil
-                note("(agent mode is text-only; attachments dropped)")
+            // Images ride into the agent turn when the model has vision; on a
+            // text-only model KRILL says so up front (never the model
+            // improvising excuses). Audio in agent mode is not supported yet.
+            var turnImages: [Data] = []
+            if !pendingImages.isEmpty {
+                if engine.supportsNativeImage {
+                    turnImages = pendingImages.map(\.data)
+                } else {
+                    note("(\(modelName) has no image input — attachment dropped. "
+                        + "Try a vision model, e.g. /model gemma-4-e2b.)")
+                }
+                pendingImages.removeAll()
             }
-            await runAgentTurn(prompt)
+            if pendingAudio != nil {
+                pendingAudio = nil
+                note("(agent mode does not take audio attachments yet; use chat mode.)")
+            }
+            await runAgentTurn(prompt, images: turnImages)
             return
         }
         await generate(prompt: prompt)
@@ -1254,8 +1265,9 @@ final class ChatTUI {
     /// Run one agent turn live: spawn the loop on a background Task, drain its
     /// events into the transcript, and poll keys for cancel / scroll / approval.
     /// Mirrors the code TUI's run loop, adapted to the chat surface.
-    private func runAgentTurn(_ task: String) async {
-        view.append(Msg(role: .user, text: task))
+    private func runAgentTurn(_ task: String, images: [Data] = []) async {
+        let shownTask = images.isEmpty ? task : "[\(images.count) img] \(task)"
+        view.append(Msg(role: .user, text: shownTask))
         scrollOffset = 0
         agentChipShown = false
 
@@ -1268,6 +1280,7 @@ final class ChatTUI {
 
         var generator = EngineGenerator(engine: engine, maxTokens: maxTokens)
         generator.onStats = { [agentStats] in agentStats.put($0) }
+        generator.imageData = images
         let loop = AgentLoop(
             generator: generator,
             tools: agentTools(),
@@ -1297,9 +1310,9 @@ final class ChatTUI {
             if finished {
                 lastStatus = ""
             } else if approver.pending() != nil {
-                lastStatus = "\(dots[spin % dots.count]) awaiting approval \u{00B7} \(elapsed)"
+                lastStatus = "\(emberSpinner(spin, dots)) awaiting approval \u{00B7} \(elapsed)"
             } else {
-                lastStatus = "\(dots[spin % dots.count]) working \u{00B7} \(elapsed) \u{00B7} Esc interrupt"
+                lastStatus = "\(emberSpinner(spin, dots)) working \u{00B7} \(elapsed) \u{00B7} Esc interrupt"
             }
             render()
             if finished { break }
@@ -1361,7 +1374,7 @@ final class ChatTUI {
             for p in queue.drain() { note(Self.researchProgressLine(p)); scrollOffset = 0 }
             let finished = queue.isFinished
             let elapsed = Self.formatElapsed(CFAbsoluteTimeGetCurrent() - startedAt)
-            lastStatus = finished ? "" : "\(dots[spin % dots.count]) researching \u{00B7} \(elapsed) \u{00B7} Esc interrupt"
+            lastStatus = finished ? "" : "\(emberSpinner(spin, dots)) researching \u{00B7} \(elapsed) \u{00B7} Esc interrupt"
             render()
             if finished { break }
             spin += 1
@@ -1695,7 +1708,7 @@ final class ChatTUI {
         // Reasoning indicator + toggle hint: filled dot when the thinking channel
         // is on, hollow when off, always carrying the ⌃T key so it reads as a
         // switch (Ctrl-T flips it; a no-op on models with no thinking channel).
-        let thinkTag = (thinkingOn ? Ansi.ember("\u{25CF}") : "\u{25CB}") + " think ctrl+t\(sep)"
+        let thinkTag = (thinkingOn ? Ansi.ember("\u{25CF}") : "\u{25CB}") + " think (ctrl+t to toggle)\(sep)"
         // Agent chip: the permission state + its key, whenever hands are on
         // (the one place agent status lives — claude-code-style, below the bar).
         let agentTag = surface == .agent
@@ -1973,6 +1986,20 @@ final class ChatTUI {
     /// usage beside it. This is what the footer shows when nothing transient is
     /// happening (never a stale "thinking..."). Uses the last generation's token
     /// stats when present, else just the model name and the window size.
+    /// The working spinner in the brand ember spectrum: each frame advances
+    /// both the braille glyph and its colour through the amber→coral→magenta
+    /// stops (the same ramp as the context bar), so "thinking" reads as Krill.
+    private static let emberSpinStops = [
+        "38;2;255;192;77", "38;2;255;160;84", "38;2;255;125;92",
+        "38;2;240;94;104", "38;2;224;69;125",
+    ]
+    private func emberSpinner(_ spin: Int, _ dots: [String]) -> String {
+        let glyph = dots[spin % dots.count]
+        guard Ansi.enabled else { return glyph }
+        let code = Self.emberSpinStops[spin % Self.emberSpinStops.count]
+        return "\u{1B}[\(code)m\(glyph)\u{1B}[0m"
+    }
+
     private func modelContextStatus() -> String {
         var parts = [modelName]
         if let st = lastStats {
