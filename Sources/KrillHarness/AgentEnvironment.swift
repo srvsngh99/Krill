@@ -14,8 +14,9 @@ public enum AgentEnvironment {
 
     public static func contextLine(modelName: String? = nil) -> String {
         let now = Date()
-        let day = now.formatted(.dateTime.weekday(.wide))
-        let date = now.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits))
+        // Month spelled out: numeric MM/DD reads as DD/MM to many models
+        // (gemma answered "April 8" for 08/04/2026).
+        let date = now.formatted(.dateTime.weekday(.wide).month(.wide).day().year())
         let time = now.formatted(.dateTime.hour().minute())
         let zone = TimeZone.current.abbreviation() ?? TimeZone.current.identifier
         let os = ProcessInfo.processInfo.operatingSystemVersionString
@@ -25,7 +26,7 @@ public enum AgentEnvironment {
         let arch = "x86_64"
         #endif
         var parts = [
-            "Environment: \(day), \(date), \(time) \(zone)",
+            "Environment: \(date), \(time) \(zone)",
             "cwd \(FileManager.default.currentDirectoryPath)",
             "macOS \(os) \(arch)",
         ]
