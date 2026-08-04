@@ -10,7 +10,10 @@ public enum AgentEnvironment {
     /// directive) append this so over-calling families still get the nudge.
     public static let toolDirective =
         "Use tools only when needed. Once you have the tool results, "
-        + "reply with the final answer and do not call any more tools."
+        + "reply with the final answer and do not call any more tools. "
+        + "Your training data has a cutoff: for facts that change over time "
+        + "(office-holders, prices, versions, news), verify with web_search "
+        + "instead of answering from memory."
 
     public static func contextLine(modelName: String? = nil) -> String {
         let now = Date()
