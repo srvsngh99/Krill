@@ -69,6 +69,14 @@ public enum CodeView {
         return json.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// A collapsed observation: one dim placeholder line carrying the size and
+    /// the expand key. Callers never collapse errors — failures must be seen.
+    public static func toolResultCollapsed(content: String, width: Int) -> [CodeLine] {
+        let count = content.split(separator: "\n", omittingEmptySubsequences: false).count
+        let hint = "    \u{2192} \(count) line\(count == 1 ? "" : "s") \u{00B7} \u{2303}O expand"
+        return [CodeLine(clip(hint, width: max(1, width)), .dim)]
+    }
+
     /// A tool observation, indented under its chip. Diff lines (`+ `/`- `) are
     /// tagged for color; everything else takes ok/error per `isError`. At most
     /// `maxLines` are shown, with a dim "N more lines" hint when truncated.

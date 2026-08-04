@@ -39,6 +39,22 @@ final class CodeViewTests: XCTestCase {
         XCTAssertEqual(lines[0].text, #"▸ grep  {"q":"x"}"#)
     }
 
+    func testToolResultCollapsedIsOneDimLineWithCountAndKey() {
+        let content = (1...24).map { "line \($0)" }.joined(separator: "\n")
+        let lines = CodeView.toolResultCollapsed(content: content, width: 60)
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertEqual(lines[0].style, .dim)
+        XCTAssertTrue(lines[0].text.contains("24 lines"))
+        XCTAssertTrue(lines[0].text.contains("\u{2303}O"))
+    }
+
+    func testToolResultUncappedWhenMaxLinesZero() {
+        let content = (1...30).map { "line \($0)" }.joined(separator: "\n")
+        let lines = CodeView.toolResult(content: content, isError: false, width: 60, maxLines: 0)
+        XCTAssertEqual(lines.count, 30, "maxLines 0 renders everything")
+        XCTAssertFalse(lines.contains { $0.text.contains("more line") })
+    }
+
     func testToolResultTagsDiffLines() {
         let content = "Edited g.txt: 1 replacement(s).\n- world\n+ krill"
         let lines = CodeView.toolResult(content: content, isError: false, width: 40, maxLines: 20)

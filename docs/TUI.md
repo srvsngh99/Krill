@@ -41,6 +41,7 @@ If auto-detection ever misreads, pass `--theme light` or `--theme dark`.
 | `Enter` | Send the message |
 | Hold `Space` | Push-to-talk (only when voice is on: dictate / handsfree / send) |
 | `Ctrl-V` | Turn voice on and cycle it: off -> dictate -> handsfree -> send -> off |
+| `Ctrl-O` | Agent mode: expand / collapse tool output (collapsed by default; errors always show) |
 | `PgUp` / `PgDn` | Scroll the conversation |
 | Mouse wheel / trackpad | Scroll the conversation (hold Option/Fn to select text) |
 | `Esc` | Interrupt the agent while it is working (in agent mode) |

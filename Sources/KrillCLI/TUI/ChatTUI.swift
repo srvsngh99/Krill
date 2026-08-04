@@ -322,6 +322,13 @@ final class ChatTUI {
         case .ctrlT:
             setThinking(!thinkingOn)   // Ctrl-T: toggle the reasoning channel
             return nil
+        case .ctrlO:
+            // Toggle tool-output visibility across the transcript.
+            toolOutputExpanded.toggle()
+            lastStatus = toolOutputExpanded
+                ? "tool output expanded \u{00B7} \u{2303}O to collapse"
+                : "tool output collapsed \u{00B7} \u{2303}O to expand"
+            return nil
         case .backTab:
             // Shift+Tab cycles the agent permission posture; no-op in chat mode
             // (there is no leash to set when the model has no hands).
@@ -1195,6 +1202,10 @@ final class ChatTUI {
     /// Ambient environment line, captured once at first use so the system
     /// prefix stays byte-stable across turns (prefix-cache friendly).
     private lazy var sessionEnvLine = AgentEnvironment.contextLine(modelName: modelName)
+
+    /// ⌃O state: tool observations render collapsed (one dim size line) until
+    /// expanded. Errors always render in full regardless.
+    private var toolOutputExpanded = false
 
     /// Prime the agent thread once, carrying the chat so far so context is not
     /// lost when hands turn on. Injects the tool system over `[system] + chat
@@ -2494,7 +2505,14 @@ final class ChatTUI {
                     lines.append(margin + styledCode(l))
                 }
             case .toolResult:
-                for l in CodeView.toolResult(content: msg.text, isError: msg.toolError, width: w, maxLines: 14) {
+                // Collapsed by default to keep the transcript scannable; ⌃O
+                // toggles full output (uncapped). Errors are never collapsed.
+                let rendered = (!toolOutputExpanded && !msg.toolError)
+                    ? CodeView.toolResultCollapsed(content: msg.text, width: w)
+                    : CodeView.toolResult(
+                        content: msg.text, isError: msg.toolError, width: w,
+                        maxLines: toolOutputExpanded ? 0 : 14)
+                for l in rendered {
                     lines.append(margin + styledCode(l))
                 }
             case .pre:
