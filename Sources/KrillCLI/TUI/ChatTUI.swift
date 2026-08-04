@@ -142,6 +142,29 @@ final class ChatTUI {
     private var lastStats: GenerationStats? // most recent turn's stats (for /context)
     private var shouldQuit = false
 
+    // Session receipt: cumulative totals across every turn (all models), printed
+    // on the normal screen after the TUI exits so the session leaves a record.
+    private let sessionStart = Date()
+    private var sessionPromptTokens = 0
+    private var sessionGeneratedTokens = 0
+    private var sessionDecodeTime = 0.0
+    private var sessionTurns = 0
+    // Double-press quit guard: the first Ctrl-C on an empty composer only warns;
+    // a second within this window actually quits. Any other key stands it down.
+    private var ctrlCArmedAt: Date?
+    private static let quitWarning = "press ctrl+c again to exit"
+    private static let quitArmWindow: TimeInterval = 2.0
+
+    /// One turn finished: refresh the footer stats and fold the turn into the
+    /// session totals behind the exit receipt.
+    private func recordTurnStats(_ st: GenerationStats) {
+        lastStats = st
+        sessionPromptTokens += st.promptTokens
+        sessionGeneratedTokens += st.generatedTokens
+        sessionDecodeTime += st.decodeTime
+        sessionTurns += 1
+    }
+
     // Working-directory label for the footer (e.g. "Krill:main"). Recomputed on
     // `/cd` so the footer tracks the session's directory.
     private lazy var cwdLabel: String = Self.computeCwdLabel()
@@ -290,6 +313,43 @@ final class ChatTUI {
                 render()
             }
         }
+
+        // Leave the alt screen FIRST (leave() is guarded, so the defer's second
+        // call is a no-op), then print the session receipt on the normal screen
+        // where it survives the TUI teardown.
+        synth.stop()
+        sessions.forEach { $0.cancel() }
+        raw.leave()
+        printSessionReceipt()
+    }
+
+    /// The post-session receipt: wall-clock length, turns, token totals, and
+    /// average decode speed, printed to the restored (normal) screen on every
+    /// clean exit path — double Ctrl-C, Ctrl-D, and /quit alike.
+    private func printSessionReceipt() {
+        let elapsed = Date().timeIntervalSince(sessionStart)
+        let h = Int(elapsed) / 3600, m = (Int(elapsed) % 3600) / 60, s = Int(elapsed) % 60
+        let length = h > 0 ? String(format: "%dh %02dm %02ds", h, m, s)
+                           : m > 0 ? String(format: "%dm %02ds", m, s)
+                                   : "\(s)s"
+        func grouped(_ n: Int) -> String {
+            let f = NumberFormatter(); f.numberStyle = .decimal
+            return f.string(from: NSNumber(value: n)) ?? String(n)
+        }
+        var lines = ["", "  " + Ansi.bold(Ansi.ember(Brand.wordmark)) + Ansi.chrome(" session"),
+                     Ansi.chrome("  length   \(length)")]
+        if sessionTurns > 0 {
+            let total = sessionPromptTokens + sessionGeneratedTokens
+            lines.append(Ansi.chrome("  turns    \(sessionTurns)"))
+            lines.append(Ansi.chrome(
+                "  tokens   \(grouped(total)) (\(grouped(sessionPromptTokens)) prompt + \(grouped(sessionGeneratedTokens)) generated)"))
+            if sessionDecodeTime > 0 {
+                let avg = Double(sessionGeneratedTokens) / sessionDecodeTime
+                lines.append(Ansi.chrome(String(format: "  speed    %.1f tok/s avg decode", avg)))
+            }
+        }
+        lines.append("")
+        Output.write(lines.joined(separator: "\r\n") + "\r\n")
     }
 
     // MARK: - Key handling
@@ -303,13 +363,30 @@ final class ChatTUI {
         // Attached to a running background agent: keys drive its approval / cancel
         // / scroll, not the composer (which is inert until the agent is idle).
         if let s = activeSession, s.isRunning { handleAttachedRunKey(key, session: s); return nil }
+        // Any key other than a follow-up Ctrl-C stands the quit warning down.
+        if ctrlCArmedAt != nil, key != .ctrlC {
+            ctrlCArmedAt = nil
+            if lastStatus == Self.quitWarning { lastStatus = "" }
+        }
         switch key {
         case .ctrlD:
             if input.isEmpty { shouldQuit = true }
             return nil
         case .ctrlC:
             synth.stop()   // also silence a spoken reply that is still playing
-            if input.isEmpty { shouldQuit = true } else { input = ""; cursor = 0; menu.close() }
+            if input.isEmpty {
+                // First press warns; only a second press within the window quits,
+                // so a reflexive Ctrl-C cannot tear the session down.
+                if let armed = ctrlCArmedAt,
+                   Date().timeIntervalSince(armed) < Self.quitArmWindow {
+                    shouldQuit = true
+                } else {
+                    ctrlCArmedAt = Date()
+                    lastStatus = Self.quitWarning
+                }
+            } else {
+                input = ""; cursor = 0; menu.close()
+            }
             return nil
         case .ctrlU:
             input = ""; cursor = 0; menu.update(for: input); return nil
@@ -1300,7 +1377,7 @@ final class ChatTUI {
         while true {
             if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize() }
             pumpAll()   // keep background agents advancing during a foreground turn
-            if let st = agentStats.take() { lastStats = st }
+            if let st = agentStats.take() { recordTurnStats(st) }
             for ev in queue.drain() { applyAgentEvent(ev) }
             let finished = queue.isFinished
             let elapsed = Self.formatElapsed(CFAbsoluteTimeGetCurrent() - startedAt)
@@ -1712,7 +1789,9 @@ final class ChatTUI {
             ? "\u{25CF} agent: \(permissions.label) (shift+tab to cycle)\(sep)" : ""
         // Background-agent count, with a marker when one needs approval.
         let agentsTag = bgAgentsTag(sep)
-        let cleanRight = "\(agentsTag)\(agentTag)\(thinkTag)\(speakTag)\(cwdLabel)\(sep)\(KrillVersionTag)"
+        // The cwd/branch label moved to the masthead's right side; the footer
+        // keeps only live chips + version so the two rows never repeat a fact.
+        let cleanRight = "\(agentsTag)\(agentTag)\(thinkTag)\(speakTag)\(KrillVersionTag)"
         // Dictation is local STT and remains available on text-only models.
         // Live work status renders ABOVE the input box (claude-code style),
         // so the footer's left half always holds the model/context stats.
@@ -1948,7 +2027,7 @@ final class ChatTUI {
             view.append(Msg(role: .note, text: "(cancelled)"))
         } else {
             modelTurns.append((role: "assistant", content: assistant))
-            if let st = gen.stats() { lastStats = st }
+            if let st = gen.stats() { recordTurnStats(st) }
             lastStatus = ""
             // Read the reply aloud when speaking is on (voice phase 2). Cleaned of
             // markdown that reads badly; a new reply interrupts the previous one.
@@ -2389,21 +2468,25 @@ final class ChatTUI {
 
     // MARK: - Rendering
 
-    // Rows consumed by chrome: 2 masthead (line + rule) + 3 input box + 1 footer.
-    // The voice posture/activity rides the footer's left side (no separate row).
-    private let paneTop = 3
-    private func paneHeight() -> Int { max(1, rows - 6) }
+    // Rows consumed by chrome: 3 masthead (line + rule + model strip) + 3 input
+    // box + 1 footer. The voice posture/activity rides the footer's left side
+    // (no separate row).
+    private let paneTop = 4
+    private func paneHeight() -> Int { max(1, rows - 7) }
 
     private func render() {
         let width = cols
         var frame = "\u{1B}[H"   // cursor home
 
-        // Rows 1-2: light masthead (wordmark line + dim rule). When attached to a
-        // background agent, the masthead names it so it is obvious you are not in
-        // the main view.
-        let headerLabel = activeSession.map { "agent[\($0.id)] \($0.title) - \($0.statusLabel())" } ?? modelName
-        frame += positioned(1, Brand.header(width: width, model: headerLabel))
+        // Rows 1-3: light masthead (wordmark + place on the right, dim rule,
+        // then the loaded model on its own dim strip — claude-code style: the
+        // repo:branch you are in up top, the model beneath the bar). When
+        // attached to a background agent, the masthead names it instead so it
+        // is obvious you are not in the main view.
+        let headerLabel = activeSession.map { "agent[\($0.id)] \($0.title) - \($0.statusLabel())" } ?? cwdLabel
+        frame += positioned(1, Brand.header(width: width, right: headerLabel))
         frame += positioned(2, Brand.headerRule(width: width))
+        frame += positioned(3, Brand.modelLine(width: width, model: modelName))
 
         // Layout from the bottom up: the 3-row input box, then the footer below
         // it, with the conversation pane filling everything between the masthead
