@@ -1190,6 +1190,10 @@ final class ChatTUI {
     /// it must survive across `agentTools()` rebuilds.
     private let todoTool = TodoTool()
 
+    /// Ambient environment line, captured once at first use so the system
+    /// prefix stays byte-stable across turns (prefix-cache friendly).
+    private lazy var sessionEnvLine = AgentEnvironment.contextLine(modelName: modelName)
+
     /// Prime the agent thread once, carrying the chat so far so context is not
     /// lost when hands turn on. Injects the tool system over `[system] + chat
     /// history`; subsequent turns continue from the loop's returned transcript.
@@ -1199,14 +1203,13 @@ final class ChatTUI {
         var msgs: [[String: String]] = []
         // Ambient facts first (date/time, cwd, platform, model) so the model
         // never wastes a turn — or a thinking budget — inferring them.
-        let envLine = AgentEnvironment.contextLine(modelName: modelName)
         if let system, !system.isEmpty {
-            msgs.append(["role": "system", "content": envLine + "\n\n" + system])
+            msgs.append(["role": "system", "content": sessionEnvLine + "\n\n" + system])
         } else {
             // Bringing our own system turn suppresses the tooling layer's
             // fallback directive — carry it explicitly.
             msgs.append(["role": "system",
-                         "content": envLine + "\n\n" + AgentEnvironment.toolDirective])
+                         "content": sessionEnvLine + "\n\n" + AgentEnvironment.toolDirective])
         }
         for t in modelTurns { msgs.append(["role": t.role, "content": t.content]) }
         let format = ToolCalling.ToolFormat.forFamily(engine.family)
@@ -1805,7 +1808,15 @@ final class ChatTUI {
         let usedAud = pendingAudio != nil
 
         var messages: [[String: String]] = []
-        if let system, !system.isEmpty { messages.append(["role": "system", "content": system]) }
+        // Chat carries the same ambient line as agent mode (date, cwd,
+        // platform, model) so "what day is it" doesn't hallucinate from
+        // training data. Session-pinned: a per-turn timestamp would change the
+        // prefix every minute and defeat shared-prefix KV reuse.
+        if let system, !system.isEmpty {
+            messages.append(["role": "system", "content": sessionEnvLine + "\n\n" + system])
+        } else {
+            messages.append(["role": "system", "content": sessionEnvLine])
+        }
         for t in modelTurns { messages.append(["role": t.role, "content": t.content]) }
         let imgs = pendingImages.map(\.data)
 
