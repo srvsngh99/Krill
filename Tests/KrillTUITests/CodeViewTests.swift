@@ -45,7 +45,7 @@ final class CodeViewTests: XCTestCase {
         XCTAssertEqual(lines.count, 1)
         XCTAssertEqual(lines[0].style, .dim)
         XCTAssertTrue(lines[0].text.contains("24 lines"))
-        XCTAssertTrue(lines[0].text.contains("\u{2303}O"))
+        XCTAssertTrue(lines[0].text.contains("ctrl+o"))
     }
 
     func testToolResultUncappedWhenMaxLinesZero() {

@@ -326,8 +326,8 @@ final class ChatTUI {
             // Toggle tool-output visibility across the transcript.
             toolOutputExpanded.toggle()
             lastStatus = toolOutputExpanded
-                ? "tool output expanded \u{00B7} \u{2303}O to collapse"
-                : "tool output collapsed \u{00B7} \u{2303}O to expand"
+                ? "tool output expanded \u{00B7} ctrl+o to collapse"
+                : "tool output collapsed \u{00B7} ctrl+o to expand"
             return nil
         case .backTab:
             // Shift+Tab cycles the agent permissions; no-op in chat mode
@@ -1678,11 +1678,11 @@ final class ChatTUI {
         // Reasoning indicator + toggle hint: filled dot when the thinking channel
         // is on, hollow when off, always carrying the ⌃T key so it reads as a
         // switch (Ctrl-T flips it; a no-op on models with no thinking channel).
-        let thinkTag = (thinkingOn ? Ansi.ember("\u{25CF}") : "\u{25CB}") + " think \u{2303}T\(sep)"
+        let thinkTag = (thinkingOn ? Ansi.ember("\u{25CF}") : "\u{25CB}") + " think ctrl+t\(sep)"
         // Agent chip: the permission state + its key, whenever hands are on
         // (the one place agent status lives — claude-code-style, below the bar).
         let agentTag = surface == .agent
-            ? "\u{25CF} agent:\(permissions.label) shift+tab\(sep)" : ""
+            ? "\u{25CF} agent: \(permissions.label) (shift+tab to cycle)\(sep)" : ""
         // Background-agent count, with a marker when one needs approval.
         let agentsTag = bgAgentsTag(sep)
         let cleanRight = "\(agentsTag)\(agentTag)\(thinkTag)\(speakTag)\(cwdLabel)\(sep)\(KrillVersionTag)"

@@ -73,7 +73,7 @@ public enum CodeView {
     /// the expand key. Callers never collapse errors — failures must be seen.
     public static func toolResultCollapsed(content: String, width: Int) -> [CodeLine] {
         let count = content.split(separator: "\n", omittingEmptySubsequences: false).count
-        let hint = "    \u{2192} \(count) line\(count == 1 ? "" : "s") \u{00B7} \u{2303}O expand"
+        let hint = "    \u{2192} \(count) line\(count == 1 ? "" : "s") \u{00B7} ctrl+o expand"
         return [CodeLine(clip(hint, width: max(1, width)), .dim)]
     }
 
