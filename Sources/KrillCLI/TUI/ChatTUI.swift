@@ -327,7 +327,9 @@ final class ChatTUI {
             // (there is no leash to set when the model has no hands).
             if surface == .agent {
                 posture = posture.next
-                note("Posture: \(posture.postureNote)")
+                // Footer-only: the agent chip already shows the new posture
+                // permanently; a transcript note per Shift+Tab is just litter.
+                lastStatus = "posture: \(posture.postureNote)"
             }
             return nil
         case .ctrlL:
@@ -1287,12 +1289,8 @@ final class ChatTUI {
     /// a live progress trail; `Esc`/`Ctrl-C` cancels. The answer is appended to
     /// the conversation so follow-up questions can build on it.
     private func runResearch(_ question: String) async {
-        guard let backend = WebSearchTool.configuredBackend() else {
-            note("Web search is not configured, so /research has nothing to search. Set a SearXNG "
-                + "instance: /config searxng_url=http://localhost:8888 (the instance needs `json` in "
-                + "its search.formats), or export KRILL_SEARXNG_URL.")
-            return
-        }
+        let (backend, backendNote) = WebSearchTool.resolveBackend()
+        if let backendNote { note(backendNote) }
         view.append(Msg(role: .user, text: "/research \(question)"))
         modelTurns.append((role: "user", content: question))
         scrollOffset = 0

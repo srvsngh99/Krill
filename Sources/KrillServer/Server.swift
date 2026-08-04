@@ -2985,13 +2985,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                      body: ["error": "no model loaded; load a model before /research."])
             return
         }
-        guard let backend = WebSearchTool.configuredBackend() else {
-            sendJSON(context: context, status: .badRequest, body: [
-                "error": "selected search backend is not configured. The default "
-                    + "(DuckDuckGo) needs no setup; for a BYOK backend set "
-                    + "search_backend=brave|tavily plus its api key, or a searxng_url."])
-            return
-        }
+        // Degrade rather than 400: an unusable selected backend falls back to
+        // the keyless default so /research always has something to search.
+        let (backend, _) = WebSearchTool.resolveBackend()
 
         let maxTokens = 1536
         let el = context.eventLoop
