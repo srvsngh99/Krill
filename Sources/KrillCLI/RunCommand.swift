@@ -167,13 +167,8 @@ struct RunCommand: AsyncParsableCommand {
         }
 
         // Load model (native Swift path for Llama, Qwen, Mistral, etc.)
-        print("Loading model from \(model)...")
         let engine = InferenceEngine(modelDirectory: modelDir)
-
-        let loadStart = CFAbsoluteTimeGetCurrent()
-        try await engine.load()
-        let loadTime = CFAbsoluteTimeGetCurrent() - loadStart
-        print(String(format: "Ready (%.1fs load time)", loadTime))
+        try await BrandedLoad.run(model: model) { try await engine.load() }
 
         if let draftSpec = draftModel {
             try DraftModelResolver.load(

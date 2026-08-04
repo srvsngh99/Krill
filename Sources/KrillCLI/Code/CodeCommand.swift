@@ -138,15 +138,8 @@ struct CodeCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        print("")
-        print("  " + Ansi.ember(Ansi.bold(">_ ")) + Ansi.bold("Krill Code")
-            + Ansi.chrome("  ·  local · private · Sourav AI Labs"))
-        print("  " + Ansi.chrome("Loading \(model)…"))
         let engine = InferenceEngine(modelDirectory: modelDir)
-        let loadStart = CFAbsoluteTimeGetCurrent()
-        try await engine.load()
-        print("  " + Ansi.chrome(String(format: "Ready in %.1fs.", CFAbsoluteTimeGetCurrent() - loadStart)))
-        print("")
+        try await BrandedLoad.run(model: model, wordmark: "Krill Code") { try await engine.load() }
 
         // Filesystem toolset is always available; bash is opt-out. The
         // permission layer (below) governs whether mutating tools actually run.
