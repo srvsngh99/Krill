@@ -10,6 +10,10 @@ import KrillTooling
 struct EngineGenerator: HarnessGenerator {
     let engine: InferenceEngine
     let maxTokens: Int
+    /// Reports each completed generation's stats (tok/s, token counts) so a
+    /// hosting surface can keep its footer live during agent runs. Called on
+    /// the loop's task, after the stream finishes.
+    var onStats: (@Sendable (GenerationStats) -> Void)? = nil
 
     var toolFormat: ToolCalling.ToolFormat {
         ToolCalling.ToolFormat.forFamily(engine.family)
@@ -20,7 +24,10 @@ struct EngineGenerator: HarnessGenerator {
         // other background agents) so decodes never overlap on the single GPU.
         await GenerationGate.shared.acquire()
         defer { GenerationGate.shared.release() }
-        return await collect(engine.generate(messages: messages, params: .greedy, maxTokens: maxTokens).stream)
+        let (stream, stats) = engine.generate(messages: messages, params: .greedy, maxTokens: maxTokens)
+        let text = await collect(stream)
+        if let s = stats() { onStats?(s) }
+        return text
     }
 
     /// Free generation with the tool-name slot constrained (see
@@ -36,13 +43,15 @@ struct EngineGenerator: HarnessGenerator {
         }
         await GenerationGate.shared.acquire()
         defer { GenerationGate.shared.release() }
-        let (stream, _) = engine.generate(
+        let (stream, stats) = engine.generate(
             messages: messages, params: .greedy, maxTokens: maxTokens,
             format: .toolNames(
                 sentinels: sentinels,
                 nameKey: ToolCallSentinels.nameKey(for: toolFormat),
                 names: toolNames))
-        return await collect(stream)
+        let text = await collect(stream)
+        if let s = stats() { onStats?(s) }
+        return text
     }
 
     func completeConstrained(messages: [[String: String]], jsonSchema: String) async -> String {
@@ -50,10 +59,12 @@ struct EngineGenerator: HarnessGenerator {
         // parameter schema, so a small model cannot omit required fields.
         await GenerationGate.shared.acquire()
         defer { GenerationGate.shared.release() }
-        let (stream, _) = engine.generate(
+        let (stream, stats) = engine.generate(
             messages: messages, params: .greedy, maxTokens: 256,
             format: .jsonSchemaCompact(jsonSchema))
-        return await collect(stream)
+        let text = await collect(stream)
+        if let s = stats() { onStats?(s) }
+        return text
     }
 
     private func collect(_ stream: AsyncStream<TokenEvent>) async -> String {

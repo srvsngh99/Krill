@@ -1210,6 +1210,20 @@ final class ChatTUI {
     /// expanded. Errors always render in full regardless.
     private var toolOutputExpanded = false
 
+    /// Latest generation stats from an agent run, written by the loop's task
+    /// via EngineGenerator.onStats and drained on the render tick, so the
+    /// footer's tok/s + context bar stay live while the agent works.
+    private final class AgentStatsBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stats: GenerationStats?
+        func put(_ s: GenerationStats) { lock.lock(); stats = s; lock.unlock() }
+        func take() -> GenerationStats? {
+            lock.lock(); defer { lock.unlock() }
+            let s = stats; stats = nil; return s
+        }
+    }
+    private let agentStats = AgentStatsBox()
+
     /// Prime the agent thread once, carrying the chat so far so context is not
     /// lost when hands turn on. Injects the tool system over `[system] + chat
     /// history`; subsequent turns continue from the loop's returned transcript.
@@ -1252,8 +1266,10 @@ final class ChatTUI {
               + "step-by-step plan. Do not edit files or run commands.)\n\n\(task)"
             : task
 
+        var generator = EngineGenerator(engine: engine, maxTokens: maxTokens)
+        generator.onStats = { [agentStats] in agentStats.put($0) }
         let loop = AgentLoop(
-            generator: EngineGenerator(engine: engine, maxTokens: maxTokens),
+            generator: generator,
             tools: agentTools(),
             permission: PermissionPolicy(mode: permissions),
             gate: approver)
@@ -1274,6 +1290,7 @@ final class ChatTUI {
         while true {
             if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize() }
             pumpAll()   // keep background agents advancing during a foreground turn
+            if let st = agentStats.take() { lastStats = st }
             for ev in queue.drain() { applyAgentEvent(ev) }
             let finished = queue.isFinished
             let elapsed = Self.formatElapsed(CFAbsoluteTimeGetCurrent() - startedAt)
@@ -1821,9 +1838,6 @@ final class ChatTUI {
                : (!pendingImages.isEmpty ? "[media]" : prompt)))
         view.append(Msg(role: .user, text: shown))
         modelTurns.append((role: "user", content: prompt))
-        let usedImgs = pendingImages.count
-        let usedAud = pendingAudio != nil
-
         var messages: [[String: String]] = []
         // Chat carries the same ambient line as agent mode (date, cwd,
         // platform, model) so "what day is it" doesn't hallucinate from
@@ -1924,7 +1938,8 @@ final class ChatTUI {
             view.append(Msg(role: .note, text: "(cancelled)"))
         } else {
             modelTurns.append((role: "assistant", content: assistant))
-            if let st = gen.stats() { lastStats = st; lastStatus = statusText(st, images: usedImgs, audio: usedAud) }
+            if let st = gen.stats() { lastStats = st }
+            lastStatus = ""
             // Read the reply aloud when speaking is on (voice phase 2). Cleaned of
             // markdown that reads badly; a new reply interrupts the previous one.
             if speakReplies, voiceNarration != .off, !assistant.isEmpty { synth.speak(assistant) }
@@ -1954,22 +1969,6 @@ final class ChatTUI {
         return k < 10 ? String(format: "%.1fK", k) : String(format: "%.0fK", k)
     }
 
-    private func statusText(_ st: GenerationStats, images: Int, audio: Bool) -> String {
-        var parts = [modelName]
-        if images > 0 { parts.append("\(images) img") }
-        if audio { parts.append("audio") }
-        parts.append(String(format: "\u{00BB} %.0f tok/s", st.decodeTokensPerSecond))   // flow glyph
-        let ctx = st.promptTokens + st.generatedTokens
-        if contextWindow > 0 {
-            let frac = min(1.0, Double(ctx) / Double(contextWindow))
-            let pct = Int((frac * 100).rounded())
-            parts.append("ctx \(contextBar(frac)) \(ctx)/\(formatContext(contextWindow)) \(pct)%")
-        } else {
-            parts.append("ctx \(ctx)")
-        }
-        return parts.joined(separator: " \u{00B7} ")
-    }
-
     /// The persistent/idle footer status: the model name with the live context
     /// usage beside it. This is what the footer shows when nothing transient is
     /// happening (never a stale "thinking..."). Uses the last generation's token
@@ -1977,6 +1976,7 @@ final class ChatTUI {
     private func modelContextStatus() -> String {
         var parts = [modelName]
         if let st = lastStats {
+            parts.append(String(format: "\u{00BB} %.0f tok/s", st.decodeTokensPerSecond))
             let ctx = st.promptTokens + st.generatedTokens
             if contextWindow > 0 {
                 let frac = min(1.0, Double(ctx) / Double(contextWindow))
@@ -2490,9 +2490,11 @@ final class ChatTUI {
                 // lines align under the text. A blank line opens each exchange.
                 if sawTurn { lines.append("") }
                 sawTurn = true
-                let wrapped = Layout.wrap(msg.text, width: max(1, width - 4))
+                // Prefix widths mirror the chip ("  ▸ ") and reply ("  ● ")
+                // rows so all three turns start their text in one column.
+                let wrapped = Layout.wrap(msg.text, width: max(1, width - 6))
                 for (i, l) in wrapped.enumerated() {
-                    let prefix = i == 0 ? " > " : "   "
+                    let prefix = i == 0 ? "  > " : "    "
                     lines.append(Ansi.userBar(prefix + l, width: width))
                 }
             case .assistant:
