@@ -284,7 +284,8 @@ Key flags: `--max-iterations <n>`, `--no-bash`, `--allow-tool <name>` /
 
 The toolset: file ops (`read_file`, `list_dir`, `glob`, `grep`, `edit`,
 `multi_edit`, `write`), `bash` (opt-out), web (`web_search`, `web_fetch`),
-`now` (current date/time), and `todo` (the agent's own step checklist —
+`now` (current date/time), `repo_map` (native tree + top-level symbols map,
+no model effort needed), and `todo` (the agent's own step checklist —
 read-only, so planning works even in plan posture). The system prompt also
 carries an ambient environment line (date/time, cwd, platform, model) so the
 model never burns a turn inferring them.

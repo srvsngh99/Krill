@@ -153,7 +153,7 @@ struct CodeCommand: AsyncParsableCommand {
         var tools: [any Tool] = [
             ReadTool(), ListTool(), GlobTool(), GrepTool(), WebFetchTool(), WebSearchTool(),
             EditTool(), MultiEditTool(), WriteTool(),
-            NowTool(), TodoTool(),
+            NowTool(), TodoTool(), RepoMapTool(),
         ]
         if bash { tools.append(BashTool()) }
 

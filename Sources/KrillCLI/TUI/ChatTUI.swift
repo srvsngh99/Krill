@@ -1177,10 +1177,10 @@ final class ChatTUI {
             "Survey this repository and write a concise Krill.md at the repo root for future "
             + "coding agents. Cover: the build and test commands, the high-level architecture and "
             + "where the main modules live, and any important conventions. Include a 'Repo map' "
-            + "section: a compact tree of the significant directories (skip build output and "
-            + "dependencies), each with a one-line role — enough that an agent can route any task "
-            + "to the right files without searching. Use the read-only tools to inspect the repo "
-            + "first, then write the file. Keep it tight and skimmable."
+            + "section: call the repo_map tool and condense its output — a compact tree of the "
+            + "significant directories, each with a one-line role, so an agent can route any task "
+            + "to the right files without searching. Use the read-only tools for anything else "
+            + "you need, then write the file. Keep it tight and skimmable."
         await runAgentTurn(task)
     }
 
@@ -1193,7 +1193,7 @@ final class ChatTUI {
         ToolRegistry([
             ReadTool(), ListTool(), GlobTool(), GrepTool(), WebFetchTool(), WebSearchTool(),
             EditTool(), MultiEditTool(), WriteTool(), BashTool(),
-            NowTool(), todoTool,
+            NowTool(), todoTool, RepoMapTool(),
             DispatchTool(queue: spawnQueue),
         ])
     }
@@ -1687,8 +1687,10 @@ final class ChatTUI {
         let agentsTag = bgAgentsTag(sep)
         let cleanRight = "\(agentsTag)\(agentTag)\(thinkTag)\(speakTag)\(cwdLabel)\(sep)\(KrillVersionTag)"
         // Dictation is local STT and remains available on text-only models.
+        // Live work status renders ABOVE the input box (claude-code style),
+        // so the footer's left half always holds the model/context stats.
         guard voiceMode != .type || !voiceActivity.isEmpty else {
-            return (lastStatus.isEmpty ? modelContextStatus() : lastStatus, cleanRight)
+            return (modelContextStatus(), cleanRight)
         }
         let dot = Ansi.ember("\u{25CF}")
         let left: String
@@ -1702,8 +1704,7 @@ final class ChatTUI {
             case .type:      left = ""   // unreachable (guarded above)
             }
         }
-        let right = lastStatus.isEmpty ? cleanRight : "\(agentsTag)\(agentTag)\(speakTag)\(lastStatus)\(sep)\(KrillVersionTag)"
-        return (left, right)
+        return (left, cleanRight)
     }
 
     /// Footer chip for background agents: count + how many are running, with a
@@ -2390,10 +2391,15 @@ final class ChatTUI {
         if let attached { approval = attached.approver.pending() }
         else if surface == .agent { approval = approver.pending() }
         else { approval = nil }
+        // Priority for the row above the input box: an approval prompt beats
+        // everything; then the live working/thinking status (claude-code
+        // style, left-aligned); then the faded composer hint.
         let hintText: String
-        if let approval { hintText = approvalPrompt(approval) }
-        else if menu.isActive || modal { hintText = "" }
-        else { hintText = composerHint() }
+        let showsStatus: Bool
+        if let approval { hintText = approvalPrompt(approval); showsStatus = false }
+        else if menu.isActive || modal { hintText = ""; showsStatus = false }
+        else if !lastStatus.isEmpty { hintText = lastStatus; showsStatus = true }
+        else { hintText = composerHint(); showsStatus = false }
         let hintRows = hintText.isEmpty ? 0 : 1
         let availRows = max(0, boxTop - paneTop)     // rows paneTop .. boxTop-1
         let convHeight = max(0, availRows - menuLines.count - hintRows)
@@ -2430,10 +2436,16 @@ final class ChatTUI {
         // Faded italic hint, right-aligned on the row just above the input box -
         // OR a pending approval prompt, left-aligned and bold so it can't be missed.
         if hintRows > 0 {
-            let clipped = String(hintText.prefix(max(0, width - 2)))
             if approval != nil {
+                let clipped = String(hintText.prefix(max(0, width - 2)))
                 frame += positioned(boxTop - 1, "  " + Ansi.bold(clipped))
+            } else if showsStatus {
+                // Live status, left-aligned above the box. It carries ANSI
+                // spans (ember spinner), so clip generously and keep the
+                // chrome shade re-entrant around them.
+                frame += positioned(boxTop - 1, "  " + Ansi.chromeStyled(hintText))
             } else {
+                let clipped = String(hintText.prefix(max(0, width - 2)))
                 let pad = max(0, width - clipped.count - 2)
                 frame += positioned(boxTop - 1, String(repeating: " ", count: pad) + Ansi.hint(clipped))
             }

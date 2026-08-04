@@ -89,10 +89,12 @@ Tab to fill it and add arguments. `/help` lists everything.
 your project. Type `/agent` again to turn hands back off. `krill code [task]`
 opens the same surface already in agent mode (and runs `task` if given).
 
-The toolset: read-only explorers (`read_file`, `list_dir`, `glob`, `grep`),
+The toolset: read-only explorers (`read_file`, `list_dir`, `glob`, `grep`,
+`repo_map` — a native map of the tree with each file's top-level symbols),
 `web_search` (search the web for links + snippets) and `web_fetch` (fetch a URL
 as readable text), file edits (`edit_file`, `multi_edit`, `write_file`), `bash`,
-and `dispatch_agent` (spawn a background agent). As it works, the transcript
+`now` (date/time), `todo` (the agent's step checklist), and `dispatch_agent`
+(spawn a background agent). As it works, the transcript
 shows each step as an action chip
 (`▸ edit_file path`), the tool's result (with a `+N -M` diffstat on edits), and a
 live footer (`working . 8s . Esc interrupt`). Press **Esc** (or `Ctrl-C`) to
