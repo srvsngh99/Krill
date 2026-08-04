@@ -39,14 +39,14 @@ final class ChatTUI {
     private var modelTurns: [(role: String, content: String)] = []
 
     // Agent mode: the same surface with tools + file edits turned on. `surface`
-    // is the chat/agent toggle (`/agent`); `posture` is the permission leash
+    // is the chat/agent toggle (`/agent`); `permissions` is the leash
     // cycled with Shift+Tab. The agent thread keeps its own model-facing history
     // (`agentMessages`, carried across turns via AgentLoop's priorMessages seam),
     // separate from chat's `modelTurns`. The on-screen `view` is shared so the
     // transcript reads continuously across both modes.
     private enum Surface { case chat, agent }
     private var surface: Surface = .chat
-    private var posture: PermissionMode = .plan
+    private var permissions: PermissionMode = .plan
     private var agentMessages: [[String: String]] = []
     private var agentSeeded = false
     private var agentChipShown = false          // a chip was emitted for the in-flight call
@@ -102,12 +102,16 @@ final class ChatTUI {
     // Whisper runtime (best accuracy; downloads an English model on first use).
     private enum VoiceEngine { case apple, whisper }
     private var voiceEngine: VoiceEngine = .apple
+    private var voiceLanguage = "auto"
+    private var voiceIdentifier = ""
+    private var voiceRate: Float = AppleSpeechSettings.systemRate
+    private var voiceNarration: VoiceNarrationPolicy = .final
     // Live voice action shown in the footer (Listening / Transcribing /
     // Sending...). Empty when idle, where the footer shows the posture instead.
     private var voiceActivity = ""
     // Advanced each tick while recording to animate the footer VU meter.
     private var voiceFrame = 0
-    private let speech = SpeechRecognizer()
+    private var speech = SpeechRecognizer()
     // Lazily loaded native Whisper runtime + its SKU (English dictation).
     private var whisper: WhisperRuntime?
     private var whisperSKU = WhisperModelManager.defaultSKU
@@ -121,7 +125,7 @@ final class ChatTUI {
     // Ctrl-T, seeded from the `thinking` config key. Passed to each generate()
     // so the model reasons before answering when on.
     private var thinkingOn = true
-    private lazy var synth = SpeechSynthesizer()
+    private lazy var synth = SpeechSynthesizer(language: voiceLanguage, voiceIdentifier: voiceIdentifier, rate: voiceRate)
     private var inputHistory: [String] = []
     private var historyIndex = 0
     private var scrollOffset = 0     // lines scrolled up from bottom
@@ -163,8 +167,12 @@ final class ChatTUI {
          params: SamplingParams, maxTokens: Int, registry: Registry,
          initialImage: Data?, initialAudio: Data?, theme: String? = nil,
          voiceModeSetting: String = "off", speakRepliesSetting: Bool = false,
+         voiceEngineSetting: String = "apple", voiceLanguageSetting: String = "auto",
+         voiceIdentifierSetting: String = "", voiceRateSetting: Float = AppleSpeechSettings.systemRate,
+         voiceWhisperModelSetting: String = WhisperModelManager.defaultSKU,
+         voiceNarrationSetting: VoiceNarrationPolicy = .final,
          thinkingSetting: Bool = true,
-         modeSetting: String = "chat", agentPostureSetting: String = "plan",
+         modeSetting: String = "chat", agentPermissionsSetting: String = "plan",
          initialAgentTask: String? = nil) {
         self.engine = engine
         self.modelName = modelName
@@ -174,10 +182,20 @@ final class ChatTUI {
         self.registry = registry
         self.themeOverride = theme
         self.voiceMode = Self.parseVoiceMode(voiceModeSetting)
+        // A persisted `send` posture is valid only for an audio-capable model.
+        // Start safely in text mode when the configured/default model changes.
+        if self.voiceMode == .send, !engine.canUseNativeAudio { self.voiceMode = .type }
         self.speakReplies = speakRepliesSetting
+        self.voiceEngine = voiceEngineSetting.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "whisper" ? .whisper : .apple
+        self.voiceLanguage = voiceLanguageSetting
+        self.voiceIdentifier = voiceIdentifierSetting
+        self.voiceRate = voiceRateSetting
+        self.voiceNarration = voiceNarrationSetting
+        self.speech = SpeechRecognizer(language: voiceLanguageSetting)
+        self.whisperSKU = WhisperModelManager.sku(voiceWhisperModelSetting)?.id ?? WhisperModelManager.defaultSKU
         self.thinkingOn = thinkingSetting
         self.surface = modeSetting.lowercased() == "agent" ? .agent : .chat
-        self.posture = PermissionMode.parse(agentPostureSetting) ?? .plan
+        self.permissions = PermissionMode.parse(agentPermissionsSetting) ?? .plan
         self.initialAgentTask = initialAgentTask
         self.contextWindow = AliasMap.resolve(modelName)?.context ?? 0
         self.customCommands = CustomCommandStore.load(from: Self.commandsDir)
@@ -299,17 +317,26 @@ final class ChatTUI {
         case .ctrlU:
             input = ""; cursor = 0; menu.update(for: input); return nil
         case .ctrlV:
-            if engine.canUseNativeAudio { cycleVoiceMode() }   // Ctrl-V: cycle voice posture
+            cycleVoiceMode()   // dictation is independent of model audio input
             return nil
         case .ctrlT:
             setThinking(!thinkingOn)   // Ctrl-T: toggle the reasoning channel
             return nil
+        case .ctrlO:
+            // Toggle tool-output visibility across the transcript.
+            toolOutputExpanded.toggle()
+            lastStatus = toolOutputExpanded
+                ? "tool output expanded \u{00B7} ctrl+o to collapse"
+                : "tool output collapsed \u{00B7} ctrl+o to expand"
+            return nil
         case .backTab:
-            // Shift+Tab cycles the agent permission posture; no-op in chat mode
+            // Shift+Tab cycles the agent permissions; no-op in chat mode
             // (there is no leash to set when the model has no hands).
             if surface == .agent {
-                posture = posture.next
-                note("Posture: \(posture.postureNote)")
+                permissions = permissions.next
+                // Footer-only: the agent chip already shows the new state
+                // permanently; a transcript note per Shift+Tab is just litter.
+                lastStatus = "permissions: \(permissions.summary)"
             }
             return nil
         case .ctrlL:
@@ -355,10 +382,10 @@ final class ChatTUI {
             input = ""; cursor = 0; menu.close(); scrollOffset = 0
             return text.isEmpty ? nil : text
         case .char(let c):
-            // On a voice-capable model, Space on an empty composer is push-to-talk
+            // In a speech-to-text posture, Space on an empty composer is push-to-talk
             // (hold to talk, release to send) - UNLESS the posture is .type, where
             // Space is just a typed space (the "don't hijack my Space" posture).
-            if c == " " && input.isEmpty && engine.canUseNativeAudio && voiceMode != .type {
+            if c == " " && input.isEmpty && canCaptureVoice {
                 pendingVoiceCapture = true
                 return nil
             }
@@ -735,13 +762,24 @@ final class ChatTUI {
             return
         }
         if surface == .agent {
-            // Agent mode is text-driven (tools, not multimodal); drop any
-            // pending media so it is not silently lost.
-            if !pendingImages.isEmpty || pendingAudio != nil {
-                pendingImages.removeAll(); pendingAudio = nil
-                note("(agent mode is text-only; attachments dropped)")
+            // Images ride into the agent turn when the model has vision; on a
+            // text-only model KRILL says so up front (never the model
+            // improvising excuses). Audio in agent mode is not supported yet.
+            var turnImages: [Data] = []
+            if !pendingImages.isEmpty {
+                if engine.supportsNativeImage {
+                    turnImages = pendingImages.map(\.data)
+                } else {
+                    note("(\(modelName) has no image input — attachment dropped. "
+                        + "Try a vision model, e.g. /model gemma-4-e2b.)")
+                }
+                pendingImages.removeAll()
             }
-            await runAgentTurn(prompt)
+            if pendingAudio != nil {
+                pendingAudio = nil
+                note("(agent mode does not take audio attachments yet; use chat mode.)")
+            }
+            await runAgentTurn(prompt, images: turnImages)
             return
         }
         await generate(prompt: prompt)
@@ -774,8 +812,8 @@ final class ChatTUI {
             if surface == .agent {
                 ensureAgentSeed()
                 note("Agent mode ON - tools enabled (read · edit · bash). "
-                    + "Posture: \(posture.label) (\(posture.postureNote)). "
-                    + "Shift+Tab cycles posture; /agent to exit.")
+                    + "Permissions: \(permissions.label) (\(permissions.summary)). "
+                    + "Shift+Tab cycles permissions; /agent to exit.")
             } else {
                 note("Agent mode OFF - back to plain chat.")
             }
@@ -1021,7 +1059,7 @@ final class ChatTUI {
             "  directory      \(FileManager.default.currentDirectoryPath)",
             "  surface        \(surface == .agent ? "agent" : "chat")",
         ]
-        if surface == .agent { lines.append("  posture        \(posture.label) - \(posture.postureNote)") }
+        if surface == .agent { lines.append("  permissions    \(permissions.label) - \(permissions.summary)") }
         if contextWindow > 0 { lines.append("  context window \(formatContext(contextWindow))") }
         lines.append("  thinking       \(thinkingOn ? "on" : "off")")
         if !extraDirs.isEmpty {
@@ -1149,8 +1187,11 @@ final class ChatTUI {
         let task =
             "Survey this repository and write a concise Krill.md at the repo root for future "
             + "coding agents. Cover: the build and test commands, the high-level architecture and "
-            + "where the main modules live, and any important conventions. Use the read-only tools "
-            + "to inspect the repo first, then write the file. Keep it tight and skimmable."
+            + "where the main modules live, and any important conventions. Include a 'Repo map' "
+            + "section: call the repo_map tool and condense its output — a compact tree of the "
+            + "significant directories, each with a one-line role, so an agent can route any task "
+            + "to the right files without searching. Use the read-only tools for anything else "
+            + "you need, then write the file. Keep it tight and skimmable."
         await runAgentTurn(task)
     }
 
@@ -1163,9 +1204,36 @@ final class ChatTUI {
         ToolRegistry([
             ReadTool(), ListTool(), GlobTool(), GrepTool(), WebFetchTool(), WebSearchTool(),
             EditTool(), MultiEditTool(), WriteTool(), BashTool(),
+            NowTool(), todoTool, RepoMapTool(),
             DispatchTool(queue: spawnQueue),
         ])
     }
+
+    /// One todo list per TUI session — the tool instance carries the state, so
+    /// it must survive across `agentTools()` rebuilds.
+    private let todoTool = TodoTool()
+
+    /// Ambient environment line, captured once at first use so the system
+    /// prefix stays byte-stable across turns (prefix-cache friendly).
+    private lazy var sessionEnvLine = AgentEnvironment.contextLine(modelName: modelName)
+
+    /// ⌃O state: tool observations render collapsed (one dim size line) until
+    /// expanded. Errors always render in full regardless.
+    private var toolOutputExpanded = false
+
+    /// Latest generation stats from an agent run, written by the loop's task
+    /// via EngineGenerator.onStats and drained on the render tick, so the
+    /// footer's tok/s + context bar stay live while the agent works.
+    private final class AgentStatsBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stats: GenerationStats?
+        func put(_ s: GenerationStats) { lock.lock(); stats = s; lock.unlock() }
+        func take() -> GenerationStats? {
+            lock.lock(); defer { lock.unlock() }
+            let s = stats; stats = nil; return s
+        }
+    }
+    private let agentStats = AgentStatsBox()
 
     /// Prime the agent thread once, carrying the chat so far so context is not
     /// lost when hands turn on. Injects the tool system over `[system] + chat
@@ -1174,7 +1242,20 @@ final class ChatTUI {
         guard !agentSeeded else { return }
         agentSeeded = true
         var msgs: [[String: String]] = []
-        if let system, !system.isEmpty { msgs.append(["role": "system", "content": system]) }
+        // Ambient facts first (date/time, cwd, platform, model) so the model
+        // never wastes a turn — or a thinking budget — inferring them.
+        // Env line, then the project brief (Krill.md — the file /init writes),
+        // then the user's system prompt or the tool directive.
+        var seedSystem = [sessionEnvLine]
+        if let brief = AgentEnvironment.projectBrief() { seedSystem.append(brief) }
+        if let system, !system.isEmpty {
+            seedSystem.append(system)
+        } else {
+            // Bringing our own system turn suppresses the tooling layer's
+            // fallback directive — carry it explicitly.
+            seedSystem.append(AgentEnvironment.toolDirective)
+        }
+        msgs.append(["role": "system", "content": seedSystem.joined(separator: "\n\n")])
         for t in modelTurns { msgs.append(["role": t.role, "content": t.content]) }
         let format = ToolCalling.ToolFormat.forFamily(engine.family)
         agentMessages = ToolCalling.injectToolSystem(
@@ -1184,22 +1265,26 @@ final class ChatTUI {
     /// Run one agent turn live: spawn the loop on a background Task, drain its
     /// events into the transcript, and poll keys for cancel / scroll / approval.
     /// Mirrors the code TUI's run loop, adapted to the chat surface.
-    private func runAgentTurn(_ task: String) async {
-        view.append(Msg(role: .user, text: task))
+    private func runAgentTurn(_ task: String, images: [Data] = []) async {
+        let shownTask = images.isEmpty ? task : "[\(images.count) img] \(task)"
+        view.append(Msg(role: .user, text: shownTask))
         scrollOffset = 0
         agentChipShown = false
 
         // Plan posture: steer the model up front (the permission layer also
         // hard-denies mutating tools, so this is a nudge, not the enforcement).
-        let runTask = posture == .plan
+        let runTask = permissions == .plan
             ? "(Plan mode: read-only. Investigate with the read-only tools and propose a clear, "
               + "step-by-step plan. Do not edit files or run commands.)\n\n\(task)"
             : task
 
+        var generator = EngineGenerator(engine: engine, maxTokens: maxTokens)
+        generator.onStats = { [agentStats] in agentStats.put($0) }
+        generator.imageData = images
         let loop = AgentLoop(
-            generator: EngineGenerator(engine: engine, maxTokens: maxTokens),
+            generator: generator,
             tools: agentTools(),
-            permission: PermissionPolicy(mode: posture),
+            permission: PermissionPolicy(mode: permissions),
             gate: approver)
 
         let queue = EventQueue()
@@ -1218,15 +1303,16 @@ final class ChatTUI {
         while true {
             if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize() }
             pumpAll()   // keep background agents advancing during a foreground turn
+            if let st = agentStats.take() { lastStats = st }
             for ev in queue.drain() { applyAgentEvent(ev) }
             let finished = queue.isFinished
             let elapsed = Self.formatElapsed(CFAbsoluteTimeGetCurrent() - startedAt)
             if finished {
                 lastStatus = ""
             } else if approver.pending() != nil {
-                lastStatus = "\(dots[spin % dots.count]) awaiting approval \u{00B7} \(elapsed)"
+                lastStatus = "\(emberSpinner(spin, dots)) awaiting approval \u{00B7} \(elapsed)"
             } else {
-                lastStatus = "\(dots[spin % dots.count]) working \u{00B7} \(elapsed) \u{00B7} Esc interrupt"
+                lastStatus = "\(emberSpinner(spin, dots)) working \u{00B7} \(elapsed) \u{00B7} Esc interrupt"
             }
             render()
             if finished { break }
@@ -1251,12 +1337,8 @@ final class ChatTUI {
     /// a live progress trail; `Esc`/`Ctrl-C` cancels. The answer is appended to
     /// the conversation so follow-up questions can build on it.
     private func runResearch(_ question: String) async {
-        guard let backend = WebSearchTool.configuredBackend() else {
-            note("Web search is not configured, so /research has nothing to search. Set a SearXNG "
-                + "instance: /config searxng_url=http://localhost:8888 (the instance needs `json` in "
-                + "its search.formats), or export KRILL_SEARXNG_URL.")
-            return
-        }
+        let (backend, backendNote) = WebSearchTool.resolveBackend()
+        if let backendNote { note(backendNote) }
         view.append(Msg(role: .user, text: "/research \(question)"))
         modelTurns.append((role: "user", content: question))
         scrollOffset = 0
@@ -1292,7 +1374,7 @@ final class ChatTUI {
             for p in queue.drain() { note(Self.researchProgressLine(p)); scrollOffset = 0 }
             let finished = queue.isFinished
             let elapsed = Self.formatElapsed(CFAbsoluteTimeGetCurrent() - startedAt)
-            lastStatus = finished ? "" : "\(dots[spin % dots.count]) researching \u{00B7} \(elapsed) \u{00B7} Esc interrupt"
+            lastStatus = finished ? "" : "\(emberSpinner(spin, dots)) researching \u{00B7} \(elapsed) \u{00B7} Esc interrupt"
             render()
             if finished { break }
             spin += 1
@@ -1432,11 +1514,11 @@ final class ChatTUI {
     private func spawnSession(title: String, task: String) {
         let s = AgentSession(
             id: nextSessionID, title: title, engine: engine,
-            maxTokens: maxTokens, posture: posture, tools: agentTools())
+            maxTokens: maxTokens, permissions: permissions, tools: agentTools())
         nextSessionID += 1
         sessions.append(s)
         s.start(task: task)
-        note("Started background agent [\(s.id)] '\(title)' (posture: \(posture.label)). "
+        note("Started background agent [\(s.id)] '\(title)' (permissions: \(permissions.label)). "
             + "/agents to attach, /switch \(s.id) to jump in.")
     }
 
@@ -1453,7 +1535,7 @@ final class ChatTUI {
     private func switcherEntries() -> [AgentSwitcher.Entry] {
         var out = [AgentSwitcher.Entry(
             id: nil, title: "main",
-            status: surface == .agent ? "agent:\(posture.label)" : "chat")]
+            status: surface == .agent ? "agent:\(permissions.label)" : "chat")]
         for s in sessions {
             out.append(.init(id: s.id, title: "[\(s.id)] \(s.title)", status: s.statusLabel()))
         }
@@ -1541,7 +1623,14 @@ final class ChatTUI {
     private var engineLabel: String { voiceEngine == .whisper ? "Whisper" : "Apple" }
 
     /// Set the voice posture and confirm it on screen.
-    private func setVoiceMode(_ m: VoiceMode) { voiceMode = m; note(voiceModeNote()) }
+    private func setVoiceMode(_ m: VoiceMode) {
+        guard m != .send || engine.canUseNativeAudio else {
+            note("Voice send needs an audio-capable model. Use dictate or hands-free for local speech-to-text.")
+            return
+        }
+        voiceMode = m
+        note(voiceModeNote())
+    }
 
     /// Turn spoken replies (TTS) on or off and confirm it on screen. Stops any
     /// in-flight speech when turning off.
@@ -1572,7 +1661,9 @@ final class ChatTUI {
     /// at `.type` (voice off) so one key both enables voice and turns it back off:
     /// off -> dictate -> handsfree -> send -> off.
     private func cycleVoiceMode() {
-        let cycle: [VoiceMode] = [.type, .dictate, .handsfree, .send]
+        let cycle: [VoiceMode] = engine.canUseNativeAudio
+            ? [.type, .dictate, .handsfree, .send]
+            : [.type, .dictate, .handsfree]
         let i = cycle.firstIndex(of: voiceMode) ?? 0
         voiceMode = cycle[(i + 1) % cycle.count]
         note(voiceModeNote())
@@ -1591,6 +1682,10 @@ final class ChatTUI {
         }
     }
 
+    private var canCaptureVoice: Bool {
+        voiceMode == .dictate || voiceMode == .handsfree || (voiceMode == .send && engine.canUseNativeAudio)
+    }
+
     /// Footer halves: the voice posture / live activity on the LEFT (a mono dot
     /// that pulses while recording), generation stats + version on the RIGHT. On
     /// non-audio models the left falls back to the generation status. Folding the
@@ -1605,7 +1700,7 @@ final class ChatTUI {
             case .idle:              left = "done\(sep)type to continue\(sep)/main to return"
             case .cancelled:         left = "cancelled\(sep)/main to return"
             }
-            return (left, "agent[\(s.id)]:\(s.posture.label)\(sep)\(cwdLabel)\(sep)\(KrillVersionTag)")
+            return (left, "agent[\(s.id)]:\(s.permissions.label)\(sep)\(cwdLabel)\(sep)\(KrillVersionTag)")
         }
         // Spoken-replies (TTS) indicator: independent of the mic, so it shows even
         // on text-only models. Leads the right half when on.
@@ -1613,16 +1708,19 @@ final class ChatTUI {
         // Reasoning indicator + toggle hint: filled dot when the thinking channel
         // is on, hollow when off, always carrying the ⌃T key so it reads as a
         // switch (Ctrl-T flips it; a no-op on models with no thinking channel).
-        let thinkTag = (thinkingOn ? Ansi.ember("\u{25CF}") : "\u{25CB}") + " think \u{2303}T\(sep)"
-        // Agent posture chip: shows the leash state whenever hands are on.
-        let agentTag = surface == .agent ? "\u{25CF} agent:\(posture.label)\(sep)" : ""
+        let thinkTag = (thinkingOn ? Ansi.ember("\u{25CF}") : "\u{25CB}") + " think (ctrl+t to toggle)\(sep)"
+        // Agent chip: the permission state + its key, whenever hands are on
+        // (the one place agent status lives — claude-code-style, below the bar).
+        let agentTag = surface == .agent
+            ? "\u{25CF} agent: \(permissions.label) (shift+tab to cycle)\(sep)" : ""
         // Background-agent count, with a marker when one needs approval.
         let agentsTag = bgAgentsTag(sep)
         let cleanRight = "\(agentsTag)\(agentTag)\(thinkTag)\(speakTag)\(cwdLabel)\(sep)\(KrillVersionTag)"
-        // Voice OFF (text mode) or a non-audio model: no voice chrome at all - the
-        // footer is just the generation status and cwd/version (plus speak tag).
-        guard engine.canUseNativeAudio, voiceMode != .type || !voiceActivity.isEmpty else {
-            return (lastStatus.isEmpty ? modelContextStatus() : lastStatus, cleanRight)
+        // Dictation is local STT and remains available on text-only models.
+        // Live work status renders ABOVE the input box (claude-code style),
+        // so the footer's left half always holds the model/context stats.
+        guard voiceMode != .type || !voiceActivity.isEmpty else {
+            return (modelContextStatus(), cleanRight)
         }
         let dot = Ansi.ember("\u{25CF}")
         let left: String
@@ -1636,8 +1734,7 @@ final class ChatTUI {
             case .type:      left = ""   // unreachable (guarded above)
             }
         }
-        let right = lastStatus.isEmpty ? cleanRight : "\(agentsTag)\(agentTag)\(speakTag)\(lastStatus)\(sep)\(KrillVersionTag)"
-        return (left, right)
+        return (left, cleanRight)
     }
 
     /// Footer chip for background agents: count + how many are running, with a
@@ -1666,8 +1763,7 @@ final class ChatTUI {
     }
 
     /// Short contextual hint shown faded + italic, right-aligned above the input
-    /// box: what Space does in the current posture (and how to reach voice when
-    /// it is off). Empty on non-audio models, where there is nothing to hint.
+    /// box: what Space does in the current posture (and how to reach local STT).
     /// One-line preview of a queued type-ahead message for the composer hint:
     /// newlines/tabs flattened to spaces and clipped so a long message never
     /// blows out the single hint row.
@@ -1694,11 +1790,8 @@ final class ChatTUI {
                 ? "agent working\(sep)Esc interrupt\(sep)/main to return"
                 : "type to continue this agent\(sep)/main to return"
         }
-        // In agent mode the leash + how to change it is the most useful hint.
-        if surface == .agent {
-            return "agent:\(posture.label)\(sep)Shift+Tab posture\(sep)/agent to exit"
-        }
-        guard engine.canUseNativeAudio else { return "" }
+        // Agent state lives in the footer only (the chip below the input bar)
+        // so the same information is not stacked on both sides of the box.
         switch voiceMode {
         case .type:      return "activate voice mode: Ctrl-V"
         case .dictate:   return "hold Space to dictate\(sep)Ctrl-V to cycle"
@@ -1712,13 +1805,16 @@ final class ChatTUI {
     /// card. Replaces the old silent dictate<->send toggle.
     private func voiceStatusCard() -> String {
         func mark(_ on: Bool) -> String { on ? ">" : " " }
-        let eng = voiceEngine == .whisper ? "Whisper (\(whisperSKU))" : "Apple on-device"
+        let eng = voiceEngine == .whisper ? "Whisper (\(whisperSKU))" : "Apple on-device (\(AppleSpeechSettings(language: voiceLanguage).localeIdentifier))"
+        let send = engine.canUseNativeAudio
+            ? "hold Space -> talk to it; the model answers your speech in text"
+            : "unavailable: this model has no native audio input (use dictate)"
         return """
         Voice posture               Ctrl-V to cycle  |  /voice-mode <name>
         \(mark(voiceMode == .type)) type       keyboard only - Space types a space, Enter sends
         \(mark(voiceMode == .dictate)) dictate    hold Space -> transcribe to composer -> review -> Enter (engine: \(eng))
         \(mark(voiceMode == .handsfree)) handsfree  hold Space -> transcribe -> auto-send (Esc cancels)
-        \(mark(voiceMode == .send)) send       hold Space -> talk to it; the model answers your speech in text
+        \(mark(voiceMode == .send)) send       \(send)
 
         \(voiceEngineInfo())
         """
@@ -1755,11 +1851,16 @@ final class ChatTUI {
                : (!pendingImages.isEmpty ? "[media]" : prompt)))
         view.append(Msg(role: .user, text: shown))
         modelTurns.append((role: "user", content: prompt))
-        let usedImgs = pendingImages.count
-        let usedAud = pendingAudio != nil
-
         var messages: [[String: String]] = []
-        if let system, !system.isEmpty { messages.append(["role": "system", "content": system]) }
+        // Chat carries the same ambient line as agent mode (date, cwd,
+        // platform, model) so "what day is it" doesn't hallucinate from
+        // training data. Session-pinned: a per-turn timestamp would change the
+        // prefix every minute and defeat shared-prefix KV reuse.
+        if let system, !system.isEmpty {
+            messages.append(["role": "system", "content": sessionEnvLine + "\n\n" + system])
+        } else {
+            messages.append(["role": "system", "content": sessionEnvLine])
+        }
         for t in modelTurns { messages.append(["role": t.role, "content": t.content]) }
         let imgs = pendingImages.map(\.data)
 
@@ -1850,10 +1951,11 @@ final class ChatTUI {
             view.append(Msg(role: .note, text: "(cancelled)"))
         } else {
             modelTurns.append((role: "assistant", content: assistant))
-            if let st = gen.stats() { lastStats = st; lastStatus = statusText(st, images: usedImgs, audio: usedAud) }
+            if let st = gen.stats() { lastStats = st }
+            lastStatus = ""
             // Read the reply aloud when speaking is on (voice phase 2). Cleaned of
             // markdown that reads badly; a new reply interrupts the previous one.
-            if speakReplies, !assistant.isEmpty { synth.speak(assistant) }
+            if speakReplies, voiceNarration != .off, !assistant.isEmpty { synth.speak(assistant) }
         }
         pendingImages.removeAll(); pendingAudio = nil
         render()
@@ -1880,29 +1982,28 @@ final class ChatTUI {
         return k < 10 ? String(format: "%.1fK", k) : String(format: "%.0fK", k)
     }
 
-    private func statusText(_ st: GenerationStats, images: Int, audio: Bool) -> String {
-        var parts = [modelName]
-        if images > 0 { parts.append("\(images) img") }
-        if audio { parts.append("audio") }
-        parts.append(String(format: "\u{00BB} %.0f tok/s", st.decodeTokensPerSecond))   // flow glyph
-        let ctx = st.promptTokens + st.generatedTokens
-        if contextWindow > 0 {
-            let frac = min(1.0, Double(ctx) / Double(contextWindow))
-            let pct = Int((frac * 100).rounded())
-            parts.append("ctx \(contextBar(frac)) \(ctx)/\(formatContext(contextWindow)) \(pct)%")
-        } else {
-            parts.append("ctx \(ctx)")
-        }
-        return parts.joined(separator: " \u{00B7} ")
-    }
-
     /// The persistent/idle footer status: the model name with the live context
     /// usage beside it. This is what the footer shows when nothing transient is
     /// happening (never a stale "thinking..."). Uses the last generation's token
     /// stats when present, else just the model name and the window size.
+    /// The working spinner in the brand ember spectrum: each frame advances
+    /// both the braille glyph and its colour through the amber→coral→magenta
+    /// stops (the same ramp as the context bar), so "thinking" reads as Krill.
+    private static let emberSpinStops = [
+        "38;2;255;192;77", "38;2;255;160;84", "38;2;255;125;92",
+        "38;2;240;94;104", "38;2;224;69;125",
+    ]
+    private func emberSpinner(_ spin: Int, _ dots: [String]) -> String {
+        let glyph = dots[spin % dots.count]
+        guard Ansi.enabled else { return glyph }
+        let code = Self.emberSpinStops[spin % Self.emberSpinStops.count]
+        return "\u{1B}[\(code)m\(glyph)\u{1B}[0m"
+    }
+
     private func modelContextStatus() -> String {
         var parts = [modelName]
         if let st = lastStats {
+            parts.append(String(format: "\u{00BB} %.0f tok/s", st.decodeTokensPerSecond))
             let ctx = st.promptTokens + st.generatedTokens
             if contextWindow > 0 {
                 let frac = min(1.0, Double(ctx) / Double(contextWindow))
@@ -1958,7 +2059,20 @@ final class ChatTUI {
         do {
             try await newEngine.load()
             engine = newEngine; modelName = name
+            if voiceMode == .send, !engine.canUseNativeAudio {
+                voiceMode = .type
+                note("Voice send was disabled because \(name) has no native audio input. Dictate and hands-free remain available.")
+            }
             contextWindow = AliasMap.resolve(name)?.context ?? 0
+            // Model-derived session state must not survive the swap: the env
+            // line names the model, and the agent seed embeds the OLD family's
+            // tool wire format (wrong syntax for the new model). The chat
+            // transcript carries over; the agent thread re-seeds from it on
+            // the next agent turn, dropping only old-format tool exchanges.
+            sessionEnvLine = AgentEnvironment.contextLine(modelName: name)
+            agentSeeded = false
+            agentMessages.removeAll()
+            lastStats = nil   // stale tok/s + ctx would misreport the new model
             note("Switched to \(name). Conversation kept.")
         } catch { note("Failed to load \(name): \(error)") }
     }
@@ -1967,7 +2081,7 @@ final class ChatTUI {
     /// Terminals report no key-release, so we use the OS key-repeat stream as the
     /// "still held" signal and treat a short gap with no Space as the release.
     private func holdToTalk() async {
-        guard engine.canUseNativeAudio, voiceMode != .type else { return }
+        guard canCaptureVoice else { return }
         // Show this BEFORE the access await: a re-signed bundle resets TCC, so the
         // system mic/Speech prompt may sit behind the terminal - without a hint the
         // app looks frozen ("nothing happens" on Space).
@@ -2092,8 +2206,8 @@ final class ChatTUI {
     /// Hands-free: transcribe the clip, drop the text in the composer so the user
     /// always SEES what will be sent, then auto-send after a short grace window.
     /// Esc (or editing the text) cancels the auto-send and keeps it in the
-    /// composer; Enter sends immediately. The reply is shown on screen - spoken
-    /// replies (TTS) are a planned follow-up to make this fully hands-free.
+    /// composer; Enter sends immediately. The reply is shown on screen and is
+    /// spoken when `/speak` and the narration policy enable local TTS.
     private func handsfreeVoice(_ wav: Data) async {
         await transcribeVoice(wav)            // fills `input` with the transcript (or notes a miss)
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2149,7 +2263,7 @@ final class ChatTUI {
         // Prefer Apple's on-device speech-to-text: accurate, fully local, no
         // download. Falls through to the multimodal model only when the Speech
         // framework is unavailable or yields nothing.
-        if SpeechRecognizer.isAvailable, await SpeechRecognizer.requestAuthorization() {
+        if SpeechRecognizer.isAvailable(language: voiceLanguage), await SpeechRecognizer.requestAuthorization() {
             if let text = await speech.transcribe(wav: wav) {
                 voiceActivity = ""
                 let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2157,6 +2271,11 @@ final class ChatTUI {
                 setInput(clean)
                 return
             }
+        }
+        guard engine.canUseNativeAudio else {
+            voiceActivity = ""
+            note("Local \(engineLabel) transcription is unavailable for language '\(voiceLanguage)'. Install/enable on-device Speech Recognition or choose /voice engine whisper; this text model cannot accept raw audio.")
+            return
         }
         // Force verbatim transcription. Gemma 4's audio path will otherwise
         // ANSWER the speech (its default behaviour) rather than transcribe it;
@@ -2308,10 +2427,15 @@ final class ChatTUI {
         if let attached { approval = attached.approver.pending() }
         else if surface == .agent { approval = approver.pending() }
         else { approval = nil }
+        // Priority for the row above the input box: an approval prompt beats
+        // everything; then the live working/thinking status (claude-code
+        // style, left-aligned); then the faded composer hint.
         let hintText: String
-        if let approval { hintText = approvalPrompt(approval) }
-        else if menu.isActive || modal { hintText = "" }
-        else { hintText = composerHint() }
+        let showsStatus: Bool
+        if let approval { hintText = approvalPrompt(approval); showsStatus = false }
+        else if menu.isActive || modal { hintText = ""; showsStatus = false }
+        else if !lastStatus.isEmpty { hintText = lastStatus; showsStatus = true }
+        else { hintText = composerHint(); showsStatus = false }
         let hintRows = hintText.isEmpty ? 0 : 1
         let availRows = max(0, boxTop - paneTop)     // rows paneTop .. boxTop-1
         let convHeight = max(0, availRows - menuLines.count - hintRows)
@@ -2348,10 +2472,16 @@ final class ChatTUI {
         // Faded italic hint, right-aligned on the row just above the input box -
         // OR a pending approval prompt, left-aligned and bold so it can't be missed.
         if hintRows > 0 {
-            let clipped = String(hintText.prefix(max(0, width - 2)))
             if approval != nil {
+                let clipped = String(hintText.prefix(max(0, width - 2)))
                 frame += positioned(boxTop - 1, "  " + Ansi.bold(clipped))
+            } else if showsStatus {
+                // Live status, left-aligned above the box. It carries ANSI
+                // spans (ember spinner), so clip generously and keep the
+                // chrome shade re-entrant around them.
+                frame += positioned(boxTop - 1, "  " + Ansi.chromeStyled(hintText))
             } else {
+                let clipped = String(hintText.prefix(max(0, width - 2)))
                 let pad = max(0, width - clipped.count - 2)
                 frame += positioned(boxTop - 1, String(repeating: " ", count: pad) + Ansi.hint(clipped))
             }
@@ -2396,9 +2526,11 @@ final class ChatTUI {
                 // lines align under the text. A blank line opens each exchange.
                 if sawTurn { lines.append("") }
                 sawTurn = true
-                let wrapped = Layout.wrap(msg.text, width: max(1, width - 4))
+                // Prefix widths mirror the chip ("  ▸ ") and reply ("  ● ")
+                // rows so all three turns start their text in one column.
+                let wrapped = Layout.wrap(msg.text, width: max(1, width - 6))
                 for (i, l) in wrapped.enumerated() {
-                    let prefix = i == 0 ? " > " : "   "
+                    let prefix = i == 0 ? "  > " : "    "
                     lines.append(Ansi.userBar(prefix + l, width: width))
                 }
             case .assistant:
@@ -2430,7 +2562,14 @@ final class ChatTUI {
                     lines.append(margin + styledCode(l))
                 }
             case .toolResult:
-                for l in CodeView.toolResult(content: msg.text, isError: msg.toolError, width: w, maxLines: 14) {
+                // Collapsed by default to keep the transcript scannable; ⌃O
+                // toggles full output (uncapped). Errors are never collapsed.
+                let rendered = (!toolOutputExpanded && !msg.toolError)
+                    ? CodeView.toolResultCollapsed(content: msg.text, width: w)
+                    : CodeView.toolResult(
+                        content: msg.text, isError: msg.toolError, width: w,
+                        maxLines: toolOutputExpanded ? 0 : 14)
+                for l in rendered {
                     lines.append(margin + styledCode(l))
                 }
             case .pre:
@@ -2633,7 +2772,7 @@ final class ChatTUI {
         let keys: [(String, String)] = [
             ("Up / Down", "History, or cycle the slash menu"),
             ("Tab", "Accept the highlighted command"),
-            ("Shift+Tab", "Agent mode: cycle posture (plan/ask/accept-edits/auto)"),
+            ("Shift+Tab", "Agent mode: cycle permissions (plan/ask/accept-edits/auto)"),
             ("Enter", "Send the message"),
             ("Hold Space", "Push-to-talk (dictate/handsfree/send postures)"),
             ("Ctrl-V", "Cycle voice posture: type/dictate/handsfree/send"),

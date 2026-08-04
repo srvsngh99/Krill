@@ -159,6 +159,79 @@ final class Spinner: @unchecked Sendable {
     }
 }
 
+// MARK: - Branded model load
+
+/// The ember-spectrum spinner: braille frames whose colour advances through
+/// the brand ramp (amber → coral → magenta) each tick — the same palette as
+/// the TUI's context bar and working status. Falls back to a single plain
+/// line when ANSI is unavailable.
+final class EmberSpinner: @unchecked Sendable {
+    private static let frames = [
+        "\u{2839}", "\u{2838}", "\u{2834}", "\u{2826}",
+        "\u{2827}", "\u{2807}", "\u{280F}", "\u{2819}",
+    ]
+    private static let stops = [
+        "38;2;255;192;77", "38;2;255;160;84", "38;2;255;125;92",
+        "38;2;240;94;104", "38;2;224;69;125",
+    ]
+    private let label: String
+    private var task: Task<Void, Never>?
+
+    init(_ label: String) { self.label = label }
+
+    func start() {
+        guard Ansi.enabled else { print("  \(label)"); return }
+        let label = self.label
+        task = Task {
+            var i = 0
+            while !Task.isCancelled {
+                let frame = Self.frames[i % Self.frames.count]
+                let stop = Self.stops[i % Self.stops.count]
+                print("\r  \u{1B}[\(stop)m\(frame)\u{1B}[0m \(Ansi.dim(label))", terminator: "")
+                fflush(stdout)
+                i += 1
+                try? await Task.sleep(nanoseconds: 90_000_000)
+            }
+        }
+    }
+
+    func stop() async {
+        task?.cancel()
+        await task?.value
+        task = nil
+        if Ansi.enabled {
+            print(Ansi.clearLine, terminator: "")
+            fflush(stdout)
+        }
+    }
+}
+
+/// The branded model-load sequence shared by `krill run` and `krill code`:
+/// wordmark line, ember spinner while the load runs, and a Ready line.
+enum BrandedLoad {
+    static func run(
+        model: String, wordmark: String = "Krill",
+        _ body: () async throws -> Void
+    ) async rethrows {
+        print("")
+        print("  " + Ansi.ember(Ansi.bold(">_ ")) + Ansi.bold(wordmark)
+            + Ansi.chrome("  \u{00B7}  local \u{00B7} private \u{00B7} Sourav AI Labs"))
+        let spinner = EmberSpinner("Loading \(model)\u{2026}")
+        spinner.start()
+        let start = CFAbsoluteTimeGetCurrent()
+        do {
+            try await body()
+        } catch {
+            await spinner.stop()
+            throw error
+        }
+        await spinner.stop()
+        print("  " + Ansi.ember("\u{25CF}")
+            + Ansi.chrome(String(format: " %@ ready in %.1fs.", model, CFAbsoluteTimeGetCurrent() - start)))
+        print("")
+    }
+}
+
 // MARK: - Markdown-lite streaming renderer
 
 /// Line-buffered markdown-lite styler for streamed model output. Completed lines

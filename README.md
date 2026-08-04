@@ -25,7 +25,7 @@ Most local-LLM stacks are one half of a pair:
 
 | Mode | Command | What you get |
 |------|---------|--------------|
-| **Chat** | `krill run <model>` | Full-screen TUI (or one-shot) — multimodal, streaming, on-device voice |
+| **Chat** | `krill run <model>` | Full-screen TUI (opens in agent mode; `/chat` for pure chat) — multimodal, streaming, on-device voice |
 | **Serve** | `krill serve` | Drop-in **OpenAI · Ollama · Anthropic** API on `:57455` |
 | **Agent** | `krill code <task>` | Coding agent — bash, edits, glob/grep, **web**, **deep research** — on your local model |
 

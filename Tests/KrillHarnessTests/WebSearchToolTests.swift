@@ -6,10 +6,11 @@ import FoundationNetworking
 
 /// Canned backend so the tool is exercised without the network.
 private struct StubBackend: SearchBackend {
-    let name = "stub"
+    let name: String
     let results: [SearchResult]
     let error: Error?
-    init(results: [SearchResult] = [], error: Error? = nil) {
+    init(name: String = "stub", results: [SearchResult] = [], error: Error? = nil) {
+        self.name = name
         self.results = results
         self.error = error
     }
@@ -50,10 +51,16 @@ final class WebSearchToolTests: XCTestCase {
         XCTAssertTrue(r.isError)
     }
 
-    func testUnconfiguredBackendGivesActionableError() async {
-        let r = await WebSearchTool(backend: nil).run(argumentsJSON: #"{"query":"swift"}"#)
-        XCTAssertTrue(r.isError)
-        XCTAssertTrue(r.content.contains("searxng_url"), "tells the user how to enable it")
+    func testUnconfiguredBackendDegradesToFallbackWithNote() async {
+        let fallback = StubBackend(name: "fallback-stub", results: [
+            SearchResult(title: "Live", url: "https://example.org", snippet: "fresh"),
+        ])
+        let r = await WebSearchTool(backend: nil, fallback: fallback)
+            .run(argumentsJSON: #"{"query":"swift"}"#)
+        XCTAssertFalse(r.isError, "degrades instead of failing")
+        XCTAssertTrue(r.content.contains("unavailable"), "explains the fallback")
+        XCTAssertTrue(r.content.contains("search_backend"), "tells the user how to fix it")
+        XCTAssertTrue(r.content.contains("https://example.org"), "still returns results")
     }
 
     func testFormatsResultsWithUntrustedFraming() async {
@@ -92,11 +99,35 @@ final class WebSearchToolTests: XCTestCase {
         XCTAssertTrue(r.content.contains("No results"))
     }
 
-    func testBackendErrorSurfaces() async {
-        let backend = StubBackend(error: SearxngBackend.SearchError.httpStatus(403))
-        let r = await WebSearchTool(backend: backend).run(argumentsJSON: #"{"query":"x"}"#)
+    func testBackendErrorRetriesOnFallbackWithNote() async {
+        let backend = StubBackend(name: "primary", error: SearxngBackend.SearchError.httpStatus(403))
+        let fallback = StubBackend(name: "fallback-stub", results: [
+            SearchResult(title: "Live", url: "https://example.org", snippet: ""),
+        ])
+        let r = await WebSearchTool(backend: backend, fallback: fallback)
+            .run(argumentsJSON: #"{"query":"x"}"#)
+        XCTAssertFalse(r.isError, "a failing selected backend degrades")
+        XCTAssertTrue(r.content.contains("403"), "the original failure is reported")
+        XCTAssertTrue(r.content.contains("retried with fallback-stub"))
+        XCTAssertTrue(r.content.contains("https://example.org"))
+    }
+
+    func testBothBackendsFailingIsAnError() async {
+        let backend = StubBackend(name: "primary", error: SearxngBackend.SearchError.httpStatus(403))
+        let fallback = StubBackend(name: "fallback-stub", error: SearxngBackend.SearchError.badResponse)
+        let r = await WebSearchTool(backend: backend, fallback: fallback)
+            .run(argumentsJSON: #"{"query":"x"}"#)
         XCTAssertTrue(r.isError)
-        XCTAssertTrue(r.content.contains("403"))
+    }
+
+    func testFallbackFailureWithoutSelectionIsAnError() async {
+        // backend nil (nothing configured) and the fallback itself errors:
+        // no second retry, a plain error comes back.
+        let fallback = StubBackend(name: "fallback-stub", error: SearxngBackend.SearchError.httpStatus(500))
+        let r = await WebSearchTool(backend: nil, fallback: fallback)
+            .run(argumentsJSON: #"{"query":"x"}"#)
+        XCTAssertTrue(r.isError)
+        XCTAssertTrue(r.content.contains("500"))
     }
 
     // MARK: - SearXNG backend (parser + URL building)

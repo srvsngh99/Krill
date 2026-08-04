@@ -370,7 +370,7 @@ public class MllamaVisionTower: Module {
         let arIds = aspectRatioIds.reshaped(bm, -1)
 
         // Patch embedding: [bm*tiles, C, H, W] -> channels-last conv -> [bm*tiles, gh*gw, hidden]
-        var pv = pixelValues.reshaped(bm * numTiles, C, H, W)
+        let pv = pixelValues.reshaped(bm * numTiles, C, H, W)
         let patches = patchEmbedding(pv.transposed(0, 2, 3, 1))   // [bm*tiles, gh, gw, hidden]
         let hidden = patches.dim(-1)
         var h = patches.reshaped(bm * numTiles, -1, hidden)       // [bm*tiles, gh*gw, hidden]

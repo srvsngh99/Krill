@@ -469,12 +469,17 @@ public struct QuantizedPrefixCacheHit {
 
 /// Internal storage form for a cached entry. fp16 and int8 are disjoint so
 /// a lookup from one path cannot read tensors written by the other.
-enum CachedStorage {
+///
+/// `@unchecked Sendable`: MLXArray is not Sendable, but every entry is built
+/// from detached/contiguous copies (`store` materializes them before the
+/// enqueue) and nothing mutates an entry after construction — the disk queue
+/// only reads it once, fire-and-forget.
+enum CachedStorage: @unchecked Sendable {
     case fp16(keys: [[MLXArray]], values: [[MLXArray]])
     case int8(snapshots: [QuantizedKVSnapshot])
 }
 
-struct MemoryCacheEntry {
+struct MemoryCacheEntry: @unchecked Sendable {
     let storage: CachedStorage
     /// The exact token prefix this entry's KV was computed under. Retained for
     /// in-memory longest-common-prefix (LCP) matching so a request that SHARES

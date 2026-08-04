@@ -457,7 +457,7 @@ class VisionPooler: Module {
     ) -> (MLXArray, MLXArray) {
         // Zero out padding tokens
         let padMask = expandedDimensions(paddingPositions, axis: -1)
-        var h = MLX.where(padMask, MLXArray(Float(0)), hiddenStates)
+        let h = MLX.where(padMask, MLXArray(Float(0)), hiddenStates)
 
         let inputSeqLen = h.dim(1)
         let length = defaultOutputLength

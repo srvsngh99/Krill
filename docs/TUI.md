@@ -37,10 +37,11 @@ If auto-detection ever misreads, pass `--theme light` or `--theme dark`.
 |-----|--------|
 | `Up` / `Down` | Recall input history, or cycle the slash-command popup |
 | `Tab` | Accept the highlighted command (then add arguments) |
-| `Shift+Tab` | Agent mode: cycle the permission posture (plan / ask / accept-edits / auto) |
+| `Shift+Tab` | Agent mode: cycle permissions (plan / ask / accept-edits / auto) |
 | `Enter` | Send the message |
 | Hold `Space` | Push-to-talk (only when voice is on: dictate / handsfree / send) |
 | `Ctrl-V` | Turn voice on and cycle it: off -> dictate -> handsfree -> send -> off |
+| `Ctrl-O` | Agent mode: expand / collapse tool output (collapsed by default; errors always show) |
 | `PgUp` / `PgDn` | Scroll the conversation |
 | Mouse wheel / trackpad | Scroll the conversation (hold Option/Fn to select text) |
 | `Esc` | Interrupt the agent while it is working (in agent mode) |
@@ -55,7 +56,7 @@ Tab to fill it and add arguments. `/help` lists everything.
 | Command | Action |
 |---------|--------|
 | `/help` | Show keys and commands |
-| `/agent` | Toggle agent mode (tools + file edits); `Shift+Tab` cycles the posture |
+| `/agent` | Toggle agent mode (tools + file edits); `Shift+Tab` cycles permissions |
 | `/bg <task>` | Spawn a background agent for a task (see Background agents) |
 | `/agents` | List and switch between background agents (`/switch <n>`, `/main` too) |
 | `/config [key=value]` | Show config, or set a key (persists to `~/.krill/config.toml`) |
@@ -88,22 +89,24 @@ Tab to fill it and add arguments. `/help` lists everything.
 your project. Type `/agent` again to turn hands back off. `krill code [task]`
 opens the same surface already in agent mode (and runs `task` if given).
 
-The toolset: read-only explorers (`read_file`, `list_dir`, `glob`, `grep`),
+The toolset: read-only explorers (`read_file`, `list_dir`, `glob`, `grep`,
+`repo_map` — a native map of the tree with each file's top-level symbols),
 `web_search` (search the web for links + snippets) and `web_fetch` (fetch a URL
 as readable text), file edits (`edit_file`, `multi_edit`, `write_file`), `bash`,
-and `dispatch_agent` (spawn a background agent). As it works, the transcript
+`now` (date/time), `todo` (the agent's step checklist), and `dispatch_agent`
+(spawn a background agent). As it works, the transcript
 shows each step as an action chip
 (`▸ edit_file path`), the tool's result (with a `+N -M` diffstat on edits), and a
 live footer (`working . 8s . Esc interrupt`). Press **Esc** (or `Ctrl-C`) to
 interrupt a run.
 
-### Permission postures
+### Permissions
 
-What the agent may do without asking is the **posture**, cycled live with
+What the agent may do without asking is its **permission level**, cycled live with
 **`Shift+Tab`** and shown as a footer chip (`agent:plan`). Read-only tools always
-run; the posture governs the mutating ones:
+run; the level governs the mutating ones:
 
-| Posture | Behaviour |
+| Level | Behaviour |
 |---------|-----------|
 | `plan` | Read-only. The agent investigates and proposes a plan; edits and commands are denied. |
 | `ask` | Confirm every file edit and shell command before it runs. |
@@ -115,8 +118,10 @@ bar appears above the input box: `[y]es` runs it, `[n]o` (or `Esc`) denies it,
 `[a]lways` allows that tool for the rest of the session.
 
 The launch defaults come from `~/.krill/config.toml`: `default_mode`
-(`chat` or `agent`) and `default_agent_posture` (`plan` / `ask` / `accept-edits`
-/ `auto`). Set them in place with `/config default_mode=agent`.
+(`agent` by default, or `chat`) and `default_agent_permissions` (`plan` / `ask` /
+`accept-edits` / `auto`; legacy alias `default_agent_posture`). Set them in
+place with `/config default_mode=chat`. The agent also reads `Krill.md` at the
+repo root into every session — generate one with `/init`.
 
 ## Background agents
 
@@ -239,15 +244,20 @@ multi-image models (mllama); single-image models use the first. `--image` /
 
 ## Voice
 
+This section describes the terminal's push-to-talk controls. The separate
+`krill code --voice` floating panel uses continuous native endpointing and live
+partial transcription; see the Voice section in [GUIDE.md](GUIDE.md#6-agentic-coding-krill-code).
+
 **Voice is off by default** - Krill is a text chat first. In the default
 **`type`** posture Space is a typed space, Enter sends, and the footer shows no
 voice chrome. Turn voice on with **`Ctrl-V`** (which then cycles the postures) or
 set a default with the `voice_mode` config key (`off` / `dictate` / `handsfree`).
-On an audio-capable Gemma 4 model the active posture rides the footer's left side
-(a dot when on, an animated meter while recording). Bare `/voice` prints the
-current state without changing it.
+The active posture rides the footer's left side (a dot when on, an animated
+meter while recording). Bare `/voice` prints the current state without changing
+it.
 
-`Ctrl-V` cycles **off (text) -> dictate -> handsfree -> send -> off**.
+On text-only models, `Ctrl-V` cycles **off (text) -> dictate -> handsfree ->
+off**. Audio-capable models add `send` before returning to off.
 
 - **`type`** (default) - keyboard only. **Space is a typed space** and Enter
   sends; there is no push-to-talk. The footer stays clean.
@@ -256,11 +266,11 @@ current state without changing it.
   Whisper; see below).
 - **`handsfree`** - hold Space to talk; the transcript is shown and then
   **auto-sent** after a short grace window (press **Esc** to cancel, **Enter** to
-  send immediately). The reply is shown on screen; spoken replies (TTS) are a
-  planned follow-up.
+  send immediately). Toggle local spoken replies with `/speak`.
 - **`send`** - the clip is sent as an audio turn and the model **answers your
   spoken input** (shown as a `[voice message]` turn). Use this to "talk to" an
-  audio-capable model rather than dictate.
+  audio-capable model rather than dictate. Krill rejects this posture on a
+  text-only model; dictation and hands-free remain available.
 
 ### Dictation engine
 

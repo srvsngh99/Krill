@@ -275,7 +275,7 @@ private extension Float {
 
 /// Scatter `values` into `base` at `indices` (1-D), returning a new array.
 private func updatedAt(_ base: MLXArray, indices: MLXArray, values: MLXArray) -> MLXArray {
-    var out = base
+    let out = base
     out[indices] = values
     return out
 }

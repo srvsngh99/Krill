@@ -557,7 +557,7 @@ class DeepSeekQuantizedMultiLinear: Module {
     }
 
     func callAsFunction(_ x: MLXArray, transpose: Bool = true) -> MLXArray {
-        return quantizedMatmul(
+        return quantizedMM(
             x, weight, scales: scales, biases: biases,
             transpose: transpose, groupSize: groupSize, bits: bits, mode: .affine)
     }
