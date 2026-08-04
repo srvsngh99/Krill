@@ -68,7 +68,7 @@ public extension PermissionMode {
 
     /// One-line description shown when the posture changes, so the leash state
     /// is never a hidden surprise.
-    var postureNote: String {
+    var summary: String {
         switch self {
         case .plan: return "plan - read-only; the agent investigates and proposes a plan (no edits, no commands)"
         case .ask: return "ask - confirm every file edit and command before it runs"

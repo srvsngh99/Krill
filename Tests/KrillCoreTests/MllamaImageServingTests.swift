@@ -124,7 +124,7 @@ final class MllamaImageServingTests: XCTestCase {
 
         // (A) cached decode.
         let numLayers = model.config.textConfig.numHiddenLayers
-        var caches: [KVCache] = (0 ..< numLayers).map { _ in KVCache() }
+        let caches: [KVCache] = (0 ..< numLayers).map { _ in KVCache() }
         let crossKV = MllamaCrossKVCache()
         let prefillIds = MLXArray(prompt.map { Int32($0) }).reshaped([1, prompt.count])
         var logits = model(

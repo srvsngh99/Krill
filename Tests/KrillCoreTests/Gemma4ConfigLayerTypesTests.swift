@@ -277,7 +277,7 @@ final class Gemma4ConfigLayerTypesTests: XCTestCase {
     /// layers `isFullAttention` flags.
     private func assertFullLayers(
         types: [String], expectedFull: [Int],
-        file: StaticString = #file, line: UInt = #line
+        file: StaticString = #filePath, line: UInt = #line
     ) throws {
         let typesJSON = "[\(types.map { "\"\($0)\"" }.joined(separator: ","))]"
         let cfg = try decode(textConfig: """

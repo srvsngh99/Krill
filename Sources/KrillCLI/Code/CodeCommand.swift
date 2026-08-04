@@ -48,7 +48,7 @@ struct CodeCommand: AsyncParsableCommand {
     var classic: Bool = false
 
     @Option(name: .long,
-            help: "Permission posture: plan (read-only), ask (confirm each mutating tool), accept-edits (auto-apply edits, ask for commands), or auto/accept-all (run every tool). Defaults to default_agent_posture (plan if unset or invalid).")
+            help: "Permission level: plan (read-only), ask (confirm each mutating tool), accept-edits (auto-apply edits, ask for commands), or auto/accept-all (run every tool). Defaults to default_agent_permissions (plan if unset or invalid).")
     var permissionMode: String?
 
     @Option(name: .customLong("allow-tool"), parsing: .singleValue,
@@ -84,10 +84,9 @@ struct CodeCommand: AsyncParsableCommand {
             print("Error: no model. Pass one (krill code <model> \"<task>\") or set default_model in ~/.krill/config.toml.")
             throw ExitCode.failure
         }
-        guard let task else {
-            print("Error: no task. Usage: krill code [<model>] \"<task>\"")
-            throw ExitCode.failure
-        }
+        // A task is optional for the full-screen TUI (bare `krill code` opens
+        // it idle, like other coding agents); the classic line renderer still
+        // requires one and fails below with a clear error.
 
         let modelDir = registry.hasModel(model)
             ? registry.modelPath(model) : URL(fileURLWithPath: model)
@@ -110,28 +109,61 @@ struct CodeCommand: AsyncParsableCommand {
             }
             mode = parsed
         } else {
-            let configured = nonEmpty(config.defaultAgentPosture)
+            let configured = nonEmpty(config.defaultAgentPermissions)
             mode = PermissionMode.configuredDefault(configured)
             if let configured, PermissionMode.parse(configured) == nil {
-                print("Warning: invalid default_agent_posture '\(configured)'; using plan mode.")
+                print("Warning: invalid default_agent_permissions '\(configured)'; using plan mode.")
             }
         }
         let policy = PermissionPolicy(
             mode: mode, allow: Set(allowTools), deny: Set(denyTools))
 
-        print("Loading model from \(model)...")
+        // Fail fast before the (expensive) model load when no task was given
+        // and the selected surface cannot start idle: the full-screen TUI
+        // launches idle (bare `krill code`, like other agents); the classic
+        // line renderer needs a task up front.
+        let opensIdleSurface = RawTerminal.isInteractive && !classic
+            && bash && allowTools.isEmpty && denyTools.isEmpty
+        if task == nil && !opensIdleSurface {
+            print("Error: no task. Usage: krill code [<model>] \"<task>\"")
+            print("(bare `krill code` opens the interactive TUI in a terminal)")
+            throw ExitCode.failure
+        }
+
         let engine = InferenceEngine(modelDirectory: modelDir)
-        let loadStart = CFAbsoluteTimeGetCurrent()
-        try await engine.load()
-        print(String(format: "Ready (%.1fs).", CFAbsoluteTimeGetCurrent() - loadStart))
+        try await BrandedLoad.run(model: model, wordmark: "Krill Code") { try await engine.load() }
 
         // Filesystem toolset is always available; bash is opt-out. The
         // permission layer (below) governs whether mutating tools actually run.
         var tools: [any Tool] = [
             ReadTool(), ListTool(), GlobTool(), GrepTool(), WebFetchTool(), WebSearchTool(),
             EditTool(), MultiEditTool(), WriteTool(),
+            NowTool(), TodoTool(), RepoMapTool(),
         ]
         if bash { tools.append(BashTool()) }
+
+        // Steer the model in plan mode; surface the posture inline. This is
+        // shared by the classic renderer and the TUI so both
+        // execution surfaces preserve exactly the same permission semantics.
+        // Ambient facts first (date/time, cwd, platform, model), then posture
+        // steering, then the user's system prompt. Since this always yields a
+        // system turn, the tooling layer's fallback anti-over-calling directive
+        // never fires — carry it explicitly when the user supplied no prompt.
+        var systemParts = [AgentEnvironment.contextLine(modelName: model)]
+        if let brief = AgentEnvironment.projectBrief() { systemParts.append(brief) }
+        if mode == .plan {
+            systemParts.append(
+                "You are in PLAN MODE (read-only). You may read and search files with the "
+                + "read-only tools, but you must NOT write files, edit files, or run shell "
+                + "commands - those are denied. Investigate as needed, then present a clear, "
+                + "concise step-by-step plan as your final answer.")
+        }
+        if let userSystem = nonEmpty(system) {
+            systemParts.append(userSystem)
+        } else {
+            systemParts.append(AgentEnvironment.toolDirective)
+        }
+        let effectiveSystem = systemParts.joined(separator: "\n\n")
 
         // On an interactive terminal with the default toolset, `krill code` is
         // just the unified chat TUI launched in agent mode - same surface as
@@ -145,25 +177,25 @@ struct CodeCommand: AsyncParsableCommand {
                 engine: engine, modelName: model, system: nonEmpty(system),
                 params: .greedy, maxTokens: maxTokens, registry: registry,
                 initialImage: nil, initialAudio: nil,
+                voiceModeSetting: config.voiceMode,
+                speakRepliesSetting: config.speakReplies,
+                voiceEngineSetting: config.voiceEngine,
+                voiceLanguageSetting: config.voiceLanguage,
+                voiceIdentifierSetting: config.voiceIdentifier,
+                voiceRateSetting: config.voiceRate,
+                voiceWhisperModelSetting: config.voiceWhisperModel,
                 thinkingSetting: config.thinking,
-                modeSetting: "agent", agentPostureSetting: mode.rawValue,
+                modeSetting: "agent", agentPermissionsSetting: mode.rawValue,
                 initialAgentTask: task)
             await tui.run()
             return
         }
 
         // Classic line renderer (--classic, non-interactive, or tool flags set).
-        // Steer the model in plan mode; surface the posture inline.
-        var effectiveSystem = system
+        // Surface the posture inline.
         switch mode {
         case .plan:
             print("Plan mode: read-only. The agent can inspect files but cannot edit them or run commands.")
-            let planNote =
-                "You are in PLAN MODE (read-only). You may read and search files with the "
-                + "read-only tools, but you must NOT write files, edit files, or run shell "
-                + "commands - those are denied. Investigate as needed, then present a clear, "
-                + "concise step-by-step plan as your final answer."
-            effectiveSystem = [planNote, nonEmpty(system)].compactMap { $0 }.joined(separator: "\n\n")
         case .ask:
             print("Ask mode: you will be prompted to approve each file edit or shell command.")
         case .acceptEdits:
@@ -172,6 +204,11 @@ struct CodeCommand: AsyncParsableCommand {
             if bash {
                 print("Note: the bash tool and file edits run with no sandbox. Use --no-bash to disable shell access, or --plan / --permission-mode ask to gate tools.")
             }
+        }
+
+        guard let task else {
+            print("Error: no task. Usage: krill code [<model>] \"<task>\"")
+            throw ExitCode.failure
         }
 
         let loop = AgentLoop(

@@ -72,7 +72,7 @@ final class VerifyProfileTests: XCTestCase {
     }
 
     private func qmm(_ x: MLXArray, _ l: QLinear) -> MLXArray {
-        MLX.quantizedMatmul(
+        MLX.quantizedMM(
             x, l.w, scales: l.scales, biases: l.biases,
             transpose: true, groupSize: l.groupSize, bits: 4, mode: .affine)
     }

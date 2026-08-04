@@ -4,6 +4,8 @@ import Foundation
 ///
 /// Precedence: CLI flags > environment variables (KRILL_*) > config.toml > defaults.
 public struct KrillConfig: Sendable {
+    private static let defaultVoiceWhisperModel = "base.en"
+
     /// Default model to use when none specified.
     public var defaultModel: String?
 
@@ -86,17 +88,37 @@ public struct KrillConfig: Sendable {
     /// talk/listen loop. `speak_replies` in config; `KRILL_SPEAK_REPLIES` env.
     public var speakReplies: Bool
 
+    /// Dictation backend: `apple` for on-device Speech or `whisper` for the
+    /// downloaded native MLX runtime. `KRILL_VOICE_ENGINE`.
+    public var voiceEngine: String
+    /// Apple recognition/TTS locale. Empty or `auto` follows the current locale.
+    /// `KRILL_VOICE_LANGUAGE`.
+    public var voiceLanguage: String
+    /// Preferred AVSpeech voice identifier; empty means system default.
+    /// `KRILL_VOICE_IDENTIFIER`.
+    public var voiceIdentifier: String
+    /// AVSpeech rate, where `0` is the system-default sentinel.
+    /// `KRILL_VOICE_RATE`.
+    public var voiceRate: Float
+    /// Native MLX Whisper SKU selected for dictation. `KRILL_VOICE_WHISPER_MODEL`.
+    public var voiceWhisperModel: String
+    /// Voice-panel orb persona: `calm`, `balanced`, or `lively` — how much
+    /// the orb moves and glows. Unknown values fall back to `balanced` at the
+    /// presentation layer. `KRILL_VOICE_ORB`.
+    public var voiceOrb: String
+
     /// Which surface the interactive TUI launches in: "chat" (default, pure
     /// inference) or "agent" (tools + file edits, the unified coding mode).
     /// `default_mode` in config. `krill code` always starts in agent mode
     /// regardless of this default.
     public var defaultMode: String
 
-    /// Which permission posture agent mode opens on: "plan" (default, read-only),
+    /// Which permission level agent mode opens on: "plan" (default, read-only),
     /// "ask" (confirm each mutating tool), "accept-edits" (auto-apply edits, ask
     /// for commands), or "auto"/"accept-all" (run everything). Shift+Tab cycles
-    /// it live in the TUI. `default_agent_posture` in config.
-    public var defaultAgentPosture: String
+    /// it live in the TUI. `default_agent_permissions` in config
+    /// (`default_agent_posture` accepted as a legacy alias).
+    public var defaultAgentPermissions: String
 
     /// Which web-search backend `web_search` uses: "auto" (default → keyless
     /// DuckDuckGo, works out of the box), "brave"/"tavily" (BYOK, need an API
@@ -158,8 +180,14 @@ public struct KrillConfig: Sendable {
         self.flashAttention = false
         self.voiceMode = "off"
         self.speakReplies = false
-        self.defaultMode = "chat"
-        self.defaultAgentPosture = "plan"
+        self.voiceEngine = "apple"
+        self.voiceLanguage = "auto"
+        self.voiceIdentifier = ""
+        self.voiceRate = 0
+        self.voiceWhisperModel = Self.defaultVoiceWhisperModel
+        self.voiceOrb = "balanced"
+        self.defaultMode = "agent"
+        self.defaultAgentPermissions = "plan"
         self.searchBackend = "auto"
         self.searxngURL = nil
         self.braveAPIKey = nil
@@ -238,10 +266,22 @@ public struct KrillConfig: Sendable {
                 voiceMode = value
             case "speak_replies":
                 speakReplies = value == "true" || value == "1"
+            case "voice_engine":
+                voiceEngine = value
+            case "voice_language":
+                voiceLanguage = value.isEmpty ? "auto" : value
+            case "voice_identifier":
+                voiceIdentifier = value
+            case "voice_rate":
+                if let rate = Float(value) { voiceRate = rate }
+            case "voice_whisper_model":
+                voiceWhisperModel = value.isEmpty ? Self.defaultVoiceWhisperModel : value
+            case "voice_orb":
+                voiceOrb = value.isEmpty ? "balanced" : value
             case "default_mode":
                 defaultMode = value
-            case "default_agent_posture":
-                defaultAgentPosture = value
+            case "default_agent_permissions", "default_agent_posture":
+                defaultAgentPermissions = value
             case "search_backend":
                 searchBackend = value
             case "searxng_url":
@@ -284,10 +324,13 @@ public struct KrillConfig: Sendable {
     /// offered here to keep the surface small and unambiguous.
     public static let writableKeys: [String] = {
         var keys = [
-            "default_model", "default_quant", "default_mode", "default_agent_posture",
+            "default_model", "default_quant", "default_mode", "default_agent_permissions",
+            "default_agent_posture",  // legacy alias, still settable
             "search_backend", "searxng_url", "brave_api_key", "tavily_api_key",
             "kv_cache_dtype", "context_length", "thinking",
-            "voice_mode", "speak_replies",
+            "voice_mode", "speak_replies", "voice_engine", "voice_language",
+            "voice_identifier", "voice_rate", "voice_whisper_model",
+            "voice_orb",
             "prefix_cache_size_gb", "prefix_cache_max_entry_gb",
             "speculative_decoding", "decode_pipeline", "ngram_spec", "flash_attention",
             "server_port", "server_host", "server_api_key", "idle_timeout", "keep_alive",
@@ -374,7 +417,7 @@ public struct KrillConfig: Sendable {
             "default_model": defaultModel ?? "(none)",
             "default_quant": "\(defaultQuant)",
             "default_mode": defaultMode,
-            "default_agent_posture": defaultAgentPosture,
+            "default_agent_permissions": defaultAgentPermissions,
             "search_backend": searchBackend,
             "searxng_url": searxngURL ?? "(none)",
             "brave_api_key": secret(braveAPIKey),
@@ -384,6 +427,12 @@ public struct KrillConfig: Sendable {
             "thinking": b(thinking),
             "voice_mode": voiceMode,
             "speak_replies": b(speakReplies),
+            "voice_engine": voiceEngine,
+            "voice_language": voiceLanguage,
+            "voice_identifier": voiceIdentifier.isEmpty ? "(system default)" : voiceIdentifier,
+            "voice_rate": voiceRate == 0 ? "(system default)" : "\(voiceRate)",
+            "voice_whisper_model": voiceWhisperModel,
+            "voice_orb": voiceOrb,
             "prefix_cache_size_gb": "\(prefixCacheSizeGB)",
             "prefix_cache_max_entry_gb": "\(prefixCacheMaxEntryGB)",
             "speculative_decoding": b(speculativeDecoding),
@@ -463,6 +512,14 @@ public struct KrillConfig: Sendable {
         if let v = env["KRILL_SPEAK_REPLIES"] {
             speakReplies = v == "1" || v.lowercased() == "true"
         }
+        if let v = env["KRILL_VOICE_ENGINE"] { voiceEngine = v }
+        if let v = env["KRILL_VOICE_LANGUAGE"] { voiceLanguage = v.isEmpty ? "auto" : v }
+        if let v = env["KRILL_VOICE_IDENTIFIER"] { voiceIdentifier = v }
+        if let v = env["KRILL_VOICE_RATE"], let rate = Float(v) { voiceRate = rate }
+        if let v = env["KRILL_VOICE_WHISPER_MODEL"] {
+            voiceWhisperModel = v.isEmpty ? Self.defaultVoiceWhisperModel : v
+        }
+        if let v = env["KRILL_VOICE_ORB"] { voiceOrb = v.isEmpty ? "balanced" : v }
         if let v = env["KRILL_ENABLE_THINKING"] {
             let s = v.lowercased()
             thinking = s == "1" || s == "true" || s == "yes" || s == "on"

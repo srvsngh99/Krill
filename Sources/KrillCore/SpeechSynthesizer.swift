@@ -19,7 +19,13 @@ public final class SpeechSynthesizer: @unchecked Sendable {
     // main).
     private var synth: AVSpeechSynthesizer?
 #endif
-    public init() {}
+    private let settings: AppleSpeechSettings
+
+    /// Empty identifiers use the system voice. An unavailable configured voice
+    /// falls back to the configured language and then the system default.
+    public init(language: String = "auto", voiceIdentifier: String = "", rate: Float = AppleSpeechSettings.systemRate) {
+        self.settings = AppleSpeechSettings(language: language, voiceIdentifier: voiceIdentifier, rate: rate)
+    }
 
     /// True when system text-to-speech is usable on this platform.
     public static var isAvailable: Bool {
@@ -36,14 +42,28 @@ public final class SpeechSynthesizer: @unchecked Sendable {
     /// AVSpeech 0...1 rate (nil = the system default).
     public func speak(_ text: String, rate: Float? = nil) {
 #if canImport(AVFoundation)
-        let clean = SpokenText.clean(text)
-        guard !clean.isEmpty else { return }
+        speakChunks([text], rate: rate)
+#endif
+    }
+
+    /// Clean and enqueue several completed sentence chunks as one reply. Unlike
+    /// repeated `speak` calls, this interrupts the preceding reply exactly once,
+    /// then lets AVSpeechSynthesizer naturally continue through each sentence.
+    public func speakChunks(_ chunks: [String], rate: Float? = nil) {
+#if canImport(AVFoundation)
+        let cleanChunks = chunks.map(SpokenText.clean).filter { !$0.isEmpty }
+        guard !cleanChunks.isEmpty else { return }
         onMain {
             let synth = self.synthesizer()
             synth.stopSpeaking(at: .immediate)
-            let utterance = AVSpeechUtterance(string: clean)
-            if let rate { utterance.rate = rate }
-            synth.speak(utterance)
+            let voice = Self.resolveVoice(settings: self.settings)
+            let utteranceRate = rate ?? self.settings.utteranceRate
+            for text in cleanChunks {
+                let utterance = AVSpeechUtterance(string: text)
+                utterance.voice = voice
+                if let utteranceRate { utterance.rate = utteranceRate }
+                synth.speak(utterance)
+            }
         }
 #endif
     }
@@ -51,7 +71,7 @@ public final class SpeechSynthesizer: @unchecked Sendable {
     /// True while an utterance is being spoken.
     public var isSpeaking: Bool {
 #if canImport(AVFoundation)
-        return synth?.isSpeaking ?? false
+        return onMainSync { self.synth?.isSpeaking ?? false }
 #else
         return false
 #endif
@@ -66,6 +86,18 @@ public final class SpeechSynthesizer: @unchecked Sendable {
     }
 
 #if canImport(AVFoundation)
+    private static func resolveVoice(settings: AppleSpeechSettings) -> AVSpeechSynthesisVoice? {
+        if let identifier = settings.requestedVoiceIdentifier,
+           let voice = AVSpeechSynthesisVoice(identifier: identifier) {
+            return voice
+        }
+        // If an identifier is stale (for example, a downloaded voice was
+        // removed), `language` remains a useful, audible fallback.
+        let requestedLanguage = settings.language.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !requestedLanguage.isEmpty, requestedLanguage.lowercased() != "auto" else { return nil }
+        return AVSpeechSynthesisVoice(language: settings.localeIdentifier)
+    }
+
     /// Lazily create the synthesizer. MUST be called on the main thread (only
     /// invoked from inside `onMain`), satisfying AVSpeechSynthesizer's main-thread
     /// affinity.
@@ -85,7 +117,81 @@ public final class SpeechSynthesizer: @unchecked Sendable {
             DispatchQueue.main.async(execute: body)
         }
     }
+
+    /// Read AVFoundation state from its owning thread while preserving the
+    /// existing synchronous `isSpeaking` API for callers on any queue.
+    private func onMainSync<T>(_ body: () -> T) -> T {
+        if Thread.isMainThread { return body() }
+        return DispatchQueue.main.sync(execute: body)
+    }
 #endif
+}
+
+/// Stateful sentence segmentation for streamed assistant text. `append` emits
+/// only boundaries followed by whitespace (so a later closing quote stays with
+/// its sentence); `finish` flushes the final remainder. The buffer is consumed
+/// as it emits, so repeated partial transcripts cannot duplicate spoken text.
+public struct SpeechSentenceChunker: Sendable {
+    private var buffer = ""
+
+    public init() {}
+
+    public mutating func append(_ text: String) -> [String] {
+        guard !text.isEmpty else { return [] }
+        buffer += text
+        return drainCompleteSentences()
+    }
+
+    public mutating func finish() -> [String] {
+        defer { buffer = "" }
+        let remaining = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        return remaining.isEmpty ? [] : [remaining]
+    }
+
+    public mutating func reset() { buffer = "" }
+
+    private mutating func drainCompleteSentences() -> [String] {
+        var chunks: [String] = []
+        var searchStart = buffer.startIndex
+        while searchStart < buffer.endIndex,
+              let boundary = completeBoundary(from: searchStart) {
+            let chunk = String(buffer[..<boundary]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !chunk.isEmpty { chunks.append(chunk) }
+            buffer.removeSubrange(..<boundary)
+            while let first = buffer.first, first.isWhitespace { buffer.removeFirst() }
+            searchStart = buffer.startIndex
+        }
+        return chunks
+    }
+
+    /// Return the index just after a complete sentence. Closing quotes/brackets
+    /// immediately following punctuation are included in the spoken chunk.
+    private func completeBoundary(from start: String.Index) -> String.Index? {
+        var index = start
+        while index < buffer.endIndex {
+            let character = buffer[index]
+            guard character == "." || character == "!" || character == "?" else {
+                index = buffer.index(after: index)
+                continue
+            }
+            var end = buffer.index(after: index)
+            while end < buffer.endIndex, isClosingPunctuation(buffer[end]) {
+                end = buffer.index(after: end)
+            }
+            // Waiting for whitespace prevents emitting `Hello.` too early when
+            // the next streamed token is a closing quote.
+            if end < buffer.endIndex, buffer[end].isWhitespace { return end }
+            index = end
+        }
+        return nil
+    }
+
+    private func isClosingPunctuation(_ character: Character) -> Bool {
+        switch character {
+        case "\"", "'", "”", "’", ")", "]", "}": return true
+        default: return false
+        }
+    }
 }
 
 /// Pure markdown-to-speech cleanup: strips the formatting that sounds wrong when

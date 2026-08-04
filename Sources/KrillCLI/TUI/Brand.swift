@@ -22,23 +22,31 @@ enum Brand {
     // MARK: - Masthead (persistent top bar)
 
     /// A light two-part masthead line (NOT a solid inverse bar): the bold
-    /// wordmark + lab on the left, the loaded model dim on the right. Pair with
+    /// wordmark + lab on the left, the session's place — `repo:branch` (or the
+    /// attached agent) — dim on the right, claude-code style. Pair with
     /// `headerRule` on the row beneath for the underline. Degrades on narrow
-    /// terminals so the line never overflows onto the rule row: drop the model
-    /// (still shown in the footer) when there is no room, then clip the wordmark.
-    static func header(width: Int, model: String) -> String {
-        // Product-only masthead: the `>_ Krill` wordmark on the left, the loaded
-        // model dim on the right. The full Sourav AI Labs lockup lives on the
-        // launch splash, not the persistent bar.
+    /// terminals so the line never overflows onto the rule row: drop the right
+    /// label when there is no room, then clip the wordmark.
+    static func header(width: Int, right: String) -> String {
+        // Product-only masthead: the `>_ Krill` wordmark on the left. The full
+        // Sourav AI Labs lockup lives on the launch splash, not the persistent bar.
         let leftPlain = "  \(wordmark)"
-        let rightPlain = "\(model)  "
+        let rightPlain = "\(right)  "
         let styledLeft = "  " + Ansi.bold(Ansi.ember(wordmark))
         if width >= leftPlain.count + rightPlain.count + 1 {
             let pad = width - leftPlain.count - rightPlain.count
-            return styledLeft + String(repeating: " ", count: pad) + Ansi.chrome(model) + "  "
+            return styledLeft + String(repeating: " ", count: pad) + Ansi.chrome(right) + "  "
         }
         if width >= leftPlain.count { return styledLeft }
         return Ansi.bold(String(leftPlain.prefix(max(0, width))))
+    }
+
+    /// The dim single-line strip under the masthead rule naming the loaded
+    /// model (claude-code style: place up top, model beneath the bar). Indented
+    /// to align with the wordmark; clipped so it never wraps.
+    static func modelLine(width: Int, model: String) -> String {
+        let plain = "  \(model)"
+        return Ansi.chrome(clip(plain, width: width))
     }
 
     /// A dim full-width rule drawn under the masthead.

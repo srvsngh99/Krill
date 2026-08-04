@@ -117,7 +117,7 @@ final class RawTerminal {
 /// flickering). Not thread-safe; the TUI writes from a single task.
 enum Output {
     static func write(_ s: String) {
-        var bytes = Array(s.utf8)
+        let bytes = Array(s.utf8)
         var off = 0
         while off < bytes.count {
             let n = bytes[off...].withUnsafeBytes { Foundation.write(STDOUT_FILENO, $0.baseAddress, $0.count) }

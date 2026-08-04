@@ -80,7 +80,7 @@ krill list                           # what's installed
 Set a default so you can just type `krill`:
 ```bash
 krill --config default_model=gemma-4-e2b
-krill                                # opens chat with the default model
+krill                                # opens the agent TUI with the default model
 ```
 
 ---
@@ -215,7 +215,8 @@ Audio input (speech understanding) runs on **Gemma 4** (native USM):
 krill run gemma-4-e2b --audio clip.wav "transcribe and summarize"   # wav/mp3/flac/ogg/m4a
 ```
 
-In the TUI, **push-to-talk** voice is available on audio-capable models:
+In the TUI, local **push-to-talk** dictation works with every model. Only the
+raw-audio `send` posture requires an audio-capable model:
 
 | Voice mode | Hold `Space` to… |
 |---|---|
@@ -245,23 +246,32 @@ krill code "add a --verbose flag to the CLI and update the README"
 krill code --plan "investigate why the build is slow"     # read-only plan first
 ```
 
+
 **Permission postures** (cycle with `Shift+Tab` in the TUI, or set with
 `--permission-mode`):
 
-| Posture | Behaviour |
+| Permissions | Behaviour |
 |---|---|
 | `plan` | Read-only: inspect files, propose a plan; no edits/commands. |
 | `ask` | Confirm every file edit and shell command. |
 | `accept-edits` | Auto-apply edits; still ask before commands. |
 | `auto` | Run everything without asking. |
 
-With no CLI override, `krill code` uses `default_agent_posture` (which defaults
+With no CLI override, `krill code` uses `default_agent_permissions` (which defaults
 to read-only `plan`). Unrestricted execution therefore requires an explicit
-`--permission-mode auto` or a deliberate `default_agent_posture = "auto"`
+`--permission-mode auto` or a deliberate `default_agent_permissions = "auto"`
 configuration.
 
 Key flags: `--max-iterations <n>`, `--no-bash`, `--allow-tool <name>` /
 `--deny-tool <name>` (repeatable), `--system "<prompt>"`.
+
+The toolset: file ops (`read_file`, `list_dir`, `glob`, `grep`, `edit`,
+`multi_edit`, `write`), `bash` (opt-out), web (`web_search`, `web_fetch`),
+`now` (current date/time), `repo_map` (native tree + top-level symbols map,
+no model effort needed), and `todo` (the agent's own step checklist —
+read-only, so planning works even in plan posture). The system prompt also
+carries an ambient environment line (date/time, cwd, platform, model) so the
+model never burns a turn inferring them.
 
 **Agent tools:** `read_file`, `list_dir`, `glob`, `grep`, `bash`, `write_file`,
 `edit_file`, `multi_edit`, `web_search`, `web_fetch`, `dispatch_agent`.
@@ -489,8 +499,8 @@ Common keys (each has a `KRILL_…` env equivalent):
 | Key | Default | Purpose |
 |---|---|---|
 | `default_model` | — | Model when none is named |
-| `default_mode` | `chat` | Launch surface: `chat` or `agent` |
-| `default_agent_posture` | `plan` | `plan` \| `ask` \| `accept-edits` \| `auto` |
+| `default_mode` | `agent` | Launch surface: `agent` (default) or `chat` |
+| `default_agent_permissions` | `plan` | `plan` \| `ask` \| `accept-edits` \| `auto` (legacy alias: `default_agent_posture`) |
 | `server_port` / `server_host` | `57455` / `127.0.0.1` | HTTP server bind |
 | `server_api_key` | — | Bearer token for all HTTP routes (redacted in config output; prefer `KRILL_API_KEY`) |
 | `keep_alive` | `5m` | Keep a model resident (`30m`, `0`, negative=pin) |
@@ -501,7 +511,11 @@ Common keys (each has a `KRILL_…` env equivalent):
 | `thinking` | `true` | Reasoning channel on/off |
 | `search_backend` | `auto` | `auto` \| `brave` \| `tavily` \| `searxng` |
 | `brave_api_key` / `tavily_api_key` | — | BYOK search keys (redacted in output) |
-| `voice_mode` / `speak_replies` | `off` / `false` | Voice posture · TTS |
+| `voice_mode` / `speak_replies` | `off` / `false` | Voice posture · enable TTS |
+| `voice_orb` | `balanced` | Voice-panel orb persona: `calm` \| `balanced` \| `lively` |
+| `voice_engine` / `voice_language` | `apple` / `auto` | Apple or native MLX Whisper STT · locale |
+| `voice_identifier` / `voice_rate` | system / system | Apple synthetic voice and speaking rate |
+| `voice_whisper_model` | `base.en` | Native MLX Whisper model SKU |
 | `models_dir` | `~/.krill/models` | Where models live |
 
 Server knobs also read Ollama's env vars (`OLLAMA_HOST`, `OLLAMA_KEEP_ALIVE`,

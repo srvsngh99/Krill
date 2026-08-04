@@ -63,7 +63,7 @@ final class UnlimitedOCREndToEndParityTests: XCTestCase {
         let L = inputIds.dim(1)
 
         // 4. Embed, splice vision at the contiguous <image> block, decode one step.
-        var embeds = lm.embedTokens(inputIds).asType(.float32)     // [1,L,1280]
+        let embeds = lm.embedTokens(inputIds).asType(.float32)     // [1,L,1280]
         let visFeat = enc(image: imageCF.transposed(0, 2, 3, 1))   // [1,256,1280]
         let assembled = assembleBaseViewTokens(features: visFeat, imageNewline: newline, viewSeparator: sep)
         let start = maskArr.firstIndex(of: 1)!
