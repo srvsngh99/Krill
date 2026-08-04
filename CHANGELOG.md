@@ -6,6 +6,65 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-05
+
+### Added
+
+- **Agent-first Krill.** Bare `krill` (and `krill code` with no task) opens the
+  full-screen agent TUI idle, with tools on and read-only `plan` permissions.
+  `/chat` or `default_mode = "chat"` opts back into pure chat.
+- **New agent tools.** `now` (current instant), `todo` (a session checklist the
+  agent maintains, available even in plan mode), and `repo_map` — a native,
+  deterministic repository mapper (tree + top-level symbols per file, per-
+  language regexes, build/dependency dirs skipped) so even small models get an
+  accurate picture of a codebase from one tool call.
+- **The Krill.md loop.** Every agent session loads `Krill.md` from the repo
+  root into its context; `/init` generates it (using `repo_map`) with build
+  commands, conventions, and a repo map.
+- **Ambient environment context.** Chat and agent sessions carry a session-
+  pinned line with the date (month spelled out), working directory, platform,
+  and model — so "what day is it" no longer answers from training data. The
+  agent directive also warns that training data has a cutoff and directs
+  time-sensitive questions to `web_search`.
+- **Agent mode reads images** on vision models (attachments ride every tool
+  round); text-only models say so immediately instead of letting the model
+  improvise excuses.
+- **Bearer authentication and safe remote serving** (from the hardening line):
+  `KRILL_API_KEY` / `--api-key` guard every HTTP route (`/healthz` stays open
+  for liveness probes); unauthenticated non-loopback binds are refused without
+  `--allow-remote-unauthenticated`. `krill launch` forwards the credential to
+  each external agent's native key surface.
+- **Transactional model pulls.** A forced re-download stages into a temp
+  directory and commits atomically with rollback — a failed pull can no longer
+  destroy an installed model. Repository filenames are validated against path
+  traversal.
+- **Verified installs and updates.** `install.sh` verifies the GitHub-published
+  SHA-256 digest before extracting; `krill update` fetches the installer from
+  the exact release tag and refuses unverifiable releases.
+
+### Changed
+
+- **Permission "posture" is now "permissions"** everywhere — footer chip
+  `agent: plan (shift+tab to cycle)`, config key `default_agent_permissions`
+  (`default_agent_posture` still accepted).
+- **web_search degrades instead of failing.** An unconfigured or failing
+  selected backend falls back to keyless DuckDuckGo with an explanatory note in
+  the result; `/research` follows the same resolution.
+- **TUI polish.** Live working status (ember-spectrum spinner) sits above the
+  input box; the footer keeps live tok/s and a context bar during agent runs;
+  tool output collapses behind its chip (`ctrl+o` expands, errors always
+  visible); user/tool/reply columns align; key hints spell full key names; the
+  masthead shows `repo:branch` with the model beneath; sessions end with a
+  receipt (duration, turns, tokens, average speed); model loads are branded
+  with an ember-animated spinner.
+- `/model` switches now refresh the environment line, re-seed the agent thread
+  in the new model family's tool format, and clear stale stats.
+
+### Fixed
+
+- All compiler warnings (never-mutated bindings, deprecated `quantizedMatmul`,
+  documented `@unchecked Sendable` on prefix-cache entry types).
+
 ## [0.17.0] - 2026-07-28
 
 ### Fixed
