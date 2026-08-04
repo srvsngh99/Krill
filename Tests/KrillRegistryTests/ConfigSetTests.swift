@@ -112,13 +112,12 @@ final class ConfigSetTests: XCTestCase {
         XCTAssertEqual(cfg.voiceIdentifier, "")
         XCTAssertEqual(cfg.voiceRate, 0)
         XCTAssertEqual(cfg.voiceWhisperModel, "base.en")
-        XCTAssertEqual(cfg.voiceNarration, .final)
         XCTAssertEqual(cfg.voiceOrb, "balanced")
 
         let keys = [
             ("voice_engine", "whisper"), ("voice_language", "en-GB"),
             ("voice_identifier", "com.example.voice"), ("voice_rate", "0.45"),
-            ("voice_whisper_model", "small.en"), ("voice_narration", "important"),
+            ("voice_whisper_model", "small.en"),
             ("voice_orb", "lively"),
         ]
         let toml = keys.reduce("") { KrillConfig.upsertTOML($0, key: $1.0, value: $1.1) }
@@ -128,19 +127,12 @@ final class ConfigSetTests: XCTestCase {
         XCTAssertEqual(cfg.voiceIdentifier, "com.example.voice")
         XCTAssertEqual(cfg.voiceRate, 0.45)
         XCTAssertEqual(cfg.voiceWhisperModel, "small.en")
-        XCTAssertEqual(cfg.voiceNarration, .important)
         XCTAssertEqual(cfg.voiceOrb, "lively")
         let display = Dictionary(uniqueKeysWithValues: cfg.displayPairs())
         XCTAssertEqual(display["voice_engine"], "whisper")
-        XCTAssertEqual(display["voice_narration"], "important")
         XCTAssertEqual(display["voice_orb"], "lively")
         XCTAssertTrue(KrillConfig.writableKeys.contains("voice_rate"))
         XCTAssertTrue(KrillConfig.writableKeys.contains("voice_orb"))
     }
 
-    func testUnknownNarrationFallsBackToFinal() {
-        var cfg = KrillConfig()
-        cfg.mergeFromTOML("voice_narration = \"not-a-policy\"")
-        XCTAssertEqual(cfg.voiceNarration, .final)
-    }
 }

@@ -246,23 +246,6 @@ krill code "add a --verbose flag to the CLI and update the README"
 krill code --plan "investigate why the build is slow"     # read-only plan first
 ```
 
-Add `--voice` for the native floating conversation panel:
-
-```bash
-krill code qwen3.5-4b --voice
-```
-
-The panel continuously listens after microphone/Speech permission is granted,
-shows provisional on-device transcription, and commits a turn after confirmed
-speech followed by a short silence. Speaking while Krill narrates stops the
-voice immediately. Instructions spoken while the foreground agent is busy are
-queued visibly and run at the next safe agent boundary; they are not injected
-inside an active model/tool turn. Tool approvals still require the panel's
-Allow/Deny controls.
-
-The floating panel currently uses Apple's on-device streaming speech recognizer.
-`voice_engine = "whisper"` selects native MLX Whisper for terminal TUI dictation;
-it does not change the floating panel's recognizer yet.
 
 **Permission postures** (cycle with `Shift+Tab` in the TUI, or set with
 `--permission-mode`):
@@ -533,7 +516,6 @@ Common keys (each has a `KRILL_…` env equivalent):
 | `voice_engine` / `voice_language` | `apple` / `auto` | Apple or native MLX Whisper STT · locale |
 | `voice_identifier` / `voice_rate` | system / system | Apple synthetic voice and speaking rate |
 | `voice_whisper_model` | `base.en` | Native MLX Whisper model SKU |
-| `voice_narration` | `final` | `off` · `final` · `important` narration policy |
 | `models_dir` | `~/.krill/models` | Where models live |
 
 Server knobs also read Ollama's env vars (`OLLAMA_HOST`, `OLLAMA_KEEP_ALIVE`,

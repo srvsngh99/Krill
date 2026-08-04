@@ -1,16 +1,5 @@
 import Foundation
 
-/// How much of an agent session is narrated. `important` is a distinct value
-/// now so Phase 3 can attach tool/blocker status events without another config
-/// migration; it currently has the same final-answer behavior as `final`.
-public enum VoiceNarrationPolicy: String, Sendable, CaseIterable {
-    case off, final, important
-
-    public static func parse(_ value: String) -> VoiceNarrationPolicy {
-        VoiceNarrationPolicy(rawValue: value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) ?? .final
-    }
-}
-
 /// Krill configuration loaded from ~/.krill/config.toml.
 ///
 /// Precedence: CLI flags > environment variables (KRILL_*) > config.toml > defaults.
@@ -113,8 +102,6 @@ public struct KrillConfig: Sendable {
     public var voiceRate: Float
     /// Native MLX Whisper SKU selected for dictation. `KRILL_VOICE_WHISPER_MODEL`.
     public var voiceWhisperModel: String
-    /// Automatic reply narration policy. `KRILL_VOICE_NARRATION`.
-    public var voiceNarration: VoiceNarrationPolicy
     /// Voice-panel orb persona: `calm`, `balanced`, or `lively` — how much
     /// the orb moves and glows. Unknown values fall back to `balanced` at the
     /// presentation layer. `KRILL_VOICE_ORB`.
@@ -198,7 +185,6 @@ public struct KrillConfig: Sendable {
         self.voiceIdentifier = ""
         self.voiceRate = 0
         self.voiceWhisperModel = Self.defaultVoiceWhisperModel
-        self.voiceNarration = .final
         self.voiceOrb = "balanced"
         self.defaultMode = "agent"
         self.defaultAgentPermissions = "plan"
@@ -290,8 +276,6 @@ public struct KrillConfig: Sendable {
                 if let rate = Float(value) { voiceRate = rate }
             case "voice_whisper_model":
                 voiceWhisperModel = value.isEmpty ? Self.defaultVoiceWhisperModel : value
-            case "voice_narration":
-                voiceNarration = VoiceNarrationPolicy.parse(value)
             case "voice_orb":
                 voiceOrb = value.isEmpty ? "balanced" : value
             case "default_mode":
@@ -345,7 +329,7 @@ public struct KrillConfig: Sendable {
             "search_backend", "searxng_url", "brave_api_key", "tavily_api_key",
             "kv_cache_dtype", "context_length", "thinking",
             "voice_mode", "speak_replies", "voice_engine", "voice_language",
-            "voice_identifier", "voice_rate", "voice_whisper_model", "voice_narration",
+            "voice_identifier", "voice_rate", "voice_whisper_model",
             "voice_orb",
             "prefix_cache_size_gb", "prefix_cache_max_entry_gb",
             "speculative_decoding", "decode_pipeline", "ngram_spec", "flash_attention",
@@ -448,7 +432,6 @@ public struct KrillConfig: Sendable {
             "voice_identifier": voiceIdentifier.isEmpty ? "(system default)" : voiceIdentifier,
             "voice_rate": voiceRate == 0 ? "(system default)" : "\(voiceRate)",
             "voice_whisper_model": voiceWhisperModel,
-            "voice_narration": voiceNarration.rawValue,
             "voice_orb": voiceOrb,
             "prefix_cache_size_gb": "\(prefixCacheSizeGB)",
             "prefix_cache_max_entry_gb": "\(prefixCacheMaxEntryGB)",
@@ -536,7 +519,6 @@ public struct KrillConfig: Sendable {
         if let v = env["KRILL_VOICE_WHISPER_MODEL"] {
             voiceWhisperModel = v.isEmpty ? Self.defaultVoiceWhisperModel : v
         }
-        if let v = env["KRILL_VOICE_NARRATION"] { voiceNarration = VoiceNarrationPolicy.parse(v) }
         if let v = env["KRILL_VOICE_ORB"] { voiceOrb = v.isEmpty ? "balanced" : v }
         if let v = env["KRILL_ENABLE_THINKING"] {
             let s = v.lowercased()

@@ -105,7 +105,6 @@ final class ChatTUI {
     private var voiceLanguage = "auto"
     private var voiceIdentifier = ""
     private var voiceRate: Float = AppleSpeechSettings.systemRate
-    private var voiceNarration: VoiceNarrationPolicy = .final
     // Live voice action shown in the footer (Listening / Transcribing /
     // Sending...). Empty when idle, where the footer shows the posture instead.
     private var voiceActivity = ""
@@ -170,7 +169,6 @@ final class ChatTUI {
          voiceEngineSetting: String = "apple", voiceLanguageSetting: String = "auto",
          voiceIdentifierSetting: String = "", voiceRateSetting: Float = AppleSpeechSettings.systemRate,
          voiceWhisperModelSetting: String = WhisperModelManager.defaultSKU,
-         voiceNarrationSetting: VoiceNarrationPolicy = .final,
          thinkingSetting: Bool = true,
          modeSetting: String = "chat", agentPermissionsSetting: String = "plan",
          initialAgentTask: String? = nil) {
@@ -190,7 +188,6 @@ final class ChatTUI {
         self.voiceLanguage = voiceLanguageSetting
         self.voiceIdentifier = voiceIdentifierSetting
         self.voiceRate = voiceRateSetting
-        self.voiceNarration = voiceNarrationSetting
         self.speech = SpeechRecognizer(language: voiceLanguageSetting)
         self.whisperSKU = WhisperModelManager.sku(voiceWhisperModelSetting)?.id ?? WhisperModelManager.defaultSKU
         self.thinkingOn = thinkingSetting
@@ -1955,7 +1952,7 @@ final class ChatTUI {
             lastStatus = ""
             // Read the reply aloud when speaking is on (voice phase 2). Cleaned of
             // markdown that reads badly; a new reply interrupts the previous one.
-            if speakReplies, voiceNarration != .off, !assistant.isEmpty { synth.speak(assistant) }
+            if speakReplies, !assistant.isEmpty { synth.speak(assistant) }
         }
         pendingImages.removeAll(); pendingAudio = nil
         render()

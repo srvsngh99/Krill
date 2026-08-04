@@ -47,10 +47,6 @@ struct CodeCommand: AsyncParsableCommand {
           help: "Use the classic line renderer instead of the full-screen TUI (also the default for non-interactive output, or when tool allow/deny flags are set).")
     var classic: Bool = false
 
-    @Flag(name: .long,
-          help: "Open the native floating voice panel. Typed and spoken turns use the local agent loop.")
-    var voice: Bool = false
-
     @Option(name: .long,
             help: "Permission level: plan (read-only), ask (confirm each mutating tool), accept-edits (auto-apply edits, ask for commands), or auto/accept-all (run every tool). Defaults to default_agent_permissions (plan if unset or invalid).")
     var permissionMode: String?
@@ -64,9 +60,6 @@ struct CodeCommand: AsyncParsableCommand {
     var denyTools: [String] = []
 
     func run() async throws {
-        guard !(voice && classic) else {
-            throw ValidationError("--voice and --classic select different interaction surfaces and cannot be combined.")
-        }
         let registry = Registry()
         let config = KrillConfig.load()
 
@@ -92,8 +85,8 @@ struct CodeCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
         // A task is optional for the full-screen TUI (bare `krill code` opens
-        // it idle, like other coding agents). The voice panel and the classic
-        // line renderer still require one and fail below with a clear error.
+        // it idle, like other coding agents); the classic line renderer still
+        // requires one and fails below with a clear error.
 
         let modelDir = registry.hasModel(model)
             ? registry.modelPath(model) : URL(fileURLWithPath: model)
@@ -126,12 +119,11 @@ struct CodeCommand: AsyncParsableCommand {
             mode: mode, allow: Set(allowTools), deny: Set(denyTools))
 
         // Fail fast before the (expensive) model load when no task was given
-        // and the selected surface cannot start idle. The voice panel and the
-        // full-screen TUI both launch idle (bare `krill code`, like other
-        // agents); only the classic line renderer needs a task up front.
-        let opensIdleSurface = voice
-            || (RawTerminal.isInteractive && !classic
-                && bash && allowTools.isEmpty && denyTools.isEmpty)
+        // and the selected surface cannot start idle: the full-screen TUI
+        // launches idle (bare `krill code`, like other agents); the classic
+        // line renderer needs a task up front.
+        let opensIdleSurface = RawTerminal.isInteractive && !classic
+            && bash && allowTools.isEmpty && denyTools.isEmpty
         if task == nil && !opensIdleSurface {
             print("Error: no task. Usage: krill code [<model>] \"<task>\"")
             print("(bare `krill code` opens the interactive TUI in a terminal)")
@@ -151,7 +143,7 @@ struct CodeCommand: AsyncParsableCommand {
         if bash { tools.append(BashTool()) }
 
         // Steer the model in plan mode; surface the posture inline. This is
-        // shared by the native voice panel and the classic renderer so both
+        // shared by the classic renderer and the TUI so both
         // execution surfaces preserve exactly the same permission semantics.
         // Ambient facts first (date/time, cwd, platform, model), then posture
         // steering, then the user's system prompt. Since this always yields a
@@ -173,28 +165,6 @@ struct CodeCommand: AsyncParsableCommand {
         }
         let effectiveSystem = systemParts.joined(separator: "\n\n")
 
-        // Voice is intentionally selected before terminal detection: it is a
-        // native AppKit surface and must remain usable when stdout is piped.
-        // It shares the loaded engine, full coding toolset and policy with
-        // `krill code --classic`; only the interaction surface changes.
-        if voice {
-            let loop = AgentLoop(
-                generator: EngineGenerator(engine: engine, maxTokens: maxTokens),
-                tools: ToolRegistry(tools),
-                maxIterations: maxIterations,
-                constrainToolArgs: constrainArgs,
-                permission: policy)
-            await VoicePanel.run(
-                loop: loop, initialTask: task ?? "", system: effectiveSystem,
-                modelName: model, permissionMode: mode,
-                voiceLanguage: config.voiceLanguage,
-                voiceIdentifier: config.voiceIdentifier,
-                voiceRate: config.voiceRate,
-                narration: config.voiceNarration,
-                orbPersona: config.voiceOrb)
-            return
-        }
-
         // On an interactive terminal with the default toolset, `krill code` is
         // just the unified chat TUI launched in agent mode - same surface as
         // `krill`, hands already on. The full-screen TUI hosts every posture
@@ -214,7 +184,6 @@ struct CodeCommand: AsyncParsableCommand {
                 voiceIdentifierSetting: config.voiceIdentifier,
                 voiceRateSetting: config.voiceRate,
                 voiceWhisperModelSetting: config.voiceWhisperModel,
-                voiceNarrationSetting: config.voiceNarration,
                 thinkingSetting: config.thinking,
                 modeSetting: "agent", agentPermissionsSetting: mode.rawValue,
                 initialAgentTask: task)

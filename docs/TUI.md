@@ -244,9 +244,7 @@ multi-image models (mllama); single-image models use the first. `--image` /
 
 ## Voice
 
-This section describes the terminal's push-to-talk controls. The separate
-`krill code --voice` floating panel uses continuous native endpointing and live
-partial transcription; see the Voice section in [GUIDE.md](GUIDE.md#6-agentic-coding-krill-code).
+This section describes the terminal's push-to-talk controls.
 
 **Voice is off by default** - Krill is a text chat first. In the default
 **`type`** posture Space is a typed space, Enter sends, and the footer shows no

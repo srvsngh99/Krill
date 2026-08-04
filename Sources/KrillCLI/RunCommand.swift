@@ -248,7 +248,6 @@ struct RunCommand: AsyncParsableCommand {
                 voiceIdentifierSetting: tuiConfig.voiceIdentifier,
                 voiceRateSetting: tuiConfig.voiceRate,
                 voiceWhisperModelSetting: tuiConfig.voiceWhisperModel,
-                voiceNarrationSetting: tuiConfig.voiceNarration,
                 thinkingSetting: tuiConfig.thinking,
                 modeSetting: tuiConfig.defaultMode,
                 agentPermissionsSetting: tuiConfig.defaultAgentPermissions)
