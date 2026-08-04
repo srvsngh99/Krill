@@ -37,7 +37,7 @@ If auto-detection ever misreads, pass `--theme light` or `--theme dark`.
 |-----|--------|
 | `Up` / `Down` | Recall input history, or cycle the slash-command popup |
 | `Tab` | Accept the highlighted command (then add arguments) |
-| `Shift+Tab` | Agent mode: cycle the permission posture (plan / ask / accept-edits / auto) |
+| `Shift+Tab` | Agent mode: cycle permissions (plan / ask / accept-edits / auto) |
 | `Enter` | Send the message |
 | Hold `Space` | Push-to-talk (only when voice is on: dictate / handsfree / send) |
 | `Ctrl-V` | Turn voice on and cycle it: off -> dictate -> handsfree -> send -> off |
@@ -56,7 +56,7 @@ Tab to fill it and add arguments. `/help` lists everything.
 | Command | Action |
 |---------|--------|
 | `/help` | Show keys and commands |
-| `/agent` | Toggle agent mode (tools + file edits); `Shift+Tab` cycles the posture |
+| `/agent` | Toggle agent mode (tools + file edits); `Shift+Tab` cycles permissions |
 | `/bg <task>` | Spawn a background agent for a task (see Background agents) |
 | `/agents` | List and switch between background agents (`/switch <n>`, `/main` too) |
 | `/config [key=value]` | Show config, or set a key (persists to `~/.krill/config.toml`) |
@@ -98,13 +98,13 @@ shows each step as an action chip
 live footer (`working . 8s . Esc interrupt`). Press **Esc** (or `Ctrl-C`) to
 interrupt a run.
 
-### Permission postures
+### Permissions
 
-What the agent may do without asking is the **posture**, cycled live with
+What the agent may do without asking is its **permission level**, cycled live with
 **`Shift+Tab`** and shown as a footer chip (`agent:plan`). Read-only tools always
-run; the posture governs the mutating ones:
+run; the level governs the mutating ones:
 
-| Posture | Behaviour |
+| Level | Behaviour |
 |---------|-----------|
 | `plan` | Read-only. The agent investigates and proposes a plan; edits and commands are denied. |
 | `ask` | Confirm every file edit and shell command before it runs. |

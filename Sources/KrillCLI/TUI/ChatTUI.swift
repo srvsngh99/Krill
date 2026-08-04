@@ -334,9 +334,9 @@ final class ChatTUI {
             // (there is no leash to set when the model has no hands).
             if surface == .agent {
                 posture = posture.next
-                // Footer-only: the agent chip already shows the new posture
+                // Footer-only: the agent chip already shows the new state
                 // permanently; a transcript note per Shift+Tab is just litter.
-                lastStatus = "posture: \(posture.postureNote)"
+                lastStatus = "permissions: \(posture.postureNote)"
             }
             return nil
         case .ctrlL:
@@ -801,8 +801,8 @@ final class ChatTUI {
             if surface == .agent {
                 ensureAgentSeed()
                 note("Agent mode ON - tools enabled (read · edit · bash). "
-                    + "Posture: \(posture.label) (\(posture.postureNote)). "
-                    + "Shift+Tab cycles posture; /agent to exit.")
+                    + "Permissions: \(posture.label) (\(posture.postureNote)). "
+                    + "Shift+Tab cycles permissions; /agent to exit.")
             } else {
                 note("Agent mode OFF - back to plain chat.")
             }
@@ -1672,8 +1672,10 @@ final class ChatTUI {
         // is on, hollow when off, always carrying the ⌃T key so it reads as a
         // switch (Ctrl-T flips it; a no-op on models with no thinking channel).
         let thinkTag = (thinkingOn ? Ansi.ember("\u{25CF}") : "\u{25CB}") + " think \u{2303}T\(sep)"
-        // Agent posture chip: shows the leash state whenever hands are on.
-        let agentTag = surface == .agent ? "\u{25CF} agent:\(posture.label)\(sep)" : ""
+        // Agent chip: the permission state + its key, whenever hands are on
+        // (the one place agent status lives — claude-code-style, below the bar).
+        let agentTag = surface == .agent
+            ? "\u{25CF} agent:\(posture.label) shift+tab\(sep)" : ""
         // Background-agent count, with a marker when one needs approval.
         let agentsTag = bgAgentsTag(sep)
         let cleanRight = "\(agentsTag)\(agentTag)\(thinkTag)\(speakTag)\(cwdLabel)\(sep)\(KrillVersionTag)"
@@ -1750,10 +1752,8 @@ final class ChatTUI {
                 ? "agent working\(sep)Esc interrupt\(sep)/main to return"
                 : "type to continue this agent\(sep)/main to return"
         }
-        // In agent mode the leash + how to change it is the most useful hint.
-        if surface == .agent {
-            return "agent:\(posture.label)\(sep)Shift+Tab posture\(sep)/agent to exit"
-        }
+        // Agent state lives in the footer only (the chip below the input bar)
+        // so the same information is not stacked on both sides of the box.
         switch voiceMode {
         case .type:      return "activate voice mode: Ctrl-V"
         case .dictate:   return "hold Space to dictate\(sep)Ctrl-V to cycle"

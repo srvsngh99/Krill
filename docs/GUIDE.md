@@ -80,7 +80,7 @@ krill list                           # what's installed
 Set a default so you can just type `krill`:
 ```bash
 krill --config default_model=gemma-4-e2b
-krill                                # opens chat with the default model
+krill                                # opens the agent TUI with the default model
 ```
 
 ---
@@ -267,7 +267,7 @@ it does not change the floating panel's recognizer yet.
 **Permission postures** (cycle with `Shift+Tab` in the TUI, or set with
 `--permission-mode`):
 
-| Posture | Behaviour |
+| Permissions | Behaviour |
 |---|---|
 | `plan` | Read-only: inspect files, propose a plan; no edits/commands. |
 | `ask` | Confirm every file edit and shell command. |
@@ -515,7 +515,7 @@ Common keys (each has a `KRILL_…` env equivalent):
 | Key | Default | Purpose |
 |---|---|---|
 | `default_model` | — | Model when none is named |
-| `default_mode` | `chat` | Launch surface: `chat` or `agent` |
+| `default_mode` | `agent` | Launch surface: `agent` (default) or `chat` |
 | `default_agent_posture` | `plan` | `plan` \| `ask` \| `accept-edits` \| `auto` |
 | `server_port` / `server_host` | `57455` / `127.0.0.1` | HTTP server bind |
 | `server_api_key` | — | Bearer token for all HTTP routes (redacted in config output; prefer `KRILL_API_KEY`) |

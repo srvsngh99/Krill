@@ -199,7 +199,7 @@ public struct KrillConfig: Sendable {
         self.voiceWhisperModel = Self.defaultVoiceWhisperModel
         self.voiceNarration = .final
         self.voiceOrb = "balanced"
-        self.defaultMode = "chat"
+        self.defaultMode = "agent"
         self.defaultAgentPosture = "plan"
         self.searchBackend = "auto"
         self.searxngURL = nil
