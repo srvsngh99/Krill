@@ -143,12 +143,19 @@ public struct WebSearchTool: Tool {
 
     private let backend: SearchBackend?
     private let defaultCount: Int
+    private let fallback: SearchBackend
 
-    /// - Parameter backend: the search provider, or nil if none is configured
-    ///   (the default reads `KrillConfig`). Injectable for tests.
-    public init(backend: SearchBackend? = WebSearchTool.configuredBackend(), defaultCount: Int = 5) {
+    /// - Parameters:
+    ///   - backend: the search provider, or nil if none is configured
+    ///     (the default reads `KrillConfig`). Injectable for tests.
+    ///   - fallback: where a nil or failing `backend` degrades to. The keyless
+    ///     default in production; injectable so tests stay off the network.
+    public init(backend: SearchBackend? = WebSearchTool.configuredBackend(),
+                defaultCount: Int = 5,
+                fallback: SearchBackend = DuckDuckGoBackend()) {
         self.backend = backend
         self.defaultCount = defaultCount
+        self.fallback = fallback
     }
 
     /// Build the backend from the resolved config. The default (`auto`) is the
@@ -218,26 +225,29 @@ public struct WebSearchTool: Tool {
         if let backend {
             active = backend
         } else {
-            let resolved = Self.resolveBackend()
-            active = resolved.backend
-            if let note = resolved.note { notes.append(note) }
+            let selected = KrillConfig.load().searchBackend
+            active = fallback
+            notes.append(
+                "Note: the configured search backend '\(selected)' is unavailable "
+                + "(missing key/URL, or not part of this build); using \(fallback.name) "
+                + "for this search. Fix with /config search_backend=... .")
         }
 
         var results: [SearchResult]
         do {
             results = try await active.search(query: query, count: count)
         } catch {
-            // A failing selected backend (down, timing out) also degrades to
-            // the keyless default rather than handing the model no data.
-            guard !(active is DuckDuckGoBackend) else {
+            // A failing selected backend (down, timing out) also degrades
+            // rather than handing the model no data.
+            guard active.name != fallback.name else {
                 return ToolResult(
                     content: "Error searching for \"\(query)\": \(error.localizedDescription)",
                     isError: true)
             }
             notes.append(
                 "Note: '\(active.name)' search failed (\(error.localizedDescription)); "
-                + "retried with DuckDuckGo.")
-            active = DuckDuckGoBackend()
+                + "retried with \(fallback.name).")
+            active = fallback
             do {
                 results = try await active.search(query: query, count: count)
             } catch {
