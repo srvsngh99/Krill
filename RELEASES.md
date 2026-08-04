@@ -7,6 +7,20 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.18.0 — 2026-08-05
+**Krill opens as an agent now.** Bare `krill` lands in the full-screen agent
+TUI — tools on, read-only `plan` permissions until you raise them — with a new
+toolset (`now`, `todo`, and a native `repo_map` that hands even small models an
+accurate map of your codebase), the Krill.md loop (`/init` writes it, every
+session reads it), and ambient context so the model knows the date, directory,
+and machine without burning a turn. `web_search` now degrades to keyless
+DuckDuckGo instead of failing when a backend is missing. The TUI got a full
+polish pass: live status above the input box, collapsible tool output
+(`ctrl+o`), live tok/s in the footer, aligned columns, branded ember loading,
+and a session receipt on exit. Under the hood, the server hardening line
+shipped: bearer auth for remote serving, transactional model pulls with
+rollback, and digest-verified installs and self-updates.
+
 ## v0.17.0 — 2026-07-28
 **Sampling was broken for every model at any temperature above zero.** The
 sampler handed `MLXRandom.categorical` probabilities where it expects logits, so
