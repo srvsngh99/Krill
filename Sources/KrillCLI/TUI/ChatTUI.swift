@@ -2064,6 +2064,15 @@ final class ChatTUI {
                 note("Voice send was disabled because \(name) has no native audio input. Dictate and hands-free remain available.")
             }
             contextWindow = AliasMap.resolve(name)?.context ?? 0
+            // Model-derived session state must not survive the swap: the env
+            // line names the model, and the agent seed embeds the OLD family's
+            // tool wire format (wrong syntax for the new model). The chat
+            // transcript carries over; the agent thread re-seeds from it on
+            // the next agent turn, dropping only old-format tool exchanges.
+            sessionEnvLine = AgentEnvironment.contextLine(modelName: name)
+            agentSeeded = false
+            agentMessages.removeAll()
+            lastStats = nil   // stale tok/s + ctx would misreport the new model
             note("Switched to \(name). Conversation kept.")
         } catch { note("Failed to load \(name): \(error)") }
     }
