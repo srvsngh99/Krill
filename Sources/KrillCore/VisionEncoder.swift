@@ -703,18 +703,21 @@ public func preprocessImage(
         throw MultimodalPreprocessingError.emptyImageData
     }
 
-    // Extract RGB from RGBA into channel-first [1, 3, H, W] in [0, 1]
-    // CGContext stores pixels bottom-to-top (row 0 = bottom of image).
-    // Vision models expect top-to-bottom, so we flip rows during readout.
+    // Extract RGB from RGBA into channel-first [1, 3, H, W] in [0, 1].
+    // NO row flip: a CGBitmapContext's backing buffer is stored TOP row first.
+    // The bottom-left origin is a property of the DRAWING coordinate system,
+    // not of memory layout, so `context.data` row 0 is already the image top.
+    // Flipping here inverted every image Gemma 4 ever saw — shapes and colours
+    // survive a flip untouched, so it only ever showed up as the model
+    // reversing above/below. Pinned by `ImageDecodeOrientationTests`.
     let pixelCount = newH * newW
     var floats = [Float](repeating: 0, count: 3 * pixelCount)
     let ptr = data.bindMemory(to: UInt8.self, capacity: pixelCount * 4)
 
-    // Channel-first: R plane, then G plane, then B plane (with row flip)
+    // Channel-first: R plane, then G plane, then B plane.
     for row in 0 ..< newH {
-        let flippedRow = newH - 1 - row  // Flip: CG bottom row → array top row
         for col in 0 ..< newW {
-            let srcIdx = (flippedRow * newW + col) * 4  // CG pixel (bottom-to-top)
+            let srcIdx = (row * newW + col) * 4
             let dstIdx = row * newW + col                // Array pixel (top-to-bottom)
             floats[dstIdx] = Float(ptr[srcIdx]) / 255.0                     // R
             floats[pixelCount + dstIdx] = Float(ptr[srcIdx + 1]) / 255.0    // G
@@ -802,9 +805,10 @@ public enum LlavaImagePreprocessor {
         let plane = imageSize * imageSize
         var floats = [Float](repeating: 0, count: 3 * plane)
         for row in 0 ..< imageSize {
-            // Destination row `row` is top-to-bottom; the source crop row maps
-            // to a bottom-to-top CGContext row.
-            let srcRow = resizedH - 1 - (cropY + row)
+            // Destination row `row` and the CGContext buffer are BOTH
+            // top-to-bottom, so the crop row maps straight across. See the
+            // note in `preprocessImage`: the bitmap buffer is top-row-first.
+            let srcRow = cropY + row
             for col in 0 ..< imageSize {
                 let srcIdx = (srcRow * resizedW + (cropX + col)) * 4
                 let dstIdx = row * imageSize + col

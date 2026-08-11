@@ -237,7 +237,11 @@ public enum MllamaProcessing {
                     let tileBase = tileIdx * 3 * plane
                     for row in 0 ..< tileSize {
                         let canvasRow = th * tileSize + row
-                        let srcRow = canvasH - 1 - canvasRow      // flip CG bottom-up
+                        // No flip: the CGBitmapContext buffer is top-row-first,
+                        // so the canvas row maps straight across. Flipping here
+                        // inverted every tile AND reversed their vertical
+                        // order. Pinned by `ImageDecodeOrientationTests`.
+                        let srcRow = canvasRow
                         for col in 0 ..< tileSize {
                             let canvasCol = tw * tileSize + col
                             let srcIdx = (srcRow * canvasW + canvasCol) * 4

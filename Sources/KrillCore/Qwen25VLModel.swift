@@ -1104,15 +1104,17 @@ public enum Qwen25VLImagePreprocessor {
             throw MultimodalPreprocessingError.emptyImageData
         }
 
-        // RGBA -> channel-last [H, W, 3] in [0, 1]. CGContext stores
-        // rows bottom-to-top; flip so row 0 is the top of the image.
+        // RGBA -> channel-last [H, W, 3] in [0, 1]. NO row flip: a
+        // CGBitmapContext's backing buffer is stored TOP row first (the
+        // bottom-left origin governs the drawing coordinate system, not memory
+        // layout), so row 0 is already the image top. Pinned by
+        // `ImageDecodeOrientationTests`.
         let pixelCount = newH * newW
         var floats = [Float](repeating: 0, count: pixelCount * 3)
         let ptr = data.bindMemory(to: UInt8.self, capacity: pixelCount * 4)
         for row in 0 ..< newH {
-            let flippedRow = newH - 1 - row
             for col in 0 ..< newW {
-                let srcIdx = (flippedRow * newW + col) * 4
+                let srcIdx = (row * newW + col) * 4
                 let dstIdx = (row * newW + col) * 3
                 floats[dstIdx] = Float(ptr[srcIdx]) / 255.0
                 floats[dstIdx + 1] = Float(ptr[srcIdx + 1]) / 255.0
