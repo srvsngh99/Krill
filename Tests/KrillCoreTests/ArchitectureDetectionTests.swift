@@ -40,6 +40,25 @@ final class ArchitectureDetectionTests: XCTestCase {
         XCTAssertEqual(id(modelType: "locateanything"), "locateanything")
     }
 
+    func testMuseGlimmerDetection() {
+        // Meta Muse Glimmer 30B. Routes on the arch string and on either
+        // model_type (the top-level VLM config and a text-only variant).
+        XCTAssertEqual(id(arch: "MuseGlimmerForConditionalGeneration"), "muse_glimmer")
+        XCTAssertEqual(id(modelType: "muse_glimmer"), "muse_glimmer")
+        XCTAssertEqual(id(modelType: "muse_glimmer_text"), "muse_glimmer")
+    }
+
+    func testMuseGlimmerIsNotStolenByGenericRules() {
+        // "museglimmer..." contains no "glm", "llama", "qwen", "gemma" or
+        // "phi" substring today, so no generic rule can claim it — but the
+        // rule must still sit ahead of `fallback`, which matches everything.
+        // Loading Muse Glimmer as a Llama would silently drop the attention
+        // gate, the NoPE split and the logit softcap.
+        XCTAssertNotEqual(id(arch: "MuseGlimmerForConditionalGeneration"), "fallback")
+        XCTAssertNotEqual(id(arch: "MuseGlimmerForConditionalGeneration"), "glm")
+        XCTAssertNotEqual(id(arch: "MuseGlimmerForConditionalGeneration"), "llama")
+    }
+
     func testMllamaDetection() {
         // Llama-3.2-Vision. Its text backbone is Llama, but the arch is
         // `MllamaForConditionalGeneration` and model_type "mllama"; it must be

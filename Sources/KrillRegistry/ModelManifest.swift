@@ -218,6 +218,15 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     /// Swift+MLX runtime (`NanbeigeForCausalLM`), logit-parity-verified against
     /// the upstream PyTorch reference.
     case nanbeige
+    /// Meta Muse Glimmer 30B (`MuseGlimmerForConditionalGeneration`, model_type
+    /// "muse_glimmer"): a dense 52-layer decoder with output-GATED attention
+    /// (`attn_out * sigmoid(gate_proj(x))`), a 3:1 sliding(2048)/full layer mix
+    /// where the FULL layers are NoPE (`layer_rope_theta[i] == 0`), Gemma-style
+    /// `(1 + w)` sandwich norms with a split eps, a `qk_scale_factor` applied on
+    /// top of the usual softmax scale, and tanh logit softcapping. Multimodal
+    /// via a ~1.8B ViT-G/14 perception encoder with windowed attention,
+    /// 2-axis interleaved RoPE, and a `pixel_shuffle` 2x2 merge.
+    case museGlimmer = "muse_glimmer"
 
     /// Detect model family from HuggingFace config.json's `architectures` field.
     public static func detect(from configJSON: [String: Any]) -> ModelFamily? {
@@ -263,6 +272,11 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         if archLower.contains("chatglm") || archLower.contains("glm") { return .glm }
         if archLower.contains("nanbeige") { return .nanbeige }
         if archLower.contains("deepseek") { return .deepseek }
+        // Muse Glimmer (`MuseGlimmerForConditionalGeneration`). No substring
+        // collision with the arms above or below ("glimmer" does not contain
+        // "glm"), but it is kept with the other multimodal families so a future
+        // broadening of a generic arm does not silently claim it.
+        if archLower.contains("museglimmer") { return .museGlimmer }
         // LocateAnything-3B before the generic qwen arm: its text backbone is
         // Qwen2.5 but the arch is `LocateAnythingForConditionalGeneration`
         // (no "qwen" substring), so an explicit arm keeps it off the dense
@@ -313,6 +327,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         case "glm4": return .glm4
         case "chatglm", "glm", "glm4_moe": return .glm
         case "nanbeige": return .nanbeige
+        case "muse_glimmer", "muse_glimmer_text": return .museGlimmer
         case "deepseek_v3": return .deepseek
         case "bert", "roberta", "xlm-roberta", "mpnet", "distilbert": return .bert
         // nomic-embed-text: RoPE encoder, still a sentence-embedding (.bert)

@@ -43,7 +43,8 @@ public struct ModelAdapter: Sendable, Equatable {
     public var chatRouting: ChatRouting {
         switch family {
         case .llama, .qwen, .qwen25vl, .qwen35, .llava, .llamaVision, .locateAnything, .mistral, .gemma, .gemma4,
-             .gemma4Unified, .phi, .glm, .glm4, .deepseek, .unlimitedOcr, .bert, .reranker, .moe, .nanbeige:
+             .gemma4Unified, .phi, .glm, .glm4, .deepseek, .unlimitedOcr, .bert, .reranker, .moe, .nanbeige,
+             .museGlimmer:
             // Native Swift+MLX path. WS5 made Qwen 2.5-VL native, so
             // a VL manifest routes here too - the standard chat path
             // decodes the image and calls the native engine, exactly
@@ -68,7 +69,8 @@ public struct ModelAdapter: Sendable, Equatable {
     public var requiresImageInput: Bool {
         switch family {
         case .llama, .qwen, .qwen25vl, .qwen35, .llava, .llamaVision, .locateAnything, .mistral, .gemma, .gemma4,
-             .gemma4Unified, .phi, .glm, .glm4, .deepseek, .unlimitedOcr, .bert, .reranker, .moe, .nanbeige:
+             .gemma4Unified, .phi, .glm, .glm4, .deepseek, .unlimitedOcr, .bert, .reranker, .moe, .nanbeige,
+             .museGlimmer:
             return false
         }
     }
@@ -104,6 +106,15 @@ public struct ModelAdapter: Sendable, Equatable {
             // (The template's `xml` default nests `<function=…><parameter=…>`
             // inside the same sentinel; Krill prompts the JSON body explicitly,
             // which this agentic model was trained to produce.)
+            return .hermes
+        case .museGlimmer:
+            // KNOWN GAP, not a considered match. Muse Glimmer's own chat
+            // template emits tool calls as an XML block
+            // (`<atem:function_calls><atem:invoke name="…">
+            // <atem:parameter name="…">…`), which no policy here models and
+            // which the Hermes parser will NOT parse. Text chat is correct;
+            // native atem tool-call prompting + parsing is a follow-up
+            // (needs a new `ChatTemplatePolicy` case and a `ToolParser` arm).
             return .hermes
         case .gemma, .glm, .glm4, .deepseek, .unlimitedOcr, .bert, .qwen25vl, .llava, .llamaVision,
              .locateAnything, .reranker:
@@ -150,7 +161,7 @@ public struct ModelAdapter: Sendable, Equatable {
             // inline (`formatLlavaTokenIds`).
             return .llavaVicuna
         case .llama, .qwen, .qwen25vl, .qwen35, .llamaVision, .locateAnything, .mistral, .gemma, .glm, .glm4, .deepseek,
-             .unlimitedOcr, .bert, .reranker, .moe, .nanbeige:
+             .unlimitedOcr, .bert, .reranker, .moe, .nanbeige, .museGlimmer:
             // Try the swift-transformers direct token-id template (keeps
             // ChatML / FIM / tool specials), else render + encode.
             return .directTokenIdsWithRenderFallback
@@ -174,7 +185,7 @@ public struct ModelAdapter: Sendable, Equatable {
             // family. Stay fp16-only until that gate lands (follow-up).
             return .fp16Only
         case .llama, .qwen, .qwen25vl, .qwen35, .llava, .llamaVision, .locateAnything, .mistral, .gemma, .phi,
-             .glm, .glm4, .deepseek, .unlimitedOcr, .bert, .reranker, .moe, .nanbeige:
+             .glm, .glm4, .deepseek, .unlimitedOcr, .bert, .reranker, .moe, .nanbeige, .museGlimmer:
             return .fp16Only
         }
     }

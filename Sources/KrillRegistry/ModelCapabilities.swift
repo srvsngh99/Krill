@@ -110,6 +110,18 @@ public enum ModelCapabilities {
             // Encoder-free multimodal Gemma 4 (12B): text + image + native
             // audio, same tool surface as the rest of the Gemma 4 family.
             return [.textGeneration, .visionInput, .audioInput, .tools]
+        case .museGlimmer:
+            // Muse Glimmer 30B: native text decoder + native perception
+            // encoder. `.visionInput` is declared for the family, but the
+            // `multimodalForward == nil` guard in InferenceEngine.capabilities
+            // strips it until the image-serving driver lands — the tower and
+            // preprocessor exist and are unit-testable, the engine wiring that
+            // threads the patch grid does not.
+            //
+            // `.tools` is NOT declared: the checkpoint's own template emits
+            // `<atem:function_calls>` XML that Krill's Hermes parser cannot
+            // read, so advertising tools would produce unparsed tool calls.
+            return [.textGeneration, .visionInput]
         case .bert:
             return [.embeddings]
         case .qwen25vl:
@@ -192,6 +204,20 @@ public enum ModelCapabilities {
             // vs the reference (fp16, MPS) 204.0 / 9.73 / 10.2s - 1.4x prefill,
             // 3.9x decode, and 1.7GB peak against ~8GB.
             return .productionNative
+        case .museGlimmer:
+            // Muse Glimmer 30B: logit-parity-gated against the transformers
+            // reference (text prefill + cached decode + vision tower + image
+            // features) on a SYNTHETIC checkpoint, and cross-verified on the
+            // real `mlx-community/Muse-Glimmer-30B-4bit` weights against
+            // mlx-vlm 0.6.12 (argmax match, cosine > 0.9999) plus an
+            // end-to-end `krill run` smoke, for text AND images (the latter via
+            // `MuseGlimmerRuntime`). What keeps this off `.productionNative` is
+            // no longer coverage but fit: benchmarked at 7.2 tok/s @512 and 6.0
+            // @4096, because 18.1 GiB of weights on a 24 GB box decodes into
+            // swap (far worse under any concurrent load). Its tool-call dialect
+            // is also unparsed — see `chatTemplate` — so `.tools` stays off.
+            // Regenerate the gate with `tools/verify_muse_glimmer_parity.py`.
+            return .experimental
         case .qwen35:
             // Ornith-9B (qwen3_5): the native GatedDeltaNet + full-attention
             // hybrid decoder is parity-verified vs mlx_lm (scan + forward +
