@@ -6,6 +6,56 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-12
+
+### Fixed
+
+- **Images were upside down.** Every image Krill decoded was flipped
+  vertically, across four families: Gemma 4 (including the encoder-free
+  unified path), LLaVA/CLIP, Qwen 2.5-VL and Llama 3.2 Vision. Each read
+  pixels back from a `CGBitmapContext` bottom-row-first, on the belief that
+  "CGContext stores rows bottom-to-top" — which describes the drawing
+  coordinate system, not memory layout. A vertical flip preserves shape,
+  colour and histogram, so it never looked like a bug; it looked like models
+  being bad at "above" and "below". `ImageDecodeOrientationTests` now pins all
+  seven decoders against a fixture authored outside CoreGraphics.
+- **`krill bench` measured a path the server never runs.** It prefilled through
+  the full forward (materializing ~414 MB of throwaway logits at 512 tokens),
+  allocated KV caches without the family's `cacheSpec` (wrong for every model
+  with windowed layers, including Gemma 4), and read peak memory from
+  `resident_size`, which does not count MLX's unified-memory buffers — an
+  18 GB model reported 28 MB. Together these reported 0.1 tok/s for a model
+  that decodes at 7.2.
+- Reasoning models whose templates fence chain-of-thought by RECIPIENT rather
+  than by tag are now detected for the token-headroom rule, so they no longer
+  spend a 512-token budget thinking and return an empty answer.
+
+### Added
+
+- **Native Muse Glimmer 30B** (`muse-glimmer-30b`): a Swift+MLX text decoder
+  and ViT-G/14 perception encoder, with no Python in the inference path. Text
+  and images both serve natively. Logit-parity gated against the transformers
+  reference at four geometries and cross-verified on the real 4-bit checkpoint
+  against mlx-vlm (argmax match, cosine > 0.9999). Marked `experimental`:
+  18.1 GiB of weights pages on a 24 GB machine (7.2 tok/s at 512 tokens), and
+  its `<atem:function_calls>` tool dialect is not parsed yet.
+- **`krill perplexity`** — measure what a quantization actually costs.
+  Reports perplexity (comparable across builds sharing a tokenizer) and bits
+  per byte (comparable across tokenizers). Neither `krill bench` nor the parity
+  oracles could answer this: the oracles compare against the same quantized
+  reference, so a quantization that degrades the model equally passes them.
+- `KRILL_DEBUG_PROMPT` and `KRILL_DEBUG_FIRST_TOKEN` dump the prompt ids a
+  request actually feeds the model, and the engine's first-token logits beside
+  the parity-gate path's, on the same weights in the same process.
+
+### Changed
+
+- The local-envelope benchmark sweep is rebuilt on `krill bench` instead of
+  scraping `krill run`, whose stats line only prints when generation is cut off
+  by `--max-tokens` — so concise models previously came back as "no data".
+  Published results now span 0.6B to 30B.
+
+
 ## [0.18.0] - 2026-08-05
 
 ### Added
