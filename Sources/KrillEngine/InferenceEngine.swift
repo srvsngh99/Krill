@@ -782,6 +782,20 @@ public final class InferenceEngine: @unchecked Sendable {
                 usePrefixCache: usePrefixCache)
         }
 
+        // Muse Glimmer native runtime. Routed here ONLY for image requests: its
+        // decode is plain 1-D (no mRoPE), so a text-only turn is served by the
+        // generic dense path below — which is the parity-gated, prefix-cached,
+        // speculation-capable one, and there is no reason to give that up. An
+        // image request needs the dedicated driver because the per-image patch
+        // grid cannot travel through the generic `multimodalForward` closure.
+        if let mg = loadedModel.module as? MuseGlimmerForConditionalGeneration,
+           imageData != nil || !imagesData.isEmpty {
+            return generateMuseGlimmer(
+                model: mg, tokenizer: tokenizer, messages: messages,
+                params: params, maxTokens: maxTokens,
+                imageData: imageData ?? imagesData.first)
+        }
+
         // Qwen3.5-VL (Ornith) native runtime. Same 3D-mRoPE decode reason as
         // Qwen 2.5-VL above; its hybrid decoder also forbids the prefix cache
         // (SSM state is non-restorable), so the dedicated driver always full-
@@ -911,6 +925,11 @@ public final class InferenceEngine: @unchecked Sendable {
         // Use direct token ID path for Gemma4 to avoid decode→re-encode
         // round-trip that loses special tokens (105, 106, 107).
         var promptTokensBuilt: [Int]
+        // Which of the builders below actually ran, for `KRILL_DEBUG_PROMPT`.
+        // A tokenizer unit test can prove `applyChatTemplateTokens` is right and
+        // still tell you nothing about this request: the engine picks between
+        // five builders, and only one of them is that call.
+        var promptBuilder = "unknown"
         if isUnlimitedOCR, imageData != nil {
             // Base-view OCR prompt: [BOS] + 273 `<image>` tokens + instruction,
             // in the `plain` DeepSeek template (the instruction lands after the
@@ -919,6 +938,7 @@ public final class InferenceEngine: @unchecked Sendable {
             let userText = preparedMessages.last(where: { $0["role"] == "user" })?["content"]
                 ?? preparedMessages.last?["content"] ?? ""
             let bos = tokenizer.bosTokenId
+            promptBuilder = "unlimitedOCR"
             promptTokensBuilt = UnlimitedOCR.promptTokens(userText: userText) { text in
                 guard !text.isEmpty else { return [] }
                 var ids = tokenizer.encode(text)
@@ -936,6 +956,7 @@ public final class InferenceEngine: @unchecked Sendable {
             // structure). `renderWithOverrideTemplate` returns nil on a
             // parse/eval failure, falling through to the built-in path so
             // an exotic Modelfile never hard-fails a request.
+            promptBuilder = "modelfileTemplateOverride"
             promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(rendered)
         } else if thinkingExplicit,
                   let thinking = tokenizer.enableThinkingPrompt(
@@ -946,11 +967,13 @@ public final class InferenceEngine: @unchecked Sendable {
             // OFF. Returns nil for the Gemma-4 channel template (handled in the
             // switch below via gemma4ChannelPrompt) and for models with no thinking
             // variable (fall through to the normal path).
+            promptBuilder = "enableThinkingPrompt"
             promptTokensBuilt = thinking
         } else {
             // Family-specific prompt tokenization, selected by the declarative
             // `ModelAdapter.tokenizerPrompt` policy (WS3) rather than a chain of
             // `family == "..."` compares.
+            promptBuilder = "\(archAdapter.tokenizerPrompt)"
             switch archAdapter.tokenizerPrompt {
             case .llavaVicuna:
                 // LLaVA-1.5: render the vicuna prompt and place
@@ -1015,16 +1038,33 @@ public final class InferenceEngine: @unchecked Sendable {
                     // to text and re-encoding, which silently drops ChatML / FIM /
                     // tool special tokens on Qwen 3 Coder and similar checkpoints
                     // and rots generation into pure special-token loops.
+                    promptBuilder += "(direct)"
                     promptTokensBuilt = direct
                 } else {
                     // Last resort: the wrapper's manual Llama 3 fallback path, for
                     // checkpoints with neither an embedded nor an external
                     // template. Lossy round-trip but the alternative is no chat
                     // formatting at all.
+                    promptBuilder += "(renderFallback)"
                     let formatted = tokenizer.applyChatTemplate(messages: preparedMessages)
                     promptTokensBuilt = tokenizer.encodeWithoutExtraBOS(formatted)
                 }
             }
+        }
+
+        // `KRILL_DEBUG_PROMPT=1`: dump the ids this request actually feeds the
+        // model, plus the builder that produced them and the inputs that select
+        // it. Token COUNT parity with a reference proves nothing about the ids
+        // themselves, so this prints ids — diff them, don't eyeball the length.
+        if ProcessInfo.processInfo.environment["KRILL_DEBUG_PROMPT"] != nil {
+            var out = "[krill-debug] prompt builder=\(promptBuilder)"
+                + " family=\(loadedModel.family) roles=\(preparedMessages.map { $0["role"] ?? "?" })"
+                + " thinkingExplicit=\(thinkingExplicit) effectiveThinking=\(effectiveThinking)"
+                + " templateOverride=\(promptTemplateOverride?.isEmpty == false)"
+                + " media=\(imageData != nil || audioData != nil)\n"
+            out += "[krill-debug] prompt count=\(promptTokensBuilt.count)\n"
+            out += "[krill-debug] prompt ids=\(promptTokensBuilt)\n"
+            FileHandle.standardError.write(Data(out.utf8))
         }
 
         // WS-D D4: honor a context-length cap (num_ctx / KRILL_CONTEXT_LENGTH).
@@ -1484,6 +1524,42 @@ public final class InferenceEngine: @unchecked Sendable {
                 }
                 MLX.eval(prefillLogits)
                 prefillDuration = CFAbsoluteTimeGetCurrent() - startTime
+
+                // `KRILL_DEBUG_FIRST_TOKEN=1`: the engine's first-token logits
+                // next to the logits of the path the parity oracle actually
+                // gates (full forward, NO caches, sliced to the last position),
+                // computed on the SAME loaded weights in the SAME process. A
+                // gate that only ever ran `forward(tokens, nil)` cannot tell
+                // these two apart; on a 30B checkpoint one load is all we get,
+                // so bisect prompt-vs-forward inside it rather than across runs.
+                if ProcessInfo.processInfo.environment["KRILL_DEBUG_FIRST_TOKEN"] != nil {
+                    func top5(_ logits: MLXArray) -> String {
+                        let row = logits.asArray(Float.self)
+                        return row.indices.sorted { row[$0] > row[$1] }.prefix(5)
+                            .map { "\($0):\(String(format: "%.4f", row[$0]))" }
+                            .joined(separator: " ")
+                    }
+                    let enginePos = prefillLogits.dim(1) - 1
+                    let engineRow = prefillLogits[0, enginePos, 0...]
+                    eval(engineRow)
+                    var out = "[krill-debug] prefill int8KV=\(useInt8KV)"
+                        + " spec=\(shouldSpec) cacheHit=\(cacheHit)"
+                        + " partialReuse=\(partialReuseLen)"
+                        + " chunkSize=\(capturedPrefillChunkSize)"
+                        + " forwarded=\(tokensToProcess.count)/\(promptTokens.count)"
+                        + " prefillForward=\(capturedPrefillForward != nil)"
+                        + " logitsShape=\(prefillLogits.shape)\n"
+                    out += "[krill-debug] engine  top5: \(top5(engineRow))\n"
+                    // Gate path: fresh full forward over the WHOLE prompt with
+                    // no caches — the exact call MuseGlimmerParityTests makes.
+                    let refInput = MLXArray(promptTokens.map { Int32($0) })
+                        .reshaped(1, promptTokens.count)
+                    let refLogits = capturedForward(refInput, nil)
+                    let refRow = refLogits[0, promptTokens.count - 1, 0...]
+                    eval(refRow)
+                    out += "[krill-debug] gateref top5: \(top5(refRow))\n"
+                    FileHandle.standardError.write(Data(out.utf8))
+                }
 
                 // -- Store in prefix cache (write-behind) --
                 // We cache KV for the full prompt (all tokens that have been
@@ -2282,6 +2358,134 @@ public final class InferenceEngine: @unchecked Sendable {
                     maxTokens: captures.max,
                     stopIds: captures.stops,
                     params: captures.params,
+                    onToken: { token in
+                        guard !captures.stops.contains(token) else { return }
+                        continuation.yield(TokenEvent(
+                            tokenId: token,
+                            text: captures.tokenizer.decodeForOutput(token: token),
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                    })
+                statsHolder.stats = GenerationStats(
+                    promptTokens: captures.prompt.count,
+                    generatedTokens: output.tokens.count,
+                    prefillTime: output.prefillSeconds,
+                    decodeTime: output.decodeSeconds)
+                let sawStop = output.tokens.last.map { captures.stops.contains($0) } ?? false
+                continuation.yield(TokenEvent(
+                    tokenId: sawStop ? (output.tokens.last ?? -1) : -1,
+                    text: "", elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
+                continuation.finish()
+            }
+        }
+        return (stream, { statsHolder.stats })
+    }
+
+    /// Muse Glimmer image request: preprocess, splice a `<|patch|>` run into
+    /// the prompt, then drive `MuseGlimmerRuntime`.
+    ///
+    /// The prompt is built by INJECTING the placeholder text into the user turn
+    /// and re-running `applyChatTemplateTokens`, rather than hand-assembling the
+    /// turn structure the way the Qwen/LocateAnything builders do. That is
+    /// deliberate: this checkpoint's template renders a dated system block,
+    /// reasoning strength and a valid-recipients list, and the direct-ids path
+    /// is already verified to reproduce it exactly. `<|patch|>` is an added
+    /// token (id 200092 == `config.image_token_id`), so it survives the
+    /// round-trip as a single id.
+    private func generateMuseGlimmer(
+        model: MuseGlimmerForConditionalGeneration,
+        tokenizer: KrillTokenizer,
+        messages: [[String: String]],
+        params: SamplingParams,
+        maxTokens: Int,
+        imageData: Data?
+    ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
+        var pixelValues: MLXArray? = nil
+        var grid: (t: Int, h: Int, w: Int)? = nil
+        var patchCount = 0
+        if let imgData = imageData {
+            // A text-only Muse Glimmer dump ships no `vision_config` and builds
+            // no tower, so it cannot serve an image. Say so instead of failing
+            // somewhere deeper.
+            guard let visionConfig = model.config.visionConfig else {
+                return Self.mediaErrorStream(
+                    "Error: this Muse Glimmer checkpoint carries no vision "
+                    + "config (text-only build); it cannot process images.")
+            }
+            do {
+                let prepped = try MuseGlimmerImagePreprocessor.preprocess(
+                    imgData, vision: visionConfig)
+                pixelValues = prepped.patches
+                grid = prepped.grid
+                patchCount = MuseGlimmerRuntime.placeholderCount(
+                    grid: prepped.grid, mergeSize: visionConfig.mergeSize)
+            } catch {
+                return Self.mediaErrorStream(
+                    "Error: Muse Glimmer image preprocessing failed: \(error)")
+            }
+        }
+
+        // Place the run at the START of the first user turn's content, which is
+        // where the template's `render_content` emits `<|patch|>` for an image
+        // content part.
+        var prepared = messages
+        if patchCount > 0,
+           let idx = prepared.firstIndex(where: { $0["role"] == "user" }) {
+            let run = String(repeating: "<|patch|>", count: patchCount)
+            prepared[idx]["content"] = run + (prepared[idx]["content"] ?? "")
+        }
+
+        let promptTokens = tokenizer.applyChatTemplateTokens(messages: prepared)
+            ?? tokenizer.encodeWithoutExtraBOS(
+                tokenizer.applyChatTemplate(messages: prepared))
+
+        // The splice in the model asserts span == feature count. Catch a
+        // placeholder/tokenizer disagreement HERE, where it can be reported,
+        // instead of as a precondition crash inside the forward.
+        let placed = promptTokens.filter { $0 == model.config.imageTokenId }.count
+        guard placed == patchCount else {
+            return Self.mediaErrorStream(
+                "Error: Muse Glimmer prompt carries \(placed) <|patch|> token(s) "
+                + "but the image needs \(patchCount). The chat template did not "
+                + "round-trip the placeholder run.")
+        }
+        guard !promptTokens.isEmpty else {
+            let empty = AsyncStream<TokenEvent> { c in
+                c.yield(TokenEvent(tokenId: 0, text: "", elapsed: 0, isEnd: true)); c.finish()
+            }
+            return (empty, { nil })
+        }
+
+        let stopIds = Self.stopTokenIds(
+            modelDirectory: modelDirectory, tokenizerEOS: tokenizer.eosTokenId)
+        let statsHolder = StatsHolder()
+        struct Captures: @unchecked Sendable {
+            let model: MuseGlimmerForConditionalGeneration
+            let tokenizer: KrillTokenizer
+            let pixels: MLXArray?
+            let grid: (t: Int, h: Int, w: Int)?
+            let prompt: [Int]
+            let stops: Set<Int>
+            let params: SamplingParams
+            let max: Int
+            let mediaHash: String?
+        }
+        let captures = Captures(
+            model: model, tokenizer: tokenizer, pixels: pixelValues, grid: grid,
+            prompt: promptTokens, stops: stopIds, params: params, max: maxTokens,
+            mediaHash: imageData.map { VisionEncoderCache.key(forImageBytes: $0) })
+
+        let stream = AsyncStream<TokenEvent> { continuation in
+            Task { [statsHolder, captures] in
+                let startTime = CFAbsoluteTimeGetCurrent()
+                let output = MuseGlimmerRuntime.generate(
+                    model: captures.model,
+                    promptTokens: captures.prompt,
+                    pixelValues: captures.pixels,
+                    grid: captures.grid,
+                    maxTokens: captures.max,
+                    stopIds: captures.stops,
+                    params: captures.params,
+                    mediaHash: captures.mediaHash,
                     onToken: { token in
                         guard !captures.stops.contains(token) else { return }
                         continuation.yield(TokenEvent(
