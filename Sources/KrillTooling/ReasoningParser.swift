@@ -63,6 +63,96 @@ public enum ReasoningParser {
         return (cleaned, t.isEmpty ? nil : t)
     }
 
+    // MARK: - ATEM / Harmony recipient channels (Muse Glimmer)
+
+    static let atemMessage = "<|message|>"
+    static let atemStart = "<|start|>"
+    /// `<|eom|>` ends a message that is NOT the end of the turn (more messages
+    /// follow); `<|eot|>` ends the turn. Both terminate a channel's content.
+    static let atemEnds = ["<|eom|>", "<|eot|>"]
+
+    /// Recipient named in an ATEM message header, e.g. `assistant to=self` or
+    /// ` to=web.search`. nil when the header carries no `to=` (the template's
+    /// default recipient is `user`, i.e. visible).
+    static func atemRecipient(in header: some StringProtocol) -> String? {
+        guard let r = header.range(of: "to=") else { return nil }
+        let name = header[r.upperBound...].prefix {
+            !$0.isWhitespace && $0 != "<"
+        }
+        return name.isEmpty ? nil : String(name)
+    }
+
+    /// Split a Muse Glimmer generation into visible text and reasoning.
+    ///
+    /// The checkpoint's template routes each assistant message to a RECIPIENT
+    /// rather than wrapping reasoning in paired tags:
+    ///
+    ///     [<|start|>assistant][ to=<recipient>]<|message|>content<|eom|or|eot|>
+    ///
+    /// `to=self` is the model's own scratchpad — the template renders a prior
+    /// turn's `reasoning_content` as exactly `to=self` — so that content is
+    /// reasoning and must not reach the user. No `to=` (or `to=user`) is the
+    /// visible answer. The generation prompt ends at `<|start|>assistant`, so
+    /// the FIRST header arrives without a `<|start|>` of its own.
+    ///
+    /// Any other recipient is a tool call (`<atem:function_calls>` XML). Those
+    /// stay VISIBLE deliberately: Krill cannot parse this dialect yet (see
+    /// `ChatTemplatePolicy.museGlimmer`), and showing an unparsed tool call is
+    /// honest, where silently swallowing it would look like an empty reply.
+    ///
+    /// Content with no terminator (truncated by `max_tokens` mid-message) runs
+    /// to end-of-text, matching how an unclosed `<think>` is treated above.
+    static func stripAtemChannels(_ text: String) -> (visible: String, thinking: String?) {
+        // Fast path: no ATEM structure, no work. Every other family lands here.
+        guard text.contains(atemMessage) else { return (text, nil) }
+
+        var visible = ""
+        var captured = ""
+        var rest = Substring(text)
+
+        while let m = rest.range(of: atemMessage) {
+            let recipient = atemRecipient(in: rest[rest.startIndex ..< m.lowerBound])
+            let body = rest[m.upperBound...]
+            // A message ends at its terminator, or at the next `<|start|>` if
+            // the model skipped one.
+            let stop = earliestRange(of: atemEnds + [atemStart], in: body)
+            let content = stop.map { body[body.startIndex ..< $0.lowerBound] } ?? body
+            if recipient == "self" {
+                captured += content
+            } else {
+                visible += content
+            }
+            guard let stop else { rest = body[body.endIndex...]; break }
+            rest = body[stop.upperBound...]
+        }
+
+        // Trailing text after the last terminator. Once ATEM structure is
+        // established, prose only ever follows a `<|message|>`, so a dangling
+        // header fragment (`<|start|>assistant to=user`, truncated) is scaffold
+        // and is dropped rather than leaked.
+        if let s = rest.range(of: atemStart) {
+            visible += rest[rest.startIndex ..< s.lowerBound]
+        } else {
+            visible += rest
+        }
+
+        let t = captured.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (visible, t.isEmpty ? nil : t)
+    }
+
+    /// Earliest occurrence of any of `needles` in `haystack`.
+    static func earliestRange(
+        of needles: [String], in haystack: some StringProtocol
+    ) -> Range<String.Index>? {
+        var best: Range<String.Index>?
+        for n in needles {
+            if let r = haystack.range(of: n), best == nil || r.lowerBound < best!.lowerBound {
+                best = r
+            }
+        }
+        return best
+    }
+
     /// Strip reasoning from `text`: first every Gemma-4 channel span, then the
     /// FIRST `<thinking>`/`<think>` block. Returns the cleaned text and the
     /// captured reasoning content (trimmed; nil if empty).
@@ -75,9 +165,12 @@ public enum ReasoningParser {
     /// model never reached the closing tag. The pre-tag prefix (typically
     /// empty) is preserved.
     public static func strip(_ text: String) -> (visible: String, thinking: String?) {
-        // Gemma-4 channels first (all occurrences), then the generic tag.
-        let (afterGemma, gemmaThinking) = stripGemmaChannels(text)
+        // ATEM recipient channels first (they wrap whole messages, including
+        // any inner tags), then Gemma-4 channels, then the generic tag.
+        let (afterAtem, atemThinking) = stripAtemChannels(text)
+        let (afterGemma, gemmaThinking) = stripGemmaChannels(afterAtem)
         var captures: [String] = []
+        if let a = atemThinking { captures.append(a) }
         if let g = gemmaThinking { captures.append(g) }
 
         var visible = afterGemma
@@ -150,7 +243,26 @@ public final class StreamingReasoningFilter {
         /// character is seen.
         case justExited
         case afterBlock
+        /// Start of stream, and again after every ATEM terminator: the text so
+        /// far may be an ATEM message header (` to=self<|message|>`). Held
+        /// until it either completes into a header — which tells us whether the
+        /// message that follows is visible — or stops being able to be one, at
+        /// which point it is flushed literally and the filter behaves exactly
+        /// as it always has. Non-ATEM models leave this state on their first
+        /// chunk, so nothing is delayed for them.
+        case atemProbe
+        /// Inside an ATEM message body whose recipient we know.
+        case atemContent(visible: Bool)
     }
+
+    /// Terminators that close an ATEM message body. `<|start|>` is included
+    /// because a model that skips its terminator still opens the next message.
+    private static let atemStops = ReasoningParser.atemEnds + [ReasoningParser.atemStart]
+    private static let maxAtemStopPrefix: Int = atemStops.map(\.count).max() ?? 0
+    /// Cap on how much a header probe may hold before deciding it is not one.
+    /// A real header is `<|start|>assistant to=<name><|message|>`; 64 leaves
+    /// room for a long tool namespace without ever stalling a stream.
+    private static let atemHeaderLimit = 64
 
     private static let openTags = ["<thinking>", "<think>", "<|channel>", "<|think|>"]
     private static let closingFor: [String: String] = [
@@ -172,7 +284,7 @@ public final class StreamingReasoningFilter {
         allMarkers.map(\.count).max() ?? 0
     }()
 
-    private var state: State = .preamble
+    private var state: State = .atemProbe
     private var buffer: String = ""
 
     public init() {}
@@ -185,6 +297,42 @@ public final class StreamingReasoningFilter {
 
         while !buffer.isEmpty {
             switch state {
+            case .atemProbe:
+                if let r = buffer.range(of: ReasoningParser.atemMessage) {
+                    // Header complete: `to=self` is the model's scratchpad and
+                    // is dropped; anything else (no recipient = `user`, or a
+                    // tool namespace) is shown. See `stripAtemChannels`.
+                    let recipient = ReasoningParser.atemRecipient(
+                        in: buffer[buffer.startIndex ..< r.lowerBound])
+                    buffer.removeSubrange(buffer.startIndex ..< r.upperBound)
+                    state = .atemContent(visible: recipient != "self")
+                    continue
+                }
+                if couldBeAtemHeader(buffer) { return emit }
+                // Not a header. Hand the buffer to the ordinary tag scanner
+                // untouched, so every other family is unaffected.
+                state = .preamble
+                continue
+
+            case .atemContent(let visible):
+                if let stop = ReasoningParser.earliestRange(
+                    of: Self.atemStops, in: buffer) {
+                    if visible {
+                        emit += buffer[buffer.startIndex ..< stop.lowerBound]
+                    }
+                    buffer.removeSubrange(buffer.startIndex ..< stop.upperBound)
+                    state = .atemProbe
+                    continue
+                }
+                // Hold only a tail that could still become a terminator.
+                let holdLen = trailingAtemStopPrefixLength(buffer)
+                let safeEnd = buffer.index(buffer.endIndex, offsetBy: -holdLen)
+                if visible {
+                    emit += buffer[buffer.startIndex ..< safeEnd]
+                }
+                buffer.removeSubrange(buffer.startIndex ..< safeEnd)
+                return emit
+
             case .afterBlock:
                 emit += buffer
                 buffer.removeAll(keepingCapacity: true)
@@ -297,6 +445,20 @@ public final class StreamingReasoningFilter {
             // Truncated mid-reasoning. Drop.
             buffer.removeAll(keepingCapacity: true)
             return ""
+        case .atemProbe:
+            // Only reachable when every byte held is still a prefix of an ATEM
+            // header — scaffold, never prose. A one-token reply truncated at
+            // ` to` lands here; emitting it would leak the channel marker.
+            buffer.removeAll(keepingCapacity: true)
+            return ""
+        case .atemContent(let visible):
+            // Held tail of a visible message: emit it, minus any partial
+            // terminator. Reasoning (`to=self`) is dropped as ever.
+            let out = visible
+                ? String(buffer.dropLast(trailingAtemStopPrefixLength(buffer)))
+                : ""
+            buffer.removeAll(keepingCapacity: true)
+            return out
         }
     }
 
@@ -312,6 +474,34 @@ public final class StreamingReasoningFilter {
             }
         }
         return best
+    }
+
+    /// True while `s` can still grow into an ATEM message header. Bounded, and
+    /// deliberately narrow: an ordinary reply ("Paris…") matches none of these
+    /// shapes, so it is released on the first chunk with no added latency.
+    private func couldBeAtemHeader(_ s: String) -> Bool {
+        if s.count > Self.atemHeaderLimit { return false }
+        // A header in progress: recipient still accumulating.
+        if s.hasPrefix(" to=") || s.hasPrefix(ReasoningParser.atemStart) { return true }
+        // Too short to tell yet: still a prefix of a shape we recognise.
+        return ReasoningParser.atemMessage.hasPrefix(s)
+            || ReasoningParser.atemStart.hasPrefix(s)
+            || " to=".hasPrefix(s)
+    }
+
+    /// Largest n such that the last n characters of `s` form a proper prefix
+    /// of an ATEM terminator (so a `<|eom|>` split across chunks is not
+    /// emitted as text).
+    private func trailingAtemStopPrefixLength(_ s: String) -> Int {
+        let limit = min(s.count, Self.maxAtemStopPrefix)
+        for n in stride(from: limit, through: 1, by: -1) {
+            let suffix = String(s.suffix(n))
+            if Self.atemStops.contains(where: { $0.hasPrefix(suffix) }),
+               !Self.atemStops.contains(suffix) {
+                return n
+            }
+        }
+        return 0
     }
 
     private func isPrefixOfAnyOpenTag(_ s: String) -> Bool {

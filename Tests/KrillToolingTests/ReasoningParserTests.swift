@@ -230,4 +230,98 @@ final class ReasoningParserTests: XCTestCase {
         XCTAssertEqual(f.consume("nk>visible"), "visible")
         XCTAssertEqual(f.finish(), "")
     }
+
+    // MARK: - ATEM / Harmony recipient channels (Muse Glimmer)
+
+    /// Verbatim output of `krill run muse-glimmer-30b "What is the capital of
+    /// France? Answer in one word." --max-tokens 40 --temp 0` on the real
+    /// checkpoint: the model routes its scratchpad to `self`, and the run hit
+    /// the token cap before it ever addressed `user`.
+    private static let realMuseGlimmerTruncated =
+        " to=self<|message|>What is the capital of France? Answer in one word.\n\n"
+        + "We need answer in one word. Capital of France is Paris.\n\n"
+        + "Probably just Paris.\n\nFollow instruction: Answer in one word.\n\n"
+
+    func testAtemSelfRecipientIsReasoningNotVisible() {
+        let raw = " to=self<|message|>Capital of France is Paris.<|eom|>"
+            + "<|start|>assistant to=user<|message|>Paris<|eot|>"
+        let (visible, thinking) = ReasoningParser.strip(raw)
+        XCTAssertEqual(visible, "Paris")
+        XCTAssertEqual(thinking, "Capital of France is Paris.")
+    }
+
+    func testAtemMissingRecipientIsVisible() {
+        // No `to=` means the template's default recipient, `user`.
+        let (visible, thinking) = ReasoningParser.strip("<|message|>Paris<|eot|>")
+        XCTAssertEqual(visible, "Paris")
+        XCTAssertNil(thinking)
+    }
+
+    func testAtemToolRecipientStaysVisible() {
+        // Krill cannot parse the atem XML dialect yet; showing it beats
+        // silently swallowing the only content the turn produced.
+        let raw = " to=web.search<|message|><atem:function_calls>x</atem:function_calls><|eot|>"
+        let (visible, _) = ReasoningParser.strip(raw)
+        XCTAssertEqual(visible, "<atem:function_calls>x</atem:function_calls>")
+    }
+
+    func testAtemTruncatedReasoningLeaksNothing() {
+        let (visible, thinking) = ReasoningParser.strip(Self.realMuseGlimmerTruncated)
+        XCTAssertEqual(visible, "", "a turn that only ever addressed `self` has no visible text")
+        XCTAssertNotNil(thinking)
+        XCTAssertFalse(visible.contains("to=self"))
+        XCTAssertFalse(visible.contains("<|message|>"))
+    }
+
+    func testAtemDanglingHeaderIsNotLeaked() {
+        let raw = " to=self<|message|>thinking<|eom|><|start|>assistant to=user"
+        let (visible, _) = ReasoningParser.strip(raw)
+        XCTAssertEqual(visible, "")
+    }
+
+    func testStreamingFilterStripsAtemReasoningAndEmitsAnswer() {
+        let f = StreamingReasoningFilter()
+        var out = ""
+        for chunk in [" to", "=self", "<|message|>", "Paris is it", "<|eom|>",
+                      "<|start|>assistant to=user<|message|>", "Paris", "<|eot|>"] {
+            out += f.consume(chunk)
+        }
+        out += f.finish()
+        XCTAssertEqual(out, "Paris")
+    }
+
+    func testStreamingFilterDropsAtemHeaderTruncatedAtFirstToken() {
+        // `--max-tokens 1` emits exactly ` to`, which must not reach the user.
+        let f = StreamingReasoningFilter()
+        XCTAssertEqual(f.consume(" to"), "")
+        XCTAssertEqual(f.finish(), "")
+    }
+
+    func testStreamingFilterEmitsAtemVisibleMessageIncrementally() {
+        let f = StreamingReasoningFilter()
+        XCTAssertEqual(f.consume("<|message|>The answer"), "The answer")
+        XCTAssertEqual(f.consume(" is Paris"), " is Paris")
+        XCTAssertEqual(f.consume("<|eot|>"), "")
+        XCTAssertEqual(f.finish(), "")
+    }
+
+    func testStreamingFilterHoldsAtemTerminatorSplitAcrossChunks() {
+        let f = StreamingReasoningFilter()
+        XCTAssertEqual(f.consume("<|message|>Paris<|e"), "Paris")
+        XCTAssertEqual(f.consume("ot|>"), "")
+        XCTAssertEqual(f.finish(), "")
+    }
+
+    /// The probe must not cost every other family a delayed first token.
+    func testStreamingFilterReleasesOrdinaryFirstChunkImmediately() {
+        let f = StreamingReasoningFilter()
+        XCTAssertEqual(f.consume("Paris is the capital."), "Paris is the capital.")
+        XCTAssertEqual(f.finish(), "")
+    }
+
+    func testAtemParserLeavesOrdinaryTextUntouched() {
+        let (visible, thinking) = ReasoningParser.strip("No channels here at all.")
+        XCTAssertEqual(visible, "No channels here at all.")
+        XCTAssertNil(thinking)
+    }
 }
