@@ -135,6 +135,19 @@ private let aliases: [String: ResolvedModel] = [
         repo: "srv-sngh/Nanbeige4.2-3B-mlx-nvfp4",
         name: "nanbeige-4.2-3b", family: .nanbeige, params: "3B", quant: "nvfp4", context: 262144),
 
+    // Meta Muse Glimmer 30B (Apache 2.0, released 2026-08). Dense 52-layer
+    // decoder with output-gated attention and a 3:1 sliding(2048)/NoPE-full
+    // layer mix, plus a ~1.8B ViT-G/14 perception encoder. Points at the
+    // mlx-community 4-bit build — the SMALLEST published MLX variant at
+    // 19.4 GB, so this needs a 32GB+ (realistically 48GB) machine; there is no
+    // sub-4-bit MLX conversion. The runtime is parity-gated on a synthetic
+    // checkpoint but has never been run on these real weights (see
+    // ModelCapabilities.supportTier), so the first real load is unproven.
+    "muse-glimmer-30b": ResolvedModel(
+        repo: "mlx-community/Muse-Glimmer-30B-4bit",
+        name: "muse-glimmer-30b", family: .museGlimmer, params: "30B", quant: "4bit",
+        context: 131072),
+
     // Qwen 3 (dense variants; MoE variants tracked under WS6)
     // Architecture delta vs Qwen 2.5: no QKV bias, per-head q_norm/k_norm
     // before RoPE, tied embeddings, explicit head_dim. Same Qwen family

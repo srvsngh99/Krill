@@ -29,6 +29,7 @@ struct Krill: AsyncParsableCommand {
             CpCommand.self,
             StopCommand.self,
             BenchCommand.self,
+            PerplexityCommand.self,
             QuantizeCommand.self,
             DebugCommand.self,
             UpdateCommand.self,

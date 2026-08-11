@@ -757,6 +757,13 @@ public final class KrillTokenizer: @unchecked Sendable {
         return t.contains("<think>") || t.contains("<thinking>")
             || t.contains("<|think|>") || t.contains("<|channel>")
             || t.contains("enable_thinking")
+            // ATEM / Harmony recipient channels (Muse Glimmer): reasoning is
+            // addressed `to=self` rather than fenced by a tag, and the template
+            // renders a prior turn's `reasoning_content` that way. Without this
+            // the headroom rule starves the model — at `high` reasoning
+            // strength it can spend a 512-token budget entirely in the `self`
+            // channel and return a visibly EMPTY answer.
+            || t.contains("to=self") || t.contains("reasoning_content")
     }
 
     /// Whether the checkpoint at `directory` ships a reasoning chat template,

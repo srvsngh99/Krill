@@ -586,6 +586,126 @@ func loadQwen35VL(configData: Data, directory: URL) throws -> LoadedModel {
     )
 }
 
+/// Rewrite an mlx_vlm-format Muse Glimmer checkpoint into the HF module layout
+/// this runtime mirrors. A no-op on an HF-format checkpoint (every key there
+/// already starts with `model.` or `lm_head.`).
+///
+/// The two layouts disagree about where the `model.` prefix goes, verified
+/// against `mlx-community/Muse-Glimmer-30B-4bit`'s weight index:
+///
+///     mlx_vlm                              HF (what this runtime builds)
+///     language_model.model.layers.{i}.*    model.language_model.layers.{i}.*
+///     language_model.model.embed_tokens.*  model.language_model.embed_tokens.*
+///     language_model.model.norm.*          model.language_model.norm.*
+///     language_model.lm_head.*             lm_head.*
+///     vision_tower.*                       model.vision_tower.*
+///     vision_adapter.*                     model.vision_adapter.*
+///     vision_projection.*                  model.vision_projection.*
+///
+/// Note `lm_head` moves in the OPPOSITE direction to everything else: mlx_vlm
+/// nests it under `language_model`, HF hoists it to the top level.
+func museGlimmerSanitize(_ flat: [String: MLXArray]) -> [String: MLXArray] {
+    // Cheap guard: if nothing is in the mlx_vlm layout, hand back the original
+    // dictionary untouched rather than rebuilding it.
+    let needsRewrite = flat.keys.contains { key in
+        key.hasPrefix("language_model.") || key.hasPrefix("vision_tower.")
+            || key.hasPrefix("vision_adapter.") || key.hasPrefix("vision_projection.")
+    }
+    guard needsRewrite else { return flat }
+
+    var out: [String: MLXArray] = [:]
+    out.reserveCapacity(flat.count)
+    for (key, value) in flat {
+        let rewritten: String
+        if key.hasPrefix("language_model.lm_head.") {
+            rewritten = "lm_head." + key.dropFirst("language_model.lm_head.".count)
+        } else if key.hasPrefix("language_model.model.") {
+            rewritten = "model.language_model." + key.dropFirst("language_model.model.".count)
+        } else if key.hasPrefix("vision_tower.") || key.hasPrefix("vision_adapter.")
+            || key.hasPrefix("vision_projection.") {
+            rewritten = "model." + key
+        } else {
+            rewritten = key
+        }
+        out[rewritten] = value
+    }
+    return out
+}
+
+/// Meta Muse Glimmer 30B (`muse_glimmer`): native Swift+MLX dense decoder with
+/// output-gated attention and a 3:1 sliding/NoPE-full layer mix, plus the
+/// ViT-G/14 perception encoder when the config carries a `vision_config`.
+///
+/// The image-serving path runs through `MuseGlimmerRuntime` (it needs the patch
+/// grid, which the generic `multimodalForward` signature cannot carry), so
+/// `multimodalForward` is deliberately left nil here and the engine intercepts
+/// on the module type instead.
+///
+/// Parity-gated against the transformers reference on a synthetic checkpoint
+/// (`MuseGlimmerParityTests`) at four geometries, AND verified on the real
+/// `mlx-community/Muse-Glimmer-30B-4bit` weights against mlx-vlm 0.6.12
+/// (prefill + cached decode: argmax match, cosine > 0.9999) and end-to-end
+/// through `krill run`. See `.claude/skills/native-port/families/muse-glimmer.md`.
+func loadMuseGlimmer(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try JSONDecoder().decode(MuseGlimmerConfig.self, from: configData)
+    try config.textConfig.validate()
+    let model = MuseGlimmerForConditionalGeneration(config)
+
+    if let q = config.quantization {
+        // Everything EXCEPT the perception encoder is quantized. Verified
+        // against `mlx-community/Muse-Glimmer-30B-4bit`'s weight index: the
+        // `vision_tower.*` tensors carry no `scales`/`biases`, but
+        // `vision_adapter.fc{1,2}`, `vision_projection` AND `embed_tokens` all
+        // do. Restricting this to `language_model` (the obvious reading, and
+        // what the other VL loaders here do) builds the two projector layers
+        // unquantized, and they then reject their `.scales` at update time.
+        quantize(model: model) { path, _ in
+            guard !path.contains("vision_tower") else { return nil }
+            let eff = q.effective(for: path)
+            return (eff.groupSize, eff.bits, mlxQuantizationMode(eff.mode))
+        }
+    }
+
+    let flat = museGlimmerSanitize(try loadWeightArrays(from: directory))
+    let nested = ModuleParameters.unflattened(flat.map { ($0.key, $0.value) })
+    // Strict verify: Muse Glimmer is untied (a real `lm_head.weight` ships in
+    // the checkpoint) and every module this runtime builds has weights in both
+    // the HF and mlx_vlm layouts, so any parameter left unset means the key
+    // mapping is wrong. This MUST stay `.all`: with a lax verify a layout
+    // mismatch leaves the whole model randomly initialised and it generates
+    // confident garbage with no error — the exact failure the sanitize below
+    // exists to prevent.
+    try model.update(parameters: nested, verify: [.all])
+
+    let tc = config.textConfig
+    return LoadedModel(
+        module: model,
+        numLayers: tc.numHiddenLayers,
+        family: "muse_glimmer",
+        forward: { tokens, caches in model(tokens, caches: caches) },
+        prefillForward: { tokens, caches in
+            model(tokens, caches: caches, lastTokenOnly: true)
+        },
+        // Non-nil ONLY when the checkpoint actually carries a perception
+        // encoder, so `.visionInput` survives the `multimodalForward == nil`
+        // strip in `InferenceEngine.capabilities` for a full build and is
+        // correctly dropped for a text-only dump. The real image path is
+        // intercepted in `generate` and routed through `MuseGlimmerRuntime`,
+        // which threads the per-image patch grid this six-arg closure cannot
+        // carry (a non-square grid is not recoverable from the patch count).
+        // If this is ever invoked, the VL interception has regressed — fail
+        // loudly rather than run a wrong-grid forward.
+        multimodalForward: config.visionConfig == nil ? nil : { _, _, _, _, _, _ in
+            fatalError(
+                "Muse Glimmer must run via MuseGlimmerRuntime, not the generic "
+                + "multimodalForward closure. The VL interception in "
+                + "InferenceEngine.generate has regressed.")
+        },
+        vocabSize: tc.vocabSize,
+        cacheSpec: tc.cacheSpec
+    )
+}
+
 /// Top-level wrapper for the Ornith / qwen3_5 config: the real checkpoint
 /// nests the text decoder hyperparameters under `text_config` (alongside a
 /// `vision_config` we ignore - the vision tower is deferred to mlx_vlm) and

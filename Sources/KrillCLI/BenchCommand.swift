@@ -111,14 +111,25 @@ private func benchmarkRun(
     promptTokens: [Int32],
     genLen: Int
 ) async throws -> BenchResult {
-    let caches = makeKVCaches(numLayers: model.numLayers)
+    // Allocate caches from the family's `cacheSpec`, exactly as the serving
+    // engine does. The spec-less overload gives every layer a full-history
+    // `KVCache`, which is wrong for any family with windowed layers (Gemma 4,
+    // Muse Glimmer: 39 of 52 layers are `.rotating(window: 2048)`) and makes
+    // the benchmark measure a configuration the server never runs.
+    let caches: [KVCacheProtocol] = makeKVCaches(
+        spec: model.cacheSpec, numLayers: model.numLayers)
     let sampler = Sampler(params: .init(temperature: 0.0))
 
     // Prefill
     let inputArray = MLXArray(promptTokens).reshaped(1, promptTokens.count)
 
     let prefillStart = CFAbsoluteTimeGetCurrent()
-    let prefillLogits = model.forward(inputArray, caches)
+    // Prefer the family's last-token-only prefill, like the engine. The full
+    // forward materializes logits for EVERY prompt position — at 512 tokens on
+    // a 202k vocab that is ~414 MB of throwaway floats, which on a machine
+    // already near its memory ceiling is enough to tip the run into swap and
+    // report a decode rate the real serving path never produces.
+    let prefillLogits = (model.prefillForward ?? model.forward)(inputArray, caches)
     MLX.eval(prefillLogits)
     let prefillTime = CFAbsoluteTimeGetCurrent() - prefillStart
 
@@ -134,8 +145,12 @@ private func benchmarkRun(
     }
     let decodeTime = CFAbsoluteTimeGetCurrent() - decodeStart
 
-    // Memory usage
-    let peakMemMB = Double(getResidentMemoryBytes()) / 1_048_576
+    // Peak MLX allocation, measured from process start (MLX exposes no reset in
+    // this version), so it covers load + every run — which is what the caller's
+    // max() across runs wanted anyway. `resident_size` was useless here: MLX
+    // holds weights in unified-memory buffers the task's RSS does not count, so
+    // an 18 GB model reported 28 MB.
+    let peakMemMB = Double(MLX.GPU.peakMemory) / 1_048_576
 
     let prefillTps = Double(promptTokens.count) / prefillTime
     let decodeTps = Double(genLen) / decodeTime
@@ -147,17 +162,4 @@ private func benchmarkRun(
         ttftMs: ttftMs,
         peakMemoryMB: peakMemMB
     )
-}
-
-// MARK: - Memory Measurement
-
-private func getResidentMemoryBytes() -> Int {
-    var info = mach_task_basic_info()
-    var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
-    let result = withUnsafeMutablePointer(to: &info) {
-        $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-            task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
-        }
-    }
-    return result == KERN_SUCCESS ? Int(info.resident_size) : 0
 }

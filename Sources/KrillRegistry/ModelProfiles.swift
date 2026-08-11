@@ -127,6 +127,18 @@ public enum ModelProfiles {
                 weaknesses: ["Looping costs ~2x compute per token vs its parameter count",
                              "Small ecosystem and few community quants"],
                 goodFor: ["Agentic workflows", "Tool calling", "On-device assistants"])
+        case .museGlimmer:
+            return ModelProfile(
+                displayName: "MUSE GLIMMER", vendor: "Meta", released: "2026-08 (30B)",
+                trainingCutoff: "2026-01-04",
+                tagline: "Local agentic multimodal: 30B distilled from Muse Spark, Apache 2.0.",
+                strengths: ["Built for autonomous agent loops and failure recovery",
+                            "Multimodal reasoning (ViT-G/14 perception encoder)",
+                            "131K context", "100+ languages", "Apache 2.0"],
+                weaknesses: ["30B needs ~20GB even at 4-bit — not a small-Mac model",
+                             "Tool calls use an XML format Krill does not yet parse natively"],
+                goodFor: ["Agentic workflows", "Document and screenshot understanding",
+                          "Local assistants on 48GB+ machines"])
         case .bert, .reranker:
             return ModelProfile(
                 displayName: "BERT", vendor: "Encoder", released: "various",

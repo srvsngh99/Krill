@@ -7,6 +7,17 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.19.0 — 2026-08-12
+**Your images were upside down.** Krill flipped every image it decoded, in
+Gemma 4, LLaVA, Qwen 2.5-VL and Llama 3.2 Vision — a `CGBitmapContext` stores
+its buffer top-row-first, but four decoders read it back bottom-first. Because
+a flip preserves shape and colour, it never looked like a bug; it looked like
+models being bad at "above" and "below". Fixed, and pinned by a gate over all
+seven decoders. This release also lands **native Muse Glimmer 30B** (text and
+vision, no Python in the inference path), a new **`krill perplexity`** command
+that measures what a quantization costs you in quality, and a repaired
+`krill bench` — it had been benchmarking a code path the server never runs.
+
 ## v0.18.0 — 2026-08-05
 **Krill opens as an agent now.** Bare `krill` lands in the full-screen agent
 TUI — tools on, read-only `plan` permissions until you raise them — with a new

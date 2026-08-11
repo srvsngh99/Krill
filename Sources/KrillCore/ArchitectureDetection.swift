@@ -153,6 +153,24 @@ let architectureRules: [ArchitectureRule] = [
         matches: { arch, mt in arch.contains("nanbeige") || mt == "nanbeige" },
         action: .load { try loadNanbeige(configData: $0, directory: $1) }),
 
+    // Meta Muse Glimmer 30B (`MuseGlimmerForConditionalGeneration`, model_type
+    // "muse_glimmer"): dense 52-layer decoder with output-gated attention, a
+    // 3:1 sliding(2048)/full mix where the FULL layers are NoPE, Gemma-style
+    // (1+w) sandwich norms, and tanh logit softcapping — plus a ViT-G/14
+    // perception encoder. The arch string collides with nothing above or below
+    // ("glimmer" contains no "glm" substring), but it is kept with the other
+    // multimodal families so a future broadening of a generic rule cannot
+    // hijack it, and it MUST precede the `fallback` rule — loading this as a
+    // Llama would drop the gate, the NoPE split, and the softcap and emit
+    // confidently wrong logits with no visible failure.
+    ArchitectureRule(
+        id: "muse_glimmer",
+        matches: { arch, mt in
+            arch.contains("museglimmer") || mt == "muse_glimmer"
+                || mt == "muse_glimmer_text"
+        },
+        action: .load { try loadMuseGlimmer(configData: $0, directory: $1) }),
+
     // Qwen 3 MoE: native Swift+MLX runtime is the DEFAULT. Expert dispatch is
     // a single `gatherQuantizedMM` per projection (shared `MoESwitchGLU`) --
     // no Swift per-expert loop, no per-layer host sync. Decode benches 2.7x

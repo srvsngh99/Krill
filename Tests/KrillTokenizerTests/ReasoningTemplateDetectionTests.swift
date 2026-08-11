@@ -69,6 +69,15 @@ final class ReasoningTemplateDetectionTests: XCTestCase {
         XCTAssertTrue(KrillTokenizer.emitsReasoningBlock(inDirectory: dir))
     }
 
+    /// Muse Glimmer fences reasoning by RECIPIENT, not by tag: the template
+    /// renders a prior turn's `reasoning_content` as `to=self`. Missing this
+    /// starves the model of headroom and the reply comes back empty.
+    func testDetectsAtemRecipientChannel() {
+        let template = "{%- if message.get('reasoning_content') -%}"
+            + "{{- '<|start|>assistant to=self<|message|>' + message['reasoning_content'] }}"
+        XCTAssertTrue(KrillTokenizer.templateEmitsReasoningBlock(template))
+    }
+
     func testDirectoryReaderReturnsFalseWhenNoTemplate() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("krill-reasoning-\(UUID().uuidString)")
