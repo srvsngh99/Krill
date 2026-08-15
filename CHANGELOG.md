@@ -6,6 +6,21 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+> Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
+> for the pending-work ledger and the release procedure.
+
+### Fixed
+
+- **`glob` and `grep` made the model count.** Both returned a bare list of
+  matches with no total, so answering "how many files match X" meant tallying
+  lines by eye — the one thing a language model is reliably bad at. A real
+  agent run over 67 files answered 64. Both tools now lead with the count
+  (`grep` also reports distinct files, since "how many files contain X" is a
+  different question from "how many occurrences"). The model was never the
+  problem: the same model, same prompt, same read-only mode answered correctly
+  once the tool stated the number. This is harness-level, so every model gets
+  it — verified on Gemma 4 as well as Qwen3.8.
+
 ## [0.20.0] - 2026-08-16
 
 ### Added

@@ -58,7 +58,15 @@ public struct GrepTool: Tool {
         if results.isEmpty {
             return ToolResult(content: "No matches for /\(pattern)/.", isError: false)
         }
-        var out = results.joined(separator: "\n")
+        // Lead with the count, for the same reason as `glob`: never make the
+        // model tally lines it could be told outright. `files` matters too —
+        // "how many files contain X" is a distinct question from "how many
+        // occurrences", and deriving it means eyeballing path prefixes.
+        let fileCount = Set(results.compactMap { $0.split(separator: ":").first }).count
+        let header = truncated
+            ? "\(results.count)+ matches in \(fileCount)+ files (truncated at \(maxMatches)):"
+            : "\(results.count) match\(results.count == 1 ? "" : "es") in \(fileCount) file\(fileCount == 1 ? "" : "s"):"
+        var out = header + "\n" + results.joined(separator: "\n")
         if truncated { out += "\n... (truncated at \(maxMatches) matches)" }
         return ToolResult(content: out, isError: false)
     }
