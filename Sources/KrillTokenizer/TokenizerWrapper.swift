@@ -1076,19 +1076,65 @@ public final class KrillTokenizer: @unchecked Sendable {
     /// `<|vision_start|>` + `imagePadCount` × `<|image_pad|>` + `<|vision_end|>`.
     /// `imagePadCount == 0` renders a plain text-only ChatML prompt (identical
     /// to `chatmlPrompt`, just as token ids).
+    /// The `reasoning_instructions` string the qwen3_5 chat template prepends to
+    /// the system message, per `reasoning_effort` level. Only Qwen3.8-class
+    /// templates carry this branch; `medium` deliberately injects nothing (the
+    /// template's own `elif` chain leaves it empty), and the template's default
+    /// when thinking is on is `xhigh`.
+    public static func qwen35ReasoningInstructions(_ effort: String) -> String? {
+        switch effort.lowercased() {
+        case "xhigh":
+            return "Reasoning effort is set to xhigh. Please think carefully through the task, "
+                + "validate key assumptions, consider plausible alternatives, and prioritize "
+                + "correctness, consistency, and clarity in the final answer."
+        case "low":
+            return "Reasoning effort is set to low. Keep your thinking brief and focused, "
+                + "moving directly to the conclusion without unnecessary elaboration."
+        case "medium":
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    /// Whether this checkpoint's chat template exposes the `reasoning_effort`
+    /// control (Qwen3.8 does; the earlier Ornith/Qwythos qwen3_5 templates do
+    /// not). Gating on the template keeps the instruction out of prompts for
+    /// models that were never trained to see it.
+    public var supportsReasoningEffort: Bool {
+        chatTemplateString?.contains("reasoning_effort") ?? false
+    }
+
     public func formatQwen35VLTokenIds(
         messages: [[String: String]],
         imagePadCount: Int,
         imageTokenId: Int,
         visionStartTokenId: Int,
         visionEndTokenId: Int,
-        enableThinking: Bool = false
+        enableThinking: Bool = false,
+        reasoningEffort: String? = nil
     ) -> [Int] {
         // Single special-token ids (encode() returns exactly one id per marker
         // for a ChatML tokenizer; verified 248045 / 248046 for Ornith).
         let imStart = tokenizer.encode(text: "<|im_start|>")
         let imEnd = tokenizer.encode(text: "<|im_end|>")
         let newline = tokenizer.encode(text: "\n")
+
+        // Mirror the template's `reasoning_instructions` block: when thinking is
+        // on, the effort instruction is prepended to the system message (or
+        // becomes one if there is none). Thinking off means no instruction at
+        // all, matching the template's outer `if enable_thinking` guard.
+        var messages = messages
+        if enableThinking, supportsReasoningEffort,
+           let instructions = Self.qwen35ReasoningInstructions(reasoningEffort ?? "xhigh") {
+            if let sysIndex = messages.firstIndex(where: { $0["role"] == "system" }) {
+                let existing = messages[sysIndex]["content"] ?? ""
+                messages[sysIndex]["content"] = existing.isEmpty
+                    ? instructions : instructions + "\n\n" + existing
+            } else {
+                messages.insert(["role": "system", "content": instructions], at: 0)
+            }
+        }
         let firstUserIndex = messages.firstIndex { $0["role"] == "user" }
 
         var tokens: [Int] = []

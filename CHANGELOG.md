@@ -6,6 +6,48 @@ reverse chronological order. Versioning follows
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-08-16
+
+### Added
+
+- **Qwen3.8-27B** — Alibaba's dense 27B vision-language model, running on
+  Krill's existing native `qwen3_5` runtime. Qwen3.8 is built on the Qwen3.5
+  architecture and ships as `model_type: "qwen3_5"`, so the hybrid decoder
+  Krill already implements — 64 layers as 16 × (3 × GatedDeltaNet linear
+  attention → 1 × gated full attention) — runs it with no new architecture
+  code: same Swift decoder, same native vision tower, same 3D interleaved
+  mRoPE. `krill pull qwen3.8-27b`. Text and image, 262,144-token context,
+  ~16.1 GiB resident at int4. Verified end to end on a 24 GB box at 9.3 tok/s
+  decode.
+- `KRILL_REASONING_EFFORT` (`xhigh` | `medium` | `low`) exposes Qwen3.8's
+  reasoning-depth control. The qwen3_5 prompt is assembled as ChatML rather
+  than rendered through Jinja, so the template's `reasoning_instructions`
+  system-message injection is mirrored in Swift, gated on the checkpoint's
+  template actually carrying the branch. An unrecognized level falls back to
+  the model's own default instead of failing the request.
+
+### Fixed
+
+- **`rope_theta` was being read correctly only by coincidence for qwen3_5
+  checkpoints.** transformers 5.x moved the rope knobs into a nested
+  `rope_parameters` object, and Qwen3.8 ships `rope_theta` *only* there — the
+  top-level decode fell through to a `10_000_000` default that happens to
+  equal the real value. Any qwen3_5 checkpoint with a different theta would
+  have loaded silently wrong, with no error and plausible-looking output.
+  `rope_theta`, `partial_rotary_factor` and `mrope_section` now resolve from
+  the nested object when absent at the top level.
+- `mrope_section` is read from the config instead of being hardcoded to
+  `[11, 11, 10]` at the model's construction site.
+- The `/model` deep-dive showed an **ORNITH** wordmark for any model on the
+  `qwen3_5` runtime. That runtime now serves three checkpoints from three
+  vendors, so profiles can be overridden per model; Qwen3.8 gets its own.
+
+### Changed
+
+- The live qwen3_5 smoke gate is checkpoint-agnostic: `KRILL_QWEN35_MODEL_PATH`
+  points it at any of the three checkpoints (the Ornith-specific
+  `KRILL_ORNITH_MODEL_PATH` still works).
+
 ## [0.19.0] - 2026-08-12
 
 ### Fixed

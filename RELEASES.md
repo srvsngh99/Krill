@@ -7,6 +7,20 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.20.0 — 2026-08-16
+**Qwen3.8-27B, for free.** Qwen's new 27B vision-language flagship is built on
+the Qwen3.5 architecture and ships as `model_type: "qwen3_5"` — the same hybrid
+decoder Krill already runs natively for Ornith and Qwythos, just scaled to 64
+layers. So it needed no new architecture code: `krill pull qwen3.8-27b` and the
+existing Swift runtime serves it, text and images, at 9.3 tok/s on a 24 GB Mac.
+Along the way this release fixes a config-reading bug that had been correct only
+by luck — transformers 5.x moved `rope_theta` into a nested object, and Krill's
+fallback default happened to match it, so a future checkpoint with a different
+value would have loaded silently wrong. Also new: `KRILL_REASONING_EFFORT` to
+dial Qwen3.8's thinking depth between `low`, `medium` and `xhigh`.
+
+---
+
 ## v0.19.0 — 2026-08-12
 **Your images were upside down.** Krill flipped every image it decoded, in
 Gemma 4, LLaVA, Qwen 2.5-VL and Llama 3.2 Vision — a `CGBitmapContext` stores

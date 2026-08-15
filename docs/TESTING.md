@@ -47,7 +47,7 @@ available; each test file documents any additional fixture/reference variable.
 | Gemma 4 text/image/audio, int8 KV | `KRILL_GEMMA4_MODEL_PATH` | `Gemma4SmokeTests`, `NativeAudioRoutingTests`, `Gemma4PartialReuseLiveTests`, `QuantizedPrefixCacheLiveTests` |
 | Gemma 4 unified/long context | `KRILL_GEMMA4_UNIFIED_MODEL_PATH` | `Gemma4ChunkedPrefillTests`, `Gemma4DecodeSweepTests` |
 | Qwen2.5-VL | `KRILL_QWEN25VL_MODEL_PATH` | `Qwen25VLSmokeTests`, `Qwen25VLProfileTests` |
-| Qwen3.5-VL / Ornith | `KRILL_ORNITH_MODEL_PATH` | `Qwen35VLSmokeTests`, `Qwen35RealCheckpointTests` |
+| Qwen3.5-VL (Ornith / Qwythos / Qwen3.8-27B) | `KRILL_QWEN35_MODEL_PATH` (legacy: `KRILL_ORNITH_MODEL_PATH`) | `Qwen35VLSmokeTests`, `Qwen35RealCheckpointTests` |
 | LLaVA | `KRILL_LLAVA_MODEL_PATH` | `LlavaPromptTokenizationTests` |
 | Llama 3.2 Vision parity | `KRILL_MLLAMA_PARITY_DIR` | `MllamaRuntimeTests` |
 | Reranker | `KRILL_RERANKER_MODEL_PATH` | `RerankEngineTests` |
