@@ -123,7 +123,7 @@ public final class Qwen35VLForConditionalGeneration: Module {
         _languageModel = ModuleInfo(wrappedValue: Qwen35ForCausalLM(tc), key: "language_model")
         self.mrope = Qwen35VLMRoPE(
             headDim: tc.headDim, partialRotaryFactor: tc.partialRotaryFactor,
-            mropeSection: [11, 11, 10], theta: tc.ropeTheta)
+            mropeSection: tc.mropeSection, theta: tc.ropeTheta)
     }
 
     /// Text-only forward (no image): straight through the hybrid decoder with

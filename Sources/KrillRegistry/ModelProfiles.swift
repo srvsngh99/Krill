@@ -16,6 +16,33 @@ public struct ModelProfile: Sendable {
 }
 
 public enum ModelProfiles {
+    /// Curated profile for a model, falling back to its family.
+    ///
+    /// Most families are single-vendor, so the family profile is the right
+    /// altitude. `.qwen35` is not: the runtime serves Ornith and Qwythos
+    /// (community Qwen3.5-class models) alongside Alibaba's own Qwen3.8, so a
+    /// family-only lookup would stamp an ORNITH wordmark on a Qwen model. Keyed
+    /// by the canonical `ResolvedModel.name`.
+    public static func profile(for family: ModelFamily, name: String? = nil) -> ModelProfile? {
+        if let name, let perModel = perModelProfiles[name.lowercased()] { return perModel }
+        return profile(for: family)
+    }
+
+    /// Per-model overrides, consulted before the family profile.
+    private static let perModelProfiles: [String: ModelProfile] = [
+        "qwen3.8-27b": ModelProfile(
+            displayName: "QWEN3.8", vendor: "Alibaba", released: "Aug 2026 (Qwen3.8)",
+            trainingCutoff: "not publicly disclosed",
+            tagline: "Dense 27B vision-language model on the Qwen3.5 hybrid decoder; thinking on by default with tunable reasoning effort.",
+            strengths: ["Strong coding and long-horizon agentic execution",
+                        "Native image and video understanding",
+                        "Efficient hybrid decoder (3× GatedDeltaNet → 1× gated attention)",
+                        "262K context natively, extensible to 1M with YaRN"],
+            weaknesses: ["~16 GiB resident at int4 — little headroom on a 24GB box",
+                         "Thinking mode is on by default and can be verbose unless effort is lowered"],
+            goodFor: ["Coding and agents", "Vision-language", "Long-context research", "Multilingual tasks"]),
+    ]
+
     /// Curated profile for a family, or nil if we have not written one.
     public static func profile(for family: ModelFamily) -> ModelProfile? {
         switch family {

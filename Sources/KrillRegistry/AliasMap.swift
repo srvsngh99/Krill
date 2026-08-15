@@ -204,6 +204,18 @@ private let aliases: [String: ResolvedModel] = [
         repo: "srv-sngh/Qwythos-9B-Claude-Mythos-5-1M-mlx-nvfp4",
         name: "qwythos-9b-nvfp4", family: .qwen35, params: "9B", quant: "nvfp4", context: 262144),
 
+    // Qwen3.8-27B (Aug 2026): Alibaba's own qwen3_5-class model — the same
+    // hybrid 3×GatedDeltaNet→1×gated-attention decoder Ornith/Qwythos use, scaled
+    // to 64 layers / 5120 hidden, plus the identical Qwen3-VL vision tower. Runs
+    // on Krill's native `.qwen35` runtime with no architecture work; `mrope_section`
+    // is [11,11,10] for both. Affine int4 gs64 (vision preserved bf16, MTP head
+    // stripped), mirrored under srv-sngh from `mlx-community/Qwen3.8-27B-4bit`.
+    // NOTE: ~16.1 GiB resident — it fits a 24 GB box but leaves little headroom;
+    // expect memory pressure under concurrent load.
+    "qwen3.8-27b": ResolvedModel(
+        repo: "srv-sngh/Qwen3.8-27B-mlx-4bit",
+        name: "qwen3.8-27b", family: .qwen35, params: "27B", quant: "4bit", context: 262144),
+
     // Unlimited-OCR (DeepSeek-OCR): native multimodal OCR runtime — DeepSeek-MoE
     // backbone (nvfp4 experts) + native DeepEncoder vision tower (SAM-ViT-B +
     // CLIP-L + projector, 8-bit). Mixed-precision Krill blob published under

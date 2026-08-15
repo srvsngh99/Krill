@@ -178,6 +178,29 @@ final class KrillRegistryTests: XCTestCase {
         XCTAssert(resolved!.repo.contains("mlx-community"))
     }
 
+    /// Qwen3.8-27B rides the existing `.qwen35` runtime, so the alias entry is
+    /// the whole integration — a wrong family here would route it to the generic
+    /// dense-Qwen loader and emit garbage.
+    func testAliasMapResolvesQwen38() {
+        let resolved = AliasMap.resolve("qwen3.8-27b")
+        XCTAssertNotNil(resolved)
+        XCTAssertEqual(resolved?.family, .qwen35)
+        XCTAssertEqual(resolved?.params, "27B")
+        XCTAssertEqual(resolved?.context, 262144)
+        XCTAssertEqual(resolved?.repo, "srv-sngh/Qwen3.8-27B-mlx-4bit")
+    }
+
+    /// The `qwen3_5` runtime serves three vendors' checkpoints, so the `/model`
+    /// deep-dive must not stamp the family's Ornith wordmark on all of them.
+    func testQwen38HasItsOwnProfile() {
+        let profile = ModelProfiles.profile(for: .qwen35, name: "qwen3.8-27b")
+        XCTAssertEqual(profile?.displayName, "QWEN3.8")
+        XCTAssertEqual(profile?.vendor, "Alibaba")
+        // Other models on the same runtime still get the family profile.
+        XCTAssertEqual(ModelProfiles.profile(for: .qwen35, name: "ornith-9b")?.displayName, "ORNITH")
+        XCTAssertEqual(ModelProfiles.profile(for: .qwen35)?.displayName, "ORNITH")
+    }
+
     func testAliasMapResolvesHFPath() {
         let resolved = AliasMap.resolve("mlx-community/some-model-4bit")
         XCTAssertNotNil(resolved)

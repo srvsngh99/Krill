@@ -8,23 +8,29 @@ import CoreGraphics
 import ImageIO
 #endif
 
-/// Live smoke gate for the native Qwen3.5-VL (Ornith) runtime. Gated on
-/// `KRILL_ORNITH_MODEL_PATH` pointing at the int4 checkpoint directory; skipped
-/// when unset. Loads the real checkpoint through the native Swift+MLX path (no
-/// Python bridge) and asserts the whole pipeline — preprocess → native vision
-/// tower → image-feature scatter → 3D mRoPE → hybrid GatedDeltaNet/attn decoder
-/// → decode loop — produces coherent, image-conditioned output.
+/// Live smoke gate for the native `qwen3_5` VL runtime. Gated on
+/// `KRILL_QWEN35_MODEL_PATH` (or the older Ornith-specific
+/// `KRILL_ORNITH_MODEL_PATH`) pointing at a checkpoint directory; skipped when
+/// unset. Loads the real checkpoint through the native Swift+MLX path (no Python
+/// bridge) and asserts the whole pipeline — preprocess → native vision tower →
+/// image-feature scatter → 3D mRoPE → hybrid GatedDeltaNet/attn decoder → decode
+/// loop — produces coherent, image-conditioned output.
+///
+/// The runtime now serves three checkpoints on this one architecture (Ornith-9B,
+/// Qwythos-9B, Qwen3.8-27B), so the gate is checkpoint-agnostic: point the env
+/// var at whichever one you want to exercise.
 final class Qwen35VLSmokeTests: XCTestCase {
 
     private func requireModel() throws -> URL {
-        guard let path = ProcessInfo.processInfo
-            .environment["KRILL_ORNITH_MODEL_PATH"], !path.isEmpty else {
-            throw XCTSkip("KRILL_ORNITH_MODEL_PATH not set")
+        let env = ProcessInfo.processInfo.environment
+        guard let path = [env["KRILL_QWEN35_MODEL_PATH"], env["KRILL_ORNITH_MODEL_PATH"]]
+            .compactMap({ $0 }).first(where: { !$0.isEmpty }) else {
+            throw XCTSkip("KRILL_QWEN35_MODEL_PATH not set")
         }
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(
             atPath: path, isDirectory: &isDir), isDir.boolValue else {
-            throw XCTSkip("KRILL_ORNITH_MODEL_PATH is not a directory: \(path)")
+            throw XCTSkip("KRILL_QWEN35_MODEL_PATH is not a directory: \(path)")
         }
         return URL(fileURLWithPath: path)
     }

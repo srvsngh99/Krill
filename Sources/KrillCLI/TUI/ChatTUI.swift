@@ -603,7 +603,7 @@ final class ChatTUI {
         let store = ModelCatalogStore(baseDir: registry.baseDir)
         guard let m = AliasMap.resolve(name, catalog: store) else { note("No info for \(name)."); return }
         let caps = ModelCapabilities.capabilities(for: m.family)
-        let profile = ModelProfiles.profile(for: m.family)
+        let profile = ModelProfiles.profile(for: m.family, name: m.name)
         // Use the resolved canonical name for registry lookups (the arg may be an
         // alias the registry does not key by).
         let onDisk = registry.hasModel(m.name) ? directorySize(registry.modelPath(m.name)) : 0

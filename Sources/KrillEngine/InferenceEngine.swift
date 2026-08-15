@@ -690,6 +690,17 @@ public final class InferenceEngine: @unchecked Sendable {
         return false
     }
 
+    /// Resolve the reasoning-depth level for templates that expose one
+    /// (`KRILL_REASONING_EFFORT` = xhigh | medium | low). An unrecognized value
+    /// resolves to nil rather than erroring, so the template's own default
+    /// (`xhigh`) applies — the chat template would `raise_exception` on a bad
+    /// level, and a typo'd env var should not fail a request.
+    public static func resolveReasoningEffort(_ env: String?) -> String? {
+        guard let level = env?.lowercased().trimmingCharacters(in: .whitespaces),
+              ["xhigh", "medium", "low"].contains(level) else { return nil }
+        return level
+    }
+
     public func generate(
         prompt: String,
         systemPrompt: String? = nil,
@@ -810,7 +821,9 @@ public final class InferenceEngine: @unchecked Sendable {
                 params: params, maxTokens: maxTokens, imageData: imageData,
                 enableThinking: Self.resolveThinking(
                     explicit: enableThinking,
-                    env: ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"]))
+                    env: ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"]),
+                reasoningEffort: Self.resolveReasoningEffort(
+                    ProcessInfo.processInfo.environment["KRILL_REASONING_EFFORT"]))
         }
 
         // LocateAnything-3B native runtime. Uses 1D RoPE (so decode needs no
@@ -2515,7 +2528,8 @@ public final class InferenceEngine: @unchecked Sendable {
         params: SamplingParams,
         maxTokens: Int,
         imageData: Data?,
-        enableThinking: Bool
+        enableThinking: Bool,
+        reasoningEffort: String? = nil
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         // Preprocess the image (if any) into the flattened patch batch + full
         // patch grid. The merged grid sizes the `<|image_pad|>` run + mRoPE.
@@ -2542,7 +2556,8 @@ public final class InferenceEngine: @unchecked Sendable {
             imageTokenId: model.config.imageTokenId,
             visionStartTokenId: model.config.visionStartTokenId,
             visionEndTokenId: model.config.visionEndTokenId,
-            enableThinking: enableThinking)
+            enableThinking: enableThinking,
+            reasoningEffort: reasoningEffort)
         guard !promptTokens.isEmpty else {
             let empty = AsyncStream<TokenEvent> { c in
                 c.yield(TokenEvent(tokenId: 0, text: "", elapsed: 0, isEnd: true))

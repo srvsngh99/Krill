@@ -40,6 +40,25 @@ public struct Qwen35Config: Codable {
     // RoPE (partial; mRoPE collapses to standard RoPE for text-only)
     public var ropeTheta: Float
     public var partialRotaryFactor: Float
+    /// Interleaved mRoPE t/h/w split, summing to `rotaryDim / 2`.
+    public var mropeSection: [Int]
+
+    /// transformers 5.x moved the rope knobs into a nested `rope_parameters`
+    /// object (Qwen3.8 ships them ONLY there; Ornith ships `partial_rotary_factor`
+    /// in both places). Decoded as a fallback source so either layout works — and
+    /// so a checkpoint with a non-default `rope_theta` is not silently read as the
+    /// 10M default.
+    private struct RopeParameters: Decodable {
+        let ropeTheta: Float?
+        let partialRotaryFactor: Float?
+        let mropeSection: [Int]?
+
+        enum CodingKeys: String, CodingKey {
+            case ropeTheta = "rope_theta"
+            case partialRotaryFactor = "partial_rotary_factor"
+            case mropeSection = "mrope_section"
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case hiddenSize = "hidden_size"
@@ -61,6 +80,13 @@ public struct Qwen35Config: Codable {
         case partialRotaryFactor = "partial_rotary_factor"
     }
 
+    /// Separate from `CodingKeys` so the synthesized `Encodable` conformance stays
+    /// valid (a key with no stored property breaks it) — `rope_parameters` is a
+    /// decode-only fallback source, never re-emitted.
+    private enum RopeKeys: String, CodingKey {
+        case ropeParameters = "rope_parameters"
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         hiddenSize = try c.decode(Int.self, forKey: .hiddenSize)
@@ -79,8 +105,12 @@ public struct Qwen35Config: Codable {
         linearKeyHeadDim = try c.decode(Int.self, forKey: .linearKeyHeadDim)
         linearValueHeadDim = try c.decode(Int.self, forKey: .linearValueHeadDim)
         linearConvKernelDim = try c.decodeIfPresent(Int.self, forKey: .linearConvKernelDim) ?? 4
-        ropeTheta = try c.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? 10_000_000
-        partialRotaryFactor = try c.decodeIfPresent(Float.self, forKey: .partialRotaryFactor) ?? 0.25
+        let rp = try decoder.container(keyedBy: RopeKeys.self)
+            .decodeIfPresent(RopeParameters.self, forKey: .ropeParameters)
+        ropeTheta = try c.decodeIfPresent(Float.self, forKey: .ropeTheta) ?? rp?.ropeTheta ?? 10_000_000
+        partialRotaryFactor = try c.decodeIfPresent(Float.self, forKey: .partialRotaryFactor)
+            ?? rp?.partialRotaryFactor ?? 0.25
+        mropeSection = rp?.mropeSection ?? [11, 11, 10]
     }
 
     /// True for GatedDeltaNet (linear-attention) layers under the hybrid schedule.
