@@ -189,4 +189,52 @@ final class FileToolsTests: XCTestCase {
         let r = await GrepTool().run(argumentsJSON: args(["pattern": "[unclosed", "path": dir.path]))
         XCTAssertTrue(r.isError)
     }
+
+    // MARK: result counts
+    //
+    // These tools exist to answer questions, and "how many" is the most common
+    // one. Returning a bare list makes the model tally lines instead — a real
+    // agent run over 67 files answered 64, and answered 67 once the count was
+    // stated. The count is the contract, not a cosmetic prefix.
+
+    func testGlobLeadsWithTheMatchCount() async throws {
+        try write("a.swift", "")
+        try write("sub/b.swift", "")
+        try write("c.txt", "")
+        let r = await GlobTool().run(argumentsJSON: args(["pattern": "**/*.swift", "path": dir.path]))
+        XCTAssertTrue(r.content.hasPrefix("2 matches"), "count must lead: \(r.content)")
+        XCTAssertFalse(r.content.contains("3 matches"), "c.txt must not be counted")
+    }
+
+    func testGlobSingleMatchIsNotPluralized() async throws {
+        try write("only.swift", "")
+        let r = await GlobTool().run(argumentsJSON: args(["pattern": "*.swift", "path": dir.path]))
+        XCTAssertTrue(r.content.hasPrefix("1 match for"), r.content)
+        XCTAssertFalse(r.content.contains("1 matches"))
+    }
+
+    /// The count must survive truncation as a lower bound rather than silently
+    /// reporting the cap as if it were the total.
+    func testGlobTruncationReportsCountAsALowerBound() async throws {
+        for i in 0 ..< 5 { try write("f\(i).swift", "") }
+        let r = await GlobTool(maxResults: 3).run(
+            argumentsJSON: args(["pattern": "*.swift", "path": dir.path]))
+        XCTAssertTrue(r.content.hasPrefix("3+ matches"), "must read as a floor: \(r.content)")
+        XCTAssertTrue(r.content.contains("truncated"))
+    }
+
+    func testGrepReportsMatchAndFileCounts() async throws {
+        try write("one.txt", "needle\nchaff\nneedle")
+        try write("two.txt", "needle")
+        let r = await GrepTool().run(argumentsJSON: args(["pattern": "needle", "path": dir.path]))
+        // 3 occurrences across 2 files — two distinct questions, both answered.
+        XCTAssertTrue(r.content.hasPrefix("3 matches in 2 files"), r.content)
+    }
+
+    func testGrepEmptyResultStillStatesTheOutcome() async throws {
+        try write("x.txt", "nothing here")
+        let r = await GrepTool().run(argumentsJSON: args(["pattern": "needle", "path": dir.path]))
+        XCTAssertFalse(r.isError)
+        XCTAssertTrue(r.content.contains("No matches"), r.content)
+    }
 }

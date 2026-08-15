@@ -38,7 +38,15 @@ public struct GlobTool: Tool {
         if matches.isEmpty {
             return ToolResult(content: "No files match \(pattern).", isError: false)
         }
-        var out = matches.sorted().joined(separator: "\n")
+        // Lead with the count. Without it, "how many files match X" forces the
+        // model to count the lines itself — which is exactly what a language
+        // model is worst at: a real run over 67 files answered 64. The tool
+        // already knows the number; stating it turns a counting task into a
+        // reading task.
+        let header = matches.count >= maxResults
+            ? "\(matches.count)+ matches for '\(pattern)' (truncated at \(maxResults)):"
+            : "\(matches.count) match\(matches.count == 1 ? "" : "es") for '\(pattern)':"
+        var out = header + "\n" + matches.sorted().joined(separator: "\n")
         if matches.count >= maxResults { out += "\n... (truncated at \(maxResults) matches)" }
         return ToolResult(content: out, isError: false)
     }
