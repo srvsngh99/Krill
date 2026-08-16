@@ -1,5 +1,9 @@
 # Krill Agent UI — remote `krill code` from any device
 
+> **Release status:** this UI is on `main` and pending the next tagged Krill
+> release. Until then, build `main` from source; no release has been published
+> for it yet.
+
 `krill serve` hosts agent sessions (the same loop as `krill code`) and serves a
 phone-quality web app at **`/ui`**, embedded in the binary. Point any browser at
 it — your Mac, a laptop on the LAN, or your phone from anywhere via a VPN — and

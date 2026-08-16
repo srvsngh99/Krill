@@ -234,7 +234,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     let agentSessions: AgentSessionStore
     /// This connection's live SSE tail of an agent session's events, torn down
     /// on channel close so a dead phone connection never accumulates sinks.
-    var agentEventsSub: (session: RemoteAgentSession, token: UUID, ping: Task<Void, Never>)?
+    var agentEventsSub: (session: RemoteAgentSession, token: UUID, ping: RepeatedTask)?
 
     init(engines: EngineRegistry, activeRef: ActiveEngineRef,
          fallbackEngine: InferenceEngine, registry: Registry,

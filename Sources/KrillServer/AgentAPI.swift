@@ -266,13 +266,13 @@ extension HTTPHandler {
             self.writeRaw(ctx, "id: \(seq)\ndata: \(frame)\n\n")
         }
         // Comment-frame heartbeat so NATs/proxies (and the client's stall
-        // detector) see a live stream even while the agent is quiet.
-        let ping = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 25_000_000_000)
-                guard let self, !Task.isCancelled else { return }
-                self.writeRaw(ctx, ": ping\n\n")
-            }
+        // detector) see a live stream even while the agent is quiet. Keep it
+        // on the channel's event loop: ChannelHandlerContext is intentionally
+        // not Sendable and must never cross a Swift-concurrency Task boundary.
+        let ping = context.eventLoop.scheduleRepeatedTask(
+            initialDelay: .seconds(25), delay: .seconds(25)
+        ) { [weak self] _ in
+            self?.writeRaw(ctx, ": ping\n\n")
         }
         agentEventsSub = (session, token, ping)
     }

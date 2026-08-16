@@ -172,6 +172,10 @@ OpenAI-family SDKs (openai, langchain-openai, llama-index) use `…/v1`; the Ant
 
 ## The agent on your phone
 
+> **Pending release:** the phone/web agent UI is merged to `main` for the next
+> Krill release, but is not in the current tagged build yet. Build `main` from
+> source to use it before that release.
+
 `krill serve` also serves a full agent UI at **`/ui`** — no app store, no extra
 install, it ships inside the binary. Point the agent at any repo on your Mac
 from your phone's browser: sessions, live tool-call transcript, and Deny /

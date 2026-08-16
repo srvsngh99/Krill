@@ -222,17 +222,8 @@ final class AgentAPITests: XCTestCase {
         // replay produces no body frames; event-log replay semantics
         // (`id: <seq>` lines) are covered directly in AgentSessionTests.
         //
-        // Note: this route parks a 25s heartbeat `Task` on the connection
-        // (`agentEventsSub`) that `finish()`'s `channelInactive` cancels.
-        // Because that cancellation is observed off-thread from the
-        // EmbeddedChannel's loop (a real Task vs. NIO's single-threaded
-        // embedded loop), NIO may log a benign
-        // "EmbeddedEventLoop is not thread-safe" diagnostic during teardown.
-        // It has not been observed to fail a run; see the handoff notes for
-        // this file if it ever needs a firmer fix upstream (not something to
-        // paper over from the test side, since it's a real production race
-        // in the SSE heartbeat's interaction with EmbeddedChannel, not a
-        // defect in this test).
+        // The connection's 25s heartbeat is a NIO repeated task on this same
+        // event loop; `finish()` drives `channelInactive`, which cancels it.
     }
 
     // MARK: - 7. Auth
