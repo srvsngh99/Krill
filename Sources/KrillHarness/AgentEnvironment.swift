@@ -21,7 +21,7 @@ public enum AgentEnvironment {
     /// known. Capped so a runaway file cannot eat the context window; nil when
     /// absent or unreadable.
     public static func projectBrief(maxChars: Int = 12_000) -> String? {
-        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let url = URL(fileURLWithPath: AgentWorkspace.currentPath)
             .appendingPathComponent("Krill.md")
         guard let raw = try? String(contentsOf: url, encoding: .utf8),
               !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
@@ -46,7 +46,7 @@ public enum AgentEnvironment {
         #endif
         var parts = [
             "Environment: \(date), \(time) \(zone)",
-            "cwd \(FileManager.default.currentDirectoryPath)",
+            "cwd \(AgentWorkspace.currentPath)",
             "macOS \(os) \(arch)",
         ]
         if let modelName, !modelName.isEmpty { parts.append("model \(modelName)") }

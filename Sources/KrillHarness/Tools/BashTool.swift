@@ -40,20 +40,24 @@ public struct BashTool: Tool {
                 content: "Error: bash requires a non-empty 'command' string argument.",
                 isError: true)
         }
+        // Capture the agent workspace HERE, in the async context: the task-local
+        // does not propagate into the dispatch-queue closure below.
+        let workspace = AgentWorkspace.root
         // Offload the blocking Process work to a background thread so it never
         // blocks the cooperative executor (and so the synchronous semaphore wait
         // is legal).
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: execute(command))
+                continuation.resume(returning: execute(command, workspace: workspace))
             }
         }
     }
 
-    private func execute(_ command: String) -> ToolResult {
+    private func execute(_ command: String, workspace: URL?) -> ToolResult {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/sh")
         proc.arguments = ["-c", command]
+        if let workspace { proc.currentDirectoryURL = workspace }
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = pipe

@@ -13,17 +13,19 @@ func jsonObject(_ s: String) -> [String: Any]? {
 /// glob-to-regex translation.
 enum FileToolSupport {
     /// Resolve a tool-supplied path. Absolute and `~` paths are honoured;
-    /// relative paths are resolved against the process working directory.
+    /// relative paths are resolved against the agent's working directory
+    /// (`AgentWorkspace` - the process cwd unless a hosting server bound a
+    /// per-session workspace around the run).
     static func resolve(_ path: String) -> URL {
         let expanded = (path as NSString).expandingTildeInPath
         if expanded.hasPrefix("/") { return URL(fileURLWithPath: expanded).standardizedFileURL }
-        let cwd = FileManager.default.currentDirectoryPath
+        let cwd = AgentWorkspace.currentPath
         return URL(fileURLWithPath: cwd).appendingPathComponent(expanded).standardizedFileURL
     }
 
     /// Path shown back to the model: relative to cwd when inside it, else absolute.
     static func display(_ url: URL) -> String {
-        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardizedFileURL.path
+        let cwd = URL(fileURLWithPath: AgentWorkspace.currentPath).standardizedFileURL.path
         let p = url.standardizedFileURL.path
         if p == cwd { return "." }
         let prefix = cwd.hasSuffix("/") ? cwd : cwd + "/"

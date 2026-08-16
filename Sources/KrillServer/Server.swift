@@ -39,6 +39,9 @@ public final class KrillServer: Sendable {
     private let corsOrigins: [String]
     private let defaultContextLimit: Int?
     private let genQueue: GenerationQueue
+    /// Shared agent-session table: every connection handler sees the same
+    /// sessions, so a phone can reconnect from a new connection and resume.
+    private let agentSessions = AgentSessionStore()
 
     public init(host: String = "127.0.0.1", port: Int = 57455,
                 compat: CompatMode = .both,
@@ -106,7 +109,8 @@ public final class KrillServer: Sendable {
                                     apiKey: self.apiKey,
                                     corsOrigins: self.corsOrigins,
                                     defaultContextLimit: self.defaultContextLimit,
-                                    genQueue: self.genQueue)
+                                    genQueue: self.genQueue,
+                                    agentSessions: self.agentSessions)
                     )
                 }
             }
@@ -121,6 +125,11 @@ public final class KrillServer: Sendable {
         }
         if compat.ollamaEnabled {
             print("Ollama API: http://\(host):\(port)/api/chat")
+        }
+        let uiHost = (host == "0.0.0.0" || host == "::") ? "localhost" : host
+        print("Agent UI: http://\(uiHost):\(port)/ui")
+        if host != "127.0.0.1", host != "localhost", let ts = Self.tailscaleIP() {
+            print("Agent UI via Tailscale: http://\(ts):\(port)/ui  (open on your phone)")
         }
         if port == 57455 {
             print("Tip: 57455 is Krill's default port (\"KRILL\" on a keypad); it coexists with Ollama on 11434. For a drop-in Ollama replacement, run with --port 11434 (or set OLLAMA_HOST).")
@@ -149,17 +158,42 @@ public final class KrillServer: Sendable {
         try await channel.closeFuture.get()
         try await group.shutdownGracefully()
     }
+
+    /// Best-effort Tailscale IPv4 of this machine, so the startup banner can
+    /// print a phone-ready URL when serving beyond loopback. Never required:
+    /// any failure (no binary, daemon down) just skips the hint.
+    private static func tailscaleIP() -> String? {
+        let candidates = [
+            "/usr/local/bin/tailscale",
+            "/opt/homebrew/bin/tailscale",
+            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        ]
+        guard let bin = candidates.first(where: { FileManager.default.fileExists(atPath: $0) })
+        else { return nil }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: bin)
+        proc.arguments = ["ip", "-4"]
+        let out = Pipe()
+        proc.standardOutput = out
+        proc.standardError = Pipe()
+        guard (try? proc.run()) != nil else { return nil }
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { return nil }
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let ip = text.split(separator: "\n").first?.trimmingCharacters(in: .whitespaces)
+        return (ip?.isEmpty == false) ? ip : nil
+    }
 }
 
 // MARK: - HTTP Handler
 
 @preconcurrency
-private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
+final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
-    private let engines: EngineRegistry
-    private let activeRef: ActiveEngineRef
+    let engines: EngineRegistry
+    let activeRef: ActiveEngineRef
     private let fallbackEngine: InferenceEngine
     /// Request-scoped engine resolved by ``routeGenerate(_:body:run:)`` before
     /// a generate handler runs (nil on non-generate paths). Set/read only on
@@ -171,14 +205,14 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     /// active resident engine, then the (possibly unloaded) base. Keeping
     /// this a computed property lets every existing `engine.` read work
     /// unchanged after the single-engine → registry refactor.
-    private var engine: InferenceEngine { requestEngine ?? activeRef.current ?? fallbackEngine }
+    var engine: InferenceEngine { requestEngine ?? activeRef.current ?? fallbackEngine }
 
     /// The active resident engine for *display* endpoints (`/healthz`,
     /// `/v1/status`, `/api/ps`, `/metrics`): always the live active model,
     /// never the request-scoped one.
     private var displayEngine: InferenceEngine { activeRef.current ?? fallbackEngine }
 
-    private let registry: Registry
+    let registry: Registry
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
@@ -194,8 +228,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private let corsOrigins: [String]
     private let defaultContextLimit: Int?
-    private let genQueue: GenerationQueue
+    let genQueue: GenerationQueue
     private var currentOrigin: String?
+    /// Server-wide agent session table (shared across connections).
+    let agentSessions: AgentSessionStore
+    /// This connection's live SSE tail of an agent session's events, torn down
+    /// on channel close so a dead phone connection never accumulates sinks.
+    var agentEventsSub: (session: RemoteAgentSession, token: UUID, ping: Task<Void, Never>)?
 
     init(engines: EngineRegistry, activeRef: ActiveEngineRef,
          fallbackEngine: InferenceEngine, registry: Registry,
@@ -205,6 +244,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
          corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
          defaultContextLimit: Int? = nil,
          genQueue: GenerationQueue = GenerationQueue(numParallel: 1, maxQueue: 512),
+         agentSessions: AgentSessionStore = AgentSessionStore(),
          maxBodySizeOverride: Int? = nil) {
         self.engines = engines
         self.activeRef = activeRef
@@ -217,7 +257,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         self.corsOrigins = corsOrigins
         self.defaultContextLimit = defaultContextLimit
         self.genQueue = genQueue
+        self.agentSessions = agentSessions
         self.maxBodySize = maxBodySizeOverride ?? ServerLimits.maxBodySize
+    }
+
+    /// Tear down this connection's SSE subscription when the channel dies
+    /// (phone locked, network switch, tab closed).
+    func channelInactive(context: ChannelHandlerContext) {
+        if let sub = agentEventsSub {
+            sub.session.unsubscribe(sub.token)
+            sub.ping.cancel()
+            agentEventsSub = nil
+        }
+        context.fireChannelInactive()
     }
 
     /// Record activity for the per-model auto-unload; honors a per-request
@@ -239,7 +291,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return corsOrigins.contains(origin) ? origin : nil
     }
 
-    private func corsHeaders() -> [(String, String)] {
+    func corsHeaders() -> [(String, String)] {
         guard let ao = allowedOrigin(for: currentOrigin) else { return [] }
         return [
             ("Access-Control-Allow-Origin", ao),
@@ -275,9 +327,13 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             // OPTIONS stays open so CORS preflights (which cannot carry
             // credentials) succeed; /healthz stays open so liveness probes
             // (launchd, uptime monitors) keep working — it leaks nothing
-            // beyond liveness and the active model name.
+            // beyond liveness and the active model name. The /ui shell (static
+            // HTML/manifest/icon, no data) is open too: a phone browser cannot
+            // send Authorization on a page load, so the page itself asks for
+            // the key and sends it on every API call it makes.
             let requestPath = head.uri.split(separator: "?").first.map(String.init) ?? head.uri
-            if head.method != .OPTIONS, requestPath != "/healthz",
+            let isUIShell = requestPath == "/ui" || requestPath.hasPrefix("/ui/")
+            if head.method != .OPTIONS, requestPath != "/healthz", !isUIShell,
                !ServerSecurity.isAuthorized(
                     authorization: head.headers.first(name: "Authorization"),
                     apiKey: apiKey
@@ -324,6 +380,16 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             let h = HTTPResponseHead(version: .http1_1, status: .noContent, headers: headers)
             context.write(wrapOutboundOut(.head(h)), promise: nil)
             context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+            return
+        }
+
+        // The phone/web UI shell and the agent-session API (path-parameterized).
+        if path == "/ui" || path.hasPrefix("/ui/") {
+            handleWebUI(context: context, method: head.method, path: path)
+            return
+        }
+        if path == "/v1/agent/sessions" || path.hasPrefix("/v1/agent/") {
+            handleAgentRoute(context: context, head: head, path: path, body: body)
             return
         }
 
@@ -1426,7 +1492,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         writeOnLoop(ctx, .body(.byteBuffer(b)), flush: true)
     }
 
-    private func writeRaw(_ ctx: ChannelHandlerContext, _ s: String) {
+    func writeRaw(_ ctx: ChannelHandlerContext, _ s: String) {
         var b = ByteBufferAllocator().buffer(capacity: s.utf8.count)
         b.writeString(s)
         writeOnLoop(ctx, .body(.byteBuffer(b)), flush: true)
@@ -2938,7 +3004,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     /// Write a response part on the channel's event loop.
     /// If already on the event loop, writes immediately; otherwise dispatches via execute.
-    private func writeOnLoop(_ context: ChannelHandlerContext, _ part: HTTPServerResponsePart, flush: Bool = false) {
+    func writeOnLoop(_ context: ChannelHandlerContext, _ part: HTTPServerResponsePart, flush: Bool = false) {
         if context.eventLoop.inEventLoop {
             if flush {
                 context.writeAndFlush(wrapOutboundOut(part), promise: nil)
@@ -3061,11 +3127,11 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func parseJSON(_ buffer: ByteBuffer) -> [String: Any]? {
+    func parseJSON(_ buffer: ByteBuffer) -> [String: Any]? {
         ServerParsing.jsonObject(from: buffer)
     }
 
-    private func sendJSON(
+    func sendJSON(
         context: ChannelHandlerContext,
         status: HTTPResponseStatus,
         body: [String: Any],
@@ -3078,7 +3144,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         sendJSONData(context: context, status: status, data: data, extraHeaders: extraHeaders)
     }
 
-    private func sendJSONOnLoop(
+    func sendJSONOnLoop(
         context: ChannelHandlerContext,
         eventLoop: EventLoop,
         status: HTTPResponseStatus,
@@ -3094,7 +3160,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    private func sendJSONData(
+    func sendJSONData(
         context: ChannelHandlerContext,
         status: HTTPResponseStatus,
         data: Data,
