@@ -24,6 +24,7 @@ OCR), and an Ollama / OpenAI / Anthropic–compatible server.
    - [Document OCR (Unlimited-OCR)](#52-document-ocr-unlimited-ocr)
    - [Audio input & voice](#53-audio-input--voice)
 6. [Agentic coding (`krill code`)](#6-agentic-coding-krill-code)
+   - [The agent from your phone or browser (`/ui`)](#61-the-agent-from-your-phone-or-browser-ui)
 7. [Connect external coding agents (`krill launch`)](#7-connect-external-coding-agents-krill-launch)
 8. [The HTTP server (`krill serve`)](#8-the-http-server-krill-serve)
    - [Endpoints](#81-endpoints)
@@ -278,6 +279,22 @@ model never burns a turn inferring them.
 
 You can also enter agent mode from a normal chat with `/agent`, or run a
 background agent with `/bg <task>`.
+
+### 6.1 The agent from your phone or browser (`/ui`)
+
+`krill serve` hosts the same agent loop as sessions you can drive from any
+browser — including your phone, from anywhere:
+
+```bash
+KRILL_API_KEY='choose-a-secret' krill serve --host 0.0.0.0
+```
+
+Open `http://<mac-ip>:57455/ui` (the startup banner prints the URL, including
+your Tailscale address if it's running), enter the key, and start a session:
+pick a repo, pick a model, pick a permission posture. Tool calls stream in
+live; mutating tools show **Deny / Allow / Always** cards in `ask` mode. On
+iPhone, Share → **Add to Home Screen** installs it as a standalone app. Full
+setup and the HTTP/SSE contract: [`docs/AGENT_UI.md`](AGENT_UI.md).
 
 ---
 
