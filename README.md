@@ -21,13 +21,14 @@ Most local-LLM stacks are one half of a pair:
 
 **Krill is both, in one binary.** The same native Swift + MLX engine that serves tokens also runs a full agent loop — tools, file edits, web fetch, permissions — against the model already sitting in your RAM. No second process, no Python bridge, nothing leaves the machine.
 
-## One engine, three modes
+## One engine, four modes
 
 | Mode | Command | What you get |
 |------|---------|--------------|
 | **Chat** | `krill run <model>` | Full-screen TUI (opens in agent mode; `/chat` for pure chat) — multimodal, streaming, on-device voice |
 | **Serve** | `krill serve` | Drop-in **OpenAI · Ollama · Anthropic** API on `:57455` |
 | **Agent** | `krill code <task>` | Coding agent — bash, edits, glob/grep, **web**, **deep research** — on your local model |
+| **Phone / Web** | `krill serve` → open **`/ui`** | The same agent from any browser or phone — sessions per repo, live tool calls, tap-to-approve. Ships inside the binary |
 
 The agent isn't boxed into your filesystem. **`web_search`** ranks the open web — keyless out of the box (DuckDuckGo), or point it at Brave/Tavily (free-tier API key) or your own SearXNG for reliable results — and **`web_fetch`** reads any page as clean text — both SSRF-guarded and untrusted-framed against prompt injection — while **`/research <question>`** runs a multi-source deep-research pass (plan queries → fetch → summarize each source → synthesize a cited answer). A local model that browses, and cites its work.
 
@@ -138,7 +139,7 @@ Native text also runs Phi, GLM-4, Mixtral, OLMoE, and DeepSeek-V2/V3, plus a ~15
 |---------|-------------|
 | `krill run <model> [prompt]` | Chat — interactive TUI or one-shot (`/agent` toggles agent mode) |
 | `krill code [task]` | Open the chat TUI in agent mode (tools, file edits, web) |
-| `krill serve` | Start the OpenAI / Ollama / Anthropic HTTP server |
+| `krill serve` | Start the HTTP server — OpenAI / Ollama / Anthropic APIs, agent sessions, and the web UI at `/ui` |
 | `krill launch <agent>` | Wire an external coding agent (Claude Code, Codex, …) to Krill |
 | `krill pull / list / rm <model>` | Manage models (download from HuggingFace) |
 | `krill quantize <hf-path>` | Convert an HF model to MLX |
@@ -168,6 +169,32 @@ print(client.chat.completions.create(
 ```
 
 OpenAI-family SDKs (openai, langchain-openai, llama-index) use `…/v1`; the Anthropic SDK takes the bare host (it appends its own `/v1/messages`). Request shapes and more SDKs: [`docs/SERVER_API.md`](docs/SERVER_API.md), [`docs/CONNECT_CODING_AGENTS.md`](docs/CONNECT_CODING_AGENTS.md).
+
+## The agent on your phone
+
+> **Pending release:** the phone/web agent UI is merged to `main` for the next
+> Krill release, but is not in the current tagged build yet. Build `main` from
+> source to use it before that release.
+
+`krill serve` also serves a full agent UI at **`/ui`** — no app store, no extra
+install, it ships inside the binary. Point the agent at any repo on your Mac
+from your phone's browser: sessions, live tool-call transcript, and Deny /
+Allow / Always approval cards for every mutating tool.
+
+```bash
+KRILL_API_KEY='choose-a-secret' krill serve --host 0.0.0.0
+```
+
+1. **Same Wi-Fi:** open `http://<your-mac-ip>:57455/ui` on the phone, enter the key.
+2. **iPhone:** Share → **Add to Home Screen** → a standalone app with the Krill tile.
+3. **From anywhere (optional):** install [Tailscale](https://tailscale.com) (free)
+   on Mac + phone — the startup banner prints the ready-to-open tailnet URL. Any
+   VPN or authenticated tunnel works; never port-forward the server raw to the
+   internet (the agent runs tools on your Mac).
+
+A non-loopback bind **requires** the API key — the server refuses to start
+remote-open and unauthenticated. Full setup, endpoint contract, and development
+notes: [`docs/AGENT_UI.md`](docs/AGENT_UI.md).
 
 ## Architecture
 

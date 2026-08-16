@@ -123,6 +123,14 @@ status, and metrics endpoints live alongside those generation surfaces; see
 or reuses the local server and points supported external coding agents at the
 appropriate protocol adapter; it does not insert a separate inference proxy.
 
+The server also **hosts agent sessions** (`/v1/agent/*`: the same `KrillHarness`
+loop the TUI drives, exposed over HTTP + SSE with remote tool approvals and a
+per-session working directory via the `AgentWorkspace` task-local) and serves
+the embedded phone/web app at `/ui`. Session model in
+`Sources/KrillServer/AgentSessions.swift`, routes in `AgentAPI.swift`, page +
+brand icons in `WebUI.swift`; contract and development notes in
+[`AGENT_UI.md`](AGENT_UI.md).
+
 ## Distribution and release metadata
 
 `VERSION` is the repository release source of truth. CI verifies that it agrees

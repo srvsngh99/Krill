@@ -56,6 +56,13 @@ no configuration to talk to Krill. The drop-in path is gated on the
 [`OLLAMA_MAC_PARITY_PLAN.md`](OLLAMA_MAC_PARITY_PLAN.md) §4 WS-A1. Verify
 parity with `make parity-gate`.
 
+## Agent Sessions & Web UI
+
+`krill serve` also hosts **agent sessions** (the `krill code` loop, drivable
+over HTTP + SSE with remote tool approvals) and serves the embedded phone/web
+app at **`/ui`**. See [`AGENT_UI.md`](AGENT_UI.md) for the routes, the event
+stream, and phone setup.
+
 ## OpenAI-Compatible Endpoints
 
 ### POST /v1/chat/completions
