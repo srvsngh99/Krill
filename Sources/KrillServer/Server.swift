@@ -332,7 +332,10 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             // send Authorization on a page load, so the page itself asks for
             // the key and sends it on every API call it makes.
             let requestPath = head.uri.split(separator: "?").first.map(String.init) ?? head.uri
+            // "/" redirects to the UI shell, so a phone user typing just
+            // host:port lands on the app instead of a bare API 401.
             let isUIShell = requestPath == "/ui" || requestPath.hasPrefix("/ui/")
+                || (head.method == .GET && requestPath == "/")
             if head.method != .OPTIONS, requestPath != "/healthz", !isUIShell,
                !ServerSecurity.isAuthorized(
                     authorization: head.headers.first(name: "Authorization"),
@@ -384,6 +387,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         // The phone/web UI shell and the agent-session API (path-parameterized).
+        if head.method == .GET, path == "/" {
+            var headers = HTTPHeaders()
+            headers.add(name: "Location", value: "/ui")
+            headers.add(name: "Content-Length", value: "0")
+            let h = HTTPResponseHead(version: .http1_1, status: .temporaryRedirect, headers: headers)
+            context.write(wrapOutboundOut(.head(h)), promise: nil)
+            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+            return
+        }
         if path == "/ui" || path.hasPrefix("/ui/") {
             handleWebUI(context: context, method: head.method, path: path)
             return
