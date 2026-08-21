@@ -964,6 +964,18 @@ document.addEventListener("visibilitychange", () => {
     setTimeout(() => { if (cur && cur.id === id) tail(id); }, 50);
   }
 });
+/* `krill ui` prints a phone link carrying the key in the fragment (#k=…):
+   adopt it once, persist it, and scrub it from the address bar. Fragments
+   never leave the browser, so the link itself does not send the key. */
+(function adoptLinkKey() {
+  const m = /(?:^#|[#&])k=([^&]+)/.exec(location.hash || "");
+  if (!m) return;
+  let key = m[1];
+  try { key = decodeURIComponent(key); } catch {}
+  cfg = { server: location.origin, key };
+  store.save(cfg);
+  history.replaceState(null, "", location.pathname + location.search);
+})();
 boot();
 </script>
 </body>

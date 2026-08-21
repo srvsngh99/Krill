@@ -283,14 +283,19 @@ background agent with `/bg <task>`.
 ### 6.1 The agent from your phone or browser (`/ui`)
 
 `krill serve` hosts the same agent loop as sessions you can drive from any
-browser — including your phone, from anywhere:
+browser — including your phone, from anywhere. The one-command path:
 
 ```bash
-KRILL_API_KEY='choose-a-secret' krill serve --host 0.0.0.0
+krill ui              # serve in the background + print the links + open the UI
+krill ui --install    # always on: starts at login, restarts if it exits
+krill ui --status     # reprint the links and key;  --stop / --uninstall undo
 ```
 
-Open `http://<mac-ip>:57455/ui` (the startup banner prints the URL, including
-your Tailscale address if it's running), enter the key, and start a session:
+`krill ui` binds on `0.0.0.0`, creates an API key on first run (saved as
+`server_api_key` in `~/.krill/config.toml`), and prints a **phone link** that
+carries the key in the URL fragment, so the phone needs no typing. (Manual
+equivalent: `KRILL_API_KEY='…' krill serve --host 0.0.0.0`.) Open the link,
+then start a session:
 pick a repo, pick a model, pick a permission posture. Tool calls stream in
 live; mutating tools show **Deny / Allow / Always** cards in `ask` mode. On
 iPhone, Share → **Add to Home Screen** installs it as a standalone app. A

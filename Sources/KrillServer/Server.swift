@@ -162,7 +162,7 @@ public final class KrillServer: Sendable {
     /// Best-effort Tailscale IPv4 of this machine, so the startup banner can
     /// print a phone-ready URL when serving beyond loopback. Never required:
     /// any failure (no binary, daemon down) just skips the hint.
-    private static func tailscaleIP() -> String? {
+    public static func tailscaleIP() -> String? {
         let candidates = [
             "/usr/local/bin/tailscale",
             "/opt/homebrew/bin/tailscale",
