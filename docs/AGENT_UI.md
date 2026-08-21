@@ -1,9 +1,5 @@
 # Krill Agent UI — remote `krill code` from any device
 
-> **Release status:** this UI is on `main` and pending the next tagged Krill
-> release. Until then, build `main` from source; no release has been published
-> for it yet.
-
 `krill serve` hosts agent sessions (the same loop as `krill code`) and serves a
 phone-quality web app at **`/ui`**, embedded in the binary. Point any browser at
 it — your Mac, a laptop on the LAN, or your phone from anywhere via a VPN — and
@@ -29,6 +25,61 @@ Krill never bundles or requires a specific network layer — any path that route
 HTTP to the Mac works (LAN, WireGuard, Cloudflare Tunnel + a real cert, ...).
 Do NOT port-forward `krill serve` straight to the public internet: the agent
 runs tools on your machine; keep it behind a VPN or an authenticated tunnel.
+
+## Using the app, step by step
+
+Shipped in Krill **v0.21.0** (`brew upgrade krill`). Everything below is the
+embedded app at `/ui`; nothing to install on the phone.
+
+1. **Connect.** The first screen asks for the **server** (pre-filled with the
+   address you opened the page from; otherwise `http://<mac-ip>:57455`) and the
+   **API key** (`KRILL_API_KEY`; leave blank only for a loopback server). Tap
+   **Connect**. Both are remembered in the browser. The **⋮** button on the
+   sessions screen brings you back here to change them.
+2. **Sessions list.** The header shows a status dot and the model the server
+   has loaded (`no model loaded` / `unreachable` are diagnostics, see below).
+   Tap **+ New session**.
+3. **New session sheet.** Three choices:
+   - **Workspace** — a folder browser rooted at your home directory. Tap a
+     folder to enter it, **‹** to go up; git repos are flagged. The session's
+     file tools, `bash`, and `Krill.md` brief all resolve inside this folder.
+   - **Model** — any installed model (`krill list`); the server loads it on
+     demand, so the first turn on a new model takes a while.
+   - **Permissions** — **Plan** (read-only), **Ask** (every mutating tool
+     prompts; the default), **Edits** (file edits auto-apply, commands prompt),
+     **Auto** (nothing prompts).
+   Tap **Start session**.
+4. **Talk to the agent.** Type in *Message the agent…* and send with **↑**
+   (on a desktop browser, Enter sends and Shift+Enter inserts a newline). The
+   pill in the header shows `idle` / `running` / `waiting`, and a *working…*
+   indicator sits under the transcript while a turn is in flight. The
+   transcript shows your messages, the assistant's replies (Markdown), and a
+   **tool card** per call — the tool name plus a one-line summary. Tap a card
+   to expand its arguments and result; a red dot marks a failed call, and
+   failures open automatically.
+5. **Approve or deny.** When a tool needs permission the pill flips to
+   `waiting for approval…`, the agent pauses, and a card shows the call with
+   **Deny / Allow / Always**. *Always* whitelists that tool name for the rest
+   of the session (typical: allow `bash` once for `swift build`, then Always).
+   The loop resumes as soon as you answer.
+6. **Stop or delete.** While a turn runs, the send button becomes **■** — tap
+   it to stop. The **⋯** menu has **Stop current run** and **Delete session**.
+7. **Leave and come back.** Sessions live in the server's memory: lock the
+   phone, switch networks, close the app — reopening replays the transcript and
+   resumes the live stream. They last until `krill serve` restarts.
+8. **On a laptop** the same page opens as a two-pane layout (sessions on the
+   left); it is the same app, not a separate desktop build.
+
+### Troubleshooting
+
+| You see | Cause / fix |
+| --- | --- |
+| Model chip says **unreachable** | The phone can't reach the server: wrong address, `krill serve` not running, or the phone isn't on the same Wi-Fi / tailnet. Test the URL in a plain browser tab first. |
+| **401** on connect | Wrong key. It must match `KRILL_API_KEY` exactly. |
+| Server exits on start with `--host 0.0.0.0` | A non-loopback bind requires an API key — set `KRILL_API_KEY` (or pass `--allow-remote-unauthenticated` on a trusted private network only). |
+| *No model available for this session* | Start the server with a model (`krill serve --model gemma-4-e2b`) or pick an installed model in the new-session sheet. |
+| A turn ends with *Stopped at the iteration limit* | The run hit `max_iterations` (24 by default). Send the next step as a new message — context carries over — or create the session over HTTP with a higher limit (table below). |
+| The stream goes quiet on iOS | Safari suspends background tabs; the app reconnects and replays when you return. Add to Home Screen for the most reliable behaviour. |
 
 ## Sessions
 

@@ -17,9 +17,8 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| 2026-08-16 | [#300](https://github.com/srvsngh99/Krill/pull/300) | `glob` and `grep` tool results lead with a match count | Behaviour change visible to every agent run and every model — worth a CHANGELOG line, not a silent fix |
 
-_Nothing else pending._
+_Nothing pending._
 
 ### Known-open, NOT yet merged
 
@@ -40,7 +39,7 @@ Tracked so a release note does not claim more than shipped.
 
 ## Cutting a release
 
-Proven flow (v0.18.0 → v0.20.0). **One PR**, not a separate SHA-fix PR.
+Proven flow (v0.18.0 → v0.21.0). **One PR**, not a separate SHA-fix PR.
 
 ```bash
 # 0. Start clean, from an up-to-date main

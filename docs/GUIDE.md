@@ -293,8 +293,9 @@ Open `http://<mac-ip>:57455/ui` (the startup banner prints the URL, including
 your Tailscale address if it's running), enter the key, and start a session:
 pick a repo, pick a model, pick a permission posture. Tool calls stream in
 live; mutating tools show **Deny / Allow / Always** cards in `ask` mode. On
-iPhone, Share → **Add to Home Screen** installs it as a standalone app. Full
-setup and the HTTP/SSE contract: [`docs/AGENT_UI.md`](AGENT_UI.md).
+iPhone, Share → **Add to Home Screen** installs it as a standalone app. A
+step-by-step walkthrough of every screen, the full setup, and the HTTP/SSE
+contract: [`docs/AGENT_UI.md`](AGENT_UI.md).
 
 ---
 
