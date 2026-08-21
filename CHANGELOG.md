@@ -9,8 +9,37 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+_Nothing yet._
+
+## [0.21.0] - 2026-08-22
+
+### Added
+
+- **`krill serve` hosts agent sessions, and ships a phone/web UI at `/ui`.**
+  The same `krill code` loop — tools, file edits, permission postures — now
+  runs inside the server, so any HTTP client can create a session rooted in a
+  chosen repo, send tasks, tail a seq-numbered SSE event stream (replayable
+  via `?since=` / `Last-Event-ID` across reconnects), and answer tool
+  approvals over HTTP. A self-contained web app is embedded in the binary at
+  `/ui`: sessions list, workspace browser, live transcript with tool cards, a
+  tap-to-approve sheet, and a PWA manifest + icon so it installs to an iPhone
+  home screen. Reach it over the LAN or a VPN such as Tailscale (the startup
+  banner prints the tailnet URL); `GET /` redirects there. Routes live under
+  `/v1/agent/*` and are documented in `docs/AGENT_UI.md` and
+  `docs/SERVER_API.md`.
+- `AgentWorkspace` — a task-local workspace root in `KrillHarness` that the
+  file tools, `bash`, and the project brief resolve against, so many sessions
+  in one server process each act in their own repo. CLI surfaces are
+  unchanged (unbound = process cwd).
+- A `RemoteApprover` permission gate that parks an `.ask` decision on a
+  continuation until a client answers, with per-session "always allow"; and a
+  per-completion generation-queue slot so agent turns interleave with API chat
+  requests on the single GPU instead of stalling them.
+
 ### Fixed
 
+- The agent SSE heartbeat is written on the connection's event loop rather
+  than from the ping task's thread (NIO channel writes are not thread-safe).
 - **`glob` and `grep` made the model count.** Both returned a bare list of
   matches with no total, so answering "how many files match X" meant tallying
   lines by eye — the one thing a language model is reliably bad at. A real

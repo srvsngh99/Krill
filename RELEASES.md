@@ -7,6 +7,21 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.21.0 — 2026-08-22
+**Krill code, from your phone.** `krill serve` now hosts the agent — the same
+loop, tools and permission postures as `krill code` — and serves a web app at
+**`/ui`** that ships inside the binary. Open it from any browser on the LAN or
+over Tailscale, add it to your iPhone home screen, pick a repo, and drive a
+coding session: live transcript, collapsible tool calls, and approval prompts
+you answer with a tap. Sessions survive the phone disconnecting (the event
+stream replays on reconnect), each session works inside its own workspace, and
+agent turns share the GPU queue with ordinary API requests instead of blocking
+them. `brew upgrade krill`, then `KRILL_API_KEY=… krill serve --host 0.0.0.0`.
+Also in this release: `glob` and `grep` results lead with a match count, so
+"how many files match" is read off the tool instead of tallied by the model.
+
+---
+
 ## v0.20.0 — 2026-08-16
 **Qwen3.8-27B, for free.** Qwen's new 27B vision-language flagship is built on
 the Qwen3.5 architecture and ships as `model_type: "qwen3_5"` — the same hybrid
