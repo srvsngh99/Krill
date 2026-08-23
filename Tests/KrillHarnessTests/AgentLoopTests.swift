@@ -443,6 +443,40 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(gate.count, 0)
     }
 
+    /// The runaway guard must not treat a post-promotion retry as a loop. A model
+    /// denied `write_file(X)` in planning naturally re-emits the IDENTICAL call
+    /// once promoted; if the denial poisoned the signature cache that retry is
+    /// silently dropped, `freshCalls` empties, and the run ends having changed
+    /// nothing. Observed end-to-end on gemma-4-12b-agentic before the posture was
+    /// folded into the signature. Note the args here are byte-identical - the
+    /// neighbouring test varies them, which is why it never caught this.
+    func testIdenticalCallRetriedAfterPromotionIsNotDedupedAsALoop() async {
+        let box = PermissionBox(mode: .adaptive)
+        let args = #"{"path":"note.txt","content":"world"}"#
+        let loop = AgentLoop(
+            generator: MockGenerator(responses: [
+                hermesCall("write_file", args),
+                hermesCall("request_execute", #"{"summary":"Ready"}"#),
+                hermesCall("write_file", args),
+                "done",
+            ]),
+            tools: ToolRegistry([
+                RequestExecuteTool(box: box, gate: LoopQuestionGate([])),
+                StubTool(name: "write_file", reply: "WROTE", isFileEdit: true),
+            ]),
+            permission: PermissionPolicy(mode: .plan),
+            permissionBox: box)
+        let transcript = await loop.run(user: "go")
+
+        XCTAssertTrue(
+            transcript.steps[0].toolCalls[0].result.isError,
+            "the planning-phase write must be denied")
+        XCTAssertEqual(
+            transcript.steps[2].toolCalls.first?.result.content, "WROTE",
+            "the identical write must actually run after promotion, not be dropped as a repeat")
+        XCTAssertEqual(box.effective, .acceptEdits)
+    }
+
     func testAskUserAnswerReachesTranscriptAndLoopContinues() async {
         let gate = LoopQuestionGate([UserAnswer(text: "SQLite", optionIndex: 0)])
         let loop = AgentLoop(

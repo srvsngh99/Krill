@@ -89,9 +89,14 @@ public struct RequestExecuteTool: Tool {
         let display: ToolDisplay? = question.flatMap { q in
             answer.map { ToolDisplay.question(q, answer: $0) }
         }
+        // The permission notice alone is not enough: without an explicit
+        // instruction to proceed, models treat "get permission" as the task and
+        // end the turn having changed nothing.
         return ToolResult(
             content: prefix + "Permission is now \(mode.label). "
-                + "Ignore the earlier PLAN MODE instruction in your system prompt — it no longer applies.",
+                + "Ignore the earlier PLAN MODE instruction in your system prompt — it no longer applies. "
+                + "Now execute the plan you just presented, step by step, starting with the first item. "
+                + "Do not re-present the plan and do not call this tool again.",
             isError: false,
             display: display,
             effect: .permissionMode(mode))

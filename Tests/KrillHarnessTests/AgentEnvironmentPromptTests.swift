@@ -34,4 +34,15 @@ final class AgentEnvironmentPromptTests: XCTestCase {
         XCTAssertTrue(AgentEnvironment.planTurnPrefix.contains("request_execute"))
         XCTAssertTrue(AgentEnvironment.toolDirective.contains("ask_user"))
     }
+
+    /// The stop-after-results directive must exempt BOTH interactive tools. With
+    /// only the `ask_user` carve-out, a planning run is told to stop the moment
+    /// its read-only investigation returns - so it never reaches
+    /// `request_execute` and adaptive mode silently accomplishes nothing.
+    func testToolDirectiveExemptsRequestExecuteAsWellAsAskUser() {
+        XCTAssertTrue(
+            AgentEnvironment.toolDirective.contains("request_execute"),
+            "toolDirective must exempt request_execute, or planning runs stop before promoting")
+        XCTAssertTrue(AgentEnvironment.toolDirective.contains("ask_user"))
+    }
 }

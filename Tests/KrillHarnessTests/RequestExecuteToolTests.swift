@@ -51,6 +51,28 @@ final class RequestExecuteToolTests: XCTestCase {
         XCTAssertEqual(result.effect, .permissionMode(.acceptEdits))
     }
 
+    /// Lifting the prohibition is not enough. Without an explicit instruction to
+    /// proceed, a model treats "get permission" as the task and ends the turn
+    /// having changed nothing - observed end-to-end on gemma-4-12b-agentic,
+    /// where promotion succeeded and the target file was never written.
+    /// Both promotion paths share `promote(...)`, so both are pinned here.
+    func testPromotionTellsTheModelToExecuteNotJustThatItMay() async {
+        let approved = await RequestExecuteTool(
+            box: PermissionBox(mode: .plan),
+            gate: ExecuteQuestionGate(UserAnswer(text: "yes", optionIndex: 0)))
+            .run(argumentsJSON: #"{"summary":"Implement it"}"#)
+        let selfPromoted = await RequestExecuteTool(
+            box: PermissionBox(mode: .adaptive), gate: ExecuteQuestionGate(.declinedAnswer))
+            .run(argumentsJSON: "{}")
+
+        for result in [approved, selfPromoted] {
+            XCTAssertTrue(
+                result.content.contains("execute the plan"),
+                "promotion must instruct the model to proceed, not merely grant permission")
+            XCTAssertTrue(result.content.contains("do not call this tool again"))
+        }
+    }
+
     func testSecondOptionPromotesToAsk() async {
         let box = PermissionBox(mode: .plan)
         let result = await RequestExecuteTool(

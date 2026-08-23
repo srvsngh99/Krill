@@ -104,8 +104,9 @@ sentence, and its plan→build mode-change reminder, which Krill lacks entirely.
   (`CodeCommand.swift:220`). This is a **latent deadlock**, not just a wiring
   gap: after a promotion to accept-edits, every `bash` call yields `.ask`, hits
   `gate?.approve(...) ?? false`, and is silently denied forever. Fix:
-  `gate: RawTerminal.isInteractive ? StdinApprover() : nil` — inert in
-  `.plan`/`.acceptAll` (never consulted today), correct after promotion.
+  `gate: (mode != .acceptAll && RawTerminal.isInteractive) ? StdinApprover() : nil`
+  — inert in `.plan`/`.acceptAll` (never consulted today), correct after
+  promotion from either `.plan` or `.adaptive`.
 - **The tool-system turn is frozen after `ensureAgentSeed()`**
   (`ChatTUI.swift:1336-1338`; re-injection skipped at `AgentLoop.swift:157-160`)
   while Shift+Tab changes posture freely. Posture-conditional tool registration

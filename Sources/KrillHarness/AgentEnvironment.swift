@@ -10,8 +10,9 @@ public enum AgentEnvironment {
     /// this version also carries Krill's training-cutoff/web-search guidance.
     public static let toolDirective =
         "Use tools only when needed. Once you have the tool results, "
-        + "reply with the final answer and do not call any more tools, unless an ask_user answer "
-        + "requires you to continue the work. Your training data has a cutoff: for facts that change over time "
+        + "reply with the final answer and do not call any more tools - except that an ask_user "
+        + "answer, or a granted request_execute, means you keep working instead of stopping. "
+        + "Your training data has a cutoff: for facts that change over time "
         + "(office-holders, prices, versions, news), verify with web_search "
         + "instead of answering from memory."
 

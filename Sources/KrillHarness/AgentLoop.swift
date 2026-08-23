@@ -226,8 +226,16 @@ public struct AgentLoop: Sendable {
             // - a model re-emitting them is looping, not progressing. If a whole
             // turn is repeats, or the total budget is spent, stop and take the
             // visible text as the final answer instead of generating forever.
+            //
+            // The signature is scoped to the CURRENT posture: a call denied under
+            // `.plan` and the same call retried after `request_execute` promoted
+            // the run are different attempts, not a loop. Without this the first
+            // denial poisons the cache, the post-promotion retry is silently
+            // dropped, and the turn ends having changed nothing.
+            let posture = permissionBox?.effective ?? permission.mode
             var freshCalls: [ToolCalling.ParsedToolCall] = []
-            for call in calls where executedSignatures.insert(toolSignature(call)).inserted {
+            for call in calls
+            where executedSignatures.insert(toolSignature(call, posture: posture)).inserted {
                 freshCalls.append(call)
             }
             let remaining = maxToolCalls - executedToolCalls
@@ -318,8 +326,10 @@ public struct AgentLoop: Sendable {
 
     /// Stable identity for a parsed call: name + raw arguments. Two calls with
     /// the same signature are treated as the same action for the runaway guard.
-    private func toolSignature(_ call: ToolCalling.ParsedToolCall) -> String {
-        call.name + "\u{1}" + call.argumentsJSON
+    private func toolSignature(
+        _ call: ToolCalling.ParsedToolCall, posture: PermissionMode
+    ) -> String {
+        posture.rawValue + "\u{1}" + call.name + "\u{1}" + call.argumentsJSON
     }
 
     /// Strip ALL reasoning blocks from text bound for the display surface.
