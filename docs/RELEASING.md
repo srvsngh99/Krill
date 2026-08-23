@@ -17,7 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| 2026-08-22 | `krill ui` (feature/krill-ui) | One-command phone UI: detached serve + key generation + phone link + launchd login item | New user-facing command; README/GUIDE/AGENT_UI already updated — just move this entry into the CHANGELOG section |
+| _(empty — cleared at v0.22.0)_ | | | |
 
 ### Known-open, NOT yet merged
 

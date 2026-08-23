@@ -7,6 +7,31 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.22.0 — 2026-08-24
+**The agent can ask you things now.** Give it an ambiguous task and instead of
+guessing it asks — one question, a few concrete options, answered with a
+keypress in the TUI, a tap on your phone, or a number on the CLI. It works in
+every permission posture, because building the right thing matters more than
+never being interrupted.
+
+Plan mode also gained an exit. When the plan is ready the agent asks to start
+implementing, and you choose how much leash to hand over: apply edits
+automatically, confirm each one, or keep planning. It can never grant itself
+unattended shell access — that stays a deliberate Shift+Tab.
+
+New **`adaptive`** posture for when you don't want to be asked at all: the agent
+starts read-only, writes its plan, then switches itself to editing when it is
+ready. Shell commands still prompt, so the dangerous half stays leashed. The
+footer tells you which phase it is in.
+
+The TUI caught up too — a sidebar with live task progress, real context usage,
+and session totals; and file edits now render as proper unified diffs with line
+numbers instead of an escaped one-line blob. Plus a fix worth calling out: the
+footer's context meter was showing only the window size, never what you had
+actually used. `brew upgrade krill`.
+
+---
+
 ## v0.21.0 — 2026-08-22
 **Krill code, from your phone.** `krill serve` now hosts the agent — the same
 loop, tools and permission postures as `krill code` — and serves a web app at
