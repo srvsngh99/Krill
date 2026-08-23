@@ -7,7 +7,7 @@ public enum AgentEntry: Equatable, Sendable {
     case user(String)
     case assistant(String)
     case toolCall(name: String, args: String)
-    case toolResult(content: String, isError: Bool)
+    case toolResult(content: String, isError: Bool, display: ToolDisplay?)
     case note(String)
 }
 
@@ -29,8 +29,12 @@ public func foldAgentEvent(
         if !chipShown {
             entries.append(.toolCall(name: inv.name, args: inv.argumentsJSON))
         }
-        entries.append(.toolResult(content: inv.result.content, isError: inv.result.isError))
+        entries.append(.toolResult(
+            content: inv.result.content, isError: inv.result.isError,
+            display: inv.result.display))
         chipShown = false
+    case .permissionChanged(let from, let to):
+        entries.append(.note("Permission changed: \(from.label) → \(to.label)"))
     case .finalAnswer(let text):
         entries.append(.assistant(text))
     case .iterationLimitReached:

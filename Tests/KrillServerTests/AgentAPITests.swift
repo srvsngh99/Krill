@@ -207,6 +207,20 @@ final class AgentAPITests: XCTestCase {
         try readResponseEnd(from: channel)
     }
 
+    func testPostQuestionWithNothingPendingReturns409() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+        let id = try createSession(on: channel)
+
+        try writeJSONRequest(
+            to: channel, method: .POST, uri: "/v1/agent/sessions/\(id)/questions",
+            body: ["text": "answer", "option_index": 0])
+        XCTAssertEqual(try readResponseHead(from: channel).status, .conflict)
+        let json = try readJSONResponseBody(from: channel)
+        XCTAssertTrue((json["error"] as? String)?.contains("pending question") ?? false)
+        try readResponseEnd(from: channel)
+    }
+
     // MARK: - 6. GET events: SSE head
 
     func testEventsEndpointReturnsSSEHead() throws {
@@ -271,6 +285,20 @@ final class AgentAPITests: XCTestCase {
         XCTAssertEqual(head.headers.first(name: "Content-Type"), "text/html; charset=utf-8")
         let body = try readResponseBody(from: channel)
         XCTAssertTrue(body.lowercased().contains("<!doctype html>"), "got: \(body)")
+        try readResponseEnd(from: channel)
+    }
+
+    func testUIIncludesQuestionPermissionAndAdaptiveControls() throws {
+        let channel = try makeChannel()
+        defer { _ = try? channel.finish(acceptAlreadyClosed: true) }
+
+        try writeRequest(to: channel, method: .GET, uri: "/ui")
+        _ = try readResponseHead(from: channel)
+        let body = try readResponseBody(from: channel)
+        XCTAssertTrue(body.contains("question_request"))
+        XCTAssertTrue(body.contains("question_answered"))
+        XCTAssertTrue(body.contains("permission_changed"))
+        XCTAssertTrue(body.contains("data-v=\"adaptive\""))
         try readResponseEnd(from: channel)
     }
 

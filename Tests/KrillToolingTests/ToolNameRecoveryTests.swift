@@ -6,7 +6,9 @@ import XCTest
 /// kebab-case variants of a snake_case tool.
 final class ToolNameRecoveryTests: XCTestCase {
 
-    private let known = ["write_file", "edit_file", "read_file", "bash"]
+    private let known = [
+        "write_file", "edit_file", "read_file", "bash", "ask_user", "request_execute",
+    ]
 
     private func canon(_ name: String) -> String {
         let calls = [ToolCalling.ParsedToolCall(name: name, argumentsJSON: "{}")]
@@ -66,6 +68,18 @@ final class ToolNameRecoveryTests: XCTestCase {
 
     func testShellAliasesToBash() {
         XCTAssertEqual(canon("Shell"), "bash")
+    }
+
+    func testQuestionAliasesToAskUser() {
+        for alias in ["question", "askuserquestion", "ask"] {
+            XCTAssertEqual(canon(alias), "ask_user")
+        }
+    }
+
+    func testPlanExitAliasesToRequestExecute() {
+        for alias in ["exitplanmode", "plan_exit", "exitplan", "approve_plan", "start_implementing"] {
+            XCTAssertEqual(canon(alias), "request_execute")
+        }
     }
 
     func testAliasNeverInventsAnUnofferedTool() {

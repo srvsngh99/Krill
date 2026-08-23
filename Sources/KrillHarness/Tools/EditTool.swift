@@ -41,13 +41,15 @@ public struct EditTool: Tool {
             } catch {
                 return ToolResult(content: "Error: could not write \(FileToolSupport.display(url)): \(error.localizedDescription)", isError: true)
             }
-            let stat = FileToolSupport.diffstat(
-                added: FileToolSupport.lineCount(newString) * count,
-                removed: FileToolSupport.lineCount(oldString) * count)
+            let path = FileToolSupport.display(url)
+            let hunks = FileToolSupport.unifiedDiff(old: text, new: updated)
+            let stat = FileToolSupport.diffstat(hunks: hunks)
+            let preview = FileToolSupport.compactPreview(hunks: hunks)
             return ToolResult(
-                content: "Edited \(FileToolSupport.display(url)) (\(stat), \(count) replacement(s)).\n"
-                    + FileToolSupport.changeSummary(old: oldString, new: newString),
-                isError: false)
+                content: "Edited \(path) (\(stat), \(count) replacement(s))."
+                    + (preview.isEmpty ? "" : "\n" + preview),
+                isError: false,
+                display: .diff(path: path, hunks: hunks))
         }
     }
 

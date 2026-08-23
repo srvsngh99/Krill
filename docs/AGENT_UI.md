@@ -72,9 +72,10 @@ embedded app at `/ui`; nothing to install on the phone.
      file tools, `bash`, and `Krill.md` brief all resolve inside this folder.
    - **Model** — any installed model (`krill list`); the server loads it on
      demand, so the first turn on a new model takes a while.
-   - **Permissions** — **Plan** (read-only), **Ask** (every mutating tool
-     prompts; the default), **Edits** (file edits auto-apply, commands prompt),
-     **Auto** (nothing prompts).
+   - **Permissions** — **Plan** (read-only), **Adaptive** (starts read-only and
+     self-promotes to edits while commands still prompt), **Ask** (every mutating
+     tool prompts; the default), **Edits** (file edits auto-apply, commands
+     prompt), **Auto** (nothing prompts).
    Tap **Start session**.
 4. **Talk to the agent.** Type in *Message the agent…* and send with **↑**
    (on a desktop browser, Enter sends and Shift+Enter inserts a newline). The
@@ -118,9 +119,10 @@ brief, and multi-turn context carries across messages. Sessions live in server
 memory: they survive phone disconnects/reconnects, but not a server restart.
 
 Permission postures (same semantics as `krill code`): `plan` (read-only),
-`ask` (default here: every mutating tool prompts), `accept-edits` (file edits
-auto-apply, commands prompt), `accept-all`. "Always allow" from a prompt
-whitelists that tool for the rest of the session.
+`adaptive` (plans read-only, then may self-promote to edits while commands
+prompt), `ask` (default here: every mutating tool prompts), `accept-edits` (file
+edits auto-apply, commands prompt), and `accept-all`. "Always allow" from a
+prompt whitelists that tool for the rest of the session.
 
 ## HTTP API
 
@@ -136,13 +138,15 @@ shell (page, manifest, icon — no data) is exempt, as are `OPTIONS`/`/healthz`.
 | `POST /v1/agent/sessions/{id}/messages` | `{"text": …}` → `202`; starts a turn (409 if one is running). |
 | `GET /v1/agent/sessions/{id}/events` | SSE. `?since=N` (or `Last-Event-ID`) replays `seq > N`, then tails live. `id:` line = seq; `: ping` heartbeat every 25s. |
 | `POST /v1/agent/sessions/{id}/approvals` | `{"id"?: …, "allow": bool, "always"?: bool}` → 409 if nothing (or a different request) is pending. |
-| `POST /v1/agent/sessions/{id}/cancel` | Stop the active turn (also resolves a parked approval as deny). |
+| `POST /v1/agent/sessions/{id}/questions` | `{"id"?: …, "option_index"?: N, "text"?: …, "declined"?: bool}` answers a pending `ask_user` or plan-approval question; 409 if none (or a different request) is pending. |
+| `POST /v1/agent/sessions/{id}/cancel` | Stop the active turn (also resolves parked approvals/questions safely). |
 | `GET /v1/agent/workspaces?path=~` | Shallow directory browser for the workspace picker (marks git repos). |
 
 Event types on the stream: `user`, `assistant`, `assistant_final`, `tool_call`
 (`name`, `args` JSON string), `tool_result` (`content`, `is_error`), `note`,
 `status` (`idle|running|waiting|cancelled`), `approval_request`
-(`id`, `tool`, `args`), `approval_resolved` (`id`, `allow`).
+(`id`, `tool`, `args`), `approval_resolved` (`id`, `allow`), `question_request`,
+`question_answered`, and `permission_changed`.
 
 ## Notes
 

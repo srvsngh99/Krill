@@ -523,7 +523,7 @@ Common keys (each has a `KRILL_…` env equivalent):
 |---|---|---|
 | `default_model` | — | Model when none is named |
 | `default_mode` | `agent` | Launch surface: `agent` (default) or `chat` |
-| `default_agent_permissions` | `plan` | `plan` \| `ask` \| `accept-edits` \| `auto` (legacy alias: `default_agent_posture`) |
+| `default_agent_permissions` | `plan` | `plan` \| `adaptive` \| `ask` \| `accept-edits` \| `auto` (legacy alias: `default_agent_posture`) |
 | `server_port` / `server_host` | `57455` / `127.0.0.1` | HTTP server bind |
 | `server_api_key` | — | Bearer token for all HTTP routes (redacted in config output; prefer `KRILL_API_KEY`) |
 | `keep_alive` | `5m` | Keep a model resident (`30m`, `0`, negative=pin) |

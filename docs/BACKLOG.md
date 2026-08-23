@@ -290,3 +290,58 @@ default path keeps its byte-exact overlap win for everyone.
 shipped. The batcher needs the epoch-level path-switch logic above to avoid
 regressing the proven concurrent overlap, so it is a separate, carefully-gated
 piece of work.
+
+---
+
+## Follow-ups surfaced by the ask_user / adaptive-mode design (2026-08-23)
+
+**Status:** design only — see `docs/ASK_USER_AND_ADAPTIVE_MODE.md`,
+`docs/ASK_USER_IMPLEMENTATION.md`, `docs/ASK_USER_VERIFICATION.md`, and
+`docs/decisions/0004-interactive-questions-and-adaptive-mode.md`. Nothing
+implemented yet. The items below are defects and gaps found while surveying that
+the design does *not* fix, or fixes only incidentally.
+
+- **The tool-system turn is frozen after the first seed.** `ensureAgentSeed()`
+  (`Sources/KrillCLI/TUI/ChatTUI.swift:1336-1338`) injects the tool list once and
+  it is never re-injected (`AgentLoop.swift:157-160` skips injection when
+  `priorMessages` is non-empty), while Shift+Tab (`ChatTUI.swift:406-415`)
+  changes posture freely afterwards. So the toolset the model *sees* is frozen at
+  seed time and cannot track posture. This makes **any** posture-dependent
+  toolset unsound in the TUI after the first Shift+Tab. The 0004 design works
+  around it (register unconditionally, branch at run time); the underlying gap
+  remains. Fixing it properly means either re-injecting on posture change (which
+  breaks the prefix cache) or moving the tool list out of the frozen turn.
+
+- **Background agents share the foreground's `TodoTool` instance.**
+  `TodoTool.swift:8` documents that "each surface keeps its own list", but
+  `spawnSession` passes the main `todoTool` through `agentTools()`
+  (`ChatTUI.swift:1625-1630`), so every background agent writes into the
+  foreground list. The 0004 work fixes this as a prerequisite for a per-session
+  task panel, but it is a standalone bug worth knowing about.
+
+- **`TUIMarkdown` reflows lists into paragraphs.**
+  `Sources/KrillCLI/TUI/TUIMarkdown.swift:9-35` handles only fenced code, ATX
+  headings, inline code and bold. Unordered and ordered lists fall through to
+  `Layout.wrap`, which reflows them into a paragraph and destroys the structure —
+  including task lists (`- [ ]`), which is exactly the `todo` tool's output
+  format. There is also a second, drifted renderer with the same four constructs
+  but different colours (`MarkdownStream`, `Sources/KrillCLI/TerminalStyle.swift:242-308`);
+  the two should be unified.
+
+- **The ember palette is triplicated.** The same five truecolor stops are
+  declared independently at `TerminalStyle.swift:45` (`emberGradient`),
+  `TerminalStyle.swift:173-176` (`EmberSpinner.stops`) and
+  `ChatTUI.swift:2070-2073` (`emberSpinStops`), and `styledCode`
+  (`ChatTUI.swift:1568-1579`) maps roles to fixed 16-colour names rather than to
+  `Palette` (`Sources/KrillTUI/Theme.swift:15-29`, which has only four slots).
+  Consolidate before adding surfaces that consume the palette.
+
+- **Reasoning output is discarded with no accessor.** `StreamingReasoningFilter`
+  (`Sources/KrillTooling/ReasoningParser.swift:235, :267-274`) drops think-block
+  tokens on the floor, and `AgentEvent` has no reasoning case. An opencode-style
+  collapsed `+ Thought: 1.5s` block is therefore net-new work, not a rendering
+  change.
+
+- **No LSP integration exists anywhere in `Sources/`.** Noted because opencode's
+  sidebar has an LSP row and a port of that layout will invite one. There is no
+  counterpart to surface.

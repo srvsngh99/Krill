@@ -37,7 +37,7 @@ If auto-detection ever misreads, pass `--theme light` or `--theme dark`.
 |-----|--------|
 | `Up` / `Down` | Recall input history, or cycle the slash-command popup |
 | `Tab` | Accept the highlighted command (then add arguments) |
-| `Shift+Tab` | Agent mode: cycle permissions (plan / ask / accept-edits / auto) |
+| `Shift+Tab` | Agent mode: cycle permissions (plan / adaptive / ask / accept-edits / auto), including while a turn runs |
 | `Enter` | Send the message |
 | Hold `Space` | Push-to-talk (only when voice is on: dictate / handsfree / send) |
 | `Ctrl-V` | Turn voice on and cycle it: off -> dictate -> handsfree -> send -> off |
@@ -93,8 +93,9 @@ The toolset: read-only explorers (`read_file`, `list_dir`, `glob`, `grep`,
 `repo_map` — a native map of the tree with each file's top-level symbols),
 `web_search` (search the web for links + snippets) and `web_fetch` (fetch a URL
 as readable text), file edits (`edit_file`, `multi_edit`, `write_file`), `bash`,
-`now` (date/time), `todo` (the agent's step checklist), and `dispatch_agent`
-(spawn a background agent). As it works, the transcript
+`now` (date/time), `todo` (the agent's step checklist), `ask_user` (clarifying
+questions), `request_execute` (plan approval), and `dispatch_agent` (spawn a
+background agent). As it works, the transcript
 shows each step as an action chip
 (`▸ edit_file path`), the tool's result (with a `+N -M` diffstat on edits), and a
 live footer (`working . 8s . Esc interrupt`). Press **Esc** (or `Ctrl-C`) to
@@ -108,7 +109,8 @@ run; the level governs the mutating ones:
 
 | Level | Behaviour |
 |---------|-----------|
-| `plan` | Read-only. The agent investigates and proposes a plan; edits and commands are denied. |
+| `plan` | Read-only. The agent investigates and proposes a plan, then may ask you to approve execution. |
+| `adaptive` | Starts read-only, then the agent may promote itself to automatic edits; shell commands still ask. The chip shows its planning/executing phase. |
 | `ask` | Confirm every file edit and shell command before it runs. |
 | `accept-edits` | File edits apply automatically; shell commands still ask. |
 | `auto` | Everything runs without asking. |
@@ -118,8 +120,9 @@ bar appears above the input box: `[y]es` runs it, `[n]o` (or `Esc`) denies it,
 `[a]lways` allows that tool for the rest of the session.
 
 The launch defaults come from `~/.krill/config.toml`: `default_mode`
-(`agent` by default, or `chat`) and `default_agent_permissions` (`plan` / `ask` /
-`accept-edits` / `auto`; legacy alias `default_agent_posture`). Set them in
+(`agent` by default, or `chat`) and `default_agent_permissions` (`plan` /
+`adaptive` / `ask` / `accept-edits` / `auto`; legacy alias
+`default_agent_posture`). Set them in
 place with `/config default_mode=chat`. The agent also reads `Krill.md` at the
 repo root into every session — generate one with `/init`.
 

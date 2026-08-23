@@ -5,15 +5,50 @@ import Foundation
 /// compact line, prepended to the agent's system prompt by each surface —
 /// local models otherwise burn a whole thinking budget guessing the date.
 public enum AgentEnvironment {
-    /// Mirror of `ToolCalling.agenticToolDirective`: surfaces that synthesize a
-    /// system turn (which suppresses the tooling layer's own fallback
-    /// directive) append this so over-calling families still get the nudge.
+    /// Deliberately differs from `ToolCalling.agenticToolDirective`: surfaces
+    /// that synthesize their own system turn suppress the tooling fallback, so
+    /// this version also carries Krill's training-cutoff/web-search guidance.
     public static let toolDirective =
         "Use tools only when needed. Once you have the tool results, "
-        + "reply with the final answer and do not call any more tools. "
-        + "Your training data has a cutoff: for facts that change over time "
+        + "reply with the final answer and do not call any more tools, unless an ask_user answer "
+        + "requires you to continue the work. Your training data has a cutoff: for facts that change over time "
         + "(office-holders, prices, versions, news), verify with web_search "
         + "instead of answering from memory."
+
+    /// Always-on guidance: clarification is available in every permission
+    /// posture and an answer continues the current run rather than ending it.
+    public static let askUserDirective =
+        "Use ask_user when a missing user choice materially affects the result. Ask one focused "
+        + "question with concise options when useful. After the answer, continue the task with it; "
+        + "a declined question means choose the safest assumption, state it, and do not ask again."
+
+    /// Shared system-level planning steer for CLI and remote builders.
+    public static let planSystemSteer =
+        "You are in PLAN MODE (read-only). You may read and search files with the read-only tools, "
+        + "but you must NOT write files, edit files, or run shell commands - those are denied. "
+        + "Investigate as needed and use ask_user when a user choice affects the plan. When the plan "
+        + "is ready, call request_execute with a concise summary; do not merely stop at a plan."
+
+    /// Shared per-turn planning prefix for interactive/background TUI builders.
+    public static let planTurnPrefix =
+        "(Plan mode: read-only. Investigate with the read-only tools and propose a clear, step-by-step "
+        + "plan. You may use ask_user for clarification. Call request_execute when ready to implement. "
+        + "Do not edit files or run commands.)"
+
+    public static let adaptivePlanTail =
+        "This is ADAPTIVE mode: begin by planning read-only, then call request_execute when you decide "
+        + "the plan is sufficient. It will enter guarded execution without asking the user."
+
+    /// Pure prompt fragments for a posture. Builders append these to their own
+    /// environment/project/user-system parts; `askUserDirective` is unconditional.
+    public static func permissionDirectives(for mode: PermissionMode) -> [String] {
+        var directives = [askUserDirective]
+        if mode.initialEffective == .plan {
+            directives.append(planSystemSteer)
+            if mode == .adaptive { directives.append(adaptivePlanTail) }
+        }
+        return directives
+    }
 
     /// The project brief: `Krill.md` at the working-directory root (the file
     /// `/init` generates — Krill's CLAUDE.md), loaded into every agent session

@@ -11,11 +11,33 @@ public enum CodeStyle: Sendable, Equatable {
     case toolError   // a failed / denied tool observation
     case diffAdd     // an added line in a diff
     case diffDel     // a removed line in a diff
+    case diffContext // an unchanged line in a diff
+    case diffHeader  // path / hunk metadata
     case note        // a status note ([cancelled], [iteration limit], ...)
     case dim         // de-emphasized chrome (truncation hints)
 }
 
 /// One styled display line: width-fitted text plus its role.
+public struct CodeDiffLine: Sendable, Equatable {
+    public enum Kind: Sendable, Equatable { case context, addition, deletion }
+    public let oldLine: Int?
+    public let newLine: Int?
+    public let kind: Kind
+    public let text: String
+    public init(oldLine: Int?, newLine: Int?, kind: Kind, text: String) {
+        self.oldLine = oldLine; self.newLine = newLine; self.kind = kind; self.text = text
+    }
+}
+
+public struct CodeDiffHunk: Sendable, Equatable {
+    public let oldStart: Int, oldCount: Int, newStart: Int, newCount: Int
+    public let lines: [CodeDiffLine]
+    public init(oldStart: Int, oldCount: Int, newStart: Int, newCount: Int, lines: [CodeDiffLine]) {
+        self.oldStart = oldStart; self.oldCount = oldCount
+        self.newStart = newStart; self.newCount = newCount; self.lines = lines
+    }
+}
+
 public struct CodeLine: Sendable, Equatable {
     public let text: String
     public let style: CodeStyle
@@ -102,6 +124,41 @@ public enum CodeView {
         let hidden = raw.count - shown.count
         if hidden > 0 {
             out.append(CodeLine(indent + "... (\(hidden) more line\(hidden == 1 ? "" : "s"))", .dim))
+        }
+        return out
+    }
+
+    /// A full UI-only unified diff. It is deliberately uncapped and does not use
+    /// the global tool-result collapse state. Old/new gutters stay fixed while
+    /// long source rows wrap beneath the same gutter.
+    public static func diff(path: String, hunks: [CodeDiffHunk], width: Int) -> [CodeLine] {
+        let width = max(12, width)
+        let largest = hunks.flatMap(\.lines).compactMap { max($0.oldLine ?? 0, $0.newLine ?? 0) }.max() ?? 1
+        let digits = max(1, String(largest).count)
+        let gutterWidth = digits * 2 + 5 // " old new │ "
+        var out = [CodeLine(Layout.clip("    diff  \(path)", width: width, ellipsis: true), .diffHeader)]
+        for hunk in hunks {
+            let header = "    @@ -\(hunk.oldStart),\(hunk.oldCount) +\(hunk.newStart),\(hunk.newCount) @@"
+            out.append(CodeLine(Layout.clip(header, width: width, ellipsis: true), .diffHeader))
+            for line in hunk.lines {
+                let old = line.oldLine.map(String.init) ?? ""
+                let new = line.newLine.map(String.init) ?? ""
+                let mark: String
+                let style: CodeStyle
+                switch line.kind {
+                case .context: mark = " "; style = .diffContext
+                case .addition: mark = "+"; style = .diffAdd
+                case .deletion: mark = "-"; style = .diffDel
+                }
+                let gutter = " " + old.padding(toLength: digits, withPad: " ", startingAt: 0)
+                    + " " + new.padding(toLength: digits, withPad: " ", startingAt: 0) + " │" + mark + " "
+                let bodyWidth = max(1, width - gutterWidth)
+                let wrapped = Layout.wrap(line.text, width: bodyWidth)
+                for (index, body) in wrapped.enumerated() {
+                    let prefix = index == 0 ? gutter : String(repeating: " ", count: gutterWidth - 1) + "│ "
+                    out.append(CodeLine(Layout.clip(prefix + body, width: width), style))
+                }
+            }
         }
         return out
     }

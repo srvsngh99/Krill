@@ -34,6 +34,10 @@ final class NowTodoToolTests: XCTestCase {
         XCTAssertTrue(progress.content.hasPrefix("Todo (1/2 done):"))
         XCTAssertTrue(progress.content.contains("[x] survey repo"))
         XCTAssertTrue(progress.content.contains("[ ] write fix"))
+        XCTAssertEqual(todo.snapshot(), [
+            .init(text: "survey repo", done: true, active: false),
+            .init(text: "write fix", done: false, active: true),
+        ])
 
         // No items → view without mutating.
         let view = await todo.run(argumentsJSON: "{}")

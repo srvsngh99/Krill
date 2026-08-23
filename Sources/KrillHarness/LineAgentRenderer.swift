@@ -46,7 +46,7 @@ public final class LineAgentRenderer: @unchecked Sendable {
             if !t.isEmpty { emit(text) }
         case .toolCall(let name, let args):
             pendingCall = (name, args)
-        case .toolResult(let content, let isError):
+        case .toolResult(let content, let isError, _):
             let marker = isError ? "x" : "*"
             if let call = pendingCall {
                 emit("  [\(marker)] \(call.name)(\(call.args))")

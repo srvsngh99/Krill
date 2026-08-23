@@ -66,6 +66,21 @@ final class CodeViewTests: XCTestCase {
         for l in lines { XCTAssertTrue(l.text.hasPrefix("    ")) }
     }
 
+    func testFullDiffHasNumberGuttersDistinctStylesAndNoCap() {
+        let hunk = CodeDiffHunk(oldStart: 7, oldCount: 2, newStart: 7, newCount: 2, lines: [
+            CodeDiffLine(oldLine: 7, newLine: 7, kind: .context, text: "same"),
+            CodeDiffLine(oldLine: 8, newLine: nil, kind: .deletion, text: "old"),
+            CodeDiffLine(oldLine: nil, newLine: 8, kind: .addition, text: "new"),
+        ])
+        let lines = CodeView.diff(path: "Sources/a.swift", hunks: [hunk], width: 50)
+        XCTAssertEqual(lines.map(\.style), [.diffHeader, .diffHeader, .diffContext, .diffDel, .diffAdd])
+        XCTAssertTrue(lines[2].text.contains("7 7 │"))
+        XCTAssertTrue(lines[3].text.contains("8   │-"))
+        XCTAssertTrue(lines[4].text.contains("  8 │+"))
+        XCTAssertFalse(lines.contains { $0.text.contains("more line") })
+        XCTAssertTrue(lines.allSatisfy { Layout.visibleWidth($0.text) <= 50 })
+    }
+
     func testToolResultErrorStyle() {
         let lines = CodeView.toolResult(
             content: "Permission denied: plan mode is read-only", isError: true, width: 60, maxLines: 20)

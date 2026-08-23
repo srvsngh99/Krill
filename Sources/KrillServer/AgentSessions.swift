@@ -81,6 +81,8 @@ final class RemoteApprover: PermissionGate, @unchecked Sendable {
     private let lock = NSLock()
     private var request: Request?
     private var continuation: CheckedContinuation<Bool, Never>?
+    private var timeoutTask: Task<Void, Never>?
+    private let timeout: TimeInterval
     /// Tools the client chose to "always allow" for the rest of the session.
     private var sticky: Set<String> = []
     /// Called (outside the lock) when a request parks / resolves, so the
@@ -88,14 +90,22 @@ final class RemoteApprover: PermissionGate, @unchecked Sendable {
     var onRequest: (@Sendable (Request) -> Void)?
     var onResolve: (@Sendable (Request, Bool) -> Void)?
 
+    init(timeout: TimeInterval = 300) {
+        self.timeout = timeout
+    }
+
     func approve(toolName: String, argumentsJSON: String) async -> Bool {
-        await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-            register(toolName: toolName, argumentsJSON: argumentsJSON, cont: cont)
+        let requestID = UUID().uuidString
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            register(
+                id: requestID, toolName: toolName,
+                argumentsJSON: argumentsJSON, cont: cont)
         }
     }
 
     private func register(
-        toolName: String, argumentsJSON: String, cont: CheckedContinuation<Bool, Never>
+        id: String, toolName: String, argumentsJSON: String,
+        cont: CheckedContinuation<Bool, Never>
     ) {
         lock.lock()
         if sticky.contains(toolName) {
@@ -103,10 +113,17 @@ final class RemoteApprover: PermissionGate, @unchecked Sendable {
             cont.resume(returning: true)
             return
         }
-        let req = Request(id: UUID().uuidString, toolName: toolName, argumentsJSON: argumentsJSON)
+        let req = Request(id: id, toolName: toolName, argumentsJSON: argumentsJSON)
         request = req
         continuation = cont
         let notify = onRequest
+        let timeout = self.timeout
+        timeoutTask = Task { [weak self] in
+            let nanos = UInt64(max(0, timeout) * 1_000_000_000)
+            do { try await Task.sleep(nanoseconds: nanos) }
+            catch { return }
+            _ = self?.resolve(id: id, allow: false)
+        }
         lock.unlock()
         notify?(req)
     }
@@ -128,11 +145,79 @@ final class RemoteApprover: PermissionGate, @unchecked Sendable {
         if allow, always { sticky.insert(req.toolName) }
         continuation = nil
         request = nil
+        let timer = timeoutTask
+        timeoutTask = nil
         let notify = onResolve
         lock.unlock()
+        timer?.cancel()
         cont.resume(returning: allow)
         notify?(req, allow)
         return true
+    }
+}
+
+// MARK: - Remote question gate
+
+/// `UserQuestionGate` for remote clients. A question parks on a continuation
+/// until the matching HTTP answer arrives. Request ids prevent a stale browser
+/// tab from answering a newer question after reconnecting.
+final class RemoteQuestionAsker: UserQuestionGate, @unchecked Sendable {
+    struct Request: Equatable, Sendable {
+        let id: String
+        let question: UserQuestion
+    }
+
+    private let lock = NSLock()
+    private var request: Request?
+    private var continuation: CheckedContinuation<UserAnswer, Never>?
+    var onRequest: (@Sendable (Request) -> Void)?
+    var onResolve: (@Sendable (Request, UserAnswer) -> Void)?
+
+    func ask(_ question: UserQuestion) async -> UserAnswer {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<UserAnswer, Never>) in
+                lock.lock()
+                let req = Request(id: UUID().uuidString, question: question)
+                request = req
+                continuation = cont
+                let notify = onRequest
+                lock.unlock()
+                notify?(req)
+                // `cancelPending()` can race before this task reaches the
+                // continuation body. Re-check after registration so that path
+                // cannot leave a parked continuation behind.
+                if Task.isCancelled { cancelPending() }
+            }
+        } onCancel: {
+            cancelPending()
+        }
+    }
+
+    func pending() -> Request? {
+        lock.lock(); defer { lock.unlock() }
+        return request
+    }
+
+    /// Answer the pending question. A supplied id must match the live request;
+    /// stale answers are rejected without disturbing its continuation.
+    @discardableResult
+    func resolve(id: String?, answer: UserAnswer) -> Bool {
+        lock.lock()
+        guard let cont = continuation, let req = request else { lock.unlock(); return false }
+        if let id, id != req.id { lock.unlock(); return false }
+        continuation = nil
+        request = nil
+        let notify = onResolve
+        lock.unlock()
+        cont.resume(returning: answer)
+        notify?(req, answer)
+        return true
+    }
+
+    func cancelPending() {
+        _ = resolve(
+            id: nil,
+            answer: UserAnswer(text: "", optionIndex: nil, wasFreeText: false, declined: true))
     }
 }
 
@@ -154,10 +239,15 @@ final class RemoteAgentSession: @unchecked Sendable {
     let workspace: URL
     /// Registry model name; nil pins the run to the server's active engine.
     let modelName: String?
+    /// Immutable posture selected when the session was created.
     let mode: PermissionMode
+    /// Authoritative live policy; adaptive keeps `mode` as its origin while this
+    /// box moves between planning and execution.
+    let permissionBox: PermissionBox
     let maxTokens: Int
     let maxIterations: Int
     let approver = RemoteApprover()
+    let asker = RemoteQuestionAsker()
     /// One todo list per session (the tool instance carries the state).
     let todoTool = TodoTool()
 
@@ -183,6 +273,7 @@ final class RemoteAgentSession: @unchecked Sendable {
         self.workspace = workspace
         self.modelName = modelName
         self.mode = mode
+        self.permissionBox = PermissionBox(mode: mode)
         self.maxTokens = maxTokens
         self.maxIterations = maxIterations
         approver.onRequest = { [weak self] req in
@@ -197,6 +288,27 @@ final class RemoteAgentSession: @unchecked Sendable {
             guard let self else { return }
             if self.status == .waiting { self.setStatus(.running) }
             self.emit(["type": "approval_resolved", "id": req.id, "allow": allow])
+        }
+        asker.onRequest = { [weak self] req in
+            guard let self else { return }
+            self.setStatus(.waiting)
+            let q = req.question
+            self.emit([
+                "type": "question_request", "id": req.id,
+                "header": q.header, "question": q.question,
+                "body": q.body, "options": q.options,
+            ])
+        }
+        asker.onResolve = { [weak self] req, answer in
+            guard let self else { return }
+            if self.status == .waiting { self.setStatus(.running) }
+            self.emit([
+                "type": "question_answered", "id": req.id,
+                "text": answer.text,
+                "option_index": answer.optionIndex.map { $0 as Any } ?? NSNull(),
+                "was_free_text": answer.wasFreeText,
+                "declined": answer.declined,
+            ])
         }
     }
 
@@ -215,10 +327,21 @@ final class RemoteAgentSession: @unchecked Sendable {
             "model": modelName ?? "",
             "workspace": workspace.path,
             "permission_mode": mode.rawValue,
+            "effective_permission_mode": permissionBox.effective.rawValue,
+            "permission_phase": permissionBox.isPlanning ? "planning" : "executing",
             "created_at": ISO8601DateFormatter().string(from: createdAt),
             "last_seq": nextSeq - 1,
             "pending_approval": approver.pending().map {
                 ["id": $0.id, "tool": $0.toolName, "args": $0.argumentsJSON]
+            } ?? NSNull(),
+            "pending_question": asker.pending().map {
+                [
+                    "id": $0.id,
+                    "header": $0.question.header,
+                    "question": $0.question.question,
+                    "body": $0.question.body,
+                    "options": $0.question.options,
+                ] as [String: Any]
             } ?? NSNull(),
         ]
     }
@@ -281,6 +404,14 @@ final class RemoteAgentSession: @unchecked Sendable {
                 "type": "tool_result", "name": inv.name,
                 "content": inv.result.content, "is_error": inv.result.isError,
             ])
+        case .permissionChanged(let from, let to):
+            emit([
+                "type": "permission_changed",
+                "from": from.rawValue,
+                "to": to.rawValue,
+                "origin": mode.rawValue,
+                "phase": permissionBox.isPlanning ? "planning" : "executing",
+            ])
         case .finalAnswer(let text):
             emit(["type": "assistant_final", "text": text])
         case .iterationLimitReached:
@@ -311,6 +442,7 @@ final class RemoteAgentSession: @unchecked Sendable {
     /// suspended loop never hangs.
     func cancel() {
         approver.resolve(id: nil, allow: false)
+        asker.cancelPending()
         lock.lock(); let task = runTask; lock.unlock()
         task?.cancel()
     }

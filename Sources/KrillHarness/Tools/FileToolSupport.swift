@@ -32,22 +32,131 @@ enum FileToolSupport {
         return p.hasPrefix(prefix) ? String(p.dropFirst(prefix.count)) : p
     }
 
-    /// Compact before/after summary for an edit (the level of "diff rendering"
-    /// a coding agent needs: what was replaced, not a full file patch).
     /// Number of lines in a string (an empty string is 0 lines).
     static func lineCount(_ s: String) -> Int {
-        s.isEmpty ? 0 : s.split(separator: "\n", omittingEmptySubsequences: false).count
+        lines(in: s).count
+    }
+
+    /// Build line-based unified-diff hunks with true old/new line numbers.
+    /// The complete result is intended for `ToolResult.display`, not the model
+    /// transcript. `CollectionDifference` supplies a stable shortest edit script;
+    /// this pass adds context and merges overlapping hunk ranges.
+    static func unifiedDiff(old: String, new: String, context: Int = 3) -> [ToolDiffHunk] {
+        let oldLines = lines(in: old)
+        let newLines = lines(in: new)
+        let difference = newLines.difference(from: oldLines)
+        let removals = Set(difference.compactMap { change -> Int? in
+            guard case .remove(let offset, _, _) = change else { return nil }
+            return offset
+        })
+        let insertions = Set(difference.compactMap { change -> Int? in
+            guard case .insert(let offset, _, _) = change else { return nil }
+            return offset
+        })
+
+        var allLines: [ToolDiffLine] = []
+        var oldBefore: [Int] = []
+        var newBefore: [Int] = []
+        var oldIndex = 0
+        var newIndex = 0
+        while oldIndex < oldLines.count || newIndex < newLines.count {
+            oldBefore.append(oldIndex)
+            newBefore.append(newIndex)
+            if oldIndex < oldLines.count, removals.contains(oldIndex) {
+                allLines.append(ToolDiffLine(
+                    oldLine: oldIndex + 1, newLine: nil, kind: .deletion,
+                    text: oldLines[oldIndex]))
+                oldIndex += 1
+            } else if newIndex < newLines.count, insertions.contains(newIndex) {
+                allLines.append(ToolDiffLine(
+                    oldLine: nil, newLine: newIndex + 1, kind: .addition,
+                    text: newLines[newIndex]))
+                newIndex += 1
+            } else if oldIndex < oldLines.count, newIndex < newLines.count {
+                allLines.append(ToolDiffLine(
+                    oldLine: oldIndex + 1, newLine: newIndex + 1, kind: .context,
+                    text: oldLines[oldIndex]))
+                oldIndex += 1
+                newIndex += 1
+            } else if oldIndex < oldLines.count {
+                // Defensive fallback for a malformed/incomplete edit script.
+                allLines.append(ToolDiffLine(
+                    oldLine: oldIndex + 1, newLine: nil, kind: .deletion,
+                    text: oldLines[oldIndex]))
+                oldIndex += 1
+            } else {
+                allLines.append(ToolDiffLine(
+                    oldLine: nil, newLine: newIndex + 1, kind: .addition,
+                    text: newLines[newIndex]))
+                newIndex += 1
+            }
+        }
+
+        let changed = allLines.indices.filter { allLines[$0].kind != .context }
+        guard !changed.isEmpty else { return [] }
+        let context = max(0, context)
+        var ranges: [Range<Int>] = []
+        for index in changed {
+            let candidate = max(0, index - context) ..< min(allLines.count, index + context + 1)
+            if let last = ranges.last, candidate.lowerBound <= last.upperBound {
+                ranges[ranges.count - 1] = last.lowerBound ..< max(last.upperBound, candidate.upperBound)
+            } else {
+                ranges.append(candidate)
+            }
+        }
+
+        return ranges.map { range in
+            let hunkLines = Array(allLines[range])
+            let oldCount = hunkLines.reduce(0) { $0 + ($1.oldLine == nil ? 0 : 1) }
+            let newCount = hunkLines.reduce(0) { $0 + ($1.newLine == nil ? 0 : 1) }
+            let oldCursor = oldBefore[range.lowerBound]
+            let newCursor = newBefore[range.lowerBound]
+            return ToolDiffHunk(
+                oldStart: oldCount == 0 ? oldCursor : oldCursor + 1,
+                oldCount: oldCount,
+                newStart: newCount == 0 ? newCursor : newCursor + 1,
+                newCount: newCount,
+                lines: hunkLines)
+        }
     }
 
     /// Compact diffstat for a mutating tool result, e.g. "+5 -2".
     static func diffstat(added: Int, removed: Int) -> String { "+\(added) -\(removed)" }
 
-    static func changeSummary(old: String, new: String, limit: Int = 240) -> String {
-        func clip(_ s: String) -> String {
-            let oneLine = s.replacingOccurrences(of: "\n", with: "\\n")
-            return oneLine.count > limit ? String(oneLine.prefix(limit)) + "..." : oneLine
+    static func diffstat(hunks: [ToolDiffHunk]) -> String {
+        var added = 0
+        var removed = 0
+        for line in hunks.flatMap(\.lines) {
+            if line.kind == .addition { added += 1 }
+            if line.kind == .deletion { removed += 1 }
         }
-        return "- \(clip(old))\n+ \(clip(new))"
+        return diffstat(added: added, removed: removed)
+    }
+
+    /// A bounded preview of the first hunk for model-facing tool content. The
+    /// complete hunks remain available through `ToolResult.display` for the UI.
+    static func compactPreview(
+        hunks: [ToolDiffHunk], maxLines: Int = 8, maxCharacters: Int = 600
+    ) -> String {
+        guard let hunk = hunks.first, maxLines > 0, maxCharacters > 0 else { return "" }
+        var rows = ["@@ -\(hunk.oldStart),\(hunk.oldCount) +\(hunk.newStart),\(hunk.newCount) @@"]
+        for line in hunk.lines.prefix(maxLines) {
+            let marker: String
+            switch line.kind {
+            case .context: marker = " "
+            case .addition: marker = "+"
+            case .deletion: marker = "-"
+            }
+            rows.append(marker + line.text)
+        }
+        if hunk.lines.count > maxLines || hunks.count > 1 { rows.append("...") }
+        let preview = rows.joined(separator: "\n")
+        if preview.count <= maxCharacters { return preview }
+        return String(preview.prefix(maxCharacters)) + "..."
+    }
+
+    private static func lines(in text: String) -> [String] {
+        text.isEmpty ? [] : text.components(separatedBy: "\n")
     }
 
     /// Translate a glob (`*`, `?`, `**`, character classes) into an anchored

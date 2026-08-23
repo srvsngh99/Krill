@@ -74,12 +74,127 @@ final class AgentSessionTests: XCTestCase {
         XCTAssertFalse(approver.resolve(id: nil, allow: true))
     }
 
+    func testRemoteApproverTimesOutToDeny() async {
+        let approver = RemoteApprover(timeout: 0.02)
+        let allowed = await approver.approve(toolName: "bash", argumentsJSON: "{}")
+        XCTAssertFalse(allowed)
+        XCTAssertNil(approver.pending())
+    }
+
+    // MARK: - RemoteQuestionAsker
+
+    private func waitForPending(
+        _ asker: RemoteQuestionAsker, timeout: TimeInterval = 5
+    ) async -> RemoteQuestionAsker.Request? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let req = asker.pending() { return req }
+            await Task.yield()
+        }
+        return asker.pending()
+    }
+
+    func testQuestionParksAndMatchingAnswerResolves() async {
+        let asker = RemoteQuestionAsker()
+        let question = UserQuestion(
+            header: "Database", question: "Which store?", body: "Choose one.",
+            options: ["SQLite", "Postgres"])
+        let task = Task { await asker.ask(question) }
+
+        guard let req = await waitForPending(asker) else {
+            return XCTFail("ask() never parked a question")
+        }
+        XCTAssertEqual(req.question, question)
+        let answer = UserAnswer(text: "Postgres", optionIndex: 1)
+        XCTAssertTrue(asker.resolve(id: req.id, answer: answer))
+        let resolved = await task.value
+        XCTAssertEqual(resolved, answer)
+        XCTAssertNil(asker.pending())
+    }
+
+    func testQuestionStaleIdLeavesPending() async {
+        let asker = RemoteQuestionAsker()
+        let task = Task { await asker.ask(UserQuestion(header: "H", question: "Q")) }
+        guard let req = await waitForPending(asker) else {
+            return XCTFail("ask() never parked a question")
+        }
+
+        XCTAssertFalse(asker.resolve(id: "stale-id", answer: UserAnswer(text: "wrong")))
+        XCTAssertEqual(asker.pending()?.id, req.id)
+        asker.cancelPending()
+        let declined = await task.value
+        XCTAssertTrue(declined.declined)
+    }
+
+    func testQuestionCancelPendingResumesDeclined() async {
+        let asker = RemoteQuestionAsker()
+        let task = Task { await asker.ask(UserQuestion(header: "H", question: "Q")) }
+        _ = await waitForPending(asker)
+        asker.cancelPending()
+
+        let answer = await task.value
+        XCTAssertTrue(answer.declined)
+        XCTAssertNil(asker.pending())
+    }
+
     // MARK: - RemoteAgentSession: event folding
 
     private func makeSession(mode: PermissionMode = .acceptAll) -> RemoteAgentSession {
         RemoteAgentSession(
             id: "test-session", title: "", workspace: FileManager.default.temporaryDirectory,
             modelName: nil, mode: mode, maxTokens: 512, maxIterations: 8)
+    }
+
+    func testSummaryReportsOriginEffectivePosturePhaseAndPendingQuestion() async {
+        let session = makeSession(mode: .adaptive)
+        var summary = session.summary()
+        XCTAssertEqual(summary["permission_mode"] as? String, "adaptive")
+        XCTAssertEqual(summary["effective_permission_mode"] as? String, "plan")
+        XCTAssertEqual(summary["permission_phase"] as? String, "planning")
+
+        XCTAssertTrue(session.permissionBox.promote(to: .acceptEdits))
+        summary = session.summary()
+        XCTAssertEqual(summary["permission_mode"] as? String, "adaptive")
+        XCTAssertEqual(summary["effective_permission_mode"] as? String, "accept-edits")
+        XCTAssertEqual(summary["permission_phase"] as? String, "executing")
+
+        let task = Task {
+            await session.asker.ask(UserQuestion(
+                header: "Choice", question: "Pick one", body: "Context", options: ["A", "B"]))
+        }
+        guard let req = await waitForPending(session.asker) else {
+            return XCTFail("question never became pending")
+        }
+        summary = session.summary()
+        let pending = summary["pending_question"] as? [String: Any]
+        XCTAssertEqual(pending?["id"] as? String, req.id)
+        XCTAssertEqual(pending?["options"] as? [String], ["A", "B"])
+        session.asker.cancelPending()
+        _ = await task.value
+        let questionEvents = session.eventObjects().filter {
+            ($0["type"] as? String)?.hasPrefix("question_") == true
+        }
+        XCTAssertEqual(questionEvents.count, 2)
+        XCTAssertEqual(questionEvents[0]["type"] as? String, "question_request")
+        XCTAssertEqual(questionEvents[1]["type"] as? String, "question_answered")
+        XCTAssertEqual(questionEvents[1]["declined"] as? Bool, true)
+    }
+
+    func testHostedRegistryIncludesInteractiveTools() {
+        let registry = HTTPHandler.agentToolRegistry(for: makeSession(mode: .plan))
+        XCTAssertTrue(registry.names.contains("ask_user"))
+        XCTAssertTrue(registry.names.contains("request_execute"))
+    }
+
+    func testRemoteSystemPromptIncludesQuestionAndAdaptivePlanningDirectives() {
+        let askPrompt = HTTPHandler.agentSystemPrompt(mode: .ask, modelName: nil)
+        XCTAssertTrue(askPrompt.contains(AgentEnvironment.askUserDirective))
+        XCTAssertFalse(askPrompt.contains(AgentEnvironment.planSystemSteer))
+
+        let adaptivePrompt = HTTPHandler.agentSystemPrompt(mode: .adaptive, modelName: nil)
+        XCTAssertTrue(adaptivePrompt.contains(AgentEnvironment.askUserDirective))
+        XCTAssertTrue(adaptivePrompt.contains(AgentEnvironment.planSystemSteer))
+        XCTAssertTrue(adaptivePrompt.contains(AgentEnvironment.adaptivePlanTail))
     }
 
     func testBeginRunEmitsUserThenStatusEvents() {
@@ -131,6 +246,19 @@ final class AgentSessionTests: XCTestCase {
         XCTAssertEqual(events[5]["type"] as? String, "assistant_final")
         XCTAssertEqual(events[5]["text"] as? String, "Done.")
         XCTAssertEqual(events[5]["seq"] as? Int, 6)
+    }
+
+    func testPermissionChangedEmitsDedicatedSSEFrame() {
+        let session = makeSession(mode: .adaptive)
+        XCTAssertTrue(session.permissionBox.promote(to: .acceptEdits))
+        session.push(.permissionChanged(from: .plan, to: .acceptEdits))
+
+        let event = session.eventObjects().last
+        XCTAssertEqual(event?["type"] as? String, "permission_changed")
+        XCTAssertEqual(event?["from"] as? String, "plan")
+        XCTAssertEqual(event?["to"] as? String, "accept-edits")
+        XCTAssertEqual(event?["origin"] as? String, "adaptive")
+        XCTAssertEqual(event?["phase"] as? String, "executing")
     }
 
     func testToolFinishedWithoutPriorToolStartedSynthesizesToolCall() {

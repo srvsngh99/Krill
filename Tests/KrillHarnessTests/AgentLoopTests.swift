@@ -34,10 +34,17 @@ private struct StubTool: Tool {
     let parametersJSON = #"{"type":"object","properties":{"command":{"type":"string"}}}"#
     let reply: String
     let asError: Bool
-    init(name: String = "bash", reply: String = "ok", asError: Bool = false) {
+    let isReadOnly: Bool
+    let isFileEdit: Bool
+    init(
+        name: String = "bash", reply: String = "ok", asError: Bool = false,
+        isReadOnly: Bool = false, isFileEdit: Bool = false
+    ) {
         self.name = name
         self.reply = reply
         self.asError = asError
+        self.isReadOnly = isReadOnly
+        self.isFileEdit = isFileEdit
     }
     func run(argumentsJSON: String) async -> ToolResult {
         ToolResult(content: reply, isError: asError)
@@ -46,6 +53,24 @@ private struct StubTool: Tool {
 
 private func hermesCall(_ name: String, _ argsJSON: String) -> String {
     "<tool_call>{\"name\": \"\(name)\", \"arguments\": \(argsJSON)}</tool_call>"
+}
+
+private final class LoopQuestionGate: UserQuestionGate, @unchecked Sendable {
+    private let lock = NSLock()
+    private let answers: [UserAnswer]
+    private var index = 0
+    private(set) var count = 0
+
+    init(_ answers: [UserAnswer]) { self.answers = answers }
+    func ask(_ question: UserQuestion) async -> UserAnswer { next() }
+    private func next() -> UserAnswer {
+        lock.lock(); defer { lock.unlock() }
+        count += 1
+        guard index < answers.count else { return .declinedAnswer }
+        defer { index += 1 }
+        return answers[index]
+    }
+    func cancelPending() {}
 }
 
 /// Generator that records whether the grammar-constrained repair pass fired and
@@ -82,7 +107,33 @@ private struct RequiredArgTool: Tool {
     func run(argumentsJSON: String) async -> ToolResult { ToolResult(content: "ARGS=\(argumentsJSON)") }
 }
 
+/// Pins dynamic dispatch of the tool-name constrained overload through the
+/// `any HarnessGenerator` existential stored by AgentLoop.
+private actor ToolNameDispatchGenerator: HarnessGenerator {
+    nonisolated let toolFormat: ToolCalling.ToolFormat = .hermes
+    private var constrainedCalls = 0
+
+    func complete(messages: [[String: String]]) async -> String { "wrong overload" }
+    func complete(
+        messages: [[String: String]], constrainingToolNames toolNames: [String]
+    ) async -> String {
+        constrainedCalls += 1
+        return "done"
+    }
+    func calls() -> Int { constrainedCalls }
+}
+
 final class AgentLoopTests: XCTestCase {
+
+    func testToolNameConstraintDynamicallyDispatchesThroughExistential() async {
+        let generator = ToolNameDispatchGenerator()
+        let loop = AgentLoop(
+            generator: generator,
+            tools: ToolRegistry([StubTool(name: "read_file", isReadOnly: true)]))
+        _ = await loop.run(user: "go")
+        let calls = await generator.calls()
+        XCTAssertEqual(calls, 1, "the engine-backed constrained overload must not be bypassed")
+    }
 
     func testNoToolCallReturnsFinalAnswerDirectly() async {
         let gen = MockGenerator(responses: ["The answer is 4."])
@@ -330,6 +381,84 @@ final class AgentLoopTests: XCTestCase {
         // Exactly one tool system turn (not re-injected on continuation).
         let systemTurns = t2.messages.filter { $0["role"] == "system" }.count
         XCTAssertLessThanOrEqual(systemTurns, 1, "tool system turn must not be duplicated")
+    }
+
+    func testPermissionBoxIsRereadAfterApprovedPromotionInSameTurn() async {
+        let box = PermissionBox(mode: .plan, deny: ["bash"])
+        let gate = LoopQuestionGate([UserAnswer(optionIndex: 0)])
+        let calls = hermesCall("request_execute", #"{"summary":"Write it"}"#)
+            + hermesCall("write_file", #"{"command":"content"}"#)
+        let loop = AgentLoop(
+            generator: MockGenerator(responses: [calls, "done"]),
+            tools: ToolRegistry([
+                RequestExecuteTool(box: box, gate: gate),
+                StubTool(name: "write_file", reply: "WROTE", isFileEdit: true),
+            ]),
+            permission: PermissionPolicy(mode: .plan, deny: ["bash"]),
+            permissionBox: box)
+        let transcript = await loop.run(user: "go")
+        XCTAssertEqual(transcript.steps[0].toolCalls[1].result.content, "WROTE")
+        XCTAssertFalse(transcript.steps[0].toolCalls[1].result.content.contains("Permission denied"))
+        XCTAssertTrue(box.policy.deny.contains("bash"))
+    }
+
+    func testDeclinedPromotionKeepsLaterSameTurnEditDenied() async {
+        let box = PermissionBox(mode: .plan)
+        let gate = LoopQuestionGate([UserAnswer(optionIndex: 2)])
+        let calls = hermesCall("request_execute", #"{"summary":"Write it"}"#)
+            + hermesCall("write_file", #"{"command":"content"}"#)
+        let loop = AgentLoop(
+            generator: MockGenerator(responses: [calls, "done"]),
+            tools: ToolRegistry([
+                RequestExecuteTool(box: box, gate: gate),
+                StubTool(name: "write_file", reply: "WROTE", isFileEdit: true),
+            ]),
+            permission: PermissionPolicy(mode: .plan),
+            permissionBox: box)
+        let transcript = await loop.run(user: "go")
+        XCTAssertTrue(transcript.steps[0].toolCalls[1].result.content.contains("Permission denied"))
+        XCTAssertEqual(box.effective, .plan)
+    }
+
+    func testAdaptiveDeniedThenPromotesThenAllowsEdit() async {
+        let box = PermissionBox(mode: .adaptive)
+        let gate = LoopQuestionGate([])
+        let generator = MockGenerator(responses: [
+            hermesCall("write_file", #"{"command":"first"}"#),
+            hermesCall("request_execute", #"{"summary":"Ready"}"#),
+            hermesCall("write_file", #"{"command":"second"}"#),
+            "done",
+        ])
+        let loop = AgentLoop(
+            generator: generator,
+            tools: ToolRegistry([
+                RequestExecuteTool(box: box, gate: gate),
+                StubTool(name: "write_file", reply: "WROTE", isFileEdit: true),
+            ]),
+            permission: PermissionPolicy(mode: .plan),
+            permissionBox: box)
+        let transcript = await loop.run(user: "go")
+        XCTAssertTrue(transcript.steps[0].toolCalls[0].result.content.contains("request_execute"))
+        XCTAssertEqual(transcript.steps[2].toolCalls[0].result.content, "WROTE")
+        XCTAssertEqual(gate.count, 0)
+    }
+
+    func testAskUserAnswerReachesTranscriptAndLoopContinues() async {
+        let gate = LoopQuestionGate([UserAnswer(text: "SQLite", optionIndex: 0)])
+        let loop = AgentLoop(
+            generator: MockGenerator(responses: [
+                hermesCall("ask_user", #"{"question":"Which store?","options":["SQLite"]}"#),
+                "I used SQLite.",
+            ]),
+            tools: ToolRegistry([AskUserTool(gate: gate)]),
+            permission: PermissionPolicy(mode: .plan))
+        let transcript = await loop.run(user: "choose")
+        XCTAssertEqual(transcript.finalText, "I used SQLite.")
+        XCTAssertTrue(transcript.messages.contains {
+            $0["role"] == "user"
+                && ($0["content"] ?? "").contains("Tool result (ask_user):")
+                && ($0["content"] ?? "").contains("SQLite")
+        })
     }
 
     func testRegistrySpecsPreserveOrderAndDedupe() {
