@@ -21,6 +21,7 @@ struct Krill: AsyncParsableCommand {
             PullCommand.self,
             ServeCommand.self,
             LaunchCommand.self,
+            UICommand.self,
             ListCommand.self,
             CatalogCommand.self,
             RemoveCommand.self,

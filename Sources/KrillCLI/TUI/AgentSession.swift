@@ -13,27 +13,53 @@ final class AgentSession {
     var title: String
     private(set) var status: Status = .idle
     private(set) var entries: [AgentEntry] = []
-    let permissions: PermissionMode
+    let permissionBox: PermissionBox
+    private(set) var permissions: PermissionMode
     let approver = TUIApprover()
+    let asker = TUIQuestionAsker()
+    let todoTool = TodoTool()
 
     private let engine: InferenceEngine
     private let maxTokens: Int
-    private let tools: ToolRegistry
+    private var tools: ToolRegistry?
     private var messages: [[String: String]] = []   // priorMessages seam, carried across turns
 
     private let queue = EventQueue()
     private var runTask: Task<AgentTranscript, Never>?
     private var chipShown = false
     private(set) var startedAt = CFAbsoluteTimeGetCurrent()
+    private(set) var lastStats: GenerationStats?
+
+    private final class StatsBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: GenerationStats?
+        func put(_ stats: GenerationStats) { lock.lock(); value = stats; lock.unlock() }
+        func take() -> GenerationStats? {
+            lock.lock(); defer { lock.unlock() }
+            let result = value; value = nil; return result
+        }
+    }
+    private let statsBox = StatsBox()
 
     init(id: Int, title: String, engine: InferenceEngine, maxTokens: Int,
-         permissions: PermissionMode, tools: ToolRegistry) {
+         permissions: PermissionMode, effectivePolicy: PermissionPolicy? = nil) {
         self.id = id
         self.title = title
         self.engine = engine
         self.maxTokens = maxTokens
         self.permissions = permissions
-        self.tools = tools
+        self.permissionBox = PermissionBox(
+            origin: permissions,
+            policy: effectivePolicy ?? PermissionPolicy(mode: permissions.initialEffective))
+    }
+
+    /// Session-owned tools must be assembled after the session so its asker,
+    /// permission box, and todo instance cannot leak into another agent.
+    func configureTools(_ tools: ToolRegistry) { self.tools = tools }
+
+    func cyclePermissions() {
+        permissions = permissions.next
+        permissionBox.setPolicy(mode: permissions)
     }
 
     var isRunning: Bool { status == .running || status == .waiting }
@@ -42,20 +68,33 @@ final class AgentSession {
     /// Start (or continue) the session on `task`. Continuation reuses the prior
     /// transcript via the loop's `priorMessages` seam.
     func start(task: String) {
+        guard let tools else {
+            entries.append(.note("Agent tools were not configured."))
+            status = .cancelled
+            return
+        }
         entries.append(.user(task))
         status = .running
         chipShown = false
         startedAt = CFAbsoluteTimeGetCurrent()
 
-        let steered = permissions == .plan
-            ? "(Plan mode: read-only. Investigate with the read-only tools and propose a clear, "
-              + "step-by-step plan. Do not edit files or run commands.)\n\n\(task)"
-            : task
+        var turnDirectives: [String] = messages.isEmpty
+            ? [AgentEnvironment.askUserDirective] : []
+        if permissionBox.isPlanning {
+            turnDirectives.append(AgentEnvironment.planTurnPrefix)
+            if permissions == .adaptive {
+                turnDirectives.append(AgentEnvironment.adaptivePlanTail)
+            }
+        }
+        let steered = (turnDirectives + [task]).joined(separator: "\n\n")
 
+        var generator = EngineGenerator(engine: engine, maxTokens: maxTokens)
+        generator.onStats = { [statsBox] in statsBox.put($0) }
         let loop = AgentLoop(
-            generator: EngineGenerator(engine: engine, maxTokens: maxTokens),
+            generator: generator,
             tools: tools,
-            permission: PermissionPolicy(mode: permissions),
+            permission: permissionBox.policy,
+            permissionBox: permissionBox,
             gate: approver)
         // Capture only locals (loop/queue/strings) so the run closure stays
         // Sendable - no `self` capture. The transcript is stashed in the queue.
@@ -73,12 +112,13 @@ final class AgentSession {
     @discardableResult
     func pump() -> Bool {
         var changed = false
+        if let stats = statsBox.take() { lastStats = stats; changed = true }
         for ev in queue.drain() {
             foldAgentEvent(ev, into: &entries, chipShown: &chipShown)
             changed = true
         }
         if isRunning {
-            let next: Status = approver.pending() != nil ? .waiting : .running
+            let next: Status = (asker.pending() != nil || approver.pending() != nil) ? .waiting : .running
             if next != status { status = next; changed = true }
         }
         if queue.isFinished, runTask != nil, let t = queue.finishedResult {
@@ -93,6 +133,7 @@ final class AgentSession {
     /// Cancel the run (Ctrl-C / quit). Also resolves any pending approval so the
     /// suspended loop never hangs.
     func cancel() {
+        asker.cancelPending()
         approver.resolve(false)
         runTask?.cancel()
     }
@@ -101,7 +142,7 @@ final class AgentSession {
     func statusLabel() -> String {
         switch status {
         case .running: return "running \(ChatTUI.formatElapsed(elapsed))"
-        case .waiting: return "needs approval"
+        case .waiting: return asker.pending() != nil ? "needs answer" : "needs approval"
         case .idle: return "done"
         case .cancelled: return "cancelled"
         }

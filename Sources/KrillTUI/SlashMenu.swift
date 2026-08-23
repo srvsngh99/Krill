@@ -44,6 +44,7 @@ public struct SlashMenu {
         Item(name: "/diff", summary: "Show pending working-tree changes (git diff)"),
         Item(name: "/status", summary: "Show version, model, cwd, posture, context"),
         Item(name: "/context", summary: "Show context-window usage breakdown"),
+        Item(name: "/sidebar", summary: "Toggle the wide-screen task/context sidebar"),
         Item(name: "/copy", summary: "Copy the last reply to the clipboard"),
         Item(name: "/cd", summary: "Change the working directory"),
         Item(name: "/add-dir", summary: "Add a directory the agent can work in"),

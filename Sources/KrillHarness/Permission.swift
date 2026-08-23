@@ -3,7 +3,7 @@ import Foundation
 /// How the agent loop treats tools that can change the world (write files, run
 /// shell commands). Read-only tools (read_file, grep, list_dir, glob) are always
 /// allowed regardless of mode - they cannot damage anything.
-public enum PermissionMode: String, Sendable, CaseIterable {
+public enum PermissionMode: String, Sendable, CaseIterable, Hashable {
     /// Run every tool without asking. The autonomous default - the proven
     /// hands-off flow the loop shipped with.
     case acceptAll = "accept-all"
@@ -19,6 +19,9 @@ public enum PermissionMode: String, Sendable, CaseIterable {
     /// Read-only: the agent may explore (read_file/grep/glob/list_dir) but every
     /// mutating tool is denied, so it can only investigate and propose a plan.
     case plan
+    /// Starts read-only, then lets `request_execute` self-promote to the guarded
+    /// execution posture. Adaptive controls when to build, not command safety.
+    case adaptive
 }
 
 public extension PermissionMode {
@@ -31,7 +34,8 @@ public extension PermissionMode {
         case "accept-edits", "acceptedits", "edits", "accept_edits": return .acceptEdits
         case "ask", "confirm": return .ask
         case "plan", "read-only", "readonly": return .plan
-        default: return PermissionMode(rawValue: s)
+        case "adaptive", "self", "pilot": return .adaptive
+        default: return PermissionMode(rawValue: s.lowercased().trimmingCharacters(in: .whitespaces))
         }
     }
 
@@ -47,7 +51,13 @@ public extension PermissionMode {
     }
 
     /// Order Shift+Tab cycles the posture through in the TUI: safest -> freest.
-    static let cycleOrder: [PermissionMode] = [.plan, .ask, .acceptEdits, .acceptAll]
+    static let cycleOrder: [PermissionMode] = [.plan, .adaptive, .ask, .acceptEdits, .acceptAll]
+
+    /// The effective posture a run starts in. Adaptive begins read-only.
+    var initialEffective: PermissionMode { self == .adaptive ? .plan : self }
+
+    /// The maximum posture a model-facing promotion may grant.
+    static let executePosture: PermissionMode = .acceptEdits
 
     /// The next posture when the user presses Shift+Tab (wraps).
     var next: PermissionMode {
@@ -63,6 +73,7 @@ public extension PermissionMode {
         case .acceptEdits: return "accept-edits"
         case .ask: return "ask"
         case .plan: return "plan"
+        case .adaptive: return "adaptive"
         }
     }
 
@@ -74,6 +85,7 @@ public extension PermissionMode {
         case .ask: return "ask - confirm every file edit and command before it runs"
         case .acceptEdits: return "accept-edits - file edits apply automatically; commands still ask"
         case .acceptAll: return "auto - every tool runs without asking"
+        case .adaptive: return "adaptive - starts read-only; the agent may switch to edits while commands still ask"
         }
     }
 }
@@ -135,10 +147,10 @@ public struct PermissionPolicy: Sendable {
             return isFileEdit ? .allow : .ask
         case .ask:
             return .ask
-        case .plan:
+        case .plan, .adaptive:
             return .deny(reason:
-                "plan mode is read-only; '\(toolName)' would change files or run commands. "
-                + "Do not call it - investigate with the read-only tools and present a plan instead.")
+                "planning is read-only; '\(toolName)' would change files or run commands. "
+                + "Investigate with read-only tools, then call request_execute before implementing.")
         }
     }
 }

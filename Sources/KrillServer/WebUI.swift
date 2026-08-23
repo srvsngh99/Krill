@@ -260,8 +260,14 @@ input, textarea, select { font: inherit; color: var(--ink); letter-spacing: inhe
 .abtn.deny { color: var(--err); border-color: var(--err); }
 .abtn.once { background: var(--ink); color: var(--paper); border-color: var(--ink); }
 .approval.resolved { opacity: .5; }
-.approval.resolved .row { display: none; }
+.approval.resolved .row, .approval.resolved .qfree, .approval.resolved .skip { display: none; }
 .approval .verdict { font-family: var(--mono); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+.question .row { flex-direction: column; }
+.question .abtn { width: 100%; text-align: left; padding: 10px 12px; text-transform: none; letter-spacing: 0; }
+.question .qfree { display: flex; gap: 8px; margin-top: 9px; }
+.question .qfree input { flex: 1; min-width: 0; border: 1.5px solid var(--line); border-radius: 4px; padding: 9px 10px; background: var(--paper); }
+.question .qfree button { flex: none; padding-left: 12px; padding-right: 12px; }
+.question .skip { margin-top: 8px; text-align: center; color: var(--mut); }
 
 .working { display: none; align-items: center; gap: 8px; color: var(--mut); font-family: var(--mono);
   font-size: 11.5px; text-transform: uppercase; letter-spacing: .1em; padding: 2px 4px; align-self: flex-start; }
@@ -308,6 +314,7 @@ input, textarea, select { font: inherit; color: var(--ink); letter-spacing: inhe
 }
 .seg button:last-child { border-right: 0; }
 .seg button.on { background: var(--ink); color: var(--paper); }
+@media (max-width: 420px) { .seg button { font-size: 9px; letter-spacing: .02em; } }
 .select, .field {
   width: 100%; background: var(--paper); border: 1.5px solid var(--line); border-radius: 4px;
   padding: 10px 12px; outline: none; appearance: none; -webkit-appearance: none; font-size: 15px;
@@ -456,6 +463,7 @@ input, textarea, select { font: inherit; color: var(--ink); letter-spacing: inhe
     <div class="lbl">// permissions</div>
     <div class="seg" id="new-mode">
       <button data-v="plan">Plan</button>
+      <button data-v="adaptive">Adaptive</button>
       <button data-v="ask" class="on">Ask</button>
       <button data-v="accept-edits">Edits</button>
       <button data-v="accept-all">Auto</button>
@@ -719,6 +727,60 @@ function resolveApproval(ev) {
   d.querySelector(".verdict").textContent = ev.allow ? "allowed" : "denied";
   d.querySelector(".verdict").style.color = ev.allow ? "var(--ok)" : "var(--err)";
 }
+function addQuestion(ev) {
+  if (document.querySelector('.question[data-qid="' + CSS.escape(ev.id) + '"]')) return;
+  const d = document.createElement("div");
+  d.className = "approval question"; d.dataset.qid = ev.id;
+  const options = Array.isArray(ev.options) ? ev.options : [];
+  d.innerHTML =
+    '<div class="lbl">// ' + esc(ev.header || "question") + "</div>" +
+    '<div class="q">' + esc(ev.question || "") + "</div>" +
+    (ev.body ? "<pre>" + esc(ev.body) + "</pre>" : "") +
+    '<div class="row"></div>' +
+    '<div class="qfree"><input type="text" placeholder="Type another answer…" aria-label="Free-text answer">' +
+    '<button class="abtn once">Send</button></div>' +
+    '<button class="abtn skip">Skip</button><div class="verdict"></div>';
+  const answer = async (text, optionIndex, wasFreeText, declined) => {
+    try {
+      await api("POST", "/v1/agent/sessions/" + cur.id + "/questions", {
+        id: ev.id, text, option_index: optionIndex, was_free_text: wasFreeText, declined,
+      });
+    } catch (e) { toast(e.message); }
+  };
+  const row = d.querySelector(".row");
+  options.forEach((option, index) => {
+    const b = document.createElement("button");
+    b.className = "abtn"; b.textContent = (index + 1) + ". " + option;
+    b.onclick = () => answer(option, index, false, false);
+    row.appendChild(b);
+  });
+  const input = d.querySelector(".qfree input");
+  const sendFree = () => { const text = input.value.trim(); if (text) answer(text, null, true, false); };
+  d.querySelector(".qfree button").onclick = sendFree;
+  input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); sendFree(); } };
+  d.querySelector(".skip").onclick = () => answer("", null, false, true);
+  $("transcript").appendChild(d);
+}
+function resolveQuestion(ev) {
+  const d = document.querySelector('.question[data-qid="' + CSS.escape(ev.id) + '"]');
+  if (!d) return;
+  d.classList.add("resolved");
+  const verdict = d.querySelector(".verdict");
+  verdict.textContent = ev.declined ? "skipped" : (ev.text ? "answered: " + ev.text : "answered");
+  verdict.style.color = ev.declined ? "var(--mut)" : "var(--ok)";
+}
+function sessionSubtitle(meta) {
+  const effective = meta.effective_permission_mode || meta.permission_mode;
+  const posture = meta.permission_mode === "adaptive" && meta.permission_phase
+    ? "adaptive (" + meta.permission_phase + ")" : effective;
+  return baseName(meta.workspace) + " · " + posture + (meta.model ? " · " + meta.model : "");
+}
+function applyPermissionChanged(ev) {
+  if (!cur) return;
+  cur.meta.effective_permission_mode = ev.to;
+  cur.meta.permission_phase = ev.phase || (ev.to === "plan" ? "planning" : "executing");
+  $("s-sub").textContent = sessionSubtitle(cur.meta);
+}
 function setSessionStatus(status) {
   if (!cur) return;
   cur.meta.status = status;
@@ -739,6 +801,9 @@ function applyEvent(ev) {
     case "status": setSessionStatus(ev.status); break;
     case "approval_request": addApproval(ev); break;
     case "approval_resolved": resolveApproval(ev); break;
+    case "question_request": addQuestion(ev); break;
+    case "question_answered": resolveQuestion(ev); break;
+    case "permission_changed": applyPermissionChanged(ev); break;
   }
 }
 
@@ -796,12 +861,12 @@ async function openSession(id) {
   cur = { id, meta: detail, lastSeq: 0, tools: new Map(), aborter: null };
   $("transcript").innerHTML = "";
   $("s-title").textContent = detail.title || "New session";
-  $("s-sub").textContent = baseName(detail.workspace) + " · " + detail.permission_mode
-    + (detail.model ? " · " + detail.model : "");
+  $("s-sub").textContent = sessionSubtitle(detail);
   for (const ev of detail.events || []) {
     if (typeof ev.seq === "number") cur.lastSeq = Math.max(cur.lastSeq, ev.seq);
     applyEvent(ev);
   }
+  if (detail.pending_question) addQuestion({ type: "question_request", ...detail.pending_question });
   setSessionStatus(detail.status);
   show("session");
   toBottom();
@@ -964,6 +1029,18 @@ document.addEventListener("visibilitychange", () => {
     setTimeout(() => { if (cur && cur.id === id) tail(id); }, 50);
   }
 });
+/* `krill ui` prints a phone link carrying the key in the fragment (#k=…):
+   adopt it once, persist it, and scrub it from the address bar. Fragments
+   never leave the browser, so the link itself does not send the key. */
+(function adoptLinkKey() {
+  const m = /(?:^#|[#&])k=([^&]+)/.exec(location.hash || "");
+  if (!m) return;
+  let key = m[1];
+  try { key = decodeURIComponent(key); } catch {}
+  cfg = { server: location.origin, key };
+  store.save(cfg);
+  history.replaceState(null, "", location.pathname + location.search);
+})();
 boot();
 </script>
 </body>

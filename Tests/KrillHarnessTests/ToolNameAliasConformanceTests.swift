@@ -2,6 +2,11 @@ import XCTest
 @testable import KrillHarness
 @testable import KrillTooling
 
+private struct AliasQuestionGate: UserQuestionGate {
+    func ask(_ question: UserQuestion) async -> UserAnswer { .declinedAnswer }
+    func cancelPending() {}
+}
+
 /// The alias table in `ToolCalling` maps another harness's tool vocabulary
 /// (Claude Code's `Read` / `Edit` / `Bash`) onto this one's names. Its keys are
 /// external and may be anything, but every VALUE has to be a tool this harness
@@ -24,6 +29,8 @@ final class ToolNameAliasConformanceTests: XCTestCase {
             WebFetchTool(), WebSearchTool(),
             EditTool(), MultiEditTool(), WriteTool(),
             BashTool(), DispatchTool(queue: SpawnQueue()),
+            AskUserTool(gate: AliasQuestionGate()),
+            RequestExecuteTool(box: PermissionBox(mode: .plan), gate: AliasQuestionGate()),
         ]
         return Set(ToolRegistry(tools).names)
     }

@@ -9,7 +9,33 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
-_Nothing yet._
+### Added
+
+- **Interactive agent questions and adaptive execution.** Agents can use
+  `ask_user` to clarify work in every permission posture and `request_execute`
+  to ask before leaving read-only plan mode. The new `adaptive` posture starts
+  read-only and may self-promote to automatic file edits, while shell commands
+  still require approval; the agent can never promote itself to `accept-all`.
+  Questions and permission changes are supported in the full-screen TUI,
+  classic `krill code`, remote sessions, and the phone/web UI.
+- **Live agent UI improvements.** Agent sessions expose per-session task
+  progress and measured context usage, and file-edit tools provide rich unified
+  diffs to UI surfaces without adding the full patch to model context.
+- Configuration remains fail-closed across versions: an older Krill reading
+  `default_agent_permissions = "adaptive"` cannot parse it and therefore falls
+  back to `plan`; existing `auto` values continue to mean `accept-all`.
+- **`krill ui`** — the one-command path to the phone app. Starts `krill serve`
+  in the background bound on `0.0.0.0` (detached under `nohup`, so it outlives
+  the terminal), generates an API key on first run and saves it to
+  `~/.krill/config.toml` as `server_api_key`, pre-loads the default model,
+  prints the LAN and Tailscale links plus a **phone link** that carries the key
+  in the URL fragment (the web app adopts it and scrubs the address bar, so
+  the phone never types the key), and opens the UI in the Mac's browser. A
+  server already running on the port is reused (with a warning if it is
+  loopback-only). `--install` / `--uninstall` register or remove a launchd
+  login item (starts at login, restarts on exit, logs in `~/.krill/ui/`);
+  `--stop` ends the detached server; `--status` reprints the links;
+  `--foreground` runs it in the terminal instead.
 
 ## [0.21.0] - 2026-08-22
 

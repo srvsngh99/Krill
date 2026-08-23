@@ -122,6 +122,19 @@ final class LayoutWrapTests: XCTestCase {
     func testShortLineUnchanged() {
         XCTAssertEqual(Layout.wrap("hello", width: 80), ["hello"])
     }
+
+    func testANSIVisibleWidthClipAndJoin() {
+        let red = "\u{1B}[31mhello\u{1B}[0m"
+        XCTAssertEqual(Layout.visibleWidth(red), 5)
+        XCTAssertEqual(Layout.visibleWidth(Layout.clip(red, width: 3)), 3)
+        let joined = Layout.join(left: red, right: "SIDE", width: 8)
+        XCTAssertEqual(Layout.visibleWidth(joined), 8)
+        XCTAssertTrue(joined.hasSuffix("SIDE"))
+    }
+
+    func testPositionedSupportsColumn() {
+        XCTAssertEqual(Layout.positioned("x", row: 3, col: 7), "\u{1B}[3;7Hx")
+    }
 }
 
 final class SlashMenuTests: XCTestCase {

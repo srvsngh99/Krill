@@ -25,6 +25,13 @@ public protocol HarnessGenerator: Sendable {
     /// falls back to unconstrained generation for backends that cannot
     /// constrain (e.g. the test mock unless it overrides this).
     func completeConstrained(messages: [[String: String]], jsonSchema: String) async -> String
+
+    /// Free-form generation with the tool-name slot constrained to offered names.
+    /// This must be a protocol requirement so calls through `any HarnessGenerator`
+    /// dynamically dispatch to engine-backed implementations.
+    func complete(
+        messages: [[String: String]], constrainingToolNames toolNames: [String]
+    ) async -> String
 }
 
 extension HarnessGenerator {

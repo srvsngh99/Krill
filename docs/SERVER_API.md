@@ -59,9 +59,13 @@ parity with `make parity-gate`.
 ## Agent Sessions & Web UI
 
 `krill serve` also hosts **agent sessions** (the `krill code` loop, drivable
-over HTTP + SSE with remote tool approvals) and serves the embedded phone/web
-app at **`/ui`**. See [`AGENT_UI.md`](AGENT_UI.md) for the routes, the event
-stream, and phone setup.
+over HTTP + SSE with remote tool approvals and model-initiated questions) and
+serves the embedded phone/web app at **`/ui`**. In addition to the approval
+route, `POST /v1/agent/sessions/{id}/questions` answers a pending `ask_user` or
+`request_execute` prompt; the event stream reports `question_request`,
+`question_answered`, and `permission_changed`. See
+[`AGENT_UI.md`](AGENT_UI.md) for the complete routes, payloads, stream, and phone
+setup.
 
 ## OpenAI-Compatible Endpoints
 

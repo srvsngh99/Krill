@@ -74,6 +74,9 @@ public enum AgentEvent: Sendable, Equatable {
     /// A tool call resolved: it ran, was denied by the permission gate, or named
     /// an unknown tool (distinguish via `invocation.result.isError`).
     case toolFinished(ToolInvocation)
+    /// A tool already changed the authoritative live permission box. This event
+    /// is observability only; consumers must not treat it as the write mechanism.
+    case permissionChanged(from: PermissionMode, to: PermissionMode)
     /// The loop ended with a final answer (a turn with no tool calls). This is
     /// the only event that carries the terminal turn's text.
     case finalAnswer(String)
@@ -108,6 +111,9 @@ public struct AgentLoop: Sendable {
     /// (`.acceptAll`) runs every tool, preserving the autonomous flow the loop
     /// shipped with; `.plan` denies mutating tools, `.ask` defers them to `gate`.
     public let permission: PermissionPolicy
+    /// Optional authoritative live policy. When present it is re-read for every
+    /// call, including later calls emitted in the same model turn.
+    public let permissionBox: PermissionBox?
     /// Interactive approver for `.ask` decisions. When the policy returns `.ask`
     /// and this is nil, the call is denied (fail-safe: no silent execution).
     public let gate: (any PermissionGate)?
@@ -118,6 +124,7 @@ public struct AgentLoop: Sendable {
         maxIterations: Int = 12,
         constrainToolArgs: Bool = true,
         permission: PermissionPolicy = PermissionPolicy(),
+        permissionBox: PermissionBox? = nil,
         gate: (any PermissionGate)? = nil
     ) {
         self.generator = generator
@@ -125,6 +132,7 @@ public struct AgentLoop: Sendable {
         self.maxIterations = max(1, maxIterations)
         self.constrainToolArgs = constrainToolArgs
         self.permission = permission
+        self.permissionBox = permissionBox
         self.gate = gate
     }
 
@@ -218,8 +226,16 @@ public struct AgentLoop: Sendable {
             // - a model re-emitting them is looping, not progressing. If a whole
             // turn is repeats, or the total budget is spent, stop and take the
             // visible text as the final answer instead of generating forever.
+            //
+            // The signature is scoped to the CURRENT posture: a call denied under
+            // `.plan` and the same call retried after `request_execute` promoted
+            // the run are different attempts, not a loop. Without this the first
+            // denial poisons the cache, the post-promotion retry is silently
+            // dropped, and the turn ends having changed nothing.
+            let posture = permissionBox?.effective ?? permission.mode
             var freshCalls: [ToolCalling.ParsedToolCall] = []
-            for call in calls where executedSignatures.insert(toolSignature(call)).inserted {
+            for call in calls
+            where executedSignatures.insert(toolSignature(call, posture: posture)).inserted {
                 freshCalls.append(call)
             }
             let remaining = maxToolCalls - executedToolCalls
@@ -245,6 +261,7 @@ public struct AgentLoop: Sendable {
                 // permission gate, the observation fed back, and the emitted event
                 // all agree on the tool that actually ran.
                 let call = await resolvedCall(rawCall, offered: tools.names, history: messages)
+                let effectiveBeforeCall = permissionBox?.effective ?? permission.mode
                 // Feed `result` back as the observation, record the invocation,
                 // and emit it, whether the tool ran, was denied, or was unknown.
                 func record(args: String, _ result: ToolResult) {
@@ -256,6 +273,9 @@ public struct AgentLoop: Sendable {
                         "content": "Tool result (\(call.name)):\n\(result.content)",
                     ])
                     onEvent?(.toolFinished(invocation))
+                    if case .permissionMode(let mode)? = result.effect {
+                        onEvent?(.permissionChanged(from: effectiveBeforeCall, to: mode))
+                    }
                 }
 
                 guard let tool = tools.tool(named: call.name), let spec = tools.spec(named: call.name) else {
@@ -269,7 +289,7 @@ public struct AgentLoop: Sendable {
                 // Permission gate: decide BEFORE repairing/running so a denied
                 // tool costs no extra generation. A denial is fed back so the
                 // model can adapt (e.g. switch to read-only investigation).
-                let decision = permission.decision(
+                let decision = (permissionBox?.policy ?? permission).decision(
                     toolName: call.name, isReadOnly: tool.isReadOnly, isFileEdit: tool.isFileEdit)
                 if case .deny(let reason) = decision {
                     record(args: call.argumentsJSON,
@@ -306,8 +326,10 @@ public struct AgentLoop: Sendable {
 
     /// Stable identity for a parsed call: name + raw arguments. Two calls with
     /// the same signature are treated as the same action for the runaway guard.
-    private func toolSignature(_ call: ToolCalling.ParsedToolCall) -> String {
-        call.name + "\u{1}" + call.argumentsJSON
+    private func toolSignature(
+        _ call: ToolCalling.ParsedToolCall, posture: PermissionMode
+    ) -> String {
+        posture.rawValue + "\u{1}" + call.name + "\u{1}" + call.argumentsJSON
     }
 
     /// Strip ALL reasoning blocks from text bound for the display surface.

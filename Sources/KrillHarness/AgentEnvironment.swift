@@ -5,15 +5,73 @@ import Foundation
 /// compact line, prepended to the agent's system prompt by each surface —
 /// local models otherwise burn a whole thinking budget guessing the date.
 public enum AgentEnvironment {
-    /// Mirror of `ToolCalling.agenticToolDirective`: surfaces that synthesize a
-    /// system turn (which suppresses the tooling layer's own fallback
-    /// directive) append this so over-calling families still get the nudge.
+    /// Deliberately differs from `ToolCalling.agenticToolDirective`: surfaces
+    /// that synthesize their own system turn suppress the tooling fallback, so
+    /// this version also carries Krill's training-cutoff/web-search guidance.
     public static let toolDirective =
         "Use tools only when needed. Once you have the tool results, "
-        + "reply with the final answer and do not call any more tools. "
+        + "reply with the final answer and do not call any more tools - except that an ask_user "
+        + "answer, or a granted request_execute, means you keep working instead of stopping. "
         + "Your training data has a cutoff: for facts that change over time "
         + "(office-holders, prices, versions, news), verify with web_search "
         + "instead of answering from memory."
+
+    /// Planning variant. `toolDirective`'s "stop once you have the tool results"
+    /// is simply WRONG while planning, where the turn's correct terminal action
+    /// is a `request_execute` CALL rather than prose - and because the directive
+    /// is appended last, recency made the model obey it over the plan steer.
+    /// Observed repeatedly on gemma-4-12b-agentic: it narrated "I'll ask for
+    /// permission to implement the edit" and ended the turn, changing nothing.
+    public static let planningToolDirective =
+        "Use tools only when needed. You are PLANNING: your turn ends by calling request_execute, "
+        + "not by replying with prose. Do not stop after the read-only tools return, and do not "
+        + "merely say you are about to request permission - emit the request_execute call itself. "
+        + "Your training data has a cutoff: for facts that change over time "
+        + "(office-holders, prices, versions, news), verify with web_search "
+        + "instead of answering from memory."
+
+    /// The anti-over-calling directive appropriate to `mode`. Surfaces that
+    /// synthesize their own system turn must use this rather than
+    /// `toolDirective` directly, or planning runs stop before they promote.
+    public static func toolDirective(for mode: PermissionMode) -> String {
+        mode.initialEffective == .plan ? planningToolDirective : toolDirective
+    }
+
+    /// Always-on guidance: clarification is available in every permission
+    /// posture and an answer continues the current run rather than ending it.
+    public static let askUserDirective =
+        "Use ask_user when a missing user choice materially affects the result. Ask one focused "
+        + "question with concise options when useful. After the answer, continue the task with it; "
+        + "a declined question means choose the safest assumption, state it, and do not ask again."
+
+    /// Shared system-level planning steer for CLI and remote builders.
+    public static let planSystemSteer =
+        "You are in PLAN MODE (read-only). You may read and search files with the read-only tools, "
+        + "but you must NOT write files, edit files, or run shell commands - those are denied. "
+        + "Investigate as needed and use ask_user when a user choice affects the plan. When the plan "
+        + "is ready, call request_execute with a concise summary; do not merely stop at a plan."
+
+    /// Shared per-turn planning prefix for interactive/background TUI builders.
+    public static let planTurnPrefix =
+        "(Plan mode: read-only. Investigate with the read-only tools and propose a clear, step-by-step "
+        + "plan. You may use ask_user for clarification. Call request_execute when ready to implement - "
+        + "emit the call itself; do not merely say you are about to ask for permission. "
+        + "Do not edit files or run commands.)"
+
+    public static let adaptivePlanTail =
+        "This is ADAPTIVE mode: begin by planning read-only, then call request_execute when you decide "
+        + "the plan is sufficient. It will enter guarded execution without asking the user."
+
+    /// Pure prompt fragments for a posture. Builders append these to their own
+    /// environment/project/user-system parts; `askUserDirective` is unconditional.
+    public static func permissionDirectives(for mode: PermissionMode) -> [String] {
+        var directives = [askUserDirective]
+        if mode.initialEffective == .plan {
+            directives.append(planSystemSteer)
+            if mode == .adaptive { directives.append(adaptivePlanTail) }
+        }
+        return directives
+    }
 
     /// The project brief: `Krill.md` at the working-directory root (the file
     /// `/init` generates — Krill's CLAUDE.md), loaded into every agent session

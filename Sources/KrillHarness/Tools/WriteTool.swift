@@ -40,11 +40,14 @@ public struct WriteTool: Tool {
             return ToolResult(content: "Error: could not write \(FileToolSupport.display(url)): \(error.localizedDescription)", isError: true)
         }
         let verb = existed ? "Overwrote" : "Created"
-        let stat = FileToolSupport.diffstat(
-            added: FileToolSupport.lineCount(content),
-            removed: FileToolSupport.lineCount(oldContent))
+        let displayPath = FileToolSupport.display(url)
+        let hunks = FileToolSupport.unifiedDiff(old: oldContent, new: content)
+        let stat = FileToolSupport.diffstat(hunks: hunks)
+        let preview = FileToolSupport.compactPreview(hunks: hunks)
         return ToolResult(
-            content: "\(verb) \(FileToolSupport.display(url)) (\(stat), \(content.utf8.count) bytes).",
-            isError: false)
+            content: "\(verb) \(displayPath) (\(stat), \(content.utf8.count) bytes)."
+                + (preview.isEmpty ? "" : "\n" + preview),
+            isError: false,
+            display: .diff(path: displayPath, hunks: hunks))
     }
 }

@@ -34,6 +34,7 @@ final class ChatTUI {
         // Tool-chip payload (used by .toolCall / .toolResult only).
         var toolName: String = ""
         var toolError: Bool = false
+        var toolDisplay: ToolDisplay? = nil
     }
     private var view: [Msg] = []
     private var modelTurns: [(role: String, content: String)] = []
@@ -46,11 +47,19 @@ final class ChatTUI {
     // transcript reads continuously across both modes.
     private enum Surface { case chat, agent }
     private var surface: Surface = .chat
-    private var permissions: PermissionMode = .plan
+    private var permissionBox: PermissionBox
+    /// Human-selected cycle position. For adaptive this remains `.adaptive`
+    /// while the box's effective posture promotes to an execution mode.
+    private var permissions: PermissionMode
     private var agentMessages: [[String: String]] = []
     private var agentSeeded = false
     private var agentChipShown = false          // a chip was emitted for the in-flight call
     private let approver = TUIApprover()
+    private let asker = TUIQuestionAsker()
+    // The prompt is rebuilt whenever the question VALUE changes. A nil/non-nil
+    // cache would show stale options for back-to-back questions in one run.
+    private var cachedQuestion: UserQuestion?
+    private var questionPrompt: QuestionPrompt?
     private var initialAgentTask: String?       // auto-run once on launch (krill code "task")
 
     // Background agents: independent sessions spawned by /bg or the model's
@@ -129,6 +138,10 @@ final class ChatTUI {
     private var historyIndex = 0
     private var scrollOffset = 0     // lines scrolled up from bottom
     private var rows = 24, cols = 80
+    private var sidebarEnabled = true
+    private static let sidebarWidth = 34
+    private var showsSidebar: Bool { sidebarEnabled && cols >= 110 }
+    private var mainWidth: Int { showsSidebar ? cols - Self.sidebarWidth - 1 : cols }
     private var lastStatus = ""
     // Index in `view` of the assistant turn currently being generated, so its
     // bullet renders as a pulsing (blinking) dot while we wait on the model.
@@ -201,6 +214,9 @@ final class ChatTUI {
         self.params = params
         self.maxTokens = maxTokens
         self.registry = registry
+        let permissionMode = PermissionMode.parse(agentPermissionsSetting) ?? .plan
+        self.permissionBox = PermissionBox(mode: permissionMode)
+        self.permissions = permissionMode
         self.themeOverride = theme
         self.voiceMode = Self.parseVoiceMode(voiceModeSetting)
         // A persisted `send` posture is valid only for an audio-capable model.
@@ -215,7 +231,6 @@ final class ChatTUI {
         self.whisperSKU = WhisperModelManager.sku(voiceWhisperModelSetting)?.id ?? WhisperModelManager.defaultSKU
         self.thinkingOn = thinkingSetting
         self.surface = modeSetting.lowercased() == "agent" ? .agent : .chat
-        self.permissions = PermissionMode.parse(agentPermissionsSetting) ?? .plan
         self.initialAgentTask = initialAgentTask
         self.contextWindow = AliasMap.resolve(modelName)?.context ?? 0
         self.customCommands = CustomCommandStore.load(from: Self.commandsDir)
@@ -408,6 +423,9 @@ final class ChatTUI {
             // (there is no leash to set when the model has no hands).
             if surface == .agent {
                 permissions = permissions.next
+                // No run is in flight here, so start a fresh box whose immutable
+                // origin matches the newly chosen posture (notably adaptive).
+                permissionBox = PermissionBox(mode: permissions)
                 // Footer-only: the agent chip already shows the new state
                 // permanently; a transcript note per Shift+Tab is just litter.
                 lastStatus = "permissions: \(permissions.summary)"
@@ -806,6 +824,39 @@ final class ChatTUI {
         return out
     }
 
+    /// Render a pending model question without owning any selection logic. The
+    /// pure `QuestionPrompt` state lives in KrillTUI and is shared by foreground
+    /// and attached background runs.
+    private func renderQuestion(
+        _ question: UserQuestion, prompt: QuestionPrompt, width: Int
+    ) -> [String] {
+        let margin = "  "
+        let available = max(8, width - margin.count - 2)
+        func clipped(_ text: String) -> String { String(text.prefix(available)) }
+        var out = ["", margin + Ansi.bold(clipped(question.header.isEmpty ? "Question" : question.header))]
+        out.append(margin + Ansi.user(clipped(question.question)))
+        if !question.body.isEmpty {
+            for line in question.body.split(separator: "\n", omittingEmptySubsequences: false) {
+                out.append(margin + Ansi.chrome(clipped(String(line))))
+            }
+        }
+        out.append("")
+        for (index, option) in question.options.enumerated() {
+            let marker = prompt.selected == index ? Ansi.ember("\u{25B8}") : " "
+            let row = "\(marker) \(index + 1). \(clipped(option))"
+            out.append(margin + (prompt.selected == index ? Ansi.bold(row) : row))
+        }
+        let marker = prompt.isFreeTextSelected ? Ansi.ember("\u{25B8}") : " "
+        let custom = prompt.isTyping ? "Type: \(prompt.freeText)\u{2588}" : "Type another answer"
+        let customRow = "\(marker) \(clipped(custom))"
+        out.append(margin + (prompt.isFreeTextSelected ? Ansi.bold(customRow) : customRow))
+        out.append("")
+        out.append(margin + Ansi.chrome(prompt.isTyping
+            ? "Enter send  \u{00B7}  Esc cancel typing"
+            : "Up/Down or 1-9  \u{00B7}  Enter choose  \u{00B7}  t type  \u{00B7}  Esc skip"))
+        return out
+    }
+
     // MARK: - Submit / commands
 
     private func processSubmit(_ text: String) async {
@@ -815,14 +866,6 @@ final class ChatTUI {
 
         if trimmed.hasPrefix("/"), isCommand(trimmed) {
             await handleCommand(trimmed)
-            render()
-            return
-        }
-        // Attached to a background session: a non-command submission continues
-        // THAT session (its own history), not the main chat. Running sessions
-        // intercept keys earlier, so the active session here is idle/finished.
-        if let s = activeSession {
-            s.start(task: trimmed)
             render()
             return
         }
@@ -854,6 +897,14 @@ final class ChatTUI {
                 note("(agent mode does not take audio attachments yet; use chat mode.)")
             }
             await runAgentTurn(prompt, images: turnImages)
+            return
+        }
+        // Outside the main agent surface, a non-command submission continues the
+        // attached background session (its own history). Agent routing must win
+        // above so attached sessions cannot bypass the foreground stats wiring.
+        if let s = activeSession {
+            s.start(task: prompt)
+            render()
             return
         }
         await generate(prompt: prompt)
@@ -936,6 +987,9 @@ final class ChatTUI {
         case "/diff": showDiff()
         case "/status": showOverlay("Status", statusOverlay())
         case "/context": showOverlay("Context", contextOverlay())
+        case "/sidebar":
+            sidebarEnabled.toggle()
+            lastStatus = sidebarEnabled ? "sidebar on (shown at 110+ columns)" : "sidebar off"
         case "/copy": copyLastReply()
         case "/cd":
             if arg.isEmpty { note("Usage: /cd <path>") } else { changeDirectory(arg) }
@@ -1274,13 +1328,23 @@ final class ChatTUI {
     /// The agent toolset: read-only explorers + web fetch + file edits + bash +
     /// the ability to spawn a background agent. The permission posture - not this
     /// list - governs what actually runs.
-    private func agentTools() -> ToolRegistry {
+    private func agentTools(
+        asker: TUIQuestionAsker,
+        permissionBox: PermissionBox,
+        todoTool: TodoTool
+    ) -> ToolRegistry {
         ToolRegistry([
             ReadTool(), ListTool(), GlobTool(), GrepTool(), WebFetchTool(), WebSearchTool(),
             EditTool(), MultiEditTool(), WriteTool(), BashTool(),
             NowTool(), todoTool, RepoMapTool(),
+            AskUserTool(gate: asker),
+            RequestExecuteTool(permissionBox: permissionBox, gate: asker),
             DispatchTool(queue: spawnQueue),
         ])
+    }
+
+    private func agentTools() -> ToolRegistry {
+        agentTools(asker: asker, permissionBox: permissionBox, todoTool: todoTool)
     }
 
     /// One todo list per TUI session — the tool instance carries the state, so
@@ -1322,12 +1386,13 @@ final class ChatTUI {
         // then the user's system prompt or the tool directive.
         var seedSystem = [sessionEnvLine]
         if let brief = AgentEnvironment.projectBrief() { seedSystem.append(brief) }
+        seedSystem.append(AgentEnvironment.askUserDirective)
         if let system, !system.isEmpty {
             seedSystem.append(system)
         } else {
             // Bringing our own system turn suppresses the tooling layer's
             // fallback directive — carry it explicitly.
-            seedSystem.append(AgentEnvironment.toolDirective)
+            seedSystem.append(AgentEnvironment.toolDirective(for: permissions))
         }
         msgs.append(["role": "system", "content": seedSystem.joined(separator: "\n\n")])
         for t in modelTurns { msgs.append(["role": t.role, "content": t.content]) }
@@ -1347,9 +1412,10 @@ final class ChatTUI {
 
         // Plan posture: steer the model up front (the permission layer also
         // hard-denies mutating tools, so this is a nudge, not the enforcement).
-        let runTask = permissions == .plan
-            ? "(Plan mode: read-only. Investigate with the read-only tools and propose a clear, "
-              + "step-by-step plan. Do not edit files or run commands.)\n\n\(task)"
+        let planningPrefix = AgentEnvironment.planTurnPrefix
+            + (permissions == .adaptive ? " " + AgentEnvironment.adaptivePlanTail : "")
+        let runTask = permissionBox.isPlanning
+            ? planningPrefix + "\n\n" + task
             : task
 
         var generator = EngineGenerator(engine: engine, maxTokens: maxTokens)
@@ -1358,7 +1424,8 @@ final class ChatTUI {
         let loop = AgentLoop(
             generator: generator,
             tools: agentTools(),
-            permission: PermissionPolicy(mode: permissions),
+            permission: permissionBox.policy,
+            permissionBox: permissionBox,
             gate: approver)
 
         let queue = EventQueue()
@@ -1383,6 +1450,8 @@ final class ChatTUI {
             let elapsed = Self.formatElapsed(CFAbsoluteTimeGetCurrent() - startedAt)
             if finished {
                 lastStatus = ""
+            } else if asker.pending() != nil {
+                lastStatus = "\(emberSpinner(spin, dots)) awaiting your answer \u{00B7} \(elapsed)"
             } else if approver.pending() != nil {
                 lastStatus = "\(emberSpinner(spin, dots)) awaiting approval \u{00B7} \(elapsed)"
             } else {
@@ -1396,6 +1465,8 @@ final class ChatTUI {
             }
         }
 
+        // Catch a stats callback that landed after the final pre-render drain.
+        if let st = agentStats.take() { recordTurnStats(st) }
         let transcript = await bgTask.value
         agentMessages = transcript.messages
         lastStatus = transcript.wasCancelled ? "cancelled"
@@ -1419,7 +1490,9 @@ final class ChatTUI {
         note("Researching: \(question)")
         render()
 
-        let gen = EngineGenerator(engine: engine, maxTokens: maxTokens)
+        var configuredGenerator = EngineGenerator(engine: engine, maxTokens: maxTokens)
+        configuredGenerator.onStats = { [agentStats] in agentStats.put($0) }
+        let gen = configuredGenerator
         let webFetch = WebFetchTool()
         let research = DeepResearch(
             complete: { msgs in await gen.complete(messages: msgs) },
@@ -1445,6 +1518,7 @@ final class ChatTUI {
         while true {
             if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize() }
             pumpAll()   // keep background agents advancing
+            if let st = agentStats.take() { recordTurnStats(st) }
             for p in queue.drain() { note(Self.researchProgressLine(p)); scrollOffset = 0 }
             let finished = queue.isFinished
             let elapsed = Self.formatElapsed(CFAbsoluteTimeGetCurrent() - startedAt)
@@ -1467,6 +1541,7 @@ final class ChatTUI {
         }
 
         let report = await runTask.value
+        if let st = agentStats.take() { recordTurnStats(st) }
         // No synthesized text means either nothing was found, or the run was
         // stopped (cancel) / the model produced nothing before synthesis.
         guard !report.text.isEmpty else {
@@ -1500,9 +1575,65 @@ final class ChatTUI {
         }
     }
 
-    /// Keys handled while an agent run is in flight: answer a pending approval
-    /// (y/n/a), or cancel / scroll the live transcript.
+    /// Refresh the pure widget state from the gate on each render/key tick. Keying
+    /// by the full value is essential when two tools ask back-to-back in one run.
+    private func syncQuestionPrompt(question: UserQuestion?) {
+        guard let question else {
+            cachedQuestion = nil
+            questionPrompt = nil
+            return
+        }
+        if cachedQuestion != question {
+            cachedQuestion = question
+            questionPrompt = QuestionPrompt(options: question.options)
+        }
+    }
+
+    private func handleQuestionKey(_ key: Key, asker: TUIQuestionAsker) {
+        guard var prompt = questionPrompt else { return }
+        if prompt.isTyping {
+            switch key {
+            case .enter:
+                asker.resolve(text: prompt.freeText)
+                cachedQuestion = nil; questionPrompt = nil
+            case .escape:
+                prompt.stopTyping()
+                questionPrompt = prompt
+            case .backspace: prompt.backspace(); questionPrompt = prompt
+            case .char(let character): prompt.append(character); questionPrompt = prompt
+            default: break
+            }
+            return
+        }
+        switch key {
+        case .up, .scrollUp: prompt.selectPrevious(); questionPrompt = prompt
+        case .down, .scrollDown: prompt.selectNext(); questionPrompt = prompt
+        case .char("t"), .char("T"):
+            prompt.beginTyping(); questionPrompt = prompt
+        case .char(let character):
+            if let digit = Int(String(character)), let index = prompt.index(forDigit: digit) {
+                asker.resolve(option: index)
+                cachedQuestion = nil; questionPrompt = nil
+            }
+        case .enter:
+            if let index = prompt.selectedOptionIndex { asker.resolve(option: index) }
+            else { prompt.beginTyping(); questionPrompt = prompt }
+        case .escape:
+            asker.decline(); cachedQuestion = nil; questionPrompt = nil
+        case .ctrlC:
+            asker.decline(); cachedQuestion = nil; questionPrompt = nil
+        default: break
+        }
+    }
+
+    /// Keys handled while an agent run is in flight: answer a pending question
+    /// or approval, change posture, or cancel / scroll the live transcript.
     private func handleAgentRunKey(_ key: Key, bgTask: Task<AgentTranscript, Never>) {
+        syncQuestionPrompt(question: asker.pending())
+        if asker.pending() != nil {
+            handleQuestionKey(key, asker: asker)
+            return
+        }
         if approver.pending() != nil {
             switch key {
             case .char("y"), .char("Y"), .enter: approver.resolve(true)
@@ -1515,6 +1646,10 @@ final class ChatTUI {
         }
         switch key {
         case .ctrlC, .escape: bgTask.cancel(); lastStatus = "cancelling"
+        case .backTab:
+            permissions = permissions.next
+            permissionBox.setPolicy(mode: permissions)
+            lastStatus = "permissions: \(permissions.summary)"
         case .pageUp: scrollOffset += paneHeight() - 1
         case .pageDown: scrollOffset = max(0, scrollOffset - (paneHeight() - 1))
         case .scrollUp, .up: scrollOffset += 3
@@ -1526,6 +1661,11 @@ final class ChatTUI {
     /// Fold one agent event into the shared transcript view, via the single
     /// `foldAgentEvent` mapping (shared with background sessions).
     private func applyAgentEvent(_ event: AgentEvent) {
+        if case .permissionChanged(_, let to) = event {
+            lastStatus = permissionBox.origin == .adaptive
+                ? "agent granted itself \(to.label) \u{00B7} shift+tab to re-leash"
+                : "permissions: \(to.summary)"
+        }
         var produced: [AgentEntry] = []
         foldAgentEvent(event, into: &produced, chipShown: &agentChipShown)
         for e in produced { view.append(Self.msg(from: e)) }
@@ -1539,7 +1679,8 @@ final class ChatTUI {
         case .user(let t): return Msg(role: .user, text: t)
         case .assistant(let t): return Msg(role: .assistant, text: t)
         case .toolCall(let name, let args): return Msg(role: .toolCall, text: args, toolName: name)
-        case .toolResult(let content, let isError): return Msg(role: .toolResult, text: content, toolError: isError)
+        case .toolResult(let content, let isError, let display):
+            return Msg(role: .toolResult, text: content, toolError: isError, toolDisplay: display)
         case .note(let t): return Msg(role: .note, text: t)
         }
     }
@@ -1561,8 +1702,10 @@ final class ChatTUI {
         case .toolName: return Ansi.cyan(line.text)
         case .toolOk: return Ansi.dim(line.text)
         case .toolError: return Ansi.red(line.text)
-        case .diffAdd: return Ansi.green(line.text)
-        case .diffDel: return Ansi.red(line.text)
+        case .diffAdd: return Ansi.diffAddition(line.text)
+        case .diffDel: return Ansi.diffDeletion(line.text)
+        case .diffContext: return Ansi.chrome(line.text)
+        case .diffHeader: return Ansi.bold(Ansi.chrome(line.text))
         case .note: return Ansi.yellow(line.text)
         case .dim: return Ansi.dim(line.text)
         }
@@ -1588,7 +1731,10 @@ final class ChatTUI {
     private func spawnSession(title: String, task: String) {
         let s = AgentSession(
             id: nextSessionID, title: title, engine: engine,
-            maxTokens: maxTokens, permissions: permissions, tools: agentTools())
+            maxTokens: maxTokens, permissions: permissionBox.origin,
+            effectivePolicy: permissionBox.policy)
+        s.configureTools(agentTools(
+            asker: s.asker, permissionBox: s.permissionBox, todoTool: s.todoTool))
         nextSessionID += 1
         sessions.append(s)
         s.start(task: task)
@@ -1633,6 +1779,11 @@ final class ChatTUI {
     /// Key handling while attached to a RUNNING background session: answer its
     /// approval prompt (y/n/a), cancel it, or scroll its transcript.
     private func handleAttachedRunKey(_ key: Key, session: AgentSession) {
+        syncQuestionPrompt(question: session.asker.pending())
+        if session.asker.pending() != nil {
+            handleQuestionKey(key, asker: session.asker)
+            return
+        }
         if session.approver.pending() != nil {
             switch key {
             case .char("y"), .char("Y"), .enter: session.approver.resolve(true)
@@ -1645,6 +1796,9 @@ final class ChatTUI {
         }
         switch key {
         case .ctrlC, .escape: session.cancel()
+        case .backTab:
+            session.cyclePermissions()
+            lastStatus = "permissions: \(session.permissions.summary)"
         case .ctrlD: shouldQuit = true
         case .pageUp: scrollOffset += paneHeight() - 1
         case .pageDown: scrollOffset = max(0, scrollOffset - (paneHeight() - 1))
@@ -1774,7 +1928,7 @@ final class ChatTUI {
             case .idle:              left = "done\(sep)type to continue\(sep)/main to return"
             case .cancelled:         left = "cancelled\(sep)/main to return"
             }
-            return (left, "agent[\(s.id)]:\(s.permissions.label)\(sep)\(cwdLabel)\(sep)\(KrillVersionTag)")
+            return (left, "agent[\(s.id)]:\(s.permissionBox.chipLabel)\(sep)\(cwdLabel)\(sep)\(KrillVersionTag)")
         }
         // Spoken-replies (TTS) indicator: independent of the mic, so it shows even
         // on text-only models. Leads the right half when on.
@@ -1786,7 +1940,7 @@ final class ChatTUI {
         // Agent chip: the permission state + its key, whenever hands are on
         // (the one place agent status lives — claude-code-style, below the bar).
         let agentTag = surface == .agent
-            ? "\u{25CF} agent: \(permissions.label) (shift+tab to cycle)\(sep)" : ""
+            ? "\u{25CF} agent: \(permissionBox.chipLabel) (shift+tab to cycle)\(sep)" : ""
         // Background-agent count, with a marker when one needs approval.
         let agentsTag = bgAgentsTag(sep)
         // The cwd/branch label moved to the masthead's right side; the footer
@@ -2475,7 +2629,10 @@ final class ChatTUI {
     private func paneHeight() -> Int { max(1, rows - 7) }
 
     private func render() {
-        let width = cols
+        // All primary widgets receive the reduced width before they render, so
+        // markdown, diffs, menus, and the composer reflow instead of hiding
+        // underneath the optional wide-screen sidebar.
+        let width = mainWidth
         var frame = "\u{1B}[H"   // cursor home
 
         // Rows 1-3: light masthead (wordmark + place on the right, dim rule,
@@ -2497,6 +2654,11 @@ final class ChatTUI {
         let boxTop = max(paneTop + 1, rows - box.count)
         let footerRow = max(rows, boxTop + box.count)
         let attached = activeSession
+        let pendingQuestion: UserQuestion?
+        if let attached { pendingQuestion = attached.asker.pending() }
+        else if surface == .agent { pendingQuestion = asker.pending() }
+        else { pendingQuestion = nil }
+        syncQuestionPrompt(question: pendingQuestion)
         let modal = picker != nil || overlay != nil || switcher != nil
         let menuLines = menu.isActive ? renderMenu(width: width) : []
         // A faded, italic, right-aligned hint sits on the row just above the input
@@ -2527,8 +2689,14 @@ final class ChatTUI {
         if let ov = overlay { pane = overlayBody(ov, width: width, height: convHeight) }
         else if let p = picker { pane = renderPicker(p, width: width, height: convHeight) }
         else if let sw = switcher { pane = renderSwitcher(sw, width: width, height: convHeight) }
-        else if let attached { pane = paneLines(attached.entries.map(Self.msg(from:)), width: width) }
-        else { pane = paneLines(width: width) }
+        else {
+            var conversation = attached.map { paneLines($0.entries.map(Self.msg(from:)), width: width) }
+                ?? paneLines(width: width)
+            if let pendingQuestion, let questionPrompt {
+                conversation += renderQuestion(pendingQuestion, prompt: questionPrompt, width: width)
+            }
+            pane = conversation
+        }
         let blankTop = modal
             ? 0
             : Chrome.anchorBlankTop(paneCount: pane.count, convHeight: convHeight, centered: view.isEmpty && attached == nil)
@@ -2572,12 +2740,74 @@ final class ChatTUI {
         }
         let (footerLeft, footerRight) = footerContent()
         frame += positioned(footerRow, Brand.footer(width: width, left: footerLeft, right: footerRight))
+        if showsSidebar {
+            let side = sidebarLines(height: rows)
+            let col = width + 1
+            for row in 1...rows {
+                let body = row <= side.count ? side[row - 1] : ""
+                let padded = Layout.join(left: "│" + body, right: "", width: Self.sidebarWidth + 1)
+                frame += positioned(row, padded, col: col, clear: false)
+            }
+        }
         frame += "\u{1B}[J"   // clear anything below
         Output.write(frame)
     }
 
-    private func positioned(_ row: Int, _ content: String) -> String {
-        "\u{1B}[\(row);1H\u{1B}[2K" + content
+    private func positioned(_ row: Int, _ content: String, col: Int = 1, clear: Bool = true) -> String {
+        Layout.positioned((clear ? "\u{1B}[2K" : "") + content, row: row, col: col)
+    }
+
+    /// Live right rail. Values are copied from lock-guarded tool/stats snapshots,
+    /// making the formatter deterministic and safe to call on every render tick.
+    private func sidebarLines(height: Int) -> [String] {
+        let width = Self.sidebarWidth
+        let inner = width - 3
+        let session = activeSession
+        let todos = session?.todoTool.snapshot() ?? todoTool.snapshot()
+        let stats = session?.lastStats ?? lastStats
+        var out: [String] = [
+            Ansi.bold(Ansi.ember("  SESSION")),
+            "",
+            Ansi.bold("  Tasks"),
+        ]
+        if todos.isEmpty {
+            out.append(Ansi.chrome("  No tasks yet"))
+        } else {
+            let done = todos.filter(\.done).count
+            out.append(Ansi.chrome("  \(done)/\(todos.count) complete"))
+            for item in todos {
+                let mark = item.done ? "✓" : (item.active ? "●" : "○")
+                let wrapped = Layout.wrap(item.text, width: max(1, inner - 2))
+                for (index, line) in wrapped.enumerated() {
+                    let prefix = index == 0 ? "  \(mark) " : "    "
+                    let row = prefix + line
+                    out.append(item.active ? Ansi.ember(row) : (item.done ? Ansi.chrome(row) : row))
+                }
+            }
+        }
+        out += ["", Ansi.bold("  Context")]
+        if let stats {
+            let used = stats.promptTokens + stats.generatedTokens
+            if contextWindow > 0 {
+                let fraction = min(1, Double(used) / Double(contextWindow))
+                out.append("  " + contextBar(fraction, cells: min(20, inner)))
+                out.append(Ansi.chrome("  \(fmtTok(used)) / \(formatContext(contextWindow))  \(Int((fraction * 100).rounded()))%"))
+            } else {
+                out.append(Ansi.chrome("  \(fmtTok(used)) tokens measured"))
+            }
+        } else {
+            out.append(Ansi.chrome("  Awaiting first measurement"))
+        }
+        out += ["", Ansi.bold("  Totals")]
+        let elapsed = Int(Date().timeIntervalSince(sessionStart))
+        out.append(Ansi.chrome("  Time    \(Self.formatElapsed(Double(elapsed)))"))
+        out.append(Ansi.chrome("  Turns   \(sessionTurns)"))
+        out.append(Ansi.chrome("  Prompt  \(fmtTok(sessionPromptTokens))"))
+        out.append(Ansi.chrome("  Output  \(fmtTok(sessionGeneratedTokens))"))
+        if sessionDecodeTime > 0 {
+            out.append(Ansi.chrome(String(format: "  Speed   %.1f tok/s", Double(sessionGeneratedTokens) / sessionDecodeTime)))
+        }
+        return Array(out.prefix(max(0, height))).map { Layout.clip($0, width: width) }
     }
 
     /// Conversation pane lines. Turns are distinguished by GLYPH + shade, not by
@@ -2642,16 +2872,35 @@ final class ChatTUI {
                     lines.append(margin + styledCode(l))
                 }
             case .toolResult:
-                // Collapsed by default to keep the transcript scannable; ⌃O
-                // toggles full output (uncapped). Errors are never collapsed.
-                let rendered = (!toolOutputExpanded && !msg.toolError)
-                    ? CodeView.toolResultCollapsed(content: msg.text, width: w)
-                    : CodeView.toolResult(
-                        content: msg.text, isError: msg.toolError, width: w,
-                        maxLines: toolOutputExpanded ? 0 : 14)
-                for l in rendered {
-                    lines.append(margin + styledCode(l))
+                let rendered: [CodeLine]
+                if case .diff(let path, let hunks)? = msg.toolDisplay {
+                    // Rich diffs are UI-only and always expanded: Ctrl-O governs
+                    // ordinary observations, never the primary edit review.
+                    let mapped = hunks.map { h in
+                        CodeDiffHunk(
+                            oldStart: h.oldStart, oldCount: h.oldCount,
+                            newStart: h.newStart, newCount: h.newCount,
+                            lines: h.lines.map { line in
+                                let kind: CodeDiffLine.Kind
+                                switch line.kind {
+                                case .context: kind = .context
+                                case .addition: kind = .addition
+                                case .deletion: kind = .deletion
+                                }
+                                return CodeDiffLine(oldLine: line.oldLine, newLine: line.newLine, kind: kind, text: line.text)
+                            })
+                    }
+                    rendered = CodeView.diff(path: path, hunks: mapped, width: w)
+                } else {
+                    // Collapsed by default to keep the transcript scannable; ⌃O
+                    // toggles full output (uncapped). Errors are never collapsed.
+                    rendered = (!toolOutputExpanded && !msg.toolError)
+                        ? CodeView.toolResultCollapsed(content: msg.text, width: w)
+                        : CodeView.toolResult(
+                            content: msg.text, isError: msg.toolError, width: w,
+                            maxLines: toolOutputExpanded ? 0 : 14)
                 }
+                for l in rendered { lines.append(margin + styledCode(l)) }
             case .pre:
                 // Preformatted (help / transcript): keep spacing verbatim - no
                 // word-wrap that would collapse aligned columns. A non-indented,
@@ -2852,7 +3101,7 @@ final class ChatTUI {
         let keys: [(String, String)] = [
             ("Up / Down", "History, or cycle the slash menu"),
             ("Tab", "Accept the highlighted command"),
-            ("Shift+Tab", "Agent mode: cycle permissions (plan/ask/accept-edits/auto)"),
+            ("Shift+Tab", "Agent mode: cycle permissions (plan/adaptive/ask/accept-edits/auto)"),
             ("Enter", "Send the message"),
             ("Hold Space", "Push-to-talk (dictate/handsfree/send postures)"),
             ("Ctrl-V", "Cycle voice posture: type/dictate/handsfree/send"),

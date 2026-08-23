@@ -1710,6 +1710,37 @@ public final class InferenceEngine: @unchecked Sendable {
                 // -- Decode loop --
                 let decodeStart = CFAbsoluteTimeGetCurrent()
 
+                // Publish stats BEFORE every terminal event. Consumers such as
+                // EngineGenerator stop at the first `isEnd` and immediately read
+                // the accessor; setting stats first keeps the (stream, stats)
+                // contract race-free, matching all vision decode drivers.
+                let publishStats: () -> Void = {
+                    let speculative: SpeculativeStats?
+                    if shouldSpec, let decoder = capturedSpecDecoder, decoder.totalRounds > 0 {
+                        speculative = SpeculativeStats(
+                            rounds: decoder.totalRounds,
+                            acceptedTokens: decoder.totalAccepted,
+                            finalK: decoder.currentK,
+                            acceptanceRate: decoder.acceptanceRate)
+                    } else if shouldNgram, let decoder = capturedNgramDecoder,
+                              decoder.totalRounds > 0 {
+                        speculative = SpeculativeStats(
+                            rounds: decoder.totalRounds,
+                            acceptedTokens: decoder.totalAccepted,
+                            finalK: decoder.currentK,
+                            acceptanceRate: decoder.acceptanceRate)
+                    } else {
+                        speculative = nil
+                    }
+                    statsHolder.stats = GenerationStats(
+                        promptTokens: promptTokens.count,
+                        generatedTokens: generatedCount,
+                        prefillTime: prefillDuration,
+                        decodeTime: CFAbsoluteTimeGetCurrent() - decodeStart,
+                        speculative: speculative,
+                        moe: capturedMoEModel?.moeUtilization())
+                }
+
                 // Plain (non-spec) decode, factored into a closure so the n-gram
                 // path can hand off to it mid-generation when its stall monitor
                 // trips. Entry invariant: `nextToken`/`nextTokenArr` is the next
@@ -1782,6 +1813,7 @@ public final class InferenceEngine: @unchecked Sendable {
                                 for case let c as RestorableKVCache in caches {
                                     c.truncate(to: Swift.max(0, c.sequenceLength - 1))
                                 }
+                                publishStats()
                                 continuation.yield(TokenEvent(
                                     tokenId: cur, text: "",
                                     elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -1800,6 +1832,7 @@ public final class InferenceEngine: @unchecked Sendable {
                     while generatedCount < maxTokens {
                         if genCancel.isCancelled { break }
                         if stopIds.contains(nextToken) {
+                            publishStats()
                             continuation.yield(TokenEvent(
                                 tokenId: nextToken, text: "",
                                 elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -1858,6 +1891,7 @@ public final class InferenceEngine: @unchecked Sendable {
                     // Emit the first token sampled from prefill logits — specDec.step
                     // only returns tokens *after* lastToken, so we must yield it here.
                     if stopIds.contains(nextToken) {
+                        publishStats()
                         continuation.yield(TokenEvent(
                             tokenId: nextToken, text: "",
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -1888,6 +1922,7 @@ public final class InferenceEngine: @unchecked Sendable {
                         var hitStop = false
                         for token in accepted {
                             if stopIds.contains(token) {
+                                publishStats()
                                 continuation.yield(TokenEvent(
                                     tokenId: token, text: "",
                                     elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -1924,6 +1959,7 @@ public final class InferenceEngine: @unchecked Sendable {
 
                     // Emit the first token (ngramStep returns tokens AFTER lastToken).
                     if stopIds.contains(nextToken) {
+                        publishStats()
                         continuation.yield(TokenEvent(
                             tokenId: nextToken, text: "",
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -1950,6 +1986,7 @@ public final class InferenceEngine: @unchecked Sendable {
                         var hitStop = false
                         for token in accepted {
                             if stopIds.contains(token) {
+                                publishStats()
                                 continuation.yield(TokenEvent(
                                     tokenId: token, text: "",
                                     elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -1990,42 +2027,15 @@ public final class InferenceEngine: @unchecked Sendable {
                     runStandardDecode()
                 }
 
-                let decodeDuration = CFAbsoluteTimeGetCurrent() - decodeStart
-
+                // Also publish for cancellation/stream-finish paths that do not
+                // emit a terminal token. For max-token termination this must
+                // happen before the synthetic terminal event below.
+                publishStats()
                 if generatedCount >= maxTokens {
                     continuation.yield(TokenEvent(
                         tokenId: -1, text: "",
                         elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
                 }
-
-                let specStats: SpeculativeStats?
-                if shouldSpec, let specDec = capturedSpecDecoder, specDec.totalRounds > 0 {
-                    specStats = SpeculativeStats(
-                        rounds: specDec.totalRounds,
-                        acceptedTokens: specDec.totalAccepted,
-                        finalK: specDec.currentK,
-                        acceptanceRate: specDec.acceptanceRate
-                    )
-                } else if shouldNgram, let ngramDec = capturedNgramDecoder, ngramDec.totalRounds > 0 {
-                    // finalK is 0 for n-gram (K is proposer-driven, not adaptive).
-                    specStats = SpeculativeStats(
-                        rounds: ngramDec.totalRounds,
-                        acceptedTokens: ngramDec.totalAccepted,
-                        finalK: ngramDec.currentK,
-                        acceptanceRate: ngramDec.acceptanceRate
-                    )
-                } else {
-                    specStats = nil
-                }
-
-                statsHolder.stats = GenerationStats(
-                    promptTokens: promptTokens.count,
-                    generatedTokens: generatedCount,
-                    prefillTime: prefillDuration,
-                    decodeTime: decodeDuration,
-                    speculative: specStats,
-                    moe: capturedMoEModel?.moeUtilization()
-                )
                 continuation.finish()
             }
         }

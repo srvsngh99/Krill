@@ -16,6 +16,7 @@ import NIOHTTP1
 ///   POST   /v1/agent/sessions/{id}/messages   {text} -> starts a turn (202)
 ///   GET    /v1/agent/sessions/{id}/events     SSE tail (replay via ?since= / Last-Event-ID)
 ///   POST   /v1/agent/sessions/{id}/approvals  {id?, allow, always?}
+///   POST   /v1/agent/sessions/{id}/questions  {id?, text?, option_index?, was_free_text?, declined?}
 ///   POST   /v1/agent/sessions/{id}/cancel     stop the active turn
 ///   GET    /v1/agent/workspaces               shallow directory browser for the workspace picker
 extension HTTPHandler {
@@ -71,6 +72,34 @@ extension HTTPHandler {
             } else {
                 sendJSON(context: context, status: .conflict,
                          body: ["error": "no matching pending approval"])
+            }
+        case (.POST, 3) where parts[0] == "sessions" && parts[2] == "questions":
+            guard let session = agentSessions.get(parts[1]) else {
+                return sendAgentNotFound(context, parts[1])
+            }
+            let json = parseJSON(body) ?? [:]
+            let optionIndex = json["option_index"] as? Int
+            let pending = session.asker.pending()
+            let suppliedText = (json["text"] as? String) ?? ""
+            let text: String
+            if suppliedText.isEmpty, let optionIndex,
+               let options = pending?.question.options,
+               options.indices.contains(optionIndex) {
+                text = options[optionIndex]
+            } else {
+                text = suppliedText
+            }
+            let answer = UserAnswer(
+                text: text,
+                optionIndex: optionIndex,
+                wasFreeText: (json["was_free_text"] as? Bool) ?? (optionIndex == nil && !text.isEmpty),
+                declined: (json["declined"] as? Bool) ?? false)
+            let resolved = session.asker.resolve(id: json["id"] as? String, answer: answer)
+            if resolved {
+                sendJSON(context: context, status: .ok, body: ["ok": true])
+            } else {
+                sendJSON(context: context, status: .conflict,
+                         body: ["error": "no matching pending question"])
             }
         case (.POST, 3) where parts[0] == "sessions" && parts[2] == "cancel":
             guard let session = agentSessions.get(parts[1]) else {
@@ -181,7 +210,8 @@ extension HTTPHandler {
                 generator: generator,
                 tools: Self.agentToolRegistry(for: session),
                 maxIterations: session.maxIterations,
-                permission: PermissionPolicy(mode: session.mode),
+                permission: session.permissionBox.policy,
+                permissionBox: session.permissionBox,
                 gate: session.approver)
 
             // First turn: synthesize the same system prompt `krill code` uses,
@@ -206,28 +236,24 @@ extension HTTPHandler {
     /// The hosted toolset: the TUI's agent toolset minus `dispatch_agent`
     /// (background fan-out stays a TUI feature for now). The permission
     /// posture — not this list — governs what actually runs.
-    private static func agentToolRegistry(for session: RemoteAgentSession) -> ToolRegistry {
+    static func agentToolRegistry(for session: RemoteAgentSession) -> ToolRegistry {
         ToolRegistry([
             ReadTool(), ListTool(), GlobTool(), GrepTool(), WebFetchTool(), WebSearchTool(),
             EditTool(), MultiEditTool(), WriteTool(), BashTool(),
             NowTool(), session.todoTool, RepoMapTool(),
+            AskUserTool(gate: session.asker),
+            RequestExecuteTool(permissionBox: session.permissionBox, gate: session.asker),
         ])
     }
 
     /// Mirror of `CodeCommand`'s system synthesis: ambient facts, project
     /// brief, plan steering, and the anti-over-calling directive. Must be
     /// called with `AgentWorkspace.root` bound to the session workspace.
-    private static func agentSystemPrompt(mode: PermissionMode, modelName: String?) -> String {
+    static func agentSystemPrompt(mode: PermissionMode, modelName: String?) -> String {
         var parts = [AgentEnvironment.contextLine(modelName: modelName)]
         if let brief = AgentEnvironment.projectBrief() { parts.append(brief) }
-        if mode == .plan {
-            parts.append(
-                "You are in PLAN MODE (read-only). You may read and search files with the "
-                + "read-only tools, but you must NOT write files, edit files, or run shell "
-                + "commands - those are denied. Investigate as needed, then present a clear, "
-                + "concise step-by-step plan as your final answer.")
-        }
-        parts.append(AgentEnvironment.toolDirective)
+        parts.append(contentsOf: AgentEnvironment.permissionDirectives(for: mode))
+        parts.append(AgentEnvironment.toolDirective(for: mode))
         return parts.joined(separator: "\n\n")
     }
 

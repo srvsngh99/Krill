@@ -140,6 +140,7 @@ Native text also runs Phi, GLM-4, Mixtral, OLMoE, and DeepSeek-V2/V3, plus a ~15
 | `krill run <model> [prompt]` | Chat — interactive TUI or one-shot (`/agent` toggles agent mode) |
 | `krill code [task]` | Open the chat TUI in agent mode (tools, file edits, web) |
 | `krill serve` | Start the HTTP server — OpenAI / Ollama / Anthropic APIs, agent sessions, and the web UI at `/ui` |
+| `krill ui` | One command for the phone app: serve in the background, print the phone link, open the UI (`--install` = always on) |
 | `krill launch <agent>` | Wire an external coding agent (Claude Code, Codex, …) to Krill |
 | `krill pull / list / rm <model>` | Manage models (download from HuggingFace) |
 | `krill quantize <hf-path>` | Convert an HF model to MLX |
@@ -178,19 +179,34 @@ from your phone's browser: sessions, live tool-call transcript, and Deny /
 Allow / Always approval cards for every mutating tool.
 
 ```bash
-KRILL_API_KEY='choose-a-secret' krill serve --host 0.0.0.0
+krill ui
 ```
 
-1. **Same Wi-Fi:** open `http://<your-mac-ip>:57455/ui` on the phone, enter the key.
-2. **iPhone:** Share → **Add to Home Screen** → a standalone app with the Krill tile.
-3. **From anywhere (optional):** install [Tailscale](https://tailscale.com) (free)
-   on Mac + phone — the startup banner prints the ready-to-open tailnet URL. Any
-   VPN or authenticated tunnel works; never port-forward the server raw to the
-   internet (the agent runs tools on your Mac).
+That one command starts the server in the background (it keeps running after
+you close the terminal), generates an API key on first run and saves it to
+`~/.krill/config.toml`, prints the links, and opens the UI on the Mac:
 
-A non-loopback bind **requires** the API key — the server refuses to start
-remote-open and unauthenticated. Full setup, endpoint contract, and development
-notes: [`docs/AGENT_UI.md`](docs/AGENT_UI.md).
+```
+>_ Krill UI
+This Mac    http://localhost:57455/ui
+Same Wi-Fi  http://192.168.1.23:57455/ui
+Tailscale   http://100.91.59.7:57455/ui
+Phone link  http://100.91.59.7:57455/ui#k=…   (carries the key)
+Stop        krill ui --stop      always-on at login: krill ui --install
+```
+
+1. **Open the phone link** on the phone (same Wi-Fi, or anywhere with
+   [Tailscale](https://tailscale.com) on both) — the key is filled in for you.
+2. **iPhone:** Share → **Add to Home Screen** → a standalone app with the Krill tile.
+3. **Leave it on:** `krill ui --install` registers the server as a login item —
+   it starts when you log in and restarts if it ever exits. `krill ui --uninstall`
+   removes it; `krill ui --status` reprints the links.
+
+Prefer to run it yourself? `KRILL_API_KEY='…' krill serve --host 0.0.0.0` is the
+same server (a non-loopback bind **requires** a key). Never port-forward it raw
+to the internet — the agent runs tools on your Mac; keep it behind a VPN or an
+authenticated tunnel. Full setup, endpoint contract, and development notes:
+[`docs/AGENT_UI.md`](docs/AGENT_UI.md).
 
 ## Architecture
 

@@ -9,17 +9,42 @@ and tool calls, and approval prompts for mutating tools you answer with a tap.
 ## Quick start (phone)
 
 ```sh
-# On the Mac: bind beyond loopback and set a key (required for non-loopback).
-KRILL_API_KEY=your-secret krill serve --host 0.0.0.0
+# On the Mac — one command:
+krill ui
 ```
 
-1. Reach the Mac from the phone:
-   - **Same Wi-Fi**: open `http://<mac-ip>:57455/ui`.
+`krill ui` starts `krill serve` in the background bound on `0.0.0.0` (it
+survives closing the terminal), generates an API key on first run and saves it
+to `~/.krill/config.toml` (`server_api_key`), pre-loads your default model,
+prints the links, and opens the UI in the Mac's browser. It reuses a server
+that is already running on the port.
+
+1. Reach the Mac from the phone — open the printed **Phone link**:
+   - **Same Wi-Fi**: the `Same Wi-Fi` address.
    - **From anywhere (recommended): [Tailscale](https://tailscale.com)** on the
-     Mac and phone (free, ~10 min). The startup banner prints the ready-to-open
-     tailnet URL. Zero ports exposed to the internet; no TLS needed.
-2. Enter the API key on the connect screen (stored in the browser).
-3. iOS: Share → **Add to Home Screen** for a full-screen standalone app.
+     Mac and phone (free, ~10 min). `krill ui` prints the `Tailscale` address
+     when it is up. Zero ports exposed to the internet; no TLS needed.
+   The phone link ends in `#k=<key>`: the app stores the key and strips it from
+   the address bar (URL fragments are never sent over the network). Without the
+   fragment, enter the key on the connect screen.
+2. iOS: Share → **Add to Home Screen** for a full-screen standalone app.
+3. Leave it on: `krill ui --install` registers the server as a **login item**
+   (launchd): it starts when you log in and restarts if it exits, with logs in
+   `~/.krill/ui/serve.log`. `krill ui --uninstall` removes it.
+
+| `krill ui` flag | What |
+| --- | --- |
+| `--model NAME` | Model to pre-load (default: `default_model` from config, else the first installed). |
+| `--port N` / `--host H` | Port (default 57455) and bind address (default `0.0.0.0`). |
+| `--no-open` | Don't open the Mac's browser. |
+| `--foreground` | Run in this terminal instead of detaching (Ctrl+C stops). |
+| `--status` | Reprint the links and key for the running server. |
+| `--stop` | Stop the detached server (`~/.krill/ui/serve.pid`). |
+| `--install` / `--uninstall` | Add / remove the launchd login item (`~/Library/LaunchAgents/ai.souravailabs.krill.serve.plist`). |
+
+Manual equivalent, if you'd rather own the process:
+`KRILL_API_KEY=your-secret krill serve --host 0.0.0.0` (a non-loopback bind
+requires a key).
 
 Krill never bundles or requires a specific network layer — any path that routes
 HTTP to the Mac works (LAN, WireGuard, Cloudflare Tunnel + a real cert, ...).
@@ -31,10 +56,12 @@ runs tools on your machine; keep it behind a VPN or an authenticated tunnel.
 Shipped in Krill **v0.21.0** (`brew upgrade krill`). Everything below is the
 embedded app at `/ui`; nothing to install on the phone.
 
-1. **Connect.** The first screen asks for the **server** (pre-filled with the
-   address you opened the page from; otherwise `http://<mac-ip>:57455`) and the
-   **API key** (`KRILL_API_KEY`; leave blank only for a loopback server). Tap
-   **Connect**. Both are remembered in the browser. The **⋮** button on the
+1. **Connect.** Opened from the `krill ui` phone link, this step is skipped —
+   the key is adopted from the link. Otherwise the first screen asks for the
+   **server** (pre-filled with the address you opened the page from; otherwise
+   `http://<mac-ip>:57455`) and the **API key** (`server_api_key` /
+   `KRILL_API_KEY`; leave blank only for a loopback server). Tap **Connect**.
+   Both are remembered in the browser. The **⋮** button on the
    sessions screen brings you back here to change them.
 2. **Sessions list.** The header shows a status dot and the model the server
    has loaded (`no model loaded` / `unreachable` are diagnostics, see below).
@@ -45,9 +72,10 @@ embedded app at `/ui`; nothing to install on the phone.
      file tools, `bash`, and `Krill.md` brief all resolve inside this folder.
    - **Model** — any installed model (`krill list`); the server loads it on
      demand, so the first turn on a new model takes a while.
-   - **Permissions** — **Plan** (read-only), **Ask** (every mutating tool
-     prompts; the default), **Edits** (file edits auto-apply, commands prompt),
-     **Auto** (nothing prompts).
+   - **Permissions** — **Plan** (read-only), **Adaptive** (starts read-only and
+     self-promotes to edits while commands still prompt), **Ask** (every mutating
+     tool prompts; the default), **Edits** (file edits auto-apply, commands
+     prompt), **Auto** (nothing prompts).
    Tap **Start session**.
 4. **Talk to the agent.** Type in *Message the agent…* and send with **↑**
    (on a desktop browser, Enter sends and Shift+Enter inserts a newline). The
@@ -79,6 +107,7 @@ embedded app at `/ui`; nothing to install on the phone.
 | Server exits on start with `--host 0.0.0.0` | A non-loopback bind requires an API key — set `KRILL_API_KEY` (or pass `--allow-remote-unauthenticated` on a trusted private network only). |
 | *No model available for this session* | Start the server with a model (`krill serve --model gemma-4-e2b`) or pick an installed model in the new-session sheet. |
 | A turn ends with *Stopped at the iteration limit* | The run hit `max_iterations` (24 by default). Send the next step as a new message — context carries over — or create the session over HTTP with a higher limit (table below). |
+| `krill ui --install` reports the server never answered | launchd cannot execute a binary inside Desktop, Documents, Downloads or iCloud Drive (macOS privacy protection). A dev build under `~/Desktop` hits this; `brew install krill` or `make install` (→ `/usr/local/bin`) do not. Check `~/.krill/ui/serve.log` and `launchctl print gui/$(id -u)/ai.souravailabs.krill.serve`. |
 | The stream goes quiet on iOS | Safari suspends background tabs; the app reconnects and replays when you return. Add to Home Screen for the most reliable behaviour. |
 
 ## Sessions
@@ -90,9 +119,10 @@ brief, and multi-turn context carries across messages. Sessions live in server
 memory: they survive phone disconnects/reconnects, but not a server restart.
 
 Permission postures (same semantics as `krill code`): `plan` (read-only),
-`ask` (default here: every mutating tool prompts), `accept-edits` (file edits
-auto-apply, commands prompt), `accept-all`. "Always allow" from a prompt
-whitelists that tool for the rest of the session.
+`adaptive` (plans read-only, then may self-promote to edits while commands
+prompt), `ask` (default here: every mutating tool prompts), `accept-edits` (file
+edits auto-apply, commands prompt), and `accept-all`. "Always allow" from a
+prompt whitelists that tool for the rest of the session.
 
 ## HTTP API
 
@@ -108,13 +138,15 @@ shell (page, manifest, icon — no data) is exempt, as are `OPTIONS`/`/healthz`.
 | `POST /v1/agent/sessions/{id}/messages` | `{"text": …}` → `202`; starts a turn (409 if one is running). |
 | `GET /v1/agent/sessions/{id}/events` | SSE. `?since=N` (or `Last-Event-ID`) replays `seq > N`, then tails live. `id:` line = seq; `: ping` heartbeat every 25s. |
 | `POST /v1/agent/sessions/{id}/approvals` | `{"id"?: …, "allow": bool, "always"?: bool}` → 409 if nothing (or a different request) is pending. |
-| `POST /v1/agent/sessions/{id}/cancel` | Stop the active turn (also resolves a parked approval as deny). |
+| `POST /v1/agent/sessions/{id}/questions` | `{"id"?: …, "option_index"?: N, "text"?: …, "declined"?: bool}` answers a pending `ask_user` or plan-approval question; 409 if none (or a different request) is pending. |
+| `POST /v1/agent/sessions/{id}/cancel` | Stop the active turn (also resolves parked approvals/questions safely). |
 | `GET /v1/agent/workspaces?path=~` | Shallow directory browser for the workspace picker (marks git repos). |
 
 Event types on the stream: `user`, `assistant`, `assistant_final`, `tool_call`
 (`name`, `args` JSON string), `tool_result` (`content`, `is_error`), `note`,
 `status` (`idle|running|waiting|cancelled`), `approval_request`
-(`id`, `tool`, `args`), `approval_resolved` (`id`, `allow`).
+(`id`, `tool`, `args`), `approval_resolved` (`id`, `allow`), `question_request`,
+`question_answered`, and `permission_changed`.
 
 ## Notes
 

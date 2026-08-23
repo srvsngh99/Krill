@@ -34,6 +34,10 @@ enum Ansi {
     static func yellow(_ s: String) -> String { wrap(s, "33") }
     static func magenta(_ s: String) -> String { wrap(s, "35") }
     static func gray(_ s: String) -> String { wrap(s, "90") }
+    /// Diff rows use restrained background tints so additions/deletions remain
+    /// distinguishable even when source text itself contains color-like syntax.
+    static func diffAddition(_ s: String) -> String { wrap(s, "38;2;170;235;190;48;2;24;58;39") }
+    static func diffDeletion(_ s: String) -> String { wrap(s, "38;2;255;185;185;48;2;67;28;34") }
 
     // MARK: - Ember accent (Krill's owned palette — the one place colour lives)
 

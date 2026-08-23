@@ -63,9 +63,56 @@ final class FileToolsTests: XCTestCase {
         XCTAssertFalse(r1.isError)
         XCTAssertTrue(r1.content.contains("Created"))
         XCTAssertEqual(read("nested/new.txt"), "hi")
+        guard case .some(.diff(let createdPath, let createdHunks)) = r1.display else {
+            return XCTFail("write_file must attach a diff display")
+        }
+        XCTAssertEqual(createdPath, path("nested/new.txt"))
+        XCTAssertEqual(FileToolSupport.diffstat(hunks: createdHunks), "+1 -0")
+
         let r2 = await WriteTool().run(argumentsJSON: args(["path": path("nested/new.txt"), "content": "bye"]))
         XCTAssertTrue(r2.content.contains("Overwrote"))
         XCTAssertEqual(read("nested/new.txt"), "bye")
+        guard case .some(.diff(_, let overwrittenHunks)) = r2.display else {
+            return XCTFail("overwrite must attach a diff display")
+        }
+        XCTAssertEqual(FileToolSupport.diffstat(hunks: overwrittenHunks), "+1 -1")
+    }
+
+    func testUnifiedDiffBuildsNumberedContextHunks() {
+        let old = (1 ... 12).map { "line \($0)" }.joined(separator: "\n")
+        var newLines = (1 ... 12).map { "line \($0)" }
+        newLines[5] = "changed six"
+        let hunks = FileToolSupport.unifiedDiff(
+            old: old, new: newLines.joined(separator: "\n"), context: 2)
+
+        XCTAssertEqual(hunks.count, 1)
+        let hunk = hunks[0]
+        XCTAssertEqual(hunk.oldStart, 4)
+        XCTAssertEqual(hunk.oldCount, 5)
+        XCTAssertEqual(hunk.newStart, 4)
+        XCTAssertEqual(hunk.newCount, 5)
+        XCTAssertEqual(hunk.lines.first?.oldLine, 4)
+        XCTAssertEqual(hunk.lines.first?.newLine, 4)
+        XCTAssertEqual(hunk.lines.map(\.kind), [.context, .context, .deletion, .addition, .context, .context])
+        XCTAssertEqual(hunk.lines.first(where: { $0.kind == .deletion })?.text, "line 6")
+        XCTAssertEqual(hunk.lines.first(where: { $0.kind == .addition })?.text, "changed six")
+    }
+
+    func testUnifiedDiffSeparatesDistantChangesAndBoundsModelPreview() {
+        let old = (1 ... 30).map { "line \($0)" }.joined(separator: "\n")
+        var newLines = (1 ... 30).map { "line \($0)" }
+        newLines[1] = "changed two"
+        newLines[27] = "changed twenty-eight"
+        let hunks = FileToolSupport.unifiedDiff(
+            old: old, new: newLines.joined(separator: "\n"), context: 1)
+
+        XCTAssertEqual(hunks.count, 2)
+        let preview = FileToolSupport.compactPreview(
+            hunks: hunks, maxLines: 3, maxCharacters: 120)
+        XCTAssertTrue(preview.hasPrefix("@@ "))
+        XCTAssertTrue(preview.hasSuffix("..."), preview)
+        XCTAssertLessThanOrEqual(preview.count, 123)
+        XCTAssertFalse(preview.contains("changed twenty-eight"), "only the first hunk belongs in model content")
     }
 
     // MARK: edit_file (pure logic)
@@ -101,6 +148,12 @@ final class FileToolsTests: XCTestCase {
         ]))
         XCTAssertFalse(r.isError)
         XCTAssertEqual(read("c.swift"), "func bar() {}")
+        guard case .some(.diff(let displayPath, let hunks)) = r.display else {
+            return XCTFail("edit_file must attach a diff display")
+        }
+        XCTAssertEqual(displayPath, path("c.swift"))
+        XCTAssertEqual(FileToolSupport.diffstat(hunks: hunks), "+1 -1")
+        XCTAssertTrue(r.content.contains("@@ -1,1 +1,1 @@"))
     }
 
     // MARK: multi_edit (atomic)
@@ -113,6 +166,24 @@ final class FileToolsTests: XCTestCase {
         ]))
         XCTAssertFalse(r.isError)
         XCTAssertEqual(read("m.txt"), "A B")
+        guard case .some(.diff(let displayPath, let hunks)) = r.display else {
+            return XCTFail("multi_edit must attach a diff display")
+        }
+        XCTAssertEqual(displayPath, path("m.txt"))
+        XCTAssertEqual(FileToolSupport.diffstat(hunks: hunks), "+1 -1")
+    }
+
+    func testWriteKeepsFullDiffOutOfModelContent() async {
+        let content = (1 ... 100).map { "new line \($0)" }.joined(separator: "\n")
+        let r = await WriteTool().run(argumentsJSON: args([
+            "path": path("large.txt"), "content": content,
+        ]))
+
+        XCTAssertLessThan(r.content.count, 1_000, "model-facing content must remain bounded")
+        guard case .some(.diff(_, let hunks)) = r.display else {
+            return XCTFail("write_file must carry the full diff in display")
+        }
+        XCTAssertEqual(hunks.flatMap(\.lines).filter { $0.kind == .addition }.count, 100)
     }
 
     func testMultiEditIsAtomicOnFailure() async throws {

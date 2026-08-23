@@ -1,15 +1,79 @@
 import Foundation
 import KrillTooling
 
-/// Result of running a tool. `content` is fed back to the model verbatim as
-/// the observation for the next turn; `isError` lets the loop (and a future
-/// renderer) flag failures without changing the feedback contract.
+/// A line in a UI-only unified diff. This deliberately lives outside the
+/// model-facing `content`, so a future renderer can show full diffs without
+/// spending context tokens on them.
+public struct ToolDiffLine: Sendable, Equatable {
+    public enum Kind: String, Sendable, Equatable {
+        case context, addition, deletion
+    }
+
+    public let oldLine: Int?
+    public let newLine: Int?
+    public let kind: Kind
+    public let text: String
+
+    public init(oldLine: Int?, newLine: Int?, kind: Kind, text: String) {
+        self.oldLine = oldLine
+        self.newLine = newLine
+        self.kind = kind
+        self.text = text
+    }
+}
+
+/// A contiguous UI-only diff hunk.
+public struct ToolDiffHunk: Sendable, Equatable {
+    public let oldStart: Int
+    public let oldCount: Int
+    public let newStart: Int
+    public let newCount: Int
+    public let lines: [ToolDiffLine]
+
+    public init(
+        oldStart: Int, oldCount: Int, newStart: Int, newCount: Int,
+        lines: [ToolDiffLine]
+    ) {
+        self.oldStart = oldStart
+        self.oldCount = oldCount
+        self.newStart = newStart
+        self.newCount = newCount
+        self.lines = lines
+    }
+}
+
+/// Rich presentation metadata for human-facing surfaces. It is never appended
+/// to the model transcript. The diff case is defined now so file tools can adopt
+/// the same seam later without changing `ToolResult` again.
+public enum ToolDisplay: Sendable, Equatable {
+    case question(UserQuestion, answer: UserAnswer)
+    case diff(path: String, hunks: [ToolDiffHunk])
+}
+
+/// A declared state transition performed by a tool. The loop only relays this
+/// for observability; the authoritative mutation belongs to `PermissionBox`.
+public enum ToolEffect: Sendable, Equatable {
+    case permissionMode(PermissionMode)
+}
+
+/// Result of running a tool. `content` is fed back to the model verbatim;
+/// `display` is UI-only and `effect` declares an already-applied state change.
 public struct ToolResult: Sendable, Equatable {
     public let content: String
     public let isError: Bool
-    public init(content: String, isError: Bool = false) {
+    public let display: ToolDisplay?
+    public let effect: ToolEffect?
+
+    public init(
+        content: String,
+        isError: Bool = false,
+        display: ToolDisplay? = nil,
+        effect: ToolEffect? = nil
+    ) {
         self.content = content
         self.isError = isError
+        self.display = display
+        self.effect = effect
     }
 }
 

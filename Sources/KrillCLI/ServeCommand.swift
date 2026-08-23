@@ -36,6 +36,10 @@ struct ServeCommand: AsyncParsableCommand {
     var ngramSpec: Bool = false
 
     func run() async throws {
+        // Line-buffer stdout even when it is a file: `krill ui` and launchd
+        // redirect the banner and request log to ~/.krill/ui/serve.log, and a
+        // fully buffered stream shows nothing until exit (or never, on SIGTERM).
+        setvbuf(stdout, nil, _IOLBF, 0)
         // n-gram spec is on by default (single-stream + batcher, each self-gated
         // and adaptive). The flag remains as an explicit pin: set the env EVERY
         // engine reads at init before any engine is constructed, so a config

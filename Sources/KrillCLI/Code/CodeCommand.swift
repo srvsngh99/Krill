@@ -48,7 +48,7 @@ struct CodeCommand: AsyncParsableCommand {
     var classic: Bool = false
 
     @Option(name: .long,
-            help: "Permission level: plan (read-only), ask (confirm each mutating tool), accept-edits (auto-apply edits, ask for commands), or auto/accept-all (run every tool). Defaults to default_agent_permissions (plan if unset or invalid).")
+            help: "Permission level: plan (read-only), adaptive (plans then self-promotes to edits), ask (confirm each mutating tool), accept-edits (auto-apply edits, ask for commands), or auto/accept-all (run every tool). Defaults to default_agent_permissions (plan if unset or invalid).")
     var permissionMode: String?
 
     @Option(name: .customLong("allow-tool"), parsing: .singleValue,
@@ -115,7 +115,7 @@ struct CodeCommand: AsyncParsableCommand {
                 print("Warning: invalid default_agent_permissions '\(configured)'; using plan mode.")
             }
         }
-        let policy = PermissionPolicy(
+        let permissionBox = PermissionBox(
             mode: mode, allow: Set(allowTools), deny: Set(denyTools))
 
         // Fail fast before the (expensive) model load when no task was given
@@ -141,6 +141,12 @@ struct CodeCommand: AsyncParsableCommand {
             NowTool(), TodoTool(), RepoMapTool(),
         ]
         if bash { tools.append(BashTool()) }
+        let questionAsker: StdinQuestionAsker? = RawTerminal.isInteractive
+            ? StdinQuestionAsker() : nil
+        tools.append(contentsOf: AgentInteractionTools.make(
+            mode: mode,
+            permissionBox: permissionBox,
+            questionGate: questionAsker))
 
         // Steer the model in plan mode; surface the posture inline. This is
         // shared by the classic renderer and the TUI so both
@@ -151,17 +157,11 @@ struct CodeCommand: AsyncParsableCommand {
         // never fires — carry it explicitly when the user supplied no prompt.
         var systemParts = [AgentEnvironment.contextLine(modelName: model)]
         if let brief = AgentEnvironment.projectBrief() { systemParts.append(brief) }
-        if mode == .plan {
-            systemParts.append(
-                "You are in PLAN MODE (read-only). You may read and search files with the "
-                + "read-only tools, but you must NOT write files, edit files, or run shell "
-                + "commands - those are denied. Investigate as needed, then present a clear, "
-                + "concise step-by-step plan as your final answer.")
-        }
+        systemParts.append(contentsOf: AgentEnvironment.permissionDirectives(for: mode))
         if let userSystem = nonEmpty(system) {
             systemParts.append(userSystem)
         } else {
-            systemParts.append(AgentEnvironment.toolDirective)
+            systemParts.append(AgentEnvironment.toolDirective(for: mode))
         }
         let effectiveSystem = systemParts.joined(separator: "\n\n")
 
@@ -195,7 +195,9 @@ struct CodeCommand: AsyncParsableCommand {
         // Surface the posture inline.
         switch mode {
         case .plan:
-            print("Plan mode: read-only. The agent can inspect files but cannot edit them or run commands.")
+            print("Plan mode: read-only. The agent can inspect files and request approval to execute.")
+        case .adaptive:
+            print("Adaptive mode: starts read-only, then may self-promote to edits; commands still ask.")
         case .ask:
             print("Ask mode: you will be prompted to approve each file edit or shell command.")
         case .acceptEdits:
@@ -211,13 +213,23 @@ struct CodeCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        var generator = EngineGenerator(engine: engine, maxTokens: maxTokens)
+        generator.onStats = { stats in
+            let rate = stats.decodeTime > 0
+                ? Double(stats.generatedTokens) / stats.decodeTime : 0
+            let line = String(
+                format: "  [generation: %d prompt + %d output tokens · %.1f tok/s]\n",
+                stats.promptTokens, stats.generatedTokens, rate)
+            FileHandle.standardError.write(Data(line.utf8))
+        }
         let loop = AgentLoop(
-            generator: EngineGenerator(engine: engine, maxTokens: maxTokens),
+            generator: generator,
             tools: ToolRegistry(tools),
             maxIterations: maxIterations,
             constrainToolArgs: constrainArgs,
-            permission: policy,
-            gate: (mode == .ask || mode == .acceptEdits) ? StdinApprover() : nil)
+            permission: permissionBox.policy,
+            permissionBox: permissionBox,
+            gate: (mode != .acceptAll && RawTerminal.isInteractive) ? StdinApprover() : nil)
 
         print("\n> \(task)\n")
         // Render the run live as the loop emits events, instead of dumping the

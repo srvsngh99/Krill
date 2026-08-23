@@ -126,6 +126,9 @@ final class PermissionPostureTests: XCTestCase {
         XCTAssertEqual(PermissionMode.parse("edits"), .acceptEdits)
         XCTAssertEqual(PermissionMode.parse("ask"), .ask)
         XCTAssertEqual(PermissionMode.parse("PLAN"), .plan)
+        XCTAssertEqual(PermissionMode.parse("adaptive"), .adaptive)
+        XCTAssertEqual(PermissionMode.parse("self"), .adaptive)
+        XCTAssertEqual(PermissionMode.parse("pilot"), .adaptive)
         XCTAssertNil(PermissionMode.parse("nonsense"))
     }
 
@@ -139,17 +142,45 @@ final class PermissionPostureTests: XCTestCase {
     }
 
     func testShiftTabCycleOrderWraps() {
-        XCTAssertEqual(PermissionMode.plan.next, .ask)
+        XCTAssertEqual(PermissionMode.plan.next, .adaptive)
+        XCTAssertEqual(PermissionMode.adaptive.next, .ask)
         XCTAssertEqual(PermissionMode.ask.next, .acceptEdits)
         XCTAssertEqual(PermissionMode.acceptEdits.next, .acceptAll)
         XCTAssertEqual(PermissionMode.acceptAll.next, .plan)
+        XCTAssertEqual(Set(PermissionMode.cycleOrder), Set(PermissionMode.allCases))
     }
 
-    func testLabelsAreStable() {
+    func testLabelsAreStableAndUnique() {
         XCTAssertEqual(PermissionMode.acceptAll.label, "auto")
         XCTAssertEqual(PermissionMode.acceptEdits.label, "accept-edits")
         XCTAssertEqual(PermissionMode.ask.label, "ask")
         XCTAssertEqual(PermissionMode.plan.label, "plan")
+        XCTAssertEqual(PermissionMode.adaptive.label, "adaptive")
+        XCTAssertEqual(Set(PermissionMode.allCases.map(\.label)).count, 5)
+    }
+
+    func testAdaptiveFailsClosedAndPointsToRequestExecute() {
+        let decision = PermissionPolicy(mode: .adaptive)
+            .decision(toolName: "bash", isReadOnly: false)
+        guard case .deny(let reason) = decision else {
+            return XCTFail("adaptive must hard-deny mutations before promotion")
+        }
+        XCTAssertTrue(reason.contains("request_execute"))
+    }
+
+    func testAskUserIsAllowedInEveryPosture() {
+        for mode in PermissionMode.allCases {
+            XCTAssertEqual(
+                PermissionPolicy(mode: mode).decision(toolName: "ask_user", isReadOnly: true),
+                .allow)
+        }
+    }
+
+    func testExecutePostureStillAsksBeforeCommands() {
+        XCTAssertEqual(
+            PermissionPolicy(mode: .executePosture)
+                .decision(toolName: "bash", isReadOnly: false),
+            .ask)
     }
 }
 
