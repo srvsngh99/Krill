@@ -254,11 +254,17 @@ postures, `planSystemSteer` present exactly when `initialEffective == .plan`.
    `gate: (mode != .acceptAll && RawTerminal.isInteractive) ? StdinApprover() : nil`.
    Today `nil` in plan and adaptive means that after a promotion every `bash`
    call is silently denied forever, with no prompt printed.
-3. Register both tools only when `RawTerminal.isInteractive`. On a piped run the
-   model is never told they exist — no hang possible, no context wasted.
+3. Register `ask_user` only when `RawTerminal.isInteractive`. Register
+   `request_execute` when interactive **or when `mode == .adaptive`**: adaptive
+   self-promotion does not consult a human gate and must work in scripts/CI.
+   Supply a `DecliningQuestionGate` for the non-interactive adaptive case so any
+   accidental planning-path question fails safe without hanging. A piped `.plan`
+   run offers neither tool.
 
-**Done when** `krill code --plan "<task>"` on a tty prompts and promotes, and the
-same command with `</dev/null` neither hangs nor offers the tools.
+**Done when** `krill code --plan "<task>"` on a tty prompts and promotes; the same
+command with `</dev/null` neither hangs nor offers the tools; and
+`krill code --permission-mode adaptive "<task>" </dev/null` offers
+`request_execute` and can self-promote to `.acceptEdits`.
 
 ---
 
@@ -374,7 +380,7 @@ edit renders as a readable diff without pressing Ctrl-O.
 Update `docs/TUI.md:40,:105-106,:121` and `docs/AGENT_UI.md:121,:132` (both
 enumerate the four modes verbatim), `docs/SERVER_API.md` (the new route and
 frames), and `CHANGELOG.md`. Mark
-`docs/decisions/0004-interactive-questions-and-adaptive-mode.md` adopted.
+`docs/decisions/0004-interactive-questions-and-adaptive-mode.md` adopted only after the manual QA gate passes (keep it proposed during review).
 
 **CHANGELOG must note the forward-compat behaviour:** an older Krill reading
 `default_agent_permissions = "adaptive"` gets `parse` → nil →

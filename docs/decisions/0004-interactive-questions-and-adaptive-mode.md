@@ -1,6 +1,6 @@
 # 0004. Interactive questions, plan promotion, and the adaptive posture
 
-Status: adopted. Date: 2026-08-23. Owner: Sourav. Scope: how Krill's agent asks
+Status: proposed. Date: 2026-08-23. Owner: Sourav. Scope: how Krill's agent asks
 the user a question mid-run, how it leaves plan mode, and the new posture in
 which it decides that for itself.
 
@@ -262,6 +262,11 @@ calls have different signatures and pass the dedupe guard.
   posture-conditional tool *registration* is a lie in the TUI. Both tools
   register unconditionally there and branch at run time. This is a pre-existing
   soundness gap for any posture-dependent toolset; tracked in `docs/BACKLOG.md`.
+- Classic/non-interactive CLI registration differs deliberately: `ask_user`
+  requires an interactive question gate, but `request_execute` must still be
+  offered in `.adaptive` because self-promotion never consults that gate. The
+  non-interactive adaptive path carries a fail-safe `DecliningQuestionGate`;
+  non-interactive `.plan` offers neither tool.
 
 **Pre-existing bugs this work forces us to fix** (each is a real defect
 independent of the feature):

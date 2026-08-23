@@ -98,8 +98,12 @@ public struct RequestExecuteTool: Tool {
     }
 
     private func declined(question: UserQuestion, answer: UserAnswer) -> ToolResult {
-        ToolResult(
-            content: "Execution was not approved. Remain in read-only planning and respect the user's decision.",
+        let typed = answer.optionIndex == nil
+            ? answer.text.trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        let feedback = typed.isEmpty ? "" : " The user said: \(typed)"
+        return ToolResult(
+            content: "Execution was not approved. Remain in read-only planning and respect the user's decision."
+                + feedback,
             isError: false,
             display: .question(question, answer: answer))
     }

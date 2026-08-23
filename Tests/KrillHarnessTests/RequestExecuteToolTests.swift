@@ -108,4 +108,38 @@ final class RequestExecuteToolTests: XCTestCase {
         XCTAssertFalse(result.isError)
         XCTAssertEqual(box.effective, .plan)
     }
+
+    func testTypedDeclineReasonIsReturnedToModel() async {
+        let box = PermissionBox(mode: .plan)
+        let answer = UserAnswer(
+            text: "not until you handle the migration path",
+            optionIndex: nil,
+            wasFreeText: true)
+        let result = await RequestExecuteTool(
+            box: box, gate: ExecuteQuestionGate(answer))
+            .run(argumentsJSON: #"{"summary":"Implement"}"#)
+
+        XCTAssertEqual(box.effective, .plan)
+        XCTAssertTrue(result.content.contains(
+            "The user said: not until you handle the migration path"))
+    }
+
+    func testNoninteractiveAdaptiveRegistrationStillOffersRequestExecute() async {
+        let box = PermissionBox(mode: .adaptive)
+        let tools = AgentInteractionTools.make(
+            mode: .adaptive, permissionBox: box, questionGate: nil)
+        XCTAssertEqual(tools.map(\.name), ["request_execute"])
+
+        let result = await tools[0].run(argumentsJSON: #"{"summary":"Implement"}"#)
+        XCTAssertEqual(result.effect, .permissionMode(.acceptEdits))
+        XCTAssertEqual(box.effective, .acceptEdits)
+    }
+
+    func testNoninteractivePlanRegistrationOffersNoInteractiveTools() {
+        let tools = AgentInteractionTools.make(
+            mode: .plan,
+            permissionBox: PermissionBox(mode: .plan),
+            questionGate: nil)
+        XCTAssertTrue(tools.isEmpty)
+    }
 }

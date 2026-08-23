@@ -143,11 +143,10 @@ struct CodeCommand: AsyncParsableCommand {
         if bash { tools.append(BashTool()) }
         let questionAsker: StdinQuestionAsker? = RawTerminal.isInteractive
             ? StdinQuestionAsker() : nil
-        if let questionAsker {
-            tools.append(AskUserTool(gate: questionAsker))
-            tools.append(RequestExecuteTool(
-                permissionBox: permissionBox, gate: questionAsker))
-        }
+        tools.append(contentsOf: AgentInteractionTools.make(
+            mode: mode,
+            permissionBox: permissionBox,
+            questionGate: questionAsker))
 
         // Steer the model in plan mode; surface the posture inline. This is
         // shared by the classic renderer and the TUI so both

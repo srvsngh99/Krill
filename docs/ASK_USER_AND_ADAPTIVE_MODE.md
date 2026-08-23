@@ -1,6 +1,6 @@
 # Krill: interactive questions, plan approval, adaptive mode, and a TUI lift
 
-Status: adopted. Date: 2026-08-23. Scope: giving Krill's agent the ability to
+Status: proposed. Date: 2026-08-23. Scope: giving Krill's agent the ability to
 ask the user questions, to request promotion out of plan mode, a new adaptive
 posture, real file diffs, and the TUI chrome to surface all of it.
 
@@ -16,7 +16,7 @@ posture, real file diffs, and the TUI chrome to surface all of it.
 > Everything below was verified against the source at commit `973c885`; line
 > numbers are accurate as of that commit and should be re-checked if the branch
 > has moved. Claims marked *(verified)* were confirmed by reading the code
-> directly, not inferred. **Implemented and adopted on `feature/krill-ui`.**
+> directly, not inferred. **Implemented in PR #303; adoption waits for manual QA.**
 
 ## Context
 
@@ -305,9 +305,12 @@ a human-only action through Shift+Tab.
 `request_execute` would be **denied by the very mode it exists to exit**. Pin it
 in a test.
 
-**Registration: always, with a posture-aware early return.** Conditional
-registration is a lie in the TUI (frozen tool-system turn — see gotchas). Three
-run-time arms:
+**Registration: always in TUI/remote, with a posture-aware early return.**
+Conditional registration is a lie in the TUI (frozen tool-system turn — see
+gotchas). The classic CLI may omit `ask_user` without an interactive gate, but
+must still offer `request_execute` in non-interactive `.adaptive` runs because
+self-promotion asks nobody; a `DecliningQuestionGate` keeps any accidental
+question path fail-safe. Three run-time arms:
 
 | effective posture | behaviour |
 |---|---|

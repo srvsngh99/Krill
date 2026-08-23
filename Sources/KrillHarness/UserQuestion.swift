@@ -45,6 +45,16 @@ public protocol UserQuestionGate: Sendable {
     func cancelPending()
 }
 
+/// Fail-safe gate for a surface with no interactive input. Adaptive
+/// `request_execute` never consults it because that posture self-promotes, but
+/// carrying a real gate keeps any accidental planning-path call non-blocking and
+/// declined rather than hanging or granting permission.
+public struct DecliningQuestionGate: UserQuestionGate {
+    public init() {}
+    public func ask(_ question: UserQuestion) async -> UserAnswer { .declinedAnswer }
+    public func cancelPending() {}
+}
+
 private enum QuestionRace: Sendable {
     case answer(UserAnswer)
     case timeout
