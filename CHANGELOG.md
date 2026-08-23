@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.22.0] - 2026-08-24
+
 ### Added
 
 - **Interactive agent questions and adaptive execution.** Agents can use
@@ -36,6 +38,36 @@ reverse chronological order. Versioning follows
   login item (starts at login, restarts on exit, logs in `~/.krill/ui/`);
   `--stop` ends the detached server; `--status` reprints the links;
   `--foreground` runs it in the terminal instead.
+
+### Fixed
+
+- **Context usage is measured again.** The dense text path published
+  `GenerationStats` *after* the terminal stream event, so a consumer that stops
+  on it — the agent loop — always read an empty holder. Agent turns therefore
+  recorded no stats: the footer showed only the context window (`ctx 128K`) with
+  no tok/s, and `/context` silently presented a characters-per-token *estimate*
+  as if it were measured. Stats are now published before the terminal event, in
+  line with the ordering the vision drivers already documented.
+- **The tool-name grammar mask now actually runs.** Constrained tool-name
+  generation lived only in a protocol extension, so calls through the existential
+  dispatched to the no-op default and the primary defence against a model naming
+  an unoffered tool never executed in production.
+- **Planning runs no longer stop without doing the work.** The anti-over-calling
+  directive told the model to stop once tool results arrived, which is wrong
+  while planning — there the turn's correct final action is a `request_execute`
+  call. Agents investigated, announced they were about to ask for permission,
+  and ended the turn having changed nothing. The directive is now posture-aware,
+  and a granted promotion instructs the model to execute the plan rather than
+  merely permitting it.
+- **A denied call no longer blocks its own retry.** The runaway guard recorded a
+  tool signature before the permission check, so a call denied while planning
+  poisoned the cache and the identical call — retried after promotion — was
+  dropped as a repeat. Signatures are now scoped to the permission posture.
+- **`krill code` keeps an approver for any posture a run can reach.** The gate
+  was wired only for `ask` and `accept-edits`, so after a promotion every shell
+  command was denied silently, with no prompt printed.
+- Remote approvals no longer park forever when no client is attached; they time
+  out and deny, leaving the workspace untouched.
 
 ## [0.21.0] - 2026-08-22
 
