@@ -1392,7 +1392,7 @@ final class ChatTUI {
         } else {
             // Bringing our own system turn suppresses the tooling layer's
             // fallback directive — carry it explicitly.
-            seedSystem.append(AgentEnvironment.toolDirective)
+            seedSystem.append(AgentEnvironment.toolDirective(for: permissions))
         }
         msgs.append(["role": "system", "content": seedSystem.joined(separator: "\n\n")])
         for t in modelTurns { msgs.append(["role": t.role, "content": t.content]) }

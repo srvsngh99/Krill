@@ -16,6 +16,27 @@ public enum AgentEnvironment {
         + "(office-holders, prices, versions, news), verify with web_search "
         + "instead of answering from memory."
 
+    /// Planning variant. `toolDirective`'s "stop once you have the tool results"
+    /// is simply WRONG while planning, where the turn's correct terminal action
+    /// is a `request_execute` CALL rather than prose - and because the directive
+    /// is appended last, recency made the model obey it over the plan steer.
+    /// Observed repeatedly on gemma-4-12b-agentic: it narrated "I'll ask for
+    /// permission to implement the edit" and ended the turn, changing nothing.
+    public static let planningToolDirective =
+        "Use tools only when needed. You are PLANNING: your turn ends by calling request_execute, "
+        + "not by replying with prose. Do not stop after the read-only tools return, and do not "
+        + "merely say you are about to request permission - emit the request_execute call itself. "
+        + "Your training data has a cutoff: for facts that change over time "
+        + "(office-holders, prices, versions, news), verify with web_search "
+        + "instead of answering from memory."
+
+    /// The anti-over-calling directive appropriate to `mode`. Surfaces that
+    /// synthesize their own system turn must use this rather than
+    /// `toolDirective` directly, or planning runs stop before they promote.
+    public static func toolDirective(for mode: PermissionMode) -> String {
+        mode.initialEffective == .plan ? planningToolDirective : toolDirective
+    }
+
     /// Always-on guidance: clarification is available in every permission
     /// posture and an answer continues the current run rather than ending it.
     public static let askUserDirective =
@@ -33,7 +54,8 @@ public enum AgentEnvironment {
     /// Shared per-turn planning prefix for interactive/background TUI builders.
     public static let planTurnPrefix =
         "(Plan mode: read-only. Investigate with the read-only tools and propose a clear, step-by-step "
-        + "plan. You may use ask_user for clarification. Call request_execute when ready to implement. "
+        + "plan. You may use ask_user for clarification. Call request_execute when ready to implement - "
+        + "emit the call itself; do not merely say you are about to ask for permission. "
         + "Do not edit files or run commands.)"
 
     public static let adaptivePlanTail =

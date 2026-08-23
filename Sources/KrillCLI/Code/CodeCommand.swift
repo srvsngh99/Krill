@@ -161,7 +161,7 @@ struct CodeCommand: AsyncParsableCommand {
         if let userSystem = nonEmpty(system) {
             systemParts.append(userSystem)
         } else {
-            systemParts.append(AgentEnvironment.toolDirective)
+            systemParts.append(AgentEnvironment.toolDirective(for: mode))
         }
         let effectiveSystem = systemParts.joined(separator: "\n\n")
 

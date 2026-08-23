@@ -253,7 +253,7 @@ extension HTTPHandler {
         var parts = [AgentEnvironment.contextLine(modelName: modelName)]
         if let brief = AgentEnvironment.projectBrief() { parts.append(brief) }
         parts.append(contentsOf: AgentEnvironment.permissionDirectives(for: mode))
-        parts.append(AgentEnvironment.toolDirective)
+        parts.append(AgentEnvironment.toolDirective(for: mode))
         return parts.joined(separator: "\n\n")
     }
 
