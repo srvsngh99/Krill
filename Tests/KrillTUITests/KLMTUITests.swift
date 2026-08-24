@@ -11,6 +11,7 @@ final class KeyDecoderTests: XCTestCase {
         XCTAssertEqual(KeyDecoder.decode([0x04]), [.ctrlD])
         XCTAssertEqual(KeyDecoder.decode([0x15]), [.ctrlU])
         XCTAssertEqual(KeyDecoder.decode([0x16]), [.ctrlV])   // cycle voice posture
+        XCTAssertEqual(KeyDecoder.decode([0x13]), [.ctrlS])   // toggle copy mode
     }
 
     func testArrowKeys() {
@@ -145,6 +146,12 @@ final class SlashMenuTests: XCTestCase {
         XCTAssertTrue(m.matches.allSatisfy { $0.name.hasPrefix("/s") })
         XCTAssertTrue(m.matches.contains { $0.name == "/system" })
         XCTAssertTrue(m.matches.contains { $0.name == "/save" })
+    }
+
+    func testCopyModeIsDiscoverableByPrefix() {
+        var m = SlashMenu()
+        m.update(for: "/copy-m")
+        XCTAssertEqual(m.matches.map(\.name), ["/copy-mode"])
     }
 
     func testInactiveOnceArgumentTyped() {

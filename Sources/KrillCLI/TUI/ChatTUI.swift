@@ -137,6 +137,10 @@ final class ChatTUI {
     private var inputHistory: [String] = []
     private var historyIndex = 0
     private var scrollOffset = 0     // lines scrolled up from bottom
+    // Mouse reporting gives Krill wheel events but prevents the terminal from
+    // drag-selecting text. Copy mode temporarily hands the mouse back and
+    // freezes redraws so the native selection remains stable.
+    private var copyMode = false
     private var rows = 24, cols = 80
     private var sidebarEnabled = true
     private static let sidebarWidth = 34
@@ -369,8 +373,31 @@ final class ChatTUI {
 
     // MARK: - Key handling
 
+    /// Copy mode is global: it must win over overlays, approvals, active agents,
+    /// and streaming so a selection never turns into an action underneath it.
+    /// RawTerminal clears IXON, so Ctrl-S arrives as a normal 0x13 key rather
+    /// than the terminal's historical XOFF flow-control command.
+    private func handleCopyModeKey(_ key: Key) -> Bool {
+        if copyMode {
+            if key == .ctrlS || key == .escape || key == .ctrlC { toggleCopyMode() }
+            return true
+        }
+        guard key == .ctrlS else { return false }
+        toggleCopyMode()
+        return true
+    }
+
+    /// Hand the mouse between Krill (wheel scrolling) and the terminal (native
+    /// selection), then force one frame for the mode banner or caught-up view.
+    private func toggleCopyMode() {
+        copyMode.toggle()
+        raw.setMouseReporting(!copyMode)
+        renderFrame()
+    }
+
     /// Mutate UI state for a key; return non-nil text to submit on Enter.
     private func handleKey(_ key: Key) -> String? {
+        if handleCopyModeKey(key) { return nil }
         // Modal screens own the keyboard while open.
         if overlay != nil { handleOverlayKey(key); return nil }
         if picker != nil { handlePickerKey(key); return nil }
@@ -496,6 +523,7 @@ final class ChatTUI {
     /// Deliberately narrow (no slash menu / history / voice) so nothing with a
     /// side effect fires mid-generation.
     private func handleStreamingKey(_ key: Key) -> Bool {
+        if handleCopyModeKey(key) { return false }
         switch key {
         case .ctrlC:
             return true                       // cancel the in-flight reply
@@ -869,10 +897,28 @@ final class ChatTUI {
             render()
             return
         }
-        // Inline @path and bare-path attachments.
+        // Inline @path attachments. A whole bare path gets the same media
+        // fallback as the line REPL below, after inline references are removed.
         let (cleaned, atts) = extractInline(trimmed)
         pendingImages.append(contentsOf: atts.filter { $0.kind == .image })
         if let a = atts.last(where: { $0.kind == .audio }) { pendingAudio = a }
+        if atts.isEmpty {
+            switch loadMedia(trimmed) {
+            case .ok(let kind, let data):
+                let name = (MediaAttachment.normalizePath(trimmed) as NSString).lastPathComponent
+                if kind == .image { pendingImages.append(makeAtt(.image, data, name)) }
+                else { pendingAudio = makeAtt(.audio, data, name) }
+                view.append(Msg(role: .note, text: attachSummary()))
+                render()
+                return
+            case .unsupported(let kind):
+                note("This model cannot process \(kind.rawValue) input.")
+                render()
+                return
+            case .notFound, .notMedia:
+                break
+            }
+        }
         let prompt = cleaned.trimmingCharacters(in: .whitespaces)
         if prompt.isEmpty {
             if !atts.isEmpty { view.append(Msg(role: .note, text: attachSummary())); render() }
@@ -991,6 +1037,7 @@ final class ChatTUI {
             sidebarEnabled.toggle()
             lastStatus = sidebarEnabled ? "sidebar on (shown at 110+ columns)" : "sidebar off"
         case "/copy": copyLastReply()
+        case "/copy-mode": toggleCopyMode()
         case "/cd":
             if arg.isEmpty { note("Usage: /cd <path>") } else { changeDirectory(arg) }
         case "/add-dir":
@@ -998,8 +1045,12 @@ final class ChatTUI {
         case "/save": saveTranscript(arg)
         case "/attach": note(attachSummary())
         case "/remove": removeAttachment(arg)
-        case "/image", "/img", "/audio":
-            if arg.isEmpty { note("Usage: \(cmd) <path>") }
+        case "/image", "/img":
+            if arg.lowercased() == "clipboard" { attachClipboardImage() }
+            else if arg.isEmpty { note("Usage: \(cmd) <path> | \(cmd) clipboard") }
+            else if attach(path: arg) { note(attachSummary()) }
+        case "/audio":
+            if arg.isEmpty { note("Usage: /audio <path>") }
             else if attach(path: arg) { note(attachSummary()) }
         case "/mic": await recordMic()
         case "/voice-mode", "/vmode":
@@ -1528,6 +1579,7 @@ final class ChatTUI {
             spin += 1
             if raw.waitForInput(timeoutMs: 120), let keys = reader.read() {
                 for key in keys {
+                    if handleCopyModeKey(key) { continue }
                     switch key {
                     case .ctrlC, .escape: runTask.cancel(); lastStatus = "cancelling"
                     case .pageUp: scrollOffset += paneHeight() - 1
@@ -1629,6 +1681,7 @@ final class ChatTUI {
     /// Keys handled while an agent run is in flight: answer a pending question
     /// or approval, change posture, or cancel / scroll the live transcript.
     private func handleAgentRunKey(_ key: Key, bgTask: Task<AgentTranscript, Never>) {
+        if handleCopyModeKey(key) { return }
         syncQuestionPrompt(question: asker.pending())
         if asker.pending() != nil {
             handleQuestionKey(key, asker: asker)
@@ -1779,6 +1832,7 @@ final class ChatTUI {
     /// Key handling while attached to a RUNNING background session: answer its
     /// approval prompt (y/n/a), cancel it, or scroll its transcript.
     private func handleAttachedRunKey(_ key: Key, session: AgentSession) {
+        if handleCopyModeKey(key) { return }
         syncQuestionPrompt(question: session.asker.pending())
         if session.asker.pending() != nil {
             handleQuestionKey(key, asker: session.asker)
@@ -2629,6 +2683,13 @@ final class ChatTUI {
     private func paneHeight() -> Int { max(1, rows - 7) }
 
     private func render() {
+        guard !copyMode else { return }
+        renderFrame()
+    }
+
+    /// Paint unconditionally. Copy-mode transitions use this for their final
+    /// banner and first caught-up frame; ordinary updates go through render().
+    private func renderFrame() {
         // All primary widgets receive the reduced width before they render, so
         // markdown, diffs, menus, and the composer reflow instead of hiding
         // underneath the optional wide-screen sidebar.
@@ -2669,12 +2730,15 @@ final class ChatTUI {
         if let attached { approval = attached.approver.pending() }
         else if surface == .agent { approval = approver.pending() }
         else { approval = nil }
-        // Priority for the row above the input box: an approval prompt beats
-        // everything; then the live working/thinking status (claude-code
-        // style, left-aligned); then the faded composer hint.
+        // Priority for the row above the input box: copy mode must stay visible;
+        // then an approval prompt, live working/thinking status (claude-code
+        // style, left-aligned), and finally the faded composer hint.
         let hintText: String
         let showsStatus: Bool
-        if let approval { hintText = approvalPrompt(approval); showsStatus = false }
+        if copyMode {
+            hintText = "copy mode: drag to select, Cmd-C to copy \u{00B7} Ctrl-S/Esc to resume"
+            showsStatus = true
+        } else if let approval { hintText = approvalPrompt(approval); showsStatus = false }
         else if menu.isActive || modal { hintText = ""; showsStatus = false }
         else if !lastStatus.isEmpty { hintText = lastStatus; showsStatus = true }
         else { hintText = composerHint(); showsStatus = false }
@@ -3053,6 +3117,22 @@ final class ChatTUI {
         }
     }
 
+    /// Attach a bitmap copied by macOS (not a text path pasted by the terminal).
+    /// This is especially useful for screenshot thumbnails whose temporary file
+    /// disappears immediately after the drag operation.
+    private func attachClipboardImage() {
+        guard engine.supportsNativeImage else {
+            note("This model cannot process image input.")
+            return
+        }
+        guard let data = ClipboardImage.imageData() else {
+            note("No image found on the clipboard. Copy an image, then run /image clipboard.")
+            return
+        }
+        pendingImages.append(makeAtt(.image, data, "clipboard image"))
+        note(attachSummary())
+    }
+
     private func extractInline(_ line: String) -> (String, [Att]) {
         var cleaned = "", atts: [Att] = []
         let chars = Array(line); var i = 0; var atBoundary = true
@@ -3105,6 +3185,7 @@ final class ChatTUI {
             ("Enter", "Send the message"),
             ("Hold Space", "Push-to-talk (dictate/handsfree/send postures)"),
             ("Ctrl-V", "Cycle voice posture: type/dictate/handsfree/send"),
+            ("Ctrl-S", "Copy mode: drag-select, Cmd-C copies, Ctrl-S/Esc resumes"),
             ("PgUp / PgDn", "Scroll the conversation"),
             ("Esc", "Interrupt the agent while it works"),
             ("Ctrl-C", "Cancel the reply, or clear the input"),
@@ -3115,7 +3196,8 @@ final class ChatTUI {
         }
         lines.append("")
         lines.append("Attachments")
-        lines.append("  Drag a file into the window, or type @path in your message.")
+        lines.append("  Drag a file into the window, type a bare path or @path in your message.")
+        lines.append("  Copy an image, then run /image clipboard to attach it directly.")
         return lines.joined(separator: "\n")
     }
 
