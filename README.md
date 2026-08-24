@@ -19,7 +19,7 @@ Most local-LLM stacks are one half of a pair:
 - an **engine** (Ollama, llama.cpp) that runs a model but can't *do* anything, and
 - a **harness** (Claude Code, Codex) that drives tools and edits files but borrows someone else's model.
 
-**Krill is both, in one binary.** The same native Swift + MLX engine that serves tokens also runs a full agent loop — tools, file edits, web fetch, permissions — against the model already sitting in your RAM. No second process, no Python bridge, nothing leaves the machine.
+**Krill is both, in one binary.** The same native Swift + MLX engine that serves tokens also runs a full agent loop — tools, file edits, web fetch, permissions — against the model already sitting in your RAM. The default local path needs no second process or Python bridge and sends model traffic nowhere. When you explicitly opt in, the same harness can instead use OpenCode's free hosted models or your signed-in Codex CLI.
 
 ## One engine, four modes
 
@@ -27,7 +27,7 @@ Most local-LLM stacks are one half of a pair:
 |------|---------|--------------|
 | **Chat** | `krill run <model>` | Full-screen TUI (opens in agent mode; `/chat` for pure chat) — multimodal, streaming, on-device voice |
 | **Serve** | `krill serve` | Drop-in **OpenAI · Ollama · Anthropic** API on `:57455` |
-| **Agent** | `krill code <task>` | Coding agent — bash, edits, glob/grep, **web**, **deep research** — on your local model |
+| **Agent** | `krill code <task>` | Coding agent — bash, edits, glob/grep, **web**, **deep research** — on a local model, OpenCode free model, or Codex subscription |
 | **Phone / Web** | `krill serve` → open **`/ui`** | The same agent from any browser or phone — sessions per repo, live tool calls, tap-to-approve. Ships inside the binary |
 
 The agent isn't boxed into your filesystem. **`web_search`** ranks the open web — keyless out of the box (DuckDuckGo), or point it at Brave/Tavily (free-tier API key) or your own SearXNG for reliable results — and **`web_fetch`** reads any page as clean text — both SSRF-guarded and untrusted-framed against prompt injection — while **`/research <question>`** runs a multi-source deep-research pass (plan queries → fetch → summarize each source → synthesize a cited answer). A local model that browses, and cites its work.
@@ -88,6 +88,31 @@ krill run gemma-4-e2b "transcribe this"      --audio ./clip.wav   # audio
 krill pull unlimited-ocr && krill run unlimited-ocr --image page.png "document parsing."   # OCR
 ```
 
+### Hosted models in the Krill harness
+
+The local MLX path remains the default. Hosted providers are explicit and use
+the classic line renderer while Krill continues to own the tool loop and
+permission checks.
+
+```bash
+# OpenCode Zen is keyless. The catalog is read live and every `-free` model is
+# available automatically; Ox Alpha is preferred while it remains advertised.
+krill code --provider opencode --list-models
+krill code --provider opencode "explain this repository"
+krill code --provider opencode nemotron-3-ultra-free "review this change"
+
+# Codex uses the official CLI's saved ChatGPT login. Krill never reads or
+# copies the subscription credential and does not turn it into an API key.
+codex login
+krill code --provider codex "review this repository"
+krill code --provider codex MODEL_ID "review this repository"  # optional model
+```
+
+Omit the Codex model to keep the user's current/default subscription model.
+Each user signs in with their own `codex login`; a shared API key is neither
+required nor supported by this bridge. Use `--base-url` to point the OpenCode
+compatible route at a different endpoint.
+
 The default port `57455` is unique, so Krill coexists with Ollama on `11434`; run `krill serve --port 11434` for a literal drop-in.
 
 > 📖 **New to Krill?** The **[User Guide](docs/GUIDE.md)** is a single indexed,
@@ -138,7 +163,7 @@ Native text also runs Phi, GLM-4, Mixtral, OLMoE, and DeepSeek-V2/V3, plus a ~15
 | Command | Description |
 |---------|-------------|
 | `krill run <model> [prompt]` | Chat — interactive TUI or one-shot (`/agent` toggles agent mode) |
-| `krill code [task]` | Open the chat TUI in agent mode (tools, file edits, web) |
+| `krill code [task]` | Agent mode on local MLX; add `--provider opencode` or `--provider codex` for hosted backends |
 | `krill serve` | Start the HTTP server — OpenAI / Ollama / Anthropic APIs, agent sessions, and the web UI at `/ui` |
 | `krill ui` | One command for the phone app: serve in the background, print the phone link, open the UI (`--install` = always on) |
 | `krill launch <agent>` | Wire an external coding agent (Claude Code, Codex, …) to Krill |

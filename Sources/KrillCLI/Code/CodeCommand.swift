@@ -4,6 +4,12 @@ import KrillEngine
 import KrillHarness
 import KrillRegistry
 
+enum CodeProvider: String, ExpressibleByArgument, CaseIterable {
+    case local
+    case opencode
+    case codex
+}
+
 /// `krill code` - the native in-process agentic loop. The model is given a
 /// task and a small toolset (PR2: just `bash`), and the loop runs
 /// generate -> parse tool calls -> execute -> feed back until it answers.
@@ -21,6 +27,22 @@ struct CodeCommand: AsyncParsableCommand {
 
     @Argument(help: "The task for the agent.")
     var prompt: String?
+
+    @Option(name: .long,
+            help: "Model backend: local (MLX), opencode (keyless OpenCode Zen free models), or codex (your Codex CLI subscription).")
+    var provider: CodeProvider = .local
+
+    @Option(name: .long,
+            help: "OpenAI-compatible base URL for --provider opencode.")
+    var baseURL: String?
+
+    @Flag(name: .long,
+          help: "List the free models currently advertised by OpenCode Zen and exit.")
+    var listModels: Bool = false
+
+    @Option(name: .long,
+            help: "Codex CLI executable name or absolute path.")
+    var codexExecutable: String = "codex"
 
     @Option(name: .long, help: "Maximum tokens per model turn.")
     var maxTokens: Int = 1024
@@ -76,6 +98,19 @@ struct CodeCommand: AsyncParsableCommand {
         let defaultModel = nonEmpty(config.defaultModel)
         var resolvedModel = nonEmpty(modelPath)
         var task = nonEmpty(prompt)
+
+        // Hosted providers have their own live/default model selection. With
+        // one positional, preserve the convenient `krill code "task"` shape;
+        // two positionals still mean `<model> <task>`.
+        if provider != .local {
+            if task == nil, !listModels {
+                task = resolvedModel
+                resolvedModel = nil
+            }
+            try await runRemote(model: resolvedModel, task: task, config: config)
+            return
+        }
+
         if task == nil, let only = resolvedModel, let def = defaultModel, !isModelRef(only) {
             resolvedModel = def
             task = only
