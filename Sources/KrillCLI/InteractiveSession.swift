@@ -106,22 +106,27 @@ final class InteractiveSession {
 
             if try await handleLine(trimmed) { continue }
 
-            // Not a command or bare attachment path: pull inline @path media,
-            // then send whatever text remains.
-            let (cleaned, inline) = extractInlineMedia(trimmed)
+            // Not a command: pull inline @path and bare-path media, then send
+            // whatever text remains.
+            let (cleaned, inline, attachmentNotes) = extractInlineMedia(trimmed)
             pendingImages.append(contentsOf: inline.filter { $0.kind == .image })
             if let aud = inline.last(where: { $0.kind == .audio }) { pendingAudio = aud }
+            attachmentNotes.forEach { print($0) }
             let promptText = cleaned.trimmingCharacters(in: .whitespaces)
             if promptText.isEmpty {
                 if !inline.isEmpty { printPending() }
+                continue
+            }
+            if let unknown = unknownCommand(in: trimmed) {
+                print("Unknown command \(unknown). Type /help for the list.")
                 continue
             }
             await generate(userText: promptText)
         }
     }
 
-    /// Handle slash commands and bare attachment paths. Returns true when the
-    /// line was fully handled (caller should read the next line).
+    /// Handle slash commands. Returns true when the line was fully handled
+    /// (caller should read the next line).
     private func handleLine(_ trimmed: String) async throws -> Bool {
         let parts = trimmed.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
         let cmd = String(parts.first ?? "")
@@ -176,25 +181,18 @@ final class InteractiveSession {
             return true
         }
 
-        // Bare dropped/typed path resolving to media.
-        switch loadMedia(trimmed) {
-        case .ok(let kind, let data):
-            addAttachment(makeAttachment(kind, data, name: (MediaAttachment.normalizePath(trimmed) as NSString).lastPathComponent))
-            printPending()
-            return true
-        case .unsupported(let k):
-            print("This model cannot process \(k.rawValue) input.")
-            return true
-        case .notFound, .notMedia:
-            break
-        }
-
-        // A "/word" that is neither a known command nor a path is a typo.
-        if cmd.hasPrefix("/"), String(cmd.dropFirst()).allSatisfy({ $0.isLetter || $0 == "?" }) {
-            print("Unknown command \(cmd). Type /help for the list.")
-            return true
-        }
         return false
+    }
+
+    /// Preserve the REPL's command-typo affordance, but run it only after media
+    /// extraction. A real `/path/to/image` has then already been attached;
+    /// unresolved `/word` still gets the familiar correction rather than being
+    /// sent to the model.
+    private func unknownCommand(in line: String) -> String? {
+        let cmd = String(line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).first ?? "")
+        guard cmd.hasPrefix("/"),
+              String(cmd.dropFirst()).allSatisfy({ $0.isLetter || $0 == "?" }) else { return nil }
+        return cmd
     }
 
     // MARK: - Generation
@@ -362,9 +360,15 @@ final class InteractiveSession {
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
             return .notFound
         }
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return .notFound }
-        let ext = (path as NSString).pathExtension
-        guard let kind = MediaAttachment.detectKind(data: data, pathExtension: ext) else { return .notMedia }
+        let kind: MediaKind
+        let data: Data
+        switch MediaAttachment.readMediaFile(at: URL(fileURLWithPath: path)) {
+        case .unreadable: return .notFound
+        case .notMedia: return .notMedia
+        case .media(let resolvedKind, let resolvedData):
+            kind = resolvedKind
+            data = resolvedData
+        }
         switch kind {
         case .image where !engine.supportsNativeImage: return .unsupported(.image)
         case .audio where !engine.canUseNativeAudio: return .unsupported(.audio)
@@ -372,43 +376,23 @@ final class InteractiveSession {
         }
     }
 
-    /// Pull inline `@path` references out of a prompt line, leaving non-file
-    /// `@mentions` in the returned text verbatim.
-    private func extractInlineMedia(_ line: String) -> (cleaned: String, attachments: [Attachment]) {
-        var cleaned = ""
-        var attachments: [Attachment] = []
-        let chars = Array(line)
-        var i = 0
-        var atBoundary = true
-        while i < chars.count {
-            let ch = chars[i]
-            if ch == "@", atBoundary {
-                var j = i + 1
-                var tok = ""
-                while j < chars.count {
-                    let c = chars[j]
-                    if c == "\\", j + 1 < chars.count { tok.append(c); tok.append(chars[j + 1]); j += 2; continue }
-                    if c == " " || c == "\t" { break }
-                    tok.append(c); j += 1
-                }
-                if !tok.isEmpty {
-                    switch loadMedia(tok) {
-                    case .ok(let kind, let data):
-                        attachments.append(makeAttachment(kind, data, name: (MediaAttachment.normalizePath(tok) as NSString).lastPathComponent))
-                        i = j; atBoundary = false; continue
-                    case .unsupported(let k):
-                        print("This model cannot process \(k.rawValue) input (@\(tok)).")
-                        i = j; atBoundary = false; continue
-                    case .notFound, .notMedia:
-                        break
-                    }
-                }
+    /// Pull inline `@path` and bare path references out of a prompt line,
+    /// leaving non-file tokens verbatim.
+    private func extractInlineMedia(_ line: String) -> (cleaned: String, attachments: [Attachment], notes: [String]) {
+        let extraction = MediaAttachment.extractReferences(from: line) { token in
+            switch loadMedia(token) {
+            case .ok(let kind, let data):
+                let name = (MediaAttachment.normalizePath(token) as NSString).lastPathComponent
+                return .attach(makeAttachment(kind, data, name: name))
+            case .unsupported(let kind): return .unsupported(kind)
+            case .notFound, .notMedia: return .unresolved
             }
-            cleaned.append(ch)
-            atBoundary = (ch == " " || ch == "\t")
-            i += 1
         }
-        return (cleaned, attachments)
+        let notes = extraction.unsupported.map { reference in
+            let name = (MediaAttachment.normalizePath(reference.token) as NSString).lastPathComponent
+            return "\(name) was not attached: \(modelName) cannot process \(reference.kind.rawValue) input."
+        }
+        return (extraction.cleaned, extraction.attachments, notes)
     }
 
     private func recordFromMic() async -> Data? {

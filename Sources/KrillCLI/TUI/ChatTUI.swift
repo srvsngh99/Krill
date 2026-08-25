@@ -897,31 +897,13 @@ final class ChatTUI {
             render()
             return
         }
-        // Inline @path attachments. A whole bare path gets the same media
-        // fallback as the line REPL below, after inline references are removed.
-        let (cleaned, atts) = extractInline(trimmed)
+        let (cleaned, atts, attachmentNotes) = extractInline(trimmed)
         pendingImages.append(contentsOf: atts.filter { $0.kind == .image })
         if let a = atts.last(where: { $0.kind == .audio }) { pendingAudio = a }
-        if atts.isEmpty {
-            switch loadMedia(trimmed) {
-            case .ok(let kind, let data):
-                let name = (MediaAttachment.normalizePath(trimmed) as NSString).lastPathComponent
-                if kind == .image { pendingImages.append(makeAtt(.image, data, name)) }
-                else { pendingAudio = makeAtt(.audio, data, name) }
-                view.append(Msg(role: .note, text: attachSummary()))
-                render()
-                return
-            case .unsupported(let kind):
-                note("This model cannot process \(kind.rawValue) input.")
-                render()
-                return
-            case .notFound, .notMedia:
-                break
-            }
-        }
+        for attachmentNote in attachmentNotes { view.append(Msg(role: .note, text: attachmentNote)) }
         let prompt = cleaned.trimmingCharacters(in: .whitespaces)
         if prompt.isEmpty {
-            if !atts.isEmpty { view.append(Msg(role: .note, text: attachSummary())); render() }
+            if !atts.isEmpty || !attachmentNotes.isEmpty { view.append(Msg(role: .note, text: attachSummary())); render() }
             return
         }
         if surface == .agent {
@@ -3093,10 +3075,18 @@ final class ChatTUI {
         let path = MediaAttachment.normalizePath(token)
         guard !path.isEmpty else { return .notFound }
         var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue,
-              let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return .notFound }
-        let ext = (path as NSString).pathExtension
-        guard let kind = MediaAttachment.detectKind(data: data, pathExtension: ext) else { return .notMedia }
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
+            return .notFound
+        }
+        let kind: MediaKind
+        let data: Data
+        switch MediaAttachment.readMediaFile(at: URL(fileURLWithPath: path)) {
+        case .unreadable: return .notFound
+        case .notMedia: return .notMedia
+        case .media(let resolvedKind, let resolvedData):
+            kind = resolvedKind
+            data = resolvedData
+        }
         switch kind {
         case .image where !engine.supportsNativeImage: return .unsupported(.image)
         case .audio where !engine.canUseNativeAudio: return .unsupported(.audio)
@@ -3133,27 +3123,21 @@ final class ChatTUI {
         note(attachSummary())
     }
 
-    private func extractInline(_ line: String) -> (String, [Att]) {
-        var cleaned = "", atts: [Att] = []
-        let chars = Array(line); var i = 0; var atBoundary = true
-        while i < chars.count {
-            let ch = chars[i]
-            if ch == "@", atBoundary {
-                var j = i + 1, tok = ""
-                while j < chars.count {
-                    let c = chars[j]
-                    if c == "\\", j + 1 < chars.count { tok.append(c); tok.append(chars[j + 1]); j += 2; continue }
-                    if c == " " || c == "\t" { break }
-                    tok.append(c); j += 1
-                }
-                if !tok.isEmpty, case .ok(let kind, let data) = loadMedia(tok) {
-                    atts.append(makeAtt(kind, data, (MediaAttachment.normalizePath(tok) as NSString).lastPathComponent))
-                    i = j; atBoundary = false; continue
-                }
+    private func extractInline(_ line: String) -> (String, [Att], [String]) {
+        let extraction = MediaAttachment.extractReferences(from: line) { token in
+            switch loadMedia(token) {
+            case .ok(let kind, let data):
+                let name = (MediaAttachment.normalizePath(token) as NSString).lastPathComponent
+                return .attach(makeAtt(kind, data, name))
+            case .unsupported(let kind): return .unsupported(kind)
+            case .notFound, .notMedia: return .unresolved
             }
-            cleaned.append(ch); atBoundary = (ch == " " || ch == "\t"); i += 1
         }
-        return (cleaned, atts)
+        let notes = extraction.unsupported.map { reference in
+            let name = (MediaAttachment.normalizePath(reference.token) as NSString).lastPathComponent
+            return "\(name) was not attached: \(modelName) cannot process \(reference.kind.rawValue) input."
+        }
+        return (extraction.cleaned, extraction.attachments, notes)
     }
 
     // MARK: - Help / transcript

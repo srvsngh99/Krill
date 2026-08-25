@@ -74,6 +74,100 @@ final class MediaAttachmentTests: XCTestCase {
         XCTAssertEqual(MediaAttachment.normalizePath("  /tmp/plain.png  "), "/tmp/plain.png")
     }
 
+    // MARK: - prompt media-reference extraction
+
+    func testExtractsBarePathMidSentence() {
+        let result: MediaReferenceExtraction<String> = MediaAttachment.extractReferences(
+            from: "What is in this screenshot? /tmp/shot.png please explain."
+        ) { token in
+            token == "/tmp/shot.png" ? .attach(token) : .unresolved
+        }
+        XCTAssertEqual(result.cleaned, "What is in this screenshot?  please explain.")
+        XCTAssertEqual(result.attachments, ["/tmp/shot.png"])
+        XCTAssertTrue(result.unsupported.isEmpty)
+    }
+
+    func testExtractsMarkedPathMidSentence() {
+        let result: MediaReferenceExtraction<String> = MediaAttachment.extractReferences(
+            from: "Compare this @/tmp/shot.png with the mockup."
+        ) { token in
+            token == "/tmp/shot.png" ? .attach(token) : .unresolved
+        }
+        XCTAssertEqual(result.cleaned, "Compare this  with the mockup.")
+        XCTAssertEqual(result.attachments, ["/tmp/shot.png"])
+    }
+
+    func testExtractsEscapedBarePathAsOneToken() {
+        let result: MediaReferenceExtraction<String> = MediaAttachment.extractReferences(
+            from: "Inspect /tmp/Screen\\ Shot\\ \\(final\\).png now"
+        ) { token in
+            token == "/tmp/Screen\\ Shot\\ \\(final\\).png" ? .attach(token) : .unresolved
+        }
+        XCTAssertEqual(result.cleaned, "Inspect  now")
+        XCTAssertEqual(result.attachments, ["/tmp/Screen\\ Shot\\ \\(final\\).png"])
+    }
+
+    func testExtractsWholeBarePath() {
+        let result: MediaReferenceExtraction<String> = MediaAttachment.extractReferences(
+            from: "~/Pictures/shot.png"
+        ) { token in
+            token == "~/Pictures/shot.png" ? .attach(token) : .unresolved
+        }
+        XCTAssertEqual(result.cleaned, "")
+        XCTAssertEqual(result.attachments, ["~/Pictures/shot.png"])
+    }
+
+    func testExtractsDotRelativePathMidSentence() {
+        let result: MediaReferenceExtraction<String> = MediaAttachment.extractReferences(
+            from: "Use ./Fixtures/shot.png for the comparison"
+        ) { token in
+            token == "./Fixtures/shot.png" ? .attach(token) : .unresolved
+        }
+        XCTAssertEqual(result.cleaned, "Use  for the comparison")
+        XCTAssertEqual(result.attachments, ["./Fixtures/shot.png"])
+    }
+
+    func testLeavesUnresolvedCandidatesVerbatim() {
+        var resolved: [String] = []
+        let input = "Inspect /tmp/missing.png and @~/missing.wav"
+        let result: MediaReferenceExtraction<String> = MediaAttachment.extractReferences(from: input) { token in
+            resolved.append(token)
+            return .unresolved
+        }
+        XCTAssertEqual(result.cleaned, input)
+        XCTAssertTrue(result.attachments.isEmpty)
+        XCTAssertTrue(result.unsupported.isEmpty)
+        XCTAssertEqual(resolved, ["/tmp/missing.png", "~/missing.wav"])
+    }
+
+    func testProseNeverInvokesResolver() {
+        var resolved: [String] = []
+        let input = "The value is 3.5 and/or thereabouts."
+        let result: MediaReferenceExtraction<String> = MediaAttachment.extractReferences(from: input) { token in
+            resolved.append(token)
+            return .unresolved
+        }
+        XCTAssertEqual(result.cleaned, input)
+        XCTAssertTrue(resolved.isEmpty)
+    }
+
+    func testUnsupportedReferenceProducesNoteMetadataAndStaysInPrompt() {
+        let input = "Please transcribe /tmp/voice.wav"
+        let result: MediaReferenceExtraction<String> = MediaAttachment.extractReferences(from: input) { token in
+            token == "/tmp/voice.wav" ? .unsupported(.audio) : .unresolved
+        }
+        XCTAssertEqual(result.cleaned, input)
+        XCTAssertTrue(result.attachments.isEmpty)
+        XCTAssertEqual(result.unsupported, [UnsupportedMediaReference(token: "/tmp/voice.wav", kind: .audio)])
+    }
+
+    func testDetectsPNGFromSixtyFourByteHeader() {
+        var header = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        header.append(Data(repeating: 0, count: 56))
+        XCTAssertEqual(header.count, 64)
+        XCTAssertEqual(MediaAttachment.detectKind(data: header, pathExtension: ""), .image)
+    }
+
     // MARK: - imageDimensions
 
     func testPNGDimensions() {

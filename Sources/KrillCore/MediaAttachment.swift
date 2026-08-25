@@ -14,7 +14,137 @@ public enum MediaKind: String, Sendable, Equatable {
     case audio
 }
 
+/// The outcome of resolving a candidate media reference while extracting it
+/// from an interactive prompt. The payload lets each UI surface keep its own
+/// attachment representation without re-reading a file after extraction.
+public enum MediaReferenceResolution<Attachment> {
+    case attach(Attachment)
+    case unsupported(MediaKind)
+    case unresolved
+}
+
+/// An unsupported media token is deliberately left in the prompt, but callers
+/// also receive it to show a clear, model-capability-specific explanation.
+public struct UnsupportedMediaReference: Sendable, Equatable {
+    public let token: String
+    public let kind: MediaKind
+
+    public init(token: String, kind: MediaKind) {
+        self.token = token
+        self.kind = kind
+    }
+}
+
+/// The pure result of extracting media references from a prompt.
+public struct MediaReferenceExtraction<Attachment> {
+    public let cleaned: String
+    public let attachments: [Attachment]
+    public let unsupported: [UnsupportedMediaReference]
+
+    public init(cleaned: String, attachments: [Attachment], unsupported: [UnsupportedMediaReference]) {
+        self.cleaned = cleaned
+        self.attachments = attachments
+        self.unsupported = unsupported
+    }
+}
+
+/// Result of the two-stage read used by interactive attachment loading.
+public enum MediaFileLoadResult {
+    case unreadable
+    case notMedia
+    case media(MediaKind, Data)
+}
+
 public enum MediaAttachment {
+    /// Extract `@path` and bare absolute, home-relative, or dot-relative media
+    /// references from a prompt. The resolver receives only the path token (no
+    /// leading `@`) and is injected so scanning stays pure and unit-testable.
+    ///
+    /// Only tokens at a word boundary are considered. Bare tokens must start
+    /// with `/`, `~`, or `.`, preventing ordinary prose from probing the
+    /// filesystem. Unresolved and unsupported tokens remain verbatim; callers
+    /// can surface `unsupported` as a visible capability note.
+    public static func extractReferences<Attachment>(
+        from line: String,
+        resolving resolver: (String) -> MediaReferenceResolution<Attachment>
+    ) -> MediaReferenceExtraction<Attachment> {
+        var cleaned = ""
+        var attachments: [Attachment] = []
+        var unsupported: [UnsupportedMediaReference] = []
+        let chars = Array(line)
+        var i = 0
+        var atBoundary = true
+
+        // Terminal drag-and-drop emits shell escapes (e.g. `My\\ Photo.png`).
+        // Scan the complete escaped token before passing it to the resolver so
+        // normalization can unescape it exactly once.
+        func token(from start: Int) -> (text: String, end: Int) {
+            var text = ""
+            var end = start
+            while end < chars.count {
+                let ch = chars[end]
+                if ch == "\\", end + 1 < chars.count {
+                    text.append(ch)
+                    text.append(chars[end + 1])
+                    end += 2
+                    continue
+                }
+                if ch == " " || ch == "\t" { break }
+                text.append(ch)
+                end += 1
+            }
+            return (text, end)
+        }
+
+        while i < chars.count {
+            let ch = chars[i]
+            let isMarked = ch == "@"
+            let isBarePath = ch == "/" || ch == "~" || ch == "."
+            if atBoundary, isMarked || isBarePath {
+                let scanned = token(from: i + (isMarked ? 1 : 0))
+                if !scanned.text.isEmpty {
+                    switch resolver(scanned.text) {
+                    case .attach(let attachment):
+                        attachments.append(attachment)
+                        i = scanned.end
+                        atBoundary = false
+                        continue
+                    case .unsupported(let kind):
+                        unsupported.append(UnsupportedMediaReference(token: scanned.text, kind: kind))
+                    case .unresolved:
+                        break
+                    }
+                }
+            }
+            cleaned.append(ch)
+            atBoundary = ch == " " || ch == "\t"
+            i += 1
+        }
+
+        return MediaReferenceExtraction(
+            cleaned: cleaned, attachments: attachments, unsupported: unsupported)
+    }
+
+    /// Read only a small header before loading an attachment into memory. The
+    /// header check is a reject filter; media kind is detected again from the
+    /// complete data so the existing behavior remains authoritative.
+    public static func readMediaFile(at url: URL) -> MediaFileLoadResult {
+        let header: Data
+        do {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            header = try handle.read(upToCount: 64) ?? Data()
+        } catch {
+            return .unreadable
+        }
+
+        let ext = url.pathExtension
+        guard detectKind(data: header, pathExtension: ext) != nil else { return .notMedia }
+        guard let data = try? Data(contentsOf: url) else { return .unreadable }
+        guard let kind = detectKind(data: data, pathExtension: ext) else { return .notMedia }
+        return .media(kind, data)
+    }
+
     /// Detect whether `data` is an image or audio clip from its magic bytes,
     /// falling back to the file extension when the header is unrecognized.
     /// Returns `nil` when neither the bytes nor the extension identify a
