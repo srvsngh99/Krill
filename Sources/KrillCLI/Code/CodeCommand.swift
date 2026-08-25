@@ -4,6 +4,12 @@ import KrillEngine
 import KrillHarness
 import KrillRegistry
 
+enum CodeProvider: String, ExpressibleByArgument, CaseIterable {
+    case local
+    case opencode
+    case codex
+}
+
 /// `krill code` - the native in-process agentic loop. The model is given a
 /// task and a small toolset (PR2: just `bash`), and the loop runs
 /// generate -> parse tool calls -> execute -> feed back until it answers.
@@ -22,8 +28,24 @@ struct CodeCommand: AsyncParsableCommand {
     @Argument(help: "The task for the agent.")
     var prompt: String?
 
-    @Option(name: .long, help: "Maximum tokens per model turn.")
-    var maxTokens: Int = 1024
+    @Option(name: .long,
+            help: "Model backend: local (MLX), opencode (keyless OpenCode Zen free models), or codex (your Codex CLI subscription).")
+    var provider: CodeProvider = .local
+
+    @Option(name: .long,
+            help: "OpenAI-compatible base URL for --provider opencode.")
+    var baseURL: String?
+
+    @Flag(name: .long,
+          help: "List the free models currently advertised by OpenCode Zen and exit.")
+    var listModels: Bool = false
+
+    @Option(name: .long,
+            help: "Codex CLI executable name or absolute path.")
+    var codexExecutable: String = "codex"
+
+    @Option(name: .long, help: "Maximum tokens per model turn (defaults to 1024 locally and 4096 for OpenCode; Codex CLI controls its own budget).")
+    var maxTokens: Int?
 
     @Option(name: .long, help: "Maximum agent iterations (tool-call rounds).")
     var maxIterations: Int = 12
@@ -36,7 +58,7 @@ struct CodeCommand: AsyncParsableCommand {
     var bash: Bool = true
 
     @Flag(name: .long, inversion: .prefixedNo,
-          help: "Grammar-constrain malformed tool calls: regenerate args that miss the schema, and re-pick a tool name that is not one of the offered tools (helps small models and models trained on another tool vocabulary).")
+          help: "Grammar-constrain malformed tool calls on local MLX backends: regenerate args that miss the schema, and re-pick a tool name that is not one of the offered tools (helps small models and models trained on another tool vocabulary).")
     var constrainArgs: Bool = true
 
     @Flag(name: .long,
@@ -63,6 +85,11 @@ struct CodeCommand: AsyncParsableCommand {
         let registry = Registry()
         let config = KrillConfig.load()
 
+        guard !(listModels && provider == .local) else {
+            print("Error: --list-models is available with --provider opencode.")
+            throw ExitCode.failure
+        }
+
         func nonEmpty(_ s: String?) -> String? {
             guard let s, !s.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
             return s
@@ -76,6 +103,19 @@ struct CodeCommand: AsyncParsableCommand {
         let defaultModel = nonEmpty(config.defaultModel)
         var resolvedModel = nonEmpty(modelPath)
         var task = nonEmpty(prompt)
+
+        // Hosted providers have their own live/default model selection. With
+        // one positional, preserve the convenient `krill code "task"` shape;
+        // two positionals still mean `<model> <task>`.
+        if provider != .local {
+            if task == nil, !listModels {
+                task = resolvedModel
+                resolvedModel = nil
+            }
+            try await runRemote(model: resolvedModel, task: task, config: config)
+            return
+        }
+
         if task == nil, let only = resolvedModel, let def = defaultModel, !isModelRef(only) {
             resolvedModel = def
             task = only
@@ -175,7 +215,7 @@ struct CodeCommand: AsyncParsableCommand {
         if RawTerminal.isInteractive && !classic && defaultToolset {
             let tui = ChatTUI(
                 engine: engine, modelName: model, system: nonEmpty(system),
-                params: .greedy, maxTokens: maxTokens, registry: registry,
+                params: .greedy, maxTokens: localMaxTokens, registry: registry,
                 initialImage: nil, initialAudio: nil,
                 voiceModeSetting: config.voiceMode,
                 speakRepliesSetting: config.speakReplies,
@@ -213,7 +253,7 @@ struct CodeCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        var generator = EngineGenerator(engine: engine, maxTokens: maxTokens)
+        var generator = EngineGenerator(engine: engine, maxTokens: localMaxTokens)
         generator.onStats = { stats in
             let rate = stats.decodeTime > 0
                 ? Double(stats.generatedTokens) / stats.decodeTime : 0
@@ -241,4 +281,7 @@ struct CodeCommand: AsyncParsableCommand {
         let onEvent: @Sendable (AgentEvent) -> Void = { renderer.handle($0) }
         _ = await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
     }
+
+    /// Preserve the conservative existing default for the local MLX path.
+    var localMaxTokens: Int { maxTokens ?? 1_024 }
 }
