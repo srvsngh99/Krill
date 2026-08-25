@@ -1,5 +1,6 @@
 import Foundation
 import KrillTooling
+import KrillEngine
 
 /// Anthropic Messages API compatibility (WS-F / T2-9) so Claude Code and
 /// the Anthropic SDK work when pointed at Krill via `ANTHROPIC_BASE_URL`.
@@ -92,7 +93,7 @@ internal enum AnthropicCompat {
 
         return Parsed(
             messages: messages, tools: tools,
-            maxTokens: (json["max_tokens"] as? NSNumber)?.intValue ?? 1024,
+            maxTokens: (json["max_tokens"] as? NSNumber)?.intValue ?? TokenBudget.unlimited,
             sampling: sampling,
             stream: (json["stream"] as? Bool) ?? false,
             model: json["model"] as? String,

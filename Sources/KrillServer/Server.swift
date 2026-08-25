@@ -769,7 +769,11 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         if s.mirostat == 0, let v = i("mirostat") { s.mirostat = v }
         if let v = i("repeat_last_n") { s.repeatLastN = v }
         if ctx == nil, let v = i("num_ctx") { ctx = v }
-        if (mt == 512 || mt == 2048), let v = i("num_predict"), v > 0 { mt = v }
+        // A Modelfile's `num_predict` applies only when the REQUEST named no
+        // ceiling. This used to compare against 512/2048 - the old per-dialect
+        // defaults that stood in for "unspecified"; that sentinel is now
+        // `TokenBudget.unlimited`, and asking the policy keeps the two in step.
+        if TokenBudget.isDerived(mt), let v = i("num_predict"), v > 0 { mt = v }
         if s.seed == nil, let seed = i("seed") { s.seed = UInt64(max(0, seed)) }
         return (s, mt, ctx)
     }
@@ -1423,7 +1427,14 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "choices": [[
                         "index": 0,
                         "message": message,
-                        "finish_reason": calls.isEmpty ? "stop" : "tool_calls",
+                        // "length" is the OpenAI signal for a reply cut off at
+                        // the ceiling. Clients (Krill's own hosted generator
+                        // included) rely on it to tell truncation from a
+                        // finished answer, so it must reflect the real stop
+                        // reason rather than always claiming "stop".
+                        "finish_reason": calls.isEmpty
+                            ? (stats?.hitTokenLimit == true ? "length" : "stop")
+                            : "tool_calls",
                     ]],
                     "usage": [
                         "prompt_tokens": stats?.promptTokens ?? 0,
@@ -1441,7 +1452,10 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "model": modelName,
                     "message": message,
                     "done": true,
-                    "done_reason": calls.isEmpty ? "stop" : "tool_calls",
+                    // Ollama's equivalent of "length" is "limit".
+                    "done_reason": calls.isEmpty
+                        ? (stats?.hitTokenLimit == true ? "limit" : "stop")
+                        : "tool_calls",
                     "total_duration": totalNs,
                     "prompt_eval_count": stats?.promptTokens ?? 0,
                     "eval_count": stats?.generatedTokens ?? 0,
@@ -1714,7 +1728,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 "choices": [[
                     "index": 0,
                     "message": ["role": "assistant", "content": fullContent],
-                    "finish_reason": "stop"
+                    "finish_reason": stats?.hitTokenLimit == true ? "length" : "stop"
                 ]],
                 "usage": [
                     "prompt_tokens": stats?.promptTokens ?? 0,
@@ -1780,7 +1794,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 "choices": [[
                     "text": fullText,
                     "index": 0,
-                    "finish_reason": "stop"
+                    "finish_reason": stats?.hitTokenLimit == true ? "length" : "stop"
                 ]],
                 "usage": [
                     "prompt_tokens": stats?.promptTokens ?? 0,
@@ -2053,6 +2067,10 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "model": modelName,
                     "message": ["role": "assistant", "content": fullContent],
                     "done": true,
+                    // Ollama's truncation signal. Previously absent entirely,
+                    // so a cut-off reply was indistinguishable from a complete
+                    // one on this endpoint.
+                    "done_reason": stats?.hitTokenLimit == true ? "limit" : "stop",
                     "total_duration": totalNs,
                     "prompt_eval_count": stats?.promptTokens ?? 0,
                     "prompt_eval_duration": prefillNs,
@@ -2250,6 +2268,10 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "model": modelName,
                     "response": fullResponse,
                     "done": true,
+                    // Ollama's truncation signal. Previously absent entirely,
+                    // so a cut-off reply was indistinguishable from a complete
+                    // one on this endpoint.
+                    "done_reason": stats?.hitTokenLimit == true ? "limit" : "stop",
                     "total_duration": totalNs,
                     "prompt_eval_count": stats?.promptTokens ?? 0,
                     "prompt_eval_duration": prefillNs,

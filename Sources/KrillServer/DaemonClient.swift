@@ -123,8 +123,12 @@ public struct DaemonClient {
             "stream": true,
             "temperature": Double(temperature),
             "top_p": Double(topP),
-            "max_tokens": maxTokens
         ]
+        // Omit the ceiling entirely when it is the derive sentinel: an absent
+        // field already means "derive" server-side, and that keeps the wire
+        // payload valid for any OpenAI-compatible endpoint (a literal -1 is
+        // rejected as non-positive by strict ones).
+        if maxTokens > 0 { body["max_tokens"] = maxTokens }
         // Wrap as NSNumber so UInt64 values above Int.max do not trap
         // the narrowing Int(seed) conversion. JSONSerialization preserves
         // the original value; the server validates the range and returns

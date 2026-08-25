@@ -3,6 +3,7 @@ import Foundation
 import KrillHarness
 import KrillRegistry
 import KrillTooling
+import KrillEngine
 
 extension CodeCommand {
     func runRemote(model requestedModel: String?, task: String?, config: KrillConfig) async throws {
@@ -127,7 +128,13 @@ extension CodeCommand {
     /// intentionally conservative local MLX default. An explicit parsed value
     /// remains authoritative.
     private var hostedMaxTokens: Int {
-        maxTokens ?? OpenAICompatibleHarnessGenerator.defaultMaxTokens
+        // A hosted provider bills by the token and has no local context to read,
+        // so "derive it" resolves to the generator's own default rather than a
+        // window computation.
+        let requested = requestedMaxTokens
+        return TokenBudget.isDerived(requested)
+            ? OpenAICompatibleHarnessGenerator.defaultMaxTokens
+            : (requested ?? OpenAICompatibleHarnessGenerator.defaultMaxTokens)
     }
 
     private func resolvedPermissionMode(config: KrillConfig) throws -> PermissionMode {

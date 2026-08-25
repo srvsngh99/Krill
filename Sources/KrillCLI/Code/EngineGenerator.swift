@@ -23,6 +23,19 @@ struct EngineGenerator: HarnessGenerator {
         ToolCalling.ToolFormat.forFamily(engine.family)
     }
 
+    /// Append a marker when the model was CUT OFF at its token ceiling.
+    ///
+    /// Without this the loop cannot tell a finished answer from a severed one:
+    /// a reply chopped mid-`<tool_call>` just fails to parse and looks like the
+    /// model producing nonsense, and a truncated prose answer reads as complete.
+    /// The marker is plain text so it survives into the transcript the user
+    /// sees, and it names the flag that fixes it.
+    static func annotatingTruncation(_ text: String, stats: GenerationStats?) -> String {
+        guard let stats, stats.hitTokenLimit else { return text }
+        return text + "\n\n[Krill: reply cut off at the token limit "
+            + "(\(stats.generatedTokens) tokens). Raise it with --max-tokens.]"
+    }
+
     func complete(messages: [[String: String]]) async -> String {
         // Serialize against every other in-process generation (foreground chat +
         // other background agents) so decodes never overlap on the single GPU.
@@ -32,8 +45,9 @@ struct EngineGenerator: HarnessGenerator {
             messages: messages, params: .greedy, maxTokens: maxTokens,
             imageData: imageData.first, imagesData: imageData)
         let text = await collect(stream)
-        if let s = stats() { onStats?(s) }
-        return text
+        let s = stats()
+        if let s { onStats?(s) }
+        return Self.annotatingTruncation(text, stats: s)
     }
 
     /// Free generation with the tool-name slot constrained (see
@@ -58,8 +72,9 @@ struct EngineGenerator: HarnessGenerator {
                 names: toolNames),
             imagesData: imageData)
         let text = await collect(stream)
-        if let s = stats() { onStats?(s) }
-        return text
+        let s = stats()
+        if let s { onStats?(s) }
+        return Self.annotatingTruncation(text, stats: s)
     }
 
     func completeConstrained(messages: [[String: String]], jsonSchema: String) async -> String {
@@ -73,8 +88,9 @@ struct EngineGenerator: HarnessGenerator {
             format: .jsonSchemaCompact(jsonSchema),
             imagesData: imageData)
         let text = await collect(stream)
-        if let s = stats() { onStats?(s) }
-        return text
+        let s = stats()
+        if let s { onStats?(s) }
+        return Self.annotatingTruncation(text, stats: s)
     }
 
     private func collect(_ stream: AsyncStream<TokenEvent>) async -> String {

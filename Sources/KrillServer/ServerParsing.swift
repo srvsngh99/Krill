@@ -1,6 +1,7 @@
 import Foundation
 import NIOCore
 import NIOHTTP1
+import KrillEngine
 import KrillSampler
 import KrillTooling
 
@@ -128,9 +129,15 @@ internal enum ServerRequestError: Error, Equatable, Sendable {
 }
 
 internal enum ServerParsing {
-    private static let defaultOpenAIMaxTokens = 512
-    private static let defaultOpenAICompletionMaxTokens = 256
-    private static let defaultOllamaMaxTokens = 2048
+    // A request that names no ceiling gets one derived from the model's context
+    // at generation time, matching Ollama's `num_predict: -1` and OpenAI's
+    // omitted `max_tokens`. The old per-dialect constants (512 / 256 / 2048)
+    // were arbitrary, disagreed with each other, and silently truncated long
+    // replies - a reasoning model could spend the whole budget thinking and
+    // return nothing. `TokenBudget.unlimited` is the "derive it" sentinel.
+    private static let defaultOpenAIMaxTokens = TokenBudget.unlimited
+    private static let defaultOpenAICompletionMaxTokens = TokenBudget.unlimited
+    private static let defaultOllamaMaxTokens = TokenBudget.unlimited
 
     private static let unsupportedOpenAIChatFields: Set<String> = [
         "parallel_tool_calls",
@@ -728,10 +735,13 @@ internal enum ServerParsing {
     ) throws -> Int? {
         var found: (field: String, value: Int)?
         for field in fields where json[field] != nil {
-            // num_predict == -1 means "generate until EOS" (Ollama). Map to a
-            // large sentinel cap rather than rejecting it as non-positive.
-            if field == "num_predict", let n = json[field] as? Int, n == -1 {
-                found = (field, 1 << 20)
+            // -1 means "derive the limit from the model's context" — Ollama's
+            // `num_predict: -1`, and the same spelling Krill's own CLI accepts.
+            // Honour it on EVERY token-limit field rather than only
+            // `num_predict`: `positiveInt` below would otherwise reject it, and
+            // Krill's own daemon route sends `max_tokens` for `krill run`.
+            if let n = json[field] as? Int, n == TokenBudget.unlimited {
+                found = (field, TokenBudget.unlimited)
                 continue
             }
             let value = try positiveInt(json[field], field: field)

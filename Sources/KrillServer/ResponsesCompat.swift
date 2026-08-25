@@ -1,5 +1,6 @@
 import Foundation
 import KrillTooling
+import KrillEngine
 
 /// OpenAI Responses API compatibility so OpenAI Codex (and any client using
 /// `wire_api = "responses"`) works when pointed at Krill. Codex removed
@@ -158,7 +159,8 @@ internal enum ResponsesCompat {
 
         return Parsed(
             messages: messages, tools: tools,
-            maxTokens: (json["max_output_tokens"] as? NSNumber)?.intValue ?? 1024,
+            maxTokens: (json["max_output_tokens"] as? NSNumber)?.intValue
+                ?? TokenBudget.unlimited,
             sampling: sampling,
             stream: (json["stream"] as? Bool) ?? false,
             model: json["model"] as? String)

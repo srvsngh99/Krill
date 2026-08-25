@@ -25,7 +25,7 @@ public struct BatchGenRequest: Sendable {
     public init(
         messages: [[String: String]],
         params: SamplingParams = .greedy,
-        maxTokens: Int = 512,
+        maxTokens: Int = TokenBudget.unlimited,
         contextLimit: Int? = nil,
         promptTemplateOverride: String? = nil,
         useSpeculative: Bool? = nil,
@@ -38,5 +38,16 @@ public struct BatchGenRequest: Sendable {
         self.promptTemplateOverride = promptTemplateOverride
         self.useSpeculative = useSpeculative
         self.usePrefixCache = usePrefixCache
+    }
+
+    /// A copy with the token ceiling replaced by a resolved one. The batch entry
+    /// points resolve before admitting a row, because the batcher compares
+    /// `generated >= maxTokens` directly and an unresolved sentinel would
+    /// terminate the row before its first token.
+    public func withMaxTokens(_ resolved: Int) -> BatchGenRequest {
+        BatchGenRequest(
+            messages: messages, params: params, maxTokens: resolved,
+            contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
+            useSpeculative: useSpeculative, usePrefixCache: usePrefixCache)
     }
 }

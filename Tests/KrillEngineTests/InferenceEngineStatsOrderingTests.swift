@@ -29,8 +29,10 @@ final class InferenceEngineStatsOrderingTests: XCTestCase {
             let prefixStart = dense.index(
                 terminal.lowerBound, offsetBy: -min(700, dense.distance(from: dense.startIndex, to: terminal.lowerBound)))
             let prefix = dense[prefixStart..<terminal.lowerBound]
+            // `publishStats(sawStop:)` takes the stop/limit discriminator, so
+            // match the call rather than a bare `()`.
             XCTAssertTrue(
-                prefix.contains("publishStats()"),
+                prefix.contains("publishStats("),
                 "terminal event \(terminalCount) can become visible before GenerationStats")
             searchStart = terminal.upperBound
         }
