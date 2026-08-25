@@ -406,12 +406,40 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(req.sampling.samplingParams.minP, 0.05, accuracy: 1e-6)
     }
 
-    func testOllamaNumPredictMinusOneMeansInfinite() throws {
+    func testOllamaNumPredictMinusOneMeansDeriveFromContext() throws {
+        // `-1` used to be mapped to a 1<<20 sentinel here. It now stays the
+        // canonical "derive it" value and the ENGINE resolves it against the
+        // model's context window - only the engine knows the window and the
+        // prompt length. Parsing must not turn it into a magic large number.
         let req = try ServerParsing.ollamaGenerateRequest(from: [
             "model": "m", "prompt": "hi", "stream": false,
             "options": ["num_predict": -1],
         ])
-        XCTAssertGreaterThan(req.maxTokens, 1 << 19)
+        XCTAssertEqual(req.maxTokens, TokenBudget.unlimited)
+        XCTAssertTrue(TokenBudget.isDerived(req.maxTokens))
+    }
+
+    func testOmittedTokenLimitMeansDeriveOnEveryDialect() throws {
+        // The old per-dialect defaults (512 / 256 / 2048) silently truncated.
+        let chat = try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+        ])
+        XCTAssertTrue(TokenBudget.isDerived(chat.maxTokens))
+
+        let ollama = try ServerParsing.ollamaGenerateRequest(from: [
+            "model": "m", "prompt": "hi", "stream": false,
+        ])
+        XCTAssertTrue(TokenBudget.isDerived(ollama.maxTokens))
+    }
+
+    func testExplicitMaxTokensMinusOneIsAcceptedNotRejected() throws {
+        // Krill's own daemon route and CLI document `-1` as "derive", so the
+        // OpenAI field must accept it rather than failing `positiveInt`.
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "max_tokens": -1,
+        ])
+        XCTAssertTrue(TokenBudget.isDerived(req.maxTokens))
     }
 
     func testOllamaChatParsesMinPFromOptions() throws {

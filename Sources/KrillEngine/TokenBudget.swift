@@ -32,6 +32,34 @@ public enum TokenBudget {
     /// old 1024 so a reasoning model's think phase does not consume it.
     public static let unknownContextFallback = 8192
 
+    /// Upper bound on a DERIVED budget, whatever the context window allows.
+    ///
+    /// `max_position_embeddings` is a THEORETICAL maximum, not a sane budget for
+    /// one reply: Gemma 4 declares 131072, so "the whole remaining context" is
+    /// ~130k tokens — hours of decode, an enormous KV cache, and in the batched
+    /// decoder a `maxStep` loop bound of the same size, which trips the Metal
+    /// command-buffer watchdog and takes the server down. (Ollama's `-1` is
+    /// bounded in practice only because its `num_ctx` default is small.)
+    ///
+    /// A derived budget therefore means "as much as the context allows, up to
+    /// something a single reply could plausibly need". An EXPLICIT
+    /// `--max-tokens` is never capped — asking for more is allowed, it is just
+    /// not the default.
+    public static let derivedCeiling = 8192
+
+    /// Tighter ceiling for a DERIVED budget on a BATCHED row.
+    ///
+    /// Batched decode multiplies GPU work by the number of live rows, and a
+    /// long-running row raises the chance of tripping Metal's command-buffer
+    /// watchdog - which surfaces as an uncaught MLX exception that takes the
+    /// server down. Measured on this hardware: gemma-4-12b with
+    /// `OLLAMA_NUM_PARALLEL=4` and three concurrent requests survives at an
+    /// explicit 64-token cap and dies at a derived 8192. Batched serving is for
+    /// throughput on many short replies, so a tighter default costs little and
+    /// is still 4x the 512 it replaced. An explicit `max_tokens` is honoured in
+    /// full on this path too - the user has then chosen the risk.
+    public static let batchedDerivedCeiling = 2048
+
     /// The sentinel a caller passes for "no explicit limit" — mirrors Ollama's
     /// `num_predict: -1`, which the server already accepts and maps here.
     public static let unlimited = -1
@@ -53,12 +81,13 @@ public enum TokenBudget {
         requested: Int?,
         contextWindow: Int,
         promptTokens: Int = 0,
-        floor: Int = 256
+        floor: Int = 256,
+        ceiling: Int = derivedCeiling
     ) -> Int {
         if let requested, requested > 0 { return requested }
-        guard contextWindow > 0 else { return unknownContextFallback }
+        guard contextWindow > 0 else { return min(unknownContextFallback, ceiling) }
         let remaining = contextWindow - promptTokens - contextReserve
-        return max(floor, remaining)
+        return max(floor, min(remaining, ceiling))
     }
 
     /// True when `requested` means "derive the limit" rather than naming one.

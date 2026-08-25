@@ -2881,7 +2881,18 @@ extension InferenceEngine {
             promptRows: promptRows,
             usePrefixCache: requests.map { $0.usePrefixCache },
             samplers: requests.map { Sampler(params: $0.params) },
-            perRowMax: requests.map { $0.maxTokens },
+            // Resolved per row: this path never calls `generate(messages:)`, and
+            // the decode loop compares `generated >= perRowMax[r]` directly, so
+            // an unresolved sentinel would end the row before its first token.
+            perRowMax: requests.enumerated().map { index, request in
+                TokenBudget.resolve(
+                    requested: request.maxTokens,
+                    contextWindow: contextWindow > 0
+                        ? Swift.min(contextWindow, request.contextLimit ?? .max)
+                        : (request.contextLimit ?? 0),
+                    promptTokens: promptRows[index].count,
+                    ceiling: TokenBudget.batchedDerivedCeiling)
+            },
             conts: conts,
             statsHolders: statsHolders)
 
@@ -3202,6 +3213,20 @@ extension InferenceEngine {
             promptTemplateOverride: req.promptTemplateOverride, tokenizer: tokenizer)
         guard !promptTokens.isEmpty else { return nil }
 
+        // Resolve the budget HERE too. This path does not go through
+        // `generate(messages:)`, so an unresolved sentinel would reach the
+        // batcher's `row.generated >= row.maxTokens` as `0 >= -1` and terminate
+        // the row before its first token - an empty reply on every batched
+        // request. The prompt is already tokenized, so the derived budget can
+        // account for it.
+        let resolvedMaxTokens = TokenBudget.resolve(
+            requested: req.maxTokens,
+            contextWindow: contextWindow > 0
+                ? Swift.min(contextWindow, req.contextLimit ?? .max)
+                : (req.contextLimit ?? 0),
+            promptTokens: promptTokens.count,
+            ceiling: TokenBudget.batchedDerivedCeiling)
+
         let stopIds = Self.stopTokenIds(
             modelDirectory: modelDirectory, tokenizerEOS: eosId)
 
@@ -3231,7 +3256,8 @@ extension InferenceEngine {
         }
         let batcher = continuousBatcher!
         batcherLock.unlock()
-        return batcher.submit(promptTokens: promptTokens, req: req)
+        return batcher.submit(
+            promptTokens: promptTokens, req: req.withMaxTokens(resolvedMaxTokens))
     }
 
     /// Build one row's prompt tokens. This is the non-Gemma-4 (plain-causal)

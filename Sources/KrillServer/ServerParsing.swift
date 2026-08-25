@@ -735,10 +735,13 @@ internal enum ServerParsing {
     ) throws -> Int? {
         var found: (field: String, value: Int)?
         for field in fields where json[field] != nil {
-            // num_predict == -1 means "generate until EOS" (Ollama). Map to a
-            // large sentinel cap rather than rejecting it as non-positive.
-            if field == "num_predict", let n = json[field] as? Int, n == -1 {
-                found = (field, 1 << 20)
+            // -1 means "derive the limit from the model's context" — Ollama's
+            // `num_predict: -1`, and the same spelling Krill's own CLI accepts.
+            // Honour it on EVERY token-limit field rather than only
+            // `num_predict`: `positiveInt` below would otherwise reject it, and
+            // Krill's own daemon route sends `max_tokens` for `krill run`.
+            if let n = json[field] as? Int, n == TokenBudget.unlimited {
+                found = (field, TokenBudget.unlimited)
                 continue
             }
             let value = try positiveInt(json[field], field: field)
