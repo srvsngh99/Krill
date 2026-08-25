@@ -25,7 +25,7 @@ public struct BatchGenRequest: Sendable {
     public init(
         messages: [[String: String]],
         params: SamplingParams = .greedy,
-        maxTokens: Int = 512,
+        maxTokens: Int = TokenBudget.unlimited,
         contextLimit: Int? = nil,
         promptTemplateOverride: String? = nil,
         useSpeculative: Bool? = nil,

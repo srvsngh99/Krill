@@ -66,4 +66,25 @@ public enum TokenBudget {
         guard let requested else { return true }
         return requested <= 0
     }
+
+    /// Parse a CLI `--max-tokens` value, returning nil when it is not valid.
+    ///
+    /// Accepts a positive integer, or any of the "derive it" spellings. `-1` is
+    /// the Ollama-compatible form, but a bare `--max-tokens -1` cannot be parsed
+    /// as a VALUE by ArgumentParser (a leading `-` reads as another flag), so it
+    /// requires `--max-tokens=-1`. `auto` exists to give that same meaning a
+    /// spelling that works in both forms.
+    public static func parse(_ raw: String) -> Int? {
+        let value = raw.trimmingCharacters(in: .whitespaces).lowercased()
+        if ["auto", "-1", "unlimited", "model", "context"].contains(value) {
+            return unlimited
+        }
+        guard let n = Int(value), n > 0 else { return nil }
+        return n
+    }
+
+    /// The value shown when a flag rejects its input.
+    public static let parseHelp =
+        "a positive number of tokens, or 'auto' (equivalently --max-tokens=-1) "
+        + "to derive it from the model's context window"
 }

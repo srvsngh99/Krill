@@ -152,7 +152,13 @@ extension HTTPHandler {
         // Default to ask: the safe interactive posture for a remote client
         // (mutating tools park on an approval the phone answers).
         let mode = (json["permission_mode"] as? String).flatMap(PermissionMode.parse) ?? .ask
-        let maxTokens = max(128, min((json["max_tokens"] as? Int) ?? 1024, 8192))
+        // Remote agent sessions derive like every other surface when the client
+        // names no ceiling; an explicit value is still clamped to a sane band so
+        // a phone client cannot pin the GPU on one turn.
+        let requested = json["max_tokens"] as? Int
+        let maxTokens = TokenBudget.isDerived(requested)
+            ? TokenBudget.unlimited
+            : max(128, min(requested ?? 0, 8192))
         let maxIterations = max(1, min((json["max_iterations"] as? Int) ?? 24, 64))
         let title = (json["title"] as? String) ?? ""
 

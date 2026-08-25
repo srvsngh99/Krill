@@ -72,6 +72,36 @@ final class TokenBudgetTests: XCTestCase {
         XCTAssertFalse(TokenBudget.isDerived(4096))
     }
 
+    // MARK: - CLI value parsing
+
+    func testParseAcceptsEveryDeriveSpelling() {
+        for raw in ["auto", "AUTO", " auto ", "-1", "unlimited", "model", "context"] {
+            XCTAssertEqual(
+                TokenBudget.parse(raw), TokenBudget.unlimited,
+                "'\(raw)' should mean derive-from-context")
+        }
+    }
+
+    func testParseAcceptsAPositiveCount() {
+        XCTAssertEqual(TokenBudget.parse("4096"), 4096)
+        XCTAssertEqual(TokenBudget.parse("1"), 1)
+    }
+
+    func testParseRejectsNonsenseAndNonPositiveNumbers() {
+        // Anything not understood must fail loudly at the flag rather than
+        // silently becoming a default the user did not ask for.
+        for raw in ["", "abc", "0", "-5", "3.5", "1e6"] {
+            XCTAssertNil(TokenBudget.parse(raw), "'\(raw)' should be rejected")
+        }
+    }
+
+    func testParsedDeriveSpellingResolvesLikeAnAbsentFlag() {
+        let viaAuto = TokenBudget.resolve(
+            requested: TokenBudget.parse("auto"), contextWindow: 32768)
+        let viaAbsent = TokenBudget.resolve(requested: nil, contextWindow: 32768)
+        XCTAssertEqual(viaAuto, viaAbsent)
+    }
+
     // MARK: - truncation detection
 
     func testTruncatedWhenTheCeilingIsReachedWithoutAStopToken() {

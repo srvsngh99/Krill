@@ -44,8 +44,12 @@ struct CodeCommand: AsyncParsableCommand {
             help: "Codex CLI executable name or absolute path.")
     var codexExecutable: String = "codex"
 
-    @Option(name: .long, help: "Maximum tokens per model turn. Default: derived from the model's context window (local), 4096 for OpenCode. Codex CLI controls its own budget.")
-    var maxTokens: Int?
+    @Option(name: .long, help: "Maximum tokens per model turn: a number, or 'auto' to derive it from the model's context window (default; '--max-tokens=-1' means the same). OpenCode uses 4096; Codex CLI controls its own budget.")
+    var maxTokens: String?
+
+    /// The parsed flag: nil when unset, otherwise a token count or the
+    /// "derive it" sentinel. Validated in `validate()`.
+    var requestedMaxTokens: Int? { maxTokens.flatMap(TokenBudget.parse) }
 
     @Option(name: .long, help: "Maximum agent iterations (tool-call rounds).")
     var maxIterations: Int = 12
@@ -286,5 +290,12 @@ struct CodeCommand: AsyncParsableCommand {
     /// window (see `TokenBudget`); the engine resolves the sentinel because only
     /// it knows the window and the prompt length. A flag value is passed through
     /// untouched.
-    var localMaxTokens: Int { maxTokens ?? TokenBudget.unlimited }
+    var localMaxTokens: Int { requestedMaxTokens ?? TokenBudget.unlimited }
+
+    func validate() throws {
+        if let raw = maxTokens, TokenBudget.parse(raw) == nil {
+            throw ValidationError(
+                "Invalid --max-tokens '\(raw)'. Expected \(TokenBudget.parseHelp).")
+        }
+    }
 }

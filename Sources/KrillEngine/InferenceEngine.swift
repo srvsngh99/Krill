@@ -739,7 +739,7 @@ public final class InferenceEngine: @unchecked Sendable {
         prompt: String,
         systemPrompt: String? = nil,
         params: SamplingParams = .greedy,
-        maxTokens: Int = 512,
+        maxTokens: Int = TokenBudget.unlimited,
         useSpeculative: Bool? = nil,
         usePrefixCache: Bool = true,
         imageData: Data? = nil,

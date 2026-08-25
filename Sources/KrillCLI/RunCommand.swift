@@ -23,8 +23,19 @@ struct RunCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Sampling temperature (0 = greedy)")
     var temp: Float = 0.0
 
-    @Option(name: .long, help: "Maximum tokens to generate")
-    var maxTokens: Int = 512
+    @Option(name: .long, help: "Maximum tokens to generate: a number, or 'auto' to derive it from the model's context window (default). '--max-tokens=-1' means the same as 'auto'.")
+    var maxTokens: String = "auto"
+
+    /// `--max-tokens` as a token count, with the "derive it" spellings mapped to
+    /// the sentinel the engine resolves. Validated in `validate()`.
+    var resolvedMaxTokens: Int { TokenBudget.parse(maxTokens) ?? TokenBudget.unlimited }
+
+    func validate() throws {
+        guard TokenBudget.parse(maxTokens) != nil else {
+            throw ValidationError(
+                "Invalid --max-tokens '\(maxTokens)'. Expected \(TokenBudget.parseHelp).")
+        }
+    }
 
     @Option(name: .long, help: "Top-p (nucleus) sampling threshold")
     var topP: Float = 1.0
@@ -147,7 +158,6 @@ struct RunCommand: AsyncParsableCommand {
         // when both paths would produce identical behaviour keeps the
         // optimisation observability-free.
         // An explicit `--max-tokens` always wins over any default below.
-        let userPinnedMaxTokens = CommandLine.arguments.contains("--max-tokens")
 
         let aliasHasOverrides = registry.getModel(model)?.overrides != nil
         if let prompt,
@@ -155,13 +165,8 @@ struct RunCommand: AsyncParsableCommand {
            registry.hasModel(model),
            !aliasHasOverrides,
            ProcessInfo.processInfo.environment["KRILL_NO_AUTO_DAEMON"] != "1" {
-            // Same reasoning-headroom rule as the in-process path below, but
-            // decided from the checkpoint on disk: this route answers WITHOUT
-            // loading the model, so there is no engine to ask.
-            let daemonMaxTokens = (userPinnedMaxTokens || !KrillTokenizer
-                .emitsReasoningBlock(inDirectory: modelDir)) ? maxTokens : 4096
             if try await tryDaemonRoute(
-                modelName: model, prompt: prompt, maxTokens: daemonMaxTokens) {
+                modelName: model, prompt: prompt, maxTokens: resolvedMaxTokens) {
                 return
             }
         }
@@ -209,20 +214,20 @@ struct RunCommand: AsyncParsableCommand {
         // Interactive chat needs headroom for a hidden reasoning chain PLUS the
         // visible answer: a thinking model can spend hundreds of tokens reasoning
         // inside its `<|channel>thought>` block before it writes a single visible
-        // word, and a 512-token cap can be exhausted mid-reasoning (the reply then
-        // comes back empty). Default the multi-turn surfaces to 4096; single-shot
-        // CLI stays lean at 512. An explicit `--max-tokens` always wins.
-        let chatMaxTokens = userPinnedMaxTokens ? maxTokens : 4096
+        // word, and a small cap is exhausted mid-reasoning - the reply then comes
+        // back EMPTY, indistinguishable from a broken model. This used to be
+        // patched with a 4096 floor for reasoning models; the budget is now
+        // derived from the model's context window, which covers every model
+        // without a heuristic. An explicit `--max-tokens` still always wins.
+        let chatMaxTokens = resolvedMaxTokens
 
-        // ...and SINGLE-SHOT needs the same headroom on a thinking model, for the
-        // same reason. Staying lean at 512 is right when every generated token is
-        // visible, but on a model whose template opens the assistant turn inside
-        // `<think>` the whole budget is spent on hidden reasoning and
-        // `krill run <model> "hello"` prints NOTHING — indistinguishable from a
-        // broken model. Nanbeige 4.2 does exactly this. Non-reasoning models keep
-        // the lean 512 default; an explicit `--max-tokens` still always wins.
-        let effectiveMaxTokens =
-            (userPinnedMaxTokens || !engine.emitsReasoningBlock) ? maxTokens : 4096
+        // ...and SINGLE-SHOT needs the same headroom, for the same reason: on a
+        // model whose template opens the assistant turn inside `<think>` a small
+        // budget is spent entirely on hidden reasoning and
+        // `krill run <model> "hello"` prints NOTHING. Nanbeige 4.2 does exactly
+        // this. Deriving from the context window removes the need to special-case
+        // reasoning models at all.
+        let effectiveMaxTokens = resolvedMaxTokens
 
         if let prompt {
             // Single-shot mode
@@ -427,6 +432,13 @@ private func printStats(_ stats: GenerationStats) {
     decode: \(stats.generatedTokens) tokens at \(decodeTps) tok/s, \
     TTFT: \(ttft)ms, total: \(total)s
     """)
+    // A reply that ran into the ceiling reads as a finished one - it just ends.
+    // Say so, and name the flag, rather than leaving the token count as the
+    // only clue.
+    if stats.hitTokenLimit {
+        print("reply cut off at the token limit - raise it with --max-tokens "
+            + "(or --max-tokens auto for the model's full context)")
+    }
 
     // Speculative-decode and MoE routing counters are engine internals -
     // `final_k`, expert-slot occupancy, peak slot load. They are what you want
