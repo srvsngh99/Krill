@@ -107,6 +107,17 @@ final class RemoteGeneratorsTests: XCTestCase {
         XCTAssertEqual((object["messages"] as? [[String: String]])?.last?["content"], "Read the README")
     }
 
+    func testOpenAICompatibleGeneratorUsesHostedDefaultAndReportsLengthTruncation() throws {
+        let generator = OpenAICompatibleHarnessGenerator(model: "x-preview-f-free")
+        XCTAssertEqual(generator.maxTokens, OpenAICompatibleHarnessGenerator.defaultMaxTokens)
+
+        let response = Data(#"{"choices":[{"finish_reason":"length","message":{"content":"partial"}}]}"#.utf8)
+        XCTAssertThrowsError(try generator.parseCompletion(response)) { error in
+            XCTAssertEqual(error as? HostedProviderError, .responseTruncated)
+            XCTAssertTrue(error.localizedDescription.contains("--max-tokens"))
+        }
+    }
+
     func testOpenAICompatibleGeneratorSurfacesNetworkAndHTTPFailures() async {
         let offline = OpenAICompatibleHarnessGenerator(model: "x-preview-f-free", transport: FailingHarnessHTTPTransport())
         let offlineReply = await offline.complete(messages: [])

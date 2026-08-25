@@ -29,6 +29,7 @@ public enum HostedProviderError: LocalizedError, Sendable, Equatable {
     case invalidBaseURL(String)
     case httpStatus(Int, String)
     case malformedResponse(String)
+    case responseTruncated
     case transport(String)
 
     public var errorDescription: String? {
@@ -39,6 +40,8 @@ public enum HostedProviderError: LocalizedError, Sendable, Equatable {
             return "Provider returned HTTP \(code): \(body)"
         case .malformedResponse(let detail):
             return "Provider returned an invalid response: \(detail)"
+        case .responseTruncated:
+            return "Provider response was truncated at --max-tokens. Increase --max-tokens (for example, --max-tokens 8192) and retry."
         case .transport(let detail):
             return "Network request failed: \(detail)"
         }
@@ -116,6 +119,7 @@ public enum OpenCodeZen {
 /// in `AgentLoop`, so this generator asks the endpoint for the raw Hermes text
 /// rather than relying on provider-specific function-call payloads.
 public struct OpenAICompatibleHarnessGenerator: HarnessGenerator {
+    public static let defaultMaxTokens = 4_096
     public let baseURL: URL
     public let model: String
     public let maxTokens: Int
@@ -125,7 +129,7 @@ public struct OpenAICompatibleHarnessGenerator: HarnessGenerator {
     public init(
         model: String,
         baseURL: URL = OpenCodeZen.defaultBaseURL,
-        maxTokens: Int = 4_096,
+        maxTokens: Int = OpenAICompatibleHarnessGenerator.defaultMaxTokens,
         toolFormat: ToolCalling.ToolFormat = .hermes,
         transport: any HarnessHTTPTransport = URLSessionHarnessHTTPTransport()
     ) {
@@ -169,7 +173,13 @@ public struct OpenAICompatibleHarnessGenerator: HarnessGenerator {
         } catch {
             throw HostedProviderError.malformedResponse("chat JSON: \(error.localizedDescription)")
         }
-        guard let content = response.choices.first?.message.content,
+        guard let choice = response.choices.first else {
+            throw HostedProviderError.malformedResponse("chat response had no choices")
+        }
+        if choice.finishReason == "length" {
+            throw HostedProviderError.responseTruncated
+        }
+        guard let content = choice.message.content,
               !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw HostedProviderError.malformedResponse("chat response had no assistant content")
         }
@@ -191,6 +201,12 @@ public struct OpenAICompatibleHarnessGenerator: HarnessGenerator {
         struct Choice: Decodable {
             struct Message: Decodable { let content: String? }
             let message: Message
+            let finishReason: String?
+
+            enum CodingKeys: String, CodingKey {
+                case message
+                case finishReason = "finish_reason"
+            }
         }
         let choices: [Choice]
     }
@@ -226,9 +242,10 @@ public struct SystemCodexProcessRunner: CodexProcessRunning {
         executable: String, arguments: [String], standardInput: String
     ) async throws -> CodexProcessResult {
         try await Task.detached(priority: nil) {
-            // Keep Codex from discovering the caller's repository AGENTS.md or
-            // project configuration. Krill supplies the complete transcript
-            // over stdin and remains the only harness that may execute tools.
+            // The isolated working directory keeps Codex from discovering the
+            // caller's repository AGENTS.md or project configuration. Krill
+            // supplies the complete transcript over stdin and remains the only
+            // harness that may execute tools.
             let workingDirectory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("krill-codex-\(UUID().uuidString)", isDirectory: true)
             try FileManager.default.createDirectory(
@@ -319,9 +336,9 @@ public struct CodexCLIHarnessGenerator: HarnessGenerator {
     public func arguments() -> [String] {
         var result = [
             "exec", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check",
-            // Keep the adapter's transcript contract independent of any
-            // project/user execpolicy rules, while intentionally retaining the
-            // normal user config where Codex keeps login and model defaults.
+            // Ignore Codex execpolicy `.rules`; the isolated temporary working
+            // directory above, not this flag, prevents project discovery. Keep
+            // normal user config for login and model defaults.
             "--ignore-rules", "--color", "never",
         ]
         if let model { result += ["--model", model] }

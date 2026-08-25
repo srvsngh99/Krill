@@ -44,8 +44,8 @@ struct CodeCommand: AsyncParsableCommand {
             help: "Codex CLI executable name or absolute path.")
     var codexExecutable: String = "codex"
 
-    @Option(name: .long, help: "Maximum tokens per model turn.")
-    var maxTokens: Int = 1024
+    @Option(name: .long, help: "Maximum tokens per model turn (defaults to 1024 locally and 4096 for OpenCode; Codex CLI controls its own budget).")
+    var maxTokens: Int?
 
     @Option(name: .long, help: "Maximum agent iterations (tool-call rounds).")
     var maxIterations: Int = 12
@@ -58,7 +58,7 @@ struct CodeCommand: AsyncParsableCommand {
     var bash: Bool = true
 
     @Flag(name: .long, inversion: .prefixedNo,
-          help: "Grammar-constrain malformed tool calls: regenerate args that miss the schema, and re-pick a tool name that is not one of the offered tools (helps small models and models trained on another tool vocabulary).")
+          help: "Grammar-constrain malformed tool calls on local MLX backends: regenerate args that miss the schema, and re-pick a tool name that is not one of the offered tools (helps small models and models trained on another tool vocabulary).")
     var constrainArgs: Bool = true
 
     @Flag(name: .long,
@@ -84,6 +84,11 @@ struct CodeCommand: AsyncParsableCommand {
     func run() async throws {
         let registry = Registry()
         let config = KrillConfig.load()
+
+        guard !(listModels && provider == .local) else {
+            print("Error: --list-models is available with --provider opencode.")
+            throw ExitCode.failure
+        }
 
         func nonEmpty(_ s: String?) -> String? {
             guard let s, !s.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
@@ -210,7 +215,7 @@ struct CodeCommand: AsyncParsableCommand {
         if RawTerminal.isInteractive && !classic && defaultToolset {
             let tui = ChatTUI(
                 engine: engine, modelName: model, system: nonEmpty(system),
-                params: .greedy, maxTokens: maxTokens, registry: registry,
+                params: .greedy, maxTokens: localMaxTokens, registry: registry,
                 initialImage: nil, initialAudio: nil,
                 voiceModeSetting: config.voiceMode,
                 speakRepliesSetting: config.speakReplies,
@@ -248,7 +253,7 @@ struct CodeCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        var generator = EngineGenerator(engine: engine, maxTokens: maxTokens)
+        var generator = EngineGenerator(engine: engine, maxTokens: localMaxTokens)
         generator.onStats = { stats in
             let rate = stats.decodeTime > 0
                 ? Double(stats.generatedTokens) / stats.decodeTime : 0
@@ -276,4 +281,7 @@ struct CodeCommand: AsyncParsableCommand {
         let onEvent: @Sendable (AgentEvent) -> Void = { renderer.handle($0) }
         _ = await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
     }
+
+    /// Preserve the conservative existing default for the local MLX path.
+    var localMaxTokens: Int { maxTokens ?? 1_024 }
 }

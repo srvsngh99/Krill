@@ -8,6 +8,11 @@ extension CodeCommand {
     func runRemote(model requestedModel: String?, task: String?, config: KrillConfig) async throws {
         guard provider != .local else { return }
 
+        if provider == .codex, let raw = nonEmpty(baseURL) {
+            print("Error: --base-url is available with --provider opencode, not --provider codex (received '\(raw)').")
+            throw ExitCode.failure
+        }
+
         let endpoint: URL
         if let raw = nonEmpty(baseURL) {
             guard let parsed = URL(string: raw),
@@ -80,7 +85,9 @@ extension CodeCommand {
                     modelName = selected.id
                 }
                 generator = OpenAICompatibleHarnessGenerator(
-                    model: modelName, baseURL: endpoint, maxTokens: maxTokens)
+                    model: modelName,
+                    baseURL: endpoint,
+                    maxTokens: hostedMaxTokens)
                 print("Using OpenCode Zen: \(modelName) (keyless, live free-model catalog)")
             } catch let exit as ExitCode {
                 throw exit
@@ -98,19 +105,29 @@ extension CodeCommand {
         let effectiveSystem = remoteSystemPrompt(
             modelName: modelName, mode: mode, userSystem: nonEmpty(system))
         printPermissionMode(mode)
+        if constrainArgs {
+            print("Note: --constrain-args is unavailable for hosted providers; continuing without local grammar constraints.")
+        }
         print("\n> \(task)\n")
 
         let loop = AgentLoop(
             generator: generator,
             tools: ToolRegistry(tools),
             maxIterations: maxIterations,
-            constrainToolArgs: constrainArgs,
+            constrainToolArgs: false,
             permission: permissionBox.policy,
             permissionBox: permissionBox,
             gate: (mode != .acceptAll && RawTerminal.isInteractive) ? StdinApprover() : nil)
         let renderer = LineAgentRenderer()
         let onEvent: @Sendable (AgentEvent) -> Void = { renderer.handle($0) }
         _ = await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
+    }
+
+    /// Hosted reasoning models need a larger completion allowance than the
+    /// intentionally conservative local MLX default. An explicit parsed value
+    /// remains authoritative.
+    private var hostedMaxTokens: Int {
+        maxTokens ?? OpenAICompatibleHarnessGenerator.defaultMaxTokens
     }
 
     private func resolvedPermissionMode(config: KrillConfig) throws -> PermissionMode {

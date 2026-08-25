@@ -19,7 +19,7 @@ Most local-LLM stacks are one half of a pair:
 - an **engine** (Ollama, llama.cpp) that runs a model but can't *do* anything, and
 - a **harness** (Claude Code, Codex) that drives tools and edits files but borrows someone else's model.
 
-**Krill is both, in one binary.** The same native Swift + MLX engine that serves tokens also runs a full agent loop — tools, file edits, web fetch, permissions — against the model already sitting in your RAM. The default local path needs no second process or Python bridge and sends model traffic nowhere. When you explicitly opt in, the same harness can instead use OpenCode's free hosted models or your signed-in Codex CLI.
+**Krill is both, in one binary.** The same native Swift + MLX engine that serves tokens also runs a full agent loop — tools, file edits, web fetch, permissions — against the model already sitting in your RAM. Krill is local by default: the native path needs no second process or Python bridge and keeps model traffic on your Mac. Hosted model traffic leaves the machine only when you explicitly select OpenCode or Codex.
 
 ## One engine, four modes
 
@@ -110,8 +110,21 @@ krill code --provider codex MODEL_ID "review this repository"  # optional model
 
 Omit the Codex model to keep the user's current/default subscription model.
 Each user signs in with their own `codex login`; a shared API key is neither
-required nor supported by this bridge. Use `--base-url` to point the OpenCode
-compatible route at a different endpoint.
+required nor supported by this bridge. `--base-url` applies only to the
+OpenCode-compatible provider; it is rejected for Codex.
+
+OpenCode defaults to a 4096-token completion budget (use `--max-tokens` to
+override it); the local MLX default remains 1024. Codex CLI controls its own
+completion budget, so `--max-tokens` does not apply to that provider. A
+response that reaches the hosted OpenCode budget reports a clear error with the
+flag to increase it rather than silently treating a partial answer as complete.
+
+The Codex bridge starts a fresh `codex exec --ephemeral` process for each agent
+turn and sends that turn's full transcript to the CLI. It does not provide
+cross-turn prompt caching, so usage and any applicable charges can grow with
+long agent runs. Krill invokes the official CLI using its existing login; it
+does not determine whether a particular account or plan is permitted for a
+given workflow, so review the terms that apply to your account.
 
 The default port `57455` is unique, so Krill coexists with Ollama on `11434`; run `krill serve --port 11434` for a literal drop-in.
 
