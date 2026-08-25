@@ -56,10 +56,22 @@ final class RawTerminal {
         atexit(krillRestoreTerminal)
         for sig in [SIGTERM, SIGHUP, SIGQUIT] { signal(sig, krillFatalSignal) }
 
-        // Alt screen, hide cursor, enable SGR mouse reporting (for wheel scroll),
-        // clear. (Hold Option/Fn to select text while mouse reporting is on.)
-        Output.write("\u{1B}[?1049h\u{1B}[?25l\u{1B}[?1000h\u{1B}[?1006h\u{1B}[2J")
         entered = true
+        // Alt screen, hide cursor, enable SGR mouse reporting (for wheel scroll),
+        // and clear. Copy mode temporarily disables mouse reporting so the
+        // terminal can use an ordinary drag for native selection.
+        Output.write("\u{1B}[?1049h\u{1B}[?25l\u{1B}[2J")
+        setMouseReporting(true)
+    }
+
+    /// Toggle terminal mouse capture without leaving the alternate screen.
+    /// Reporting on gives Krill wheel events; reporting off gives the terminal
+    /// native drag-selection and Cmd-C handling.
+    func setMouseReporting(_ enabled: Bool) {
+        guard entered else { return }
+        Output.write(enabled
+            ? "\u{1B}[?1000h\u{1B}[?1006h"
+            : "\u{1B}[?1000l\u{1B}[?1006l")
     }
 
     func leave() {
