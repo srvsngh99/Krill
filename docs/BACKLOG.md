@@ -7,6 +7,18 @@ the in-repo companion to the owner's out-of-repo board
 
 ---
 
+## Interactive attachment size ceiling
+
+**Status:** deferred follow-up to the TUI attachment fixes after PR #305.
+
+Interactive media loading now sniffs a 64-byte header before reading the full
+file, so a large non-media path is rejected without an RSS spike. A recognized
+image or audio file is still loaded in full. Add an explicit size ceiling (for
+example 64 MB) with a clear user-facing refusal before supporting arbitrarily
+large media attachments becomes a practical requirement.
+
+---
+
 ## `krill launch` roster: remaining agents + live verification
 
 **Status:** core DONE (PRs #161-#164). `krill launch <agent>` ships with
