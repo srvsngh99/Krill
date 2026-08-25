@@ -118,6 +118,9 @@ final class ContinuousBatcher: @unchecked Sendable {
         var caches: [KVCacheProtocol]
         var current: Int        // last-emitted token; the next forward's input
         var generated = 0
+        /// Set only when the row ended on a stop token, so `finalize` can tell a
+        /// clean finish from a reply cut off at `maxTokens`.
+        var sawStop = false
         var recent: [Int]
         var prefillTime: Double
         var admittedAt: Double
@@ -553,6 +556,7 @@ final class ContinuousBatcher: @unchecked Sendable {
         if deps.stopIds.contains(token) {
             row.cont.yield(TokenEvent(tokenId: token, text: "",
                                       elapsed: now - row.admittedAt, isEnd: true))
+            row.sawStop = true
             finalize(row, decodeEnd: now, emitTerminal: false)
             return true
         }
@@ -582,7 +586,9 @@ final class ContinuousBatcher: @unchecked Sendable {
         row.stats.stats = GenerationStats(
             promptTokens: row.promptLen, generatedTokens: row.generated,
             prefillTime: row.prefillTime,
-            decodeTime: max(0, decodeEnd - decodeStart))
+            decodeTime: max(0, decodeEnd - decodeStart),
+            hitTokenLimit: GenerationStats.truncated(
+                generated: row.generated, limit: row.maxTokens, sawStop: row.sawStop))
         row.cont.finish()
         row.isFinished = true
     }

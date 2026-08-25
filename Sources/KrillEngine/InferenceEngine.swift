@@ -25,6 +25,8 @@ public final class InferenceEngine: @unchecked Sendable {
     private var loadedModel: LoadedModel?
     private var tokenizer: KrillTokenizer?
     private var modelDirectory: URL
+    /// Memoized `contextWindow`; cleared whenever a different model is loaded.
+    private var cachedContextWindow: Int?
 
     /// Prefix cache for reusing KV state across requests.
     public let prefixCache: PrefixCache
@@ -110,6 +112,36 @@ public final class InferenceEngine: @unchecked Sendable {
     /// Filesystem path to the loaded model directory.
     /// Returns nil if no model is currently loaded.
     public var modelDirectoryPath: String? { isLoaded ? modelDirectory.path : nil }
+
+    /// The loaded model's context window in tokens, or 0 when it cannot be
+    /// determined. Read from `config.json`'s `max_position_embeddings`, falling
+    /// back to the text sub-config that multimodal checkpoints nest it under.
+    ///
+    /// This is what makes a derived token budget possible: the real ceiling on
+    /// a reply is the context window minus the prompt, not a constant.
+    public var contextWindow: Int {
+        guard isLoaded else { return 0 }
+        if let cached = cachedContextWindow { return cached }
+        let value = Self.contextWindow(modelDirectory: modelDirectory)
+        cachedContextWindow = value
+        return value
+    }
+
+    static func contextWindow(modelDirectory: URL) -> Int {
+        let url = modelDirectory.appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return 0 }
+        if let n = json["max_position_embeddings"] as? Int, n > 0 { return n }
+        // Multimodal checkpoints nest the language model's limit one level down.
+        for key in ["text_config", "llm_config", "language_config"] {
+            if let sub = json[key] as? [String: Any],
+               let n = sub["max_position_embeddings"] as? Int, n > 0 {
+                return n
+            }
+        }
+        return 0
+    }
 
     /// The loaded model's declared capability set. Combines the family's
     /// static registry entry (`ModelCapabilities.capabilities(for:)`)
@@ -247,6 +279,7 @@ public final class InferenceEngine: @unchecked Sendable {
     public init(modelDirectory: URL, prefixCache: PrefixCache? = nil,
                 kvCacheDtype: String? = nil, prefillChunkSize: Int? = nil) {
         self.modelDirectory = modelDirectory
+        self.cachedContextWindow = nil
         self.prefixCache = prefixCache ?? PrefixCache()
         if let dtype = kvCacheDtype {
             self.kvCacheDtype = dtype
@@ -373,6 +406,7 @@ public final class InferenceEngine: @unchecked Sendable {
         // Success — now swap atomically.
         unload()
         self.modelDirectory = newDir
+        self.cachedContextWindow = nil
         self.loadedModel = newModel
         self.tokenizer = newTokenizer
         self.loadedAt = Date()
@@ -751,7 +785,7 @@ public final class InferenceEngine: @unchecked Sendable {
     public func generate(
         messages: [[String: String]],
         params: SamplingParams = .greedy,
-        maxTokens: Int = 512,
+        maxTokens: Int = TokenBudget.unlimited,
         useSpeculative: Bool? = nil,
         usePrefixCache: Bool = true,
         imageData: Data? = nil,
@@ -768,6 +802,23 @@ public final class InferenceEngine: @unchecked Sendable {
             return (emptyStream, { nil })
         }
 
+        // Resolve the budget ONCE, here, so every caller - CLI, agent loop, and
+        // all five server dialects - gets the same policy without threading it
+        // through each call site. A non-positive value means "derive it" (see
+        // `TokenBudget`); anything positive is an explicit, deliberate ceiling
+        // and is honoured as given. `contextLimit` narrows the window when a
+        // caller pinned a smaller one than the checkpoint declares.
+        let requestedMaxTokens = maxTokens
+        let effectiveWindow = contextWindow > 0
+            ? Swift.min(contextWindow, contextLimit ?? .max)
+            : (contextLimit ?? 0)
+        // Prompt length is not known yet (the chat template has not been
+        // applied), so this is the window-wide ceiling. The generic decode path
+        // narrows it once the prompt is tokenized - without that, a long prompt
+        // plus a full-window budget could decode past the context edge.
+        var derivedMaxTokens = TokenBudget.resolve(
+            requested: requestedMaxTokens, contextWindow: effectiveWindow)
+
         // Llama-3.2-Vision (mllama) native runtime. The image enters via gated
         // cross-attention that every decode step must re-attend to, so (like
         // Qwen 2.5-VL) every request - image or text-only - routes to the
@@ -778,7 +829,7 @@ public final class InferenceEngine: @unchecked Sendable {
             let images = !imagesData.isEmpty ? imagesData : (imageData.map { [$0] } ?? [])
             return generateLlamaVision(
                 model: mllama, tokenizer: tokenizer, messages: messages,
-                params: params, maxTokens: maxTokens, images: images)
+                params: params, maxTokens: derivedMaxTokens, images: images)
         }
 
         // Qwen 2.5-VL native runtime. Its 3D-mRoPE decode loop needs
@@ -789,7 +840,7 @@ public final class InferenceEngine: @unchecked Sendable {
         if let vlModel = loadedModel.module as? Qwen25VLForConditionalGeneration {
             return generateQwen25VL(
                 model: vlModel, tokenizer: tokenizer, messages: messages,
-                params: params, maxTokens: maxTokens, imageData: imageData,
+                params: params, maxTokens: derivedMaxTokens, imageData: imageData,
                 usePrefixCache: usePrefixCache)
         }
 
@@ -803,7 +854,7 @@ public final class InferenceEngine: @unchecked Sendable {
            imageData != nil || !imagesData.isEmpty {
             return generateMuseGlimmer(
                 model: mg, tokenizer: tokenizer, messages: messages,
-                params: params, maxTokens: maxTokens,
+                params: params, maxTokens: derivedMaxTokens,
                 imageData: imageData ?? imagesData.first)
         }
 
@@ -818,7 +869,7 @@ public final class InferenceEngine: @unchecked Sendable {
             // emit the right think scaffold after the assistant cue.
             return generateQwen35VL(
                 model: vlModel, tokenizer: tokenizer, messages: messages,
-                params: params, maxTokens: maxTokens, imageData: imageData,
+                params: params, maxTokens: derivedMaxTokens, imageData: imageData,
                 enableThinking: Self.resolveThinking(
                     explicit: enableThinking,
                     env: ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"]),
@@ -834,7 +885,7 @@ public final class InferenceEngine: @unchecked Sendable {
         if let laModel = loadedModel.module as? LocateAnythingForConditionalGeneration {
             return generateLocateAnything(
                 model: laModel, tokenizer: tokenizer, messages: messages,
-                params: params, maxTokens: maxTokens, imageData: imageData)
+                params: params, maxTokens: derivedMaxTokens, imageData: imageData)
         }
 
         // Inject media placeholders into the first user message before
@@ -1064,6 +1115,19 @@ public final class InferenceEngine: @unchecked Sendable {
                 }
             }
         }
+
+        // The prompt is tokenized now, so a DERIVED budget can be narrowed to
+        // what the context actually leaves: window - prompt - reserve. An
+        // explicitly requested ceiling is left exactly as the caller set it.
+        if TokenBudget.isDerived(requestedMaxTokens), effectiveWindow > 0 {
+            derivedMaxTokens = TokenBudget.resolve(
+                requested: nil,
+                contextWindow: effectiveWindow,
+                promptTokens: promptTokensBuilt.count)
+        }
+        // Immutable from here on: the decode closures below are escaping and
+        // capture this, so it must not stay mutable.
+        let maxTokens = derivedMaxTokens
 
         // `KRILL_DEBUG_PROMPT=1`: dump the ids this request actually feeds the
         // model, plus the builder that produced them and the inputs that select
@@ -1714,7 +1778,10 @@ public final class InferenceEngine: @unchecked Sendable {
                 // EngineGenerator stop at the first `isEnd` and immediately read
                 // the accessor; setting stats first keeps the (stream, stats)
                 // contract race-free, matching all vision decode drivers.
-                let publishStats: () -> Void = {
+                // `sawStop` distinguishes a clean stop-token finish from a reply
+                // cut off at the token ceiling, so consumers can say which
+                // happened instead of presenting a truncated answer as complete.
+                let publishStats: (_ sawStop: Bool) -> Void = { sawStop in
                     let speculative: SpeculativeStats?
                     if shouldSpec, let decoder = capturedSpecDecoder, decoder.totalRounds > 0 {
                         speculative = SpeculativeStats(
@@ -1738,7 +1805,9 @@ public final class InferenceEngine: @unchecked Sendable {
                         prefillTime: prefillDuration,
                         decodeTime: CFAbsoluteTimeGetCurrent() - decodeStart,
                         speculative: speculative,
-                        moe: capturedMoEModel?.moeUtilization())
+                        moe: capturedMoEModel?.moeUtilization(),
+                        hitTokenLimit: GenerationStats.truncated(
+                            generated: generatedCount, limit: maxTokens, sawStop: sawStop))
                 }
 
                 // Plain (non-spec) decode, factored into a closure so the n-gram
@@ -1813,7 +1882,7 @@ public final class InferenceEngine: @unchecked Sendable {
                                 for case let c as RestorableKVCache in caches {
                                     c.truncate(to: Swift.max(0, c.sequenceLength - 1))
                                 }
-                                publishStats()
+                                publishStats(true)
                                 continuation.yield(TokenEvent(
                                     tokenId: cur, text: "",
                                     elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -1832,7 +1901,7 @@ public final class InferenceEngine: @unchecked Sendable {
                     while generatedCount < maxTokens {
                         if genCancel.isCancelled { break }
                         if stopIds.contains(nextToken) {
-                            publishStats()
+                            publishStats(true)
                             continuation.yield(TokenEvent(
                                 tokenId: nextToken, text: "",
                                 elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -1891,7 +1960,7 @@ public final class InferenceEngine: @unchecked Sendable {
                     // Emit the first token sampled from prefill logits — specDec.step
                     // only returns tokens *after* lastToken, so we must yield it here.
                     if stopIds.contains(nextToken) {
-                        publishStats()
+                        publishStats(true)
                         continuation.yield(TokenEvent(
                             tokenId: nextToken, text: "",
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -1922,7 +1991,7 @@ public final class InferenceEngine: @unchecked Sendable {
                         var hitStop = false
                         for token in accepted {
                             if stopIds.contains(token) {
-                                publishStats()
+                                publishStats(true)
                                 continuation.yield(TokenEvent(
                                     tokenId: token, text: "",
                                     elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -1959,7 +2028,7 @@ public final class InferenceEngine: @unchecked Sendable {
 
                     // Emit the first token (ngramStep returns tokens AFTER lastToken).
                     if stopIds.contains(nextToken) {
-                        publishStats()
+                        publishStats(true)
                         continuation.yield(TokenEvent(
                             tokenId: nextToken, text: "",
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -1986,7 +2055,7 @@ public final class InferenceEngine: @unchecked Sendable {
                         var hitStop = false
                         for token in accepted {
                             if stopIds.contains(token) {
-                                publishStats()
+                                publishStats(true)
                                 continuation.yield(TokenEvent(
                                     tokenId: token, text: "",
                                     elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -2030,7 +2099,7 @@ public final class InferenceEngine: @unchecked Sendable {
                 // Also publish for cancellation/stream-finish paths that do not
                 // emit a terminal token. For max-token termination this must
                 // happen before the synthetic terminal event below.
-                publishStats()
+                publishStats(false)
                 if generatedCount >= maxTokens {
                     continuation.yield(TokenEvent(
                         tokenId: -1, text: "",
@@ -2133,12 +2202,14 @@ public final class InferenceEngine: @unchecked Sendable {
                             text: captures.tokenizer.decodeForOutput(token: token),
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime))
                     })
+                let sawStop = output.tokens.last.map { captures.stops.contains($0) } ?? false
                 statsHolder.stats = GenerationStats(
                     promptTokens: captures.prompt.count,
                     generatedTokens: output.tokens.count,
                     prefillTime: output.prefillSeconds,
-                    decodeTime: output.decodeSeconds)
-                let sawStop = output.tokens.last.map { captures.stops.contains($0) } ?? false
+                    decodeTime: output.decodeSeconds,
+                    hitTokenLimit: GenerationStats.truncated(
+                        generated: output.tokens.count, limit: captures.max, sawStop: sawStop))
                 continuation.yield(TokenEvent(
                     tokenId: sawStop ? (output.tokens.last ?? -1) : -1,
                     text: "",
@@ -2289,16 +2360,18 @@ public final class InferenceEngine: @unchecked Sendable {
                 // reads the stats accessor as soon as it sees isEnd;
                 // setting stats first keeps the (stream, stats)
                 // contract race-free.
-                statsHolder.stats = GenerationStats(
-                    promptTokens: capturedPrompt.count,
-                    generatedTokens: output.tokens.count,
-                    prefillTime: output.prefillSeconds,
-                    decodeTime: output.decodeSeconds)
                 // One terminal event: the stop token id if generation
                 // ended on a stop, else -1 (maxTokens reached).
                 let sawStop = output.tokens.last.map {
                     capturedStops.contains($0)
                 } ?? false
+                statsHolder.stats = GenerationStats(
+                    promptTokens: capturedPrompt.count,
+                    generatedTokens: output.tokens.count,
+                    prefillTime: output.prefillSeconds,
+                    decodeTime: output.decodeSeconds,
+                    hitTokenLimit: GenerationStats.truncated(
+                        generated: output.tokens.count, limit: capturedMax, sawStop: sawStop))
                 continuation.yield(TokenEvent(
                     tokenId: sawStop ? (output.tokens.last ?? -1) : -1,
                     text: "",
@@ -2388,12 +2461,14 @@ public final class InferenceEngine: @unchecked Sendable {
                             text: captures.tokenizer.decodeForOutput(token: token),
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime))
                     })
+                let sawStop = output.tokens.last.map { captures.stops.contains($0) } ?? false
                 statsHolder.stats = GenerationStats(
                     promptTokens: captures.prompt.count,
                     generatedTokens: output.tokens.count,
                     prefillTime: output.prefillSeconds,
-                    decodeTime: output.decodeSeconds)
-                let sawStop = output.tokens.last.map { captures.stops.contains($0) } ?? false
+                    decodeTime: output.decodeSeconds,
+                    hitTokenLimit: GenerationStats.truncated(
+                        generated: output.tokens.count, limit: captures.max, sawStop: sawStop))
                 continuation.yield(TokenEvent(
                     tokenId: sawStop ? (output.tokens.last ?? -1) : -1,
                     text: "", elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -2516,12 +2591,14 @@ public final class InferenceEngine: @unchecked Sendable {
                             text: captures.tokenizer.decodeForOutput(token: token),
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime))
                     })
+                let sawStop = output.tokens.last.map { captures.stops.contains($0) } ?? false
                 statsHolder.stats = GenerationStats(
                     promptTokens: captures.prompt.count,
                     generatedTokens: output.tokens.count,
                     prefillTime: output.prefillSeconds,
-                    decodeTime: output.decodeSeconds)
-                let sawStop = output.tokens.last.map { captures.stops.contains($0) } ?? false
+                    decodeTime: output.decodeSeconds,
+                    hitTokenLimit: GenerationStats.truncated(
+                        generated: output.tokens.count, limit: captures.max, sawStop: sawStop))
                 continuation.yield(TokenEvent(
                     tokenId: sawStop ? (output.tokens.last ?? -1) : -1,
                     text: "", elapsed: CFAbsoluteTimeGetCurrent() - startTime, isEnd: true))
@@ -2634,14 +2711,16 @@ public final class InferenceEngine: @unchecked Sendable {
                             text: text,
                             elapsed: CFAbsoluteTimeGetCurrent() - startTime))
                     })
+                let sawStop = output.tokens.last.map {
+                    capturedStops.contains($0)
+                } ?? false
                 statsHolder.stats = GenerationStats(
                     promptTokens: capturedPrompt.count,
                     generatedTokens: output.tokens.count,
                     prefillTime: output.prefillSeconds,
-                    decodeTime: output.decodeSeconds)
-                let sawStop = output.tokens.last.map {
-                    capturedStops.contains($0)
-                } ?? false
+                    decodeTime: output.decodeSeconds,
+                    hitTokenLimit: GenerationStats.truncated(
+                        generated: output.tokens.count, limit: captures.max, sawStop: sawStop))
                 continuation.yield(TokenEvent(
                     tokenId: sawStop ? (output.tokens.last ?? -1) : -1,
                     text: "",
@@ -3222,6 +3301,10 @@ extension InferenceEngine {
 
         var generated = [Int](repeating: 0, count: R)
         var done = [Bool](repeating: false, count: R)
+        // Per row: did it end on a stop token, or run into its ceiling? Only the
+        // stop-token branch below sets this, so a row that merely ran out of
+        // budget is correctly reported as truncated.
+        var rowSawStop = [Bool](repeating: false, count: R)
         var recent: [[Int]] = (0 ..< R).map {
             c.samplers[$0].needsHistory ? Array(c.promptRows[$0].suffix(512)) : []
         }
@@ -3242,6 +3325,7 @@ extension InferenceEngine {
                 c.conts[r].yield(TokenEvent(
                     tokenId: current[r], text: "", elapsed: now, isEnd: true))
                 done[r] = true
+                rowSawStop[r] = true
                 return
             }
             let text = c.tokenizer.decodeForOutput(token: current[r])
@@ -3294,7 +3378,11 @@ extension InferenceEngine {
             }
             c.statsHolders[r].stats = GenerationStats(
                 promptTokens: lengths[r], generatedTokens: generated[r],
-                prefillTime: prefillDuration, decodeTime: decodeDuration)
+                prefillTime: prefillDuration, decodeTime: decodeDuration,
+                // Batched rows carry their own ceiling; a row that reached it
+                // was cut off just as a single-stream generation would be.
+                hitTokenLimit: GenerationStats.truncated(
+                    generated: generated[r], limit: c.perRowMax[r], sawStop: rowSawStop[r]))
             c.conts[r].finish()
         }
     }

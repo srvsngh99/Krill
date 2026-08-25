@@ -1,6 +1,7 @@
 import Foundation
 import NIOCore
 import NIOHTTP1
+import KrillEngine
 import KrillSampler
 import KrillTooling
 
@@ -128,9 +129,15 @@ internal enum ServerRequestError: Error, Equatable, Sendable {
 }
 
 internal enum ServerParsing {
-    private static let defaultOpenAIMaxTokens = 512
-    private static let defaultOpenAICompletionMaxTokens = 256
-    private static let defaultOllamaMaxTokens = 2048
+    // A request that names no ceiling gets one derived from the model's context
+    // at generation time, matching Ollama's `num_predict: -1` and OpenAI's
+    // omitted `max_tokens`. The old per-dialect constants (512 / 256 / 2048)
+    // were arbitrary, disagreed with each other, and silently truncated long
+    // replies - a reasoning model could spend the whole budget thinking and
+    // return nothing. `TokenBudget.unlimited` is the "derive it" sentinel.
+    private static let defaultOpenAIMaxTokens = TokenBudget.unlimited
+    private static let defaultOpenAICompletionMaxTokens = TokenBudget.unlimited
+    private static let defaultOllamaMaxTokens = TokenBudget.unlimited
 
     private static let unsupportedOpenAIChatFields: Set<String> = [
         "parallel_tool_calls",

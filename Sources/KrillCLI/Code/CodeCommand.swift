@@ -44,7 +44,7 @@ struct CodeCommand: AsyncParsableCommand {
             help: "Codex CLI executable name or absolute path.")
     var codexExecutable: String = "codex"
 
-    @Option(name: .long, help: "Maximum tokens per model turn (defaults to 1024 locally and 4096 for OpenCode; Codex CLI controls its own budget).")
+    @Option(name: .long, help: "Maximum tokens per model turn. Default: derived from the model's context window (local), 4096 for OpenCode. Codex CLI controls its own budget.")
     var maxTokens: Int?
 
     @Option(name: .long, help: "Maximum agent iterations (tool-call rounds).")
@@ -282,6 +282,9 @@ struct CodeCommand: AsyncParsableCommand {
         _ = await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
     }
 
-    /// Preserve the conservative existing default for the local MLX path.
-    var localMaxTokens: Int { maxTokens ?? 1_024 }
+    /// Local generations derive their ceiling from the loaded model's context
+    /// window (see `TokenBudget`); the engine resolves the sentinel because only
+    /// it knows the window and the prompt length. A flag value is passed through
+    /// untouched.
+    var localMaxTokens: Int { maxTokens ?? TokenBudget.unlimited }
 }

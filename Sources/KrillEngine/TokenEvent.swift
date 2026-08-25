@@ -64,13 +64,23 @@ public struct GenerationStats: Sendable {
     /// is a native MoE runtime).
     public let moe: MoEUtilization?
 
+    /// True when generation stopped because it reached the token ceiling rather
+    /// than because the model emitted a stop token - i.e. the reply is CUT OFF.
+    ///
+    /// Without this a truncated reply is indistinguishable from a complete one:
+    /// the caller sees plausible text that simply ends, and an agent loop sees a
+    /// tool call chopped mid-JSON. Every consumer that shows a reply should say
+    /// so when this is set.
+    public let hitTokenLimit: Bool
+
     public init(
         promptTokens: Int,
         generatedTokens: Int,
         prefillTime: Double,
         decodeTime: Double,
         speculative: SpeculativeStats? = nil,
-        moe: MoEUtilization? = nil
+        moe: MoEUtilization? = nil,
+        hitTokenLimit: Bool = false
     ) {
         self.promptTokens = promptTokens
         self.generatedTokens = generatedTokens
@@ -78,6 +88,15 @@ public struct GenerationStats: Sendable {
         self.decodeTime = decodeTime
         self.speculative = speculative
         self.moe = moe
+        self.hitTokenLimit = hitTokenLimit
+    }
+
+    /// Whether a run that produced `generated` tokens under a `limit` was cut
+    /// off. `sawStop` is authoritative when known: a model that emitted its stop
+    /// token on the very last allowed step finished cleanly and must not be
+    /// reported as truncated.
+    public static func truncated(generated: Int, limit: Int, sawStop: Bool) -> Bool {
+        !sawStop && limit > 0 && generated >= limit
     }
 
     /// Prefill throughput.
