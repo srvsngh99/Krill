@@ -119,6 +119,12 @@ completion budget, so `--max-tokens` does not apply to that provider. A
 response that reaches the hosted OpenCode budget reports a clear error with the
 flag to increase it rather than silently treating a partial answer as complete.
 
+Hosted reasoning models spend most of a turn before emitting any content, so
+OpenCode requests use a 300s ceiling rather than URLSession's 60s default, and
+transient failures (429/502/503/504, or a dropped connection) are retried twice
+with a short backoff before the error is surfaced. Free tiers return these
+routinely; a blip should not end an agent run.
+
 The Codex bridge starts a fresh `codex exec --ephemeral` process for each agent
 turn and sends that turn's full transcript to the CLI. It does not provide
 cross-turn prompt caching, so usage and any applicable charges can grow with

@@ -12,13 +12,78 @@ public protocol HarnessHTTPTransport: Sendable {
     func send(_ request: URLRequest) async throws -> (Data, URLResponse)
 }
 
+/// Shared tuning for hosted providers.
+public enum HostedProviderDefaults {
+    /// Per-request ceiling. URLSession defaults to 60s, which is far too tight
+    /// here: hosted *reasoning* models spend most of a turn before emitting any
+    /// content, and a single measured turn against OpenCode Zen's default free
+    /// model took ~45s at the 4096-token budget. One slow turn must not kill an
+    /// agent run, so allow real headroom rather than shaving the observed time.
+    public static let requestTimeout: TimeInterval = 300
+
+    /// Total attempts (1 try + 2 retries) for transient failures. Free tiers
+    /// return 503/429 routinely - one observed on a first request - and losing a
+    /// whole agent run to a blip is worse than waiting a couple of seconds.
+    public static let maxAttempts = 3
+
+    /// Backoff before retry N (1-based). Short enough to stay interactive.
+    public static func retryDelay(afterAttempt attempt: Int) -> Duration {
+        .milliseconds(attempt == 1 ? 500 : 1_500)
+    }
+
+    /// Status codes worth retrying: rate limiting and transient gateway/upstream
+    /// faults. Everything else (4xx in particular) is deterministic - retrying a
+    /// malformed request just wastes the user's time.
+    public static func isRetryable(status: Int) -> Bool {
+        status == 429 || status == 502 || status == 503 || status == 504
+    }
+}
+
 /// The normal transport for hosted providers.
 public struct URLSessionHarnessHTTPTransport: HarnessHTTPTransport {
-    public init() {}
+    private let timeout: TimeInterval
+
+    public init(timeout: TimeInterval = HostedProviderDefaults.requestTimeout) {
+        self.timeout = timeout
+    }
 
     public func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
-        try await URLSession.shared.data(for: request)
+        // Applied here rather than at each call site so every hosted request
+        // gets the ceiling even if a new one is added later.
+        var timed = request
+        timed.timeoutInterval = timeout
+        return try await URLSession.shared.data(for: timed)
     }
+}
+
+/// Send `request`, retrying transient transport errors and retryable statuses.
+///
+/// Retry lives ABOVE the transport seam so a stub transport in tests observes
+/// the retries, and so both model discovery and chat completion share one
+/// policy. The final attempt's outcome is returned as-is for the caller to
+/// validate, so a non-retryable status still surfaces its real body.
+func sendWithRetry(
+    _ request: URLRequest,
+    transport: any HarnessHTTPTransport,
+    maxAttempts: Int = HostedProviderDefaults.maxAttempts
+) async throws -> (Data, URLResponse) {
+    var lastError: (any Error)?
+    for attempt in 1...max(1, maxAttempts) {
+        let isLast = attempt >= max(1, maxAttempts)
+        do {
+            let (data, response) = try await transport.send(request)
+            guard let http = response as? HTTPURLResponse,
+                  HostedProviderDefaults.isRetryable(status: http.statusCode),
+                  !isLast
+            else { return (data, response) }
+        } catch {
+            lastError = error
+            if isLast { throw error }
+        }
+        try? await Task.sleep(for: HostedProviderDefaults.retryDelay(afterAttempt: attempt))
+    }
+    // Unreachable: the loop either returns or throws on its last attempt.
+    throw lastError ?? HostedProviderError.transport("request failed")
 }
 
 /// Errors that can be shown directly to the agent loop.  `HarnessGenerator`
@@ -80,7 +145,7 @@ public enum OpenCodeZen {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await transport.send(request)
+            (data, response) = try await sendWithRetry(request, transport: transport)
         } catch {
             throw HostedProviderError.transport(error.localizedDescription)
         }
@@ -143,13 +208,13 @@ public struct OpenAICompatibleHarnessGenerator: HarnessGenerator {
     public func complete(messages: [[String: String]]) async -> String {
         do {
             let request = try makeRequest(messages: messages)
-            let (data, response) = try await transport.send(request)
+            let (data, response) = try await sendWithRetry(request, transport: transport)
             try OpenCodeZen.validate(response: response, data: data)
             return try parseCompletion(data)
         } catch let error as HostedProviderError {
             return "Error: OpenCode provider: \(error.localizedDescription)"
         } catch {
-            return "Error: OpenCode provider: \(error.localizedDescription)"
+            return "Error: OpenCode provider: \(HostedProviderError.transport(error.localizedDescription).localizedDescription)"
         }
     }
 

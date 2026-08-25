@@ -30,6 +30,50 @@ private struct FailingHarnessHTTPTransport: HarnessHTTPTransport {
     func send(_ request: URLRequest) async throws -> (Data, URLResponse) { throw Failure() }
 }
 
+/// Replays a fixed script of statuses, one per attempt, and counts calls so a
+/// test can assert on how many attempts the retry policy actually made.
+private actor ScriptedHarnessHTTPTransport: HarnessHTTPTransport {
+    private let statuses: [Int]
+    private let body: String
+    private var calls = 0
+
+    init(statuses: [Int], body: String = #"{"choices":[{"finish_reason":"stop","message":{"content":"ok"}}]}"#) {
+        self.statuses = statuses
+        self.body = body
+    }
+
+    func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        let status = statuses[min(calls, statuses.count - 1)]
+        calls += 1
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"])!
+        return (Data(body.utf8), response)
+    }
+
+    func callCount() -> Int { calls }
+}
+
+/// Throws for the first `failures` attempts, then succeeds.
+private actor FlakyHarnessHTTPTransport: HarnessHTTPTransport {
+    struct Failure: LocalizedError { var errorDescription: String? { "connection reset" } }
+    private let failures: Int
+    private var calls = 0
+
+    init(failures: Int) { self.failures = failures }
+
+    func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        calls += 1
+        if calls <= failures { throw Failure() }
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"])!
+        return (Data(#"{"choices":[{"finish_reason":"stop","message":{"content":"recovered"}}]}"#.utf8), response)
+    }
+
+    func callCount() -> Int { calls }
+}
+
 private actor StubCodexRunner: CodexProcessRunning {
     let result: CodexProcessResult
     private var capturedExecutable: String?
@@ -116,6 +160,53 @@ final class RemoteGeneratorsTests: XCTestCase {
             XCTAssertEqual(error as? HostedProviderError, .responseTruncated)
             XCTAssertTrue(error.localizedDescription.contains("--max-tokens"))
         }
+    }
+
+    func testRetriesTransient503ThenSucceeds() async {
+        let transport = ScriptedHarnessHTTPTransport(statuses: [503, 200])
+        let generator = OpenAICompatibleHarnessGenerator(
+            model: "x-preview-f-free", transport: transport)
+        let reply = await generator.complete(messages: [])
+        XCTAssertEqual(reply, "ok")
+        let calls = await transport.callCount()
+        XCTAssertEqual(calls, 2, "a transient 503 must be retried, not surfaced")
+    }
+
+    func testRetriesTransportErrorThenSucceeds() async {
+        let transport = FlakyHarnessHTTPTransport(failures: 1)
+        let generator = OpenAICompatibleHarnessGenerator(
+            model: "x-preview-f-free", transport: transport)
+        let reply = await generator.complete(messages: [])
+        XCTAssertEqual(reply, "recovered")
+        let calls = await transport.callCount()
+        XCTAssertEqual(calls, 2)
+    }
+
+    func testGivesUpAfterMaxAttemptsAndSurfacesTheStatus() async {
+        let transport = ScriptedHarnessHTTPTransport(statuses: [503])
+        let generator = OpenAICompatibleHarnessGenerator(
+            model: "x-preview-f-free", transport: transport)
+        let reply = await generator.complete(messages: [])
+        XCTAssertTrue(reply.contains("503"), reply)
+        let calls = await transport.callCount()
+        XCTAssertEqual(calls, HostedProviderDefaults.maxAttempts)
+    }
+
+    func testDoesNotRetryDeterministicClientErrors() async {
+        let transport = ScriptedHarnessHTTPTransport(statuses: [400])
+        let generator = OpenAICompatibleHarnessGenerator(
+            model: "x-preview-f-free", transport: transport)
+        let reply = await generator.complete(messages: [])
+        XCTAssertTrue(reply.contains("400"), reply)
+        let calls = await transport.callCount()
+        XCTAssertEqual(calls, 1, "a 4xx is deterministic; retrying only wastes time")
+    }
+
+    func testURLSessionTransportAppliesAGenerousTimeout() {
+        XCTAssertEqual(HostedProviderDefaults.requestTimeout, 300)
+        XCTAssertGreaterThan(
+            HostedProviderDefaults.requestTimeout, 60,
+            "URLSession's 60s default is shorter than a measured hosted reasoning turn")
     }
 
     func testOpenAICompatibleGeneratorSurfacesNetworkAndHTTPFailures() async {
