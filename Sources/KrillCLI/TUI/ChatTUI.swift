@@ -953,8 +953,7 @@ final class ChatTUI {
                 pendingAudio = nil
                 note("(agent mode does not take audio attachments yet; use chat mode.)")
             }
-            await runAgentTurn(
-                drainShellContext(into: prompt), images: turnImages, displayAs: prompt)
+            await runAgentTurn(prompt, images: turnImages)
             return
         }
         // Outside the main agent surface, a non-command submission continues the
@@ -971,7 +970,7 @@ final class ChatTUI {
             render()
             return
         }
-        await generate(prompt: drainShellContext(into: prompt), displayAs: prompt)
+        await generate(prompt: prompt)
     }
 
     /// Aliases accepted by handleCommand but kept out of the autosuggest list to
@@ -1036,7 +1035,9 @@ final class ChatTUI {
                 note("Switch to agent mode (/agent) before spawning a background agent."); break
             }
             guard !arg.isEmpty else { note("Usage: /bg <task>"); break }
-            spawnSession(title: DispatchTool.deriveTitle(arg), task: arg)
+            // A user-typed /bg drains the bank; the model's dispatch_agent
+            // path into spawnSession deliberately does not.
+            spawnSession(title: DispatchTool.deriveTitle(arg), task: drainShellContext(into: arg))
         case "/research":
             guard !arg.isEmpty else { note("Usage: /research <question>"); break }
             await runResearch(arg)
@@ -1237,11 +1238,11 @@ final class ChatTUI {
         """
     }
 
-    /// Total characters the bank may hold. One run is already capped at
+    /// Total bytes the bank may hold. One run is already capped at
     /// `shellEscapeMaxBytes` by BashTool; this stops a run of `!` commands from
     /// quietly stacking up until a one-word message drags tens of thousands of
     /// tokens into the turn (and straight into the context truncation).
-    private static let shellBankMaxChars = 32_768
+    private static let shellBankMaxBytes = 32_768
 
     /// Bank a run's output for the next message, evicting the oldest entries
     /// when the bank would exceed its cap, and say on screen that it happened -
@@ -1251,7 +1252,7 @@ final class ChatTUI {
         pendingShellContext.append(Self.shellContextBlock(command: command, output: output))
         var evicted = 0
         while pendingShellContext.count > 1,
-              pendingShellContext.reduce(0, { $0 + $1.count }) > Self.shellBankMaxChars {
+              pendingShellContext.reduce(0, { $0 + $1.utf8.count }) > Self.shellBankMaxBytes {
             pendingShellContext.removeFirst()
             evicted += 1
         }
@@ -1329,6 +1330,11 @@ final class ChatTUI {
                 // session and the persisted config can never disagree.
                 shellOutputToModel = KrillConfig.parseBool(value)
                 appliedNow = true
+                if !["true", "false", "1", "0", "on", "off", "yes", "no"]
+                    .contains(value.lowercased()) {
+                    note("'\(value)' is not a boolean - read as "
+                        + "\(shellOutputToModel). Use true or false.")
+                }
             }
             note("Set \(key) = \(value) in ~/.krill/config.toml. "
                 + (appliedNow
@@ -1619,11 +1625,13 @@ final class ChatTUI {
     /// Run one agent turn live: spawn the loop on a background Task, drain its
     /// events into the transcript, and poll keys for cancel / scroll / approval.
     /// Mirrors the code TUI's run loop, adapted to the chat surface.
-    private func runAgentTurn(_ task: String, images: [Data] = [], displayAs: String? = nil) async {
-        // `displayAs` is the on-screen bubble; the model always receives `task`.
-        // They differ when a `!` shell escape's output is riding along.
-        let shown = displayAs ?? task
-        let shownTask = images.isEmpty ? shown : "[\(images.count) img] \(shown)"
+    private func runAgentTurn(_ task: String, images: [Data] = []) async {
+        // Banked `!` output rides in front of the model's copy of this turn.
+        // Draining HERE rather than at the call sites is what makes the on-screen
+        // promise ("goes to the model with your next message") true for every way
+        // a turn can start - typed, custom slash command, /init, launch task.
+        let modelTask = drainShellContext(into: task)
+        let shownTask = images.isEmpty ? task : "[\(images.count) img] \(task)"
         view.append(Msg(role: .user, text: shownTask))
         scrollOffset = 0
         agentChipShown = false
@@ -1633,8 +1641,8 @@ final class ChatTUI {
         let planningPrefix = AgentEnvironment.planTurnPrefix
             + (permissions == .adaptive ? " " + AgentEnvironment.adaptivePlanTail : "")
         let runTask = permissionBox.isPlanning
-            ? planningPrefix + "\n\n" + task
-            : task
+            ? planningPrefix + "\n\n" + modelTask
+            : modelTask
 
         var generator = EngineGenerator(engine: engine, maxTokens: maxTokens)
         generator.onStats = { [agentStats] in agentStats.put($0) }
@@ -2291,6 +2299,9 @@ final class ChatTUI {
 
     private func generate(prompt: String, displayAs: String? = nil) async {
         synth.stop()   // a new turn hushes any still-speaking previous reply
+        // As in runAgentTurn: banked `!` output joins the model's copy of the
+        // turn here, so every caller (typed, custom command, voice) honours it.
+        let modelPrompt = drainShellContext(into: prompt)
         // `displayAs` is the on-screen bubble; the model always receives `prompt`.
         // They differ for a sent voice clip: the user sees "[voice message]" but
         // the model gets a plain instruction to answer the audio. Feeding the
@@ -2301,7 +2312,7 @@ final class ChatTUI {
             : (pendingAudio != nil ? "[voice message]"
                : (!pendingImages.isEmpty ? "[media]" : prompt)))
         view.append(Msg(role: .user, text: shown))
-        modelTurns.append((role: "user", content: prompt))
+        modelTurns.append((role: "user", content: modelPrompt))
         var messages: [[String: String]] = []
         // Chat carries the same ambient line as agent mode (date, cwd,
         // platform, model) so "what day is it" doesn't hallucinate from
@@ -3368,6 +3379,7 @@ final class ChatTUI {
         lines.append("  !<command>     Run a shell command; its output goes to the model with")
         lines.append("                 your next message (config: shell_output_to_model).")
         lines.append("  !!<command>    Run it with the output kept local - the model never sees it.")
+        lines.append("  \\!<text>       Send a message that starts with a literal '!'.")
         lines.append("  Commands run in a subshell, so use /cd to move the session.")
         lines.append("")
         lines.append("Attachments")

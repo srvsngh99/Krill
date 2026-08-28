@@ -67,7 +67,7 @@ final class InteractiveSession {
     /// keyboard. This REPL is also the surface Krill falls back to when stdin
     /// is a pipe or a file, and executing a `!` line out of piped CONTENT would
     /// turn `krill run model < notes.txt` into arbitrary command execution.
-    private let shellEscapesEnabled = RawTerminal.isInteractive
+    private let shellEscapesEnabled = isatty(STDIN_FILENO) != 0
 
     private var history: [(role: String, content: String)] = []
     private var pendingImages: [Attachment] = []
@@ -144,7 +144,7 @@ final class InteractiveSession {
                 print("Unknown command \(unknown). Type /help for the list.")
                 continue
             }
-            await generate(userText: drainShellContext(into: promptText))
+            await generate(userText: promptText)
         }
     }
 
@@ -170,9 +170,9 @@ final class InteractiveSession {
         print()
     }
 
-    /// Total characters the bank may hold, so a run of `!` commands cannot
+    /// Total bytes the bank may hold, so a run of `!` commands cannot
     /// quietly stack up until a one-word message drags the context over.
-    private static let shellBankMaxChars = 32_768
+    private static let shellBankMaxBytes = 32_768
 
     /// Bank a run's output for the next message, evicting the oldest entries
     /// past the cap, and say so - the effect lands on a LATER message, so it
@@ -181,7 +181,7 @@ final class InteractiveSession {
         pendingShellContext.append(Self.shellContextBlock(command: command, output: output))
         var evicted = 0
         while pendingShellContext.count > 1,
-              pendingShellContext.reduce(0, { $0 + $1.count }) > Self.shellBankMaxChars {
+              pendingShellContext.reduce(0, { $0 + $1.utf8.count }) > Self.shellBankMaxBytes {
             pendingShellContext.removeFirst()
             evicted += 1
         }
@@ -288,6 +288,10 @@ final class InteractiveSession {
     // MARK: - Generation
 
     private func generate(userText: String) async {
+        // Banked `!` output rides in front of the model's copy of the turn.
+        // Draining inside the sink, not at the call site, keeps the on-screen
+        // promise true however a turn is started.
+        let userText = drainShellContext(into: userText)
         var messages: [[String: String]] = []
         if let system, !system.isEmpty { messages.append(["role": "system", "content": system]) }
         for turn in history { messages.append(["role": turn.role, "content": turn.content]) }
@@ -540,6 +544,12 @@ final class InteractiveSession {
           \(Ansi.cyan("/reset"))          Clear the conversation
           \(Ansi.cyan("/help"))           This help
           \(Ansi.cyan("/quit"))           Exit
+        \(shellEscapesEnabled ? """
+        \(Ansi.bold("Shell"))
+          \(Ansi.cyan("!<command>"))      Run it; the output goes to the model with your next message
+          \(Ansi.cyan("!!<command>"))     Run it with the output kept local - the model never sees it
+          \(Ansi.cyan("\\\\!<text>"))       Send a message that starts with a literal '!'
+        """ : "")
         \(Ansi.dim("Attach a file by dragging it into the terminal, or inline with @path."))
         \(Ansi.dim("Tab completes commands and paths; Up/Down recall history; Ctrl-C cancels a reply."))
         """)

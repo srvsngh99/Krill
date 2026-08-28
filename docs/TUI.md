@@ -123,6 +123,9 @@ Notes:
 - `/clear` drops anything still banked, along with the conversation.
 - In the classic line REPL, escapes are honoured only on a real terminal —
   piping a file into `krill run` never executes a `!` line in its content.
+- The phone / web UI at `/ui` deliberately has **no** shell escape. That surface
+  is served over the network by `krill ui`, so a `!` there would be remote code
+  execution on your Mac from any device on the LAN.
 
 ## Agent mode
 
