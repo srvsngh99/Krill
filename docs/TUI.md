@@ -38,7 +38,7 @@ If auto-detection ever misreads, pass `--theme light` or `--theme dark`.
 | `Up` / `Down` | Recall input history, or cycle the slash-command popup |
 | `Tab` | Accept the highlighted command (then add arguments) |
 | `Shift+Tab` | Agent mode: cycle permissions (plan / adaptive / ask / accept-edits / auto), including while a turn runs |
-| `Enter` | Send the message |
+| `Enter` | Send the message (a line starting with `!` runs as a shell command) |
 | Hold `Space` | Push-to-talk (only when voice is on: dictate / handsfree / send) |
 | `Ctrl-V` | Turn voice on and cycle it: off -> dictate -> handsfree -> send -> off |
 | `Ctrl-O` | Agent mode: expand / collapse tool output (collapsed by default; errors always show) |
@@ -82,6 +82,38 @@ Tab to fill it and add arguments. `/help` lists everything.
 | `/voice` | Show the current voice state (posture + engine) |
 | `/voice engine apple\|whisper` | Choose the dictation engine (see Voice) |
 | `/quit` | Exit (`/exit`, `/q` too) |
+
+## Shell escapes (`!` / `!!`)
+
+A line that starts with `!` is not a message — it is a shell command, run right
+there in the session's working directory. The output lands in the transcript as
+a `bash` step, shown in full (not collapsed: you ran it to read it).
+
+| You type | What happens |
+|---|---|
+| `!git status` | Runs it, shows the output, and hands that output to the model with your **next** message |
+| `!!git status` | Runs it, shows the output, and the model never sees it |
+| `!` (bare) | Prints the usage reminder |
+
+The output does not become a turn of its own — it is banked and rides in front
+of whatever you type next, so the model reads it as context you shared rather
+than as your words. Your message bubble still shows only what you typed. Bank
+several runs before writing the message and all of them ride along.
+
+Which behaviour the **single** bang gets is the `shell_output_to_model` config
+key (default `true`). Set it with `/config shell_output_to_model=false` — unlike
+most keys, this one also retargets the running session — and every `!` then
+behaves like `!!`. The double bang is always private, whatever the key says.
+
+Notes:
+
+- Commands run in their own subshell, so `!cd ~/src` cannot move the session.
+  Use `/cd` for that.
+- A shell escape is a **human** action, so it is not gated by the agent
+  permission level: `plan` mode restrains the model, not you — exactly as a
+  second terminal window would not be restrained.
+- Runs are capped at 5 minutes and the last 32 KB of combined stdout+stderr.
+- To send a message that genuinely begins with `!`, start it with a space.
 
 ## Agent mode
 

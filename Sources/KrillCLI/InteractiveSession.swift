@@ -4,8 +4,10 @@ import KrillCore
 import KrillEngine
 import KrillRegistry
 import KrillSampler
+import KrillHarness
 import KrillServer
 import KrillTooling
+import KrillTUI
 
 // SIGINT during a reply sets this flag (async-signal-safe: only a sig_atomic_t
 // is touched). The decode display loop polls it and breaks; breaking ends the
@@ -56,6 +58,11 @@ final class InteractiveSession {
     // Reasoning channel default for this REPL session (from the `thinking` config
     // key; on by default). No-op for models without a thinking channel.
     private let thinking: Bool
+    // `!<command>` shell escapes: whether a single-bang run's output is handed
+    // to the model with the next message (`shell_output_to_model`). `!!` is
+    // always private. `pendingShellContext` banks runs until the next message.
+    private let shellOutputToModel: Bool
+    private var pendingShellContext: [String] = []
 
     private var history: [(role: String, content: String)] = []
     private var pendingImages: [Attachment] = []
@@ -72,7 +79,8 @@ final class InteractiveSession {
         registry: Registry,
         initialImage: Data? = nil,
         initialAudio: Data? = nil,
-        thinking: Bool = true
+        thinking: Bool = true,
+        shellOutputToModel: Bool = true
     ) {
         self.engine = engine
         self.modelName = modelName
@@ -81,6 +89,7 @@ final class InteractiveSession {
         self.maxTokens = maxTokens
         self.registry = registry
         self.thinking = thinking
+        self.shellOutputToModel = shellOutputToModel
         if let initialImage { pendingImages.append(makeAttachment(.image, initialImage, name: "image")) }
         if let initialAudio { pendingAudio = makeAttachment(.audio, initialAudio, name: "audio") }
     }
@@ -91,7 +100,8 @@ final class InteractiveSession {
         ReplCompletion.install()
         installReplySigint()
         print(Ansi.bold("\nKrill interactive chat") + " " + Ansi.dim("(\(modelName))"))
-        print(Ansi.dim("Type a message. /help for commands, Tab to complete, Up/Down for history, /quit to exit.\n"))
+        print(Ansi.dim("Type a message. /help for commands, !<command> for a shell escape, "
+            + "Tab to complete, Up/Down for history, /quit to exit.\n"))
         if !pendingImages.isEmpty || pendingAudio != nil { printPending() }
 
         while true {
@@ -104,6 +114,10 @@ final class InteractiveSession {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
 
+            if let bang = BangCommand.parse(trimmed) {
+                await runShellEscape(bang)
+                continue
+            }
             if try await handleLine(trimmed) { continue }
 
             // Not a command: pull inline @path and bare-path media, then send
@@ -121,8 +135,50 @@ final class InteractiveSession {
                 print("Unknown command \(unknown). Type /help for the list.")
                 continue
             }
-            await generate(userText: promptText)
+            await generate(userText: drainShellContext(into: promptText))
         }
+    }
+
+    // MARK: - Shell escapes (!command / !!command)
+
+    /// Run a `!` / `!!` shell escape and print its output. Same contract as the
+    /// full-screen TUI: `!!` keeps the output out of the model's context, `!`
+    /// follows `shell_output_to_model`. The command runs in its own subshell,
+    /// so `!cd …` cannot move the session.
+    private func runShellEscape(_ bang: BangCommand) async {
+        guard !bang.command.isEmpty else { print(Ansi.dim(BangCommand.usage)); return }
+        let tool = BashTool(timeout: 300, maxOutputBytes: 32_768)
+        let result = await tool.run(command: bang.command)
+        print(Ansi.dim("$ \(bang.command)"))
+        print(result.content)
+        if shellOutputToModel && !bang.isPrivate {
+            pendingShellContext.append(
+                Self.shellContextBlock(command: bang.command, output: result.content))
+        } else {
+            print(Ansi.dim(bang.isPrivate
+                ? "(kept local - the model will not see this output.)"
+                : "(shell_output_to_model is off - the model will not see this output.)"))
+        }
+        print()
+    }
+
+    /// How a banked `!` run is presented to the model: labelled, so it reads as
+    /// an observation the user handed over rather than as their words.
+    private static func shellContextBlock(command: String, output: String) -> String {
+        """
+        The user ran this shell command and shared its output with you:
+
+        $ \(command)
+        \(output)
+        """
+    }
+
+    /// Prepend everything banked since the last message to `text`, and clear it.
+    private func drainShellContext(into text: String) -> String {
+        guard !pendingShellContext.isEmpty else { return text }
+        let banked = pendingShellContext.joined(separator: "\n\n")
+        pendingShellContext.removeAll()
+        return banked + "\n\n" + text
     }
 
     /// Handle slash commands. Returns true when the line was fully handled

@@ -40,6 +40,15 @@ public struct BashTool: Tool {
                 content: "Error: bash requires a non-empty 'command' string argument.",
                 isError: true)
         }
+        return await run(command: command)
+    }
+
+    /// Run `command` directly, without the model's JSON argument envelope.
+    ///
+    /// The TUI's `!` shell escape goes through here so a command the human
+    /// types gets exactly the same treatment as one the model issues: the same
+    /// shell, workspace, timeout, and output cap.
+    public func run(command: String) async -> ToolResult {
         // Capture the agent workspace HERE, in the async context: the task-local
         // does not propagate into the dispatch-queue closure below.
         let workspace = AgentWorkspace.root

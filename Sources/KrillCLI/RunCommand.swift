@@ -254,6 +254,7 @@ struct RunCommand: AsyncParsableCommand {
                 voiceRateSetting: tuiConfig.voiceRate,
                 voiceWhisperModelSetting: tuiConfig.voiceWhisperModel,
                 thinkingSetting: tuiConfig.thinking,
+                shellOutputToModelSetting: tuiConfig.shellOutputToModel,
                 modeSetting: tuiConfig.defaultMode,
                 agentPermissionsSetting: tuiConfig.defaultAgentPermissions)
             await tui.run()
@@ -261,11 +262,13 @@ struct RunCommand: AsyncParsableCommand {
             // Classic line REPL (forced with --classic, or auto when stdout is
             // not a TTY, e.g. piped/redirected): multi-turn memory, libedit
             // editing/history/tab-completion, streamed markdown, media attach.
+            let replConfig = KrillConfig.load()
             let session = InteractiveSession(
                 engine: engine, modelName: model, system: system,
                 params: params, maxTokens: chatMaxTokens, registry: registry,
                 initialImage: imageData, initialAudio: audioData,
-                thinking: KrillConfig.load().thinking)
+                thinking: replConfig.thinking,
+                shellOutputToModel: replConfig.shellOutputToModel)
             do {
                 try await session.run()
             } catch is CleanExit {

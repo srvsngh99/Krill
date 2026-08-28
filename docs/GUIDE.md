@@ -155,6 +155,12 @@ Type these inside the chat TUI:
 | `/config [key=value]` · `/init` | Show/set config · generate a `Krill.md` for the repo |
 | `/quit` (`/exit`, `/q`) | Exit |
 
+**Shell escapes:** a line starting with `!` runs as a shell command instead of
+being sent as a message. `!git status` shows the output *and* hands it to the
+model with your next message; `!!git status` keeps it local. The single bang
+follows the `shell_output_to_model` config key (default `true`); the double bang
+is always private. Full details in [`docs/TUI.md`](TUI.md#shell-escapes---).
+
 **Custom commands:** drop a markdown file at `~/.krill/commands/<name>.md` and it
 becomes `/<name>`. Placeholders `$ARGUMENTS`, `$INPUT`, `$1`..`$9` are
 substituted; optional `--- description: … ---` frontmatter shows in `/help`.
@@ -532,6 +538,7 @@ Common keys (each has a `KRILL_…` env equivalent):
 | `kv_cache_dtype` | `fp16` | KV cache precision (`fp16` / `int8`) |
 | `context_length` | model max | Prompt token limit |
 | `thinking` | `true` | Reasoning channel on/off |
+| `shell_output_to_model` | `true` | Whether a `!<command>` shell escape's output is handed to the model with your next message (`!!<command>` is always private) |
 | `search_backend` | `auto` | `auto` \| `brave` \| `tavily` \| `searxng` |
 | `brave_api_key` / `tavily_api_key` | — | BYOK search keys (redacted in output) |
 | `voice_mode` / `speak_replies` | `off` / `false` | Voice posture · enable TTS |

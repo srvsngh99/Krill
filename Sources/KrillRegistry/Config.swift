@@ -157,6 +157,14 @@ public struct KrillConfig: Sendable {
     /// toggle it per session; this is the starting value.
     public var thinking: Bool
 
+    /// Whether a `!<command>` shell escape typed at the chat prompt hands its
+    /// output to the model with your next message. ON by default: you usually
+    /// run a command so the model can see the result. Turn it off to keep every
+    /// single-bang run private by default. `!!<command>` is always private and
+    /// ignores this. `shell_output_to_model` in config;
+    /// `KRILL_SHELL_OUTPUT_TO_MODEL` env. The TUI can toggle it per session.
+    public var shellOutputToModel: Bool
+
     public init() {
         self.defaultModel = nil
         self.defaultQuant = 4
@@ -196,6 +204,7 @@ public struct KrillConfig: Sendable {
         self.kreachURL = nil
         #endif
         self.thinking = true
+        self.shellOutputToModel = true
     }
 
     /// Load configuration with full precedence chain.
@@ -296,6 +305,9 @@ public struct KrillConfig: Sendable {
             #endif
             case "thinking", "enable_thinking":
                 thinking = value == "true" || value == "1" || value == "on" || value == "yes"
+            case "shell_output_to_model":
+                shellOutputToModel =
+                    value == "true" || value == "1" || value == "on" || value == "yes"
             case "keep_alive":
                 keepAlive = value
             case "num_parallel":
@@ -327,7 +339,7 @@ public struct KrillConfig: Sendable {
             "default_model", "default_quant", "default_mode", "default_agent_permissions",
             "default_agent_posture",  // legacy alias, still settable
             "search_backend", "searxng_url", "brave_api_key", "tavily_api_key",
-            "kv_cache_dtype", "context_length", "thinking",
+            "kv_cache_dtype", "context_length", "thinking", "shell_output_to_model",
             "voice_mode", "speak_replies", "voice_engine", "voice_language",
             "voice_identifier", "voice_rate", "voice_whisper_model",
             "voice_orb",
@@ -425,6 +437,7 @@ public struct KrillConfig: Sendable {
             "kv_cache_dtype": kvCacheDtype,
             "context_length": contextLength.map { "\($0)" } ?? "(model default)",
             "thinking": b(thinking),
+            "shell_output_to_model": b(shellOutputToModel),
             "voice_mode": voiceMode,
             "speak_replies": b(speakReplies),
             "voice_engine": voiceEngine,
@@ -523,6 +536,10 @@ public struct KrillConfig: Sendable {
         if let v = env["KRILL_ENABLE_THINKING"] {
             let s = v.lowercased()
             thinking = s == "1" || s == "true" || s == "yes" || s == "on"
+        }
+        if let v = env["KRILL_SHELL_OUTPUT_TO_MODEL"] {
+            let s = v.lowercased()
+            shellOutputToModel = s == "1" || s == "true" || s == "yes" || s == "on"
         }
         if let v = env["KRILL_SEARCH_BACKEND"] { searchBackend = v }
         if let v = env["KRILL_SEARXNG_URL"] { searxngURL = v.isEmpty ? nil : v }
