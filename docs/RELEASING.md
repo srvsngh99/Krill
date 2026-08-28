@@ -17,7 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| _(empty — cleared at v0.22.0)_ | | | |
+| _(empty — cleared at v0.23.0)_ | | | |
 
 ### Known-open, NOT yet merged
 
