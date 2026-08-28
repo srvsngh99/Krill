@@ -65,15 +65,22 @@ final class AgentSession {
     var isRunning: Bool { status == .running || status == .waiting }
     var elapsed: Double { CFAbsoluteTimeGetCurrent() - startedAt }
 
+    /// Whether `start` can actually run a turn. The caller checks this before
+    /// spending anything it would have to put back (banked `!` output).
+    var canStart: Bool { tools != nil }
+
     /// Start (or continue) the session on `task`. Continuation reuses the prior
     /// transcript via the loop's `priorMessages` seam.
-    func start(task: String) {
+    ///
+    /// `displayAs` is the on-screen bubble; the model always receives `task`.
+    /// They differ when banked `!` shell output is riding along with the turn.
+    func start(task: String, displayAs: String? = nil) {
         guard let tools else {
             entries.append(.note("Agent tools were not configured."))
             status = .cancelled
             return
         }
-        entries.append(.user(task))
+        entries.append(.user(displayAs ?? task))
         status = .running
         chipShown = false
         startedAt = CFAbsoluteTimeGetCurrent()

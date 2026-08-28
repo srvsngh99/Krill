@@ -306,8 +306,7 @@ public struct KrillConfig: Sendable {
             case "thinking", "enable_thinking":
                 thinking = value == "true" || value == "1" || value == "on" || value == "yes"
             case "shell_output_to_model":
-                shellOutputToModel =
-                    value == "true" || value == "1" || value == "on" || value == "yes"
+                shellOutputToModel = Self.parseBool(value)
             case "keep_alive":
                 keepAlive = value
             case "num_parallel":
@@ -324,6 +323,14 @@ public struct KrillConfig: Sendable {
         raw.split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+    }
+
+    /// The truthy spellings a boolean config value may take, in one place so a
+    /// surface that applies a key live (the TUI's `/config`) can never disagree
+    /// with what the file parser will read back from `config.toml`.
+    public static func parseBool(_ value: String) -> Bool {
+        let v = value.trimmingCharacters(in: .whitespaces).lowercased()
+        return v == "true" || v == "1" || v == "on" || v == "yes"
     }
 
     /// Path to the persisted config file (`~/.krill/config.toml`).
@@ -538,8 +545,7 @@ public struct KrillConfig: Sendable {
             thinking = s == "1" || s == "true" || s == "yes" || s == "on"
         }
         if let v = env["KRILL_SHELL_OUTPUT_TO_MODEL"] {
-            let s = v.lowercased()
-            shellOutputToModel = s == "1" || s == "true" || s == "yes" || s == "on"
+            shellOutputToModel = Self.parseBool(v)
         }
         if let v = env["KRILL_SEARCH_BACKEND"] { searchBackend = v }
         if let v = env["KRILL_SEARXNG_URL"] { searxngURL = v.isEmpty ? nil : v }

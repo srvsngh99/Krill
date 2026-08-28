@@ -39,6 +39,21 @@ struct BangCommandTests {
         #expect(BangCommand.parse("") == nil)
     }
 
+    @Test func backslashEscapesALiteralLeadingBang() {
+        // The escape must make `parse` decline, or there would be no way to
+        // send the model a message that starts with an exclamation mark.
+        #expect(BangCommand.parse("\\!important: read this") == nil)
+        #expect(BangCommand.unescape("\\!important: read this") == "!important: read this")
+        #expect(BangCommand.unescape("  \\!hi") == "  !hi", "leading whitespace is preserved")
+    }
+
+    @Test func unescapeLeavesEverythingElseAlone() {
+        #expect(BangCommand.unescape("plain text") == "plain text")
+        #expect(BangCommand.unescape("!echo hi") == "!echo hi", "a real escape is not touched")
+        #expect(BangCommand.unescape("grep '\\!' file") == "grep '\\!' file",
+                "only a LEADING marker is stripped")
+    }
+
     @Test func innerBangsBelongToTheCommand() {
         // History expansion, negation, `!!` as a shell idiom: only the leading
         // marker is consumed, the rest is handed to the shell verbatim.

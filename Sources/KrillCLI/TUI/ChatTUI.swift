@@ -914,12 +914,15 @@ final class ChatTUI {
             render()
             return
         }
-        if trimmed.hasPrefix("/"), isCommand(trimmed) {
-            await handleCommand(trimmed)
+        // Not a shell escape: drop a `\!` escape marker so the message reaches
+        // the model with the literal leading `!` the user meant.
+        let line = BangCommand.unescape(trimmed)
+        if line.hasPrefix("/"), isCommand(line) {
+            await handleCommand(line)
             render()
             return
         }
-        let (cleaned, atts, attachmentNotes) = extractInline(trimmed)
+        let (cleaned, atts, attachmentNotes) = extractInline(line)
         pendingImages.append(contentsOf: atts.filter { $0.kind == .image })
         if let a = atts.last(where: { $0.kind == .audio }) { pendingAudio = a }
         for attachmentNote in attachmentNotes { view.append(Msg(role: .note, text: attachmentNote)) }
@@ -930,8 +933,8 @@ final class ChatTUI {
         }
         // Output banked by `!` runs since the last message rides in front of
         // this turn's text: the model gets it, the transcript bubble stays the
-        // words the user actually typed.
-        let modelPrompt = drainShellContext(into: prompt)
+        // words the user actually typed. Each branch drains at its own point of
+        // no return so a turn that never starts does not silently eat the bank.
         if surface == .agent {
             // Images ride into the agent turn when the model has vision; on a
             // text-only model KRILL says so up front (never the model
@@ -950,18 +953,25 @@ final class ChatTUI {
                 pendingAudio = nil
                 note("(agent mode does not take audio attachments yet; use chat mode.)")
             }
-            await runAgentTurn(modelPrompt, images: turnImages, displayAs: prompt)
+            await runAgentTurn(
+                drainShellContext(into: prompt), images: turnImages, displayAs: prompt)
             return
         }
         // Outside the main agent surface, a non-command submission continues the
         // attached background session (its own history). Agent routing must win
         // above so attached sessions cannot bypass the foreground stats wiring.
         if let s = activeSession {
-            s.start(task: modelPrompt)
+            // A session that cannot start surfaces its own error and consumes
+            // nothing, so the bank is only spent once the turn is committed.
+            if s.canStart {
+                s.start(task: drainShellContext(into: prompt), displayAs: prompt)
+            } else {
+                s.start(task: prompt)
+            }
             render()
             return
         }
-        await generate(prompt: modelPrompt, displayAs: prompt)
+        await generate(prompt: drainShellContext(into: prompt), displayAs: prompt)
     }
 
     /// Aliases accepted by handleCommand but kept out of the autosuggest list to
@@ -1000,6 +1010,9 @@ final class ChatTUI {
         case "/clear", "/reset":   // /reset kept as an alias for clearing the chat
             modelTurns.removeAll(); view.removeAll(); pendingImages.removeAll(); pendingAudio = nil
             agentMessages.removeAll(); agentSeeded = false; approver.reset()
+            // Banked `!` output belongs to the conversation being cleared - it
+            // must not ride into the next, supposedly fresh, message.
+            pendingShellContext.removeAll()
             // Cancel and drop every background agent too.
             sessions.forEach { $0.cancel() }; sessions.removeAll(); activeSessionID = nil
             note("Conversation cleared.")
@@ -1175,7 +1188,10 @@ final class ChatTUI {
             lastStatus = "\(emberSpinner(spin, dots)) \(command) \u{00B7} \(elapsed) \u{00B7} Esc stop waiting"
             render()
             spin += 1
-            if raw.waitForInput(timeoutMs: 120), let keys = reader.read() {
+            if raw.waitForInput(timeoutMs: 120) {
+                // A nil read is EOF (Ctrl-D, or stdin closed under us). Without
+                // this the loop spins hot on a always-ready descriptor.
+                guard let keys = reader.read() else { abandoned = true; break }
                 if keys.contains(where: { $0 == .escape || $0 == .ctrlC }) { abandoned = true; break }
             }
         }
@@ -1193,7 +1209,7 @@ final class ChatTUI {
             role: .toolResult, text: result.content, toolError: result.isError,
             toolAlwaysExpanded: true))
         if feedsModel {
-            pendingShellContext.append(Self.shellContextBlock(command: command, output: result.content))
+            bankShellOutput(command: command, output: result.content)
         } else {
             note(bang.isPrivate
                 ? "(kept local \u{2014} the model will not see this output.)"
@@ -1219,6 +1235,33 @@ final class ChatTUI {
         $ \(command)
         \(output)
         """
+    }
+
+    /// Total characters the bank may hold. One run is already capped at
+    /// `shellEscapeMaxBytes` by BashTool; this stops a run of `!` commands from
+    /// quietly stacking up until a one-word message drags tens of thousands of
+    /// tokens into the turn (and straight into the context truncation).
+    private static let shellBankMaxChars = 32_768
+
+    /// Bank a run's output for the next message, evicting the oldest entries
+    /// when the bank would exceed its cap, and say on screen that it happened -
+    /// the whole point is that the effect lands on a LATER message, so it has to
+    /// be visible now.
+    private func bankShellOutput(command: String, output: String) {
+        pendingShellContext.append(Self.shellContextBlock(command: command, output: output))
+        var evicted = 0
+        while pendingShellContext.count > 1,
+              pendingShellContext.reduce(0, { $0 + $1.count }) > Self.shellBankMaxChars {
+            pendingShellContext.removeFirst()
+            evicted += 1
+        }
+        let runs = pendingShellContext.count
+        var text = "(going to the model with your next message \u{2014} "
+            + "\(runs) banked run\(runs == 1 ? "" : "s").)"
+        if evicted > 0 {
+            text += " Dropped the \(evicted) oldest to stay under the bank's size cap."
+        }
+        note(text)
     }
 
     /// Prepend everything banked since the last message to `prompt` and clear
@@ -1282,7 +1325,9 @@ final class ChatTUI {
             // the next line already honours the change.
             var appliedNow = false
             if key == "shell_output_to_model" {
-                shellOutputToModel = ["true", "1", "on", "yes"].contains(value.lowercased())
+                // Read the value back the way the FILE parser will, so the live
+                // session and the persisted config can never disagree.
+                shellOutputToModel = KrillConfig.parseBool(value)
                 appliedNow = true
             }
             note("Set \(key) = \(value) in ~/.krill/config.toml. "

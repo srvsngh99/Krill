@@ -150,6 +150,18 @@ final class ConfigSetTests: XCTestCase {
             XCTAssertTrue(on.shellOutputToModel, "\(truthy) reads as on")
         }
 
+        // Case must not matter, and must not matter DIFFERENTLY in the file
+        // parser than in the TUI's live toggle - both go through parseBool.
+        for spelling in ["TRUE", "True", "On", "YES", " true "] {
+            var mixed = KrillConfig()
+            mixed.shellOutputToModel = false
+            mixed.mergeFromTOML("shell_output_to_model = \"\(spelling)\"\n")
+            XCTAssertTrue(mixed.shellOutputToModel, "\(spelling) reads as on")
+            XCTAssertTrue(KrillConfig.parseBool(spelling), "live toggle agrees on \(spelling)")
+        }
+        XCTAssertFalse(KrillConfig.parseBool("FALSE"))
+        XCTAssertFalse(KrillConfig.parseBool("nonsense"))
+
         let display = Dictionary(uniqueKeysWithValues: cfg.displayPairs())
         XCTAssertEqual(display["shell_output_to_model"], "false")
         XCTAssertTrue(KrillConfig.writableKeys.contains("shell_output_to_model"))

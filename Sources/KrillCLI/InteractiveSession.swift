@@ -63,6 +63,11 @@ final class InteractiveSession {
     // always private. `pendingShellContext` banks runs until the next message.
     private let shellOutputToModel: Bool
     private var pendingShellContext: [String] = []
+    /// Shell escapes are only honoured when a human is actually at the
+    /// keyboard. This REPL is also the surface Krill falls back to when stdin
+    /// is a pipe or a file, and executing a `!` line out of piped CONTENT would
+    /// turn `krill run model < notes.txt` into arbitrary command execution.
+    private let shellEscapesEnabled = RawTerminal.isInteractive
 
     private var history: [(role: String, content: String)] = []
     private var pendingImages: [Attachment] = []
@@ -100,7 +105,8 @@ final class InteractiveSession {
         ReplCompletion.install()
         installReplySigint()
         print(Ansi.bold("\nKrill interactive chat") + " " + Ansi.dim("(\(modelName))"))
-        print(Ansi.dim("Type a message. /help for commands, !<command> for a shell escape, "
+        let shellHint = shellEscapesEnabled ? "!<command> for a shell escape, " : ""
+        print(Ansi.dim("Type a message. /help for commands, \(shellHint)"
             + "Tab to complete, Up/Down for history, /quit to exit.\n"))
         if !pendingImages.isEmpty || pendingAudio != nil { printPending() }
 
@@ -114,15 +120,18 @@ final class InteractiveSession {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
 
-            if let bang = BangCommand.parse(trimmed) {
+            if shellEscapesEnabled, let bang = BangCommand.parse(trimmed) {
                 await runShellEscape(bang)
                 continue
             }
-            if try await handleLine(trimmed) { continue }
+            // Not a shell escape: drop a `\!` marker so a message may start
+            // with a literal exclamation mark.
+            let text = BangCommand.unescape(trimmed)
+            if try await handleLine(text) { continue }
 
             // Not a command: pull inline @path and bare-path media, then send
             // whatever text remains.
-            let (cleaned, inline, attachmentNotes) = extractInlineMedia(trimmed)
+            let (cleaned, inline, attachmentNotes) = extractInlineMedia(text)
             pendingImages.append(contentsOf: inline.filter { $0.kind == .image })
             if let aud = inline.last(where: { $0.kind == .audio }) { pendingAudio = aud }
             attachmentNotes.forEach { print($0) }
@@ -131,7 +140,7 @@ final class InteractiveSession {
                 if !inline.isEmpty { printPending() }
                 continue
             }
-            if let unknown = unknownCommand(in: trimmed) {
+            if let unknown = unknownCommand(in: text) {
                 print("Unknown command \(unknown). Type /help for the list.")
                 continue
             }
@@ -152,14 +161,37 @@ final class InteractiveSession {
         print(Ansi.dim("$ \(bang.command)"))
         print(result.content)
         if shellOutputToModel && !bang.isPrivate {
-            pendingShellContext.append(
-                Self.shellContextBlock(command: bang.command, output: result.content))
+            bankShellOutput(command: bang.command, output: result.content)
         } else {
             print(Ansi.dim(bang.isPrivate
                 ? "(kept local - the model will not see this output.)"
                 : "(shell_output_to_model is off - the model will not see this output.)"))
         }
         print()
+    }
+
+    /// Total characters the bank may hold, so a run of `!` commands cannot
+    /// quietly stack up until a one-word message drags the context over.
+    private static let shellBankMaxChars = 32_768
+
+    /// Bank a run's output for the next message, evicting the oldest entries
+    /// past the cap, and say so - the effect lands on a LATER message, so it
+    /// has to be visible now.
+    private func bankShellOutput(command: String, output: String) {
+        pendingShellContext.append(Self.shellContextBlock(command: command, output: output))
+        var evicted = 0
+        while pendingShellContext.count > 1,
+              pendingShellContext.reduce(0, { $0 + $1.count }) > Self.shellBankMaxChars {
+            pendingShellContext.removeFirst()
+            evicted += 1
+        }
+        let runs = pendingShellContext.count
+        var text = "(going to the model with your next message - "
+            + "\(runs) banked run\(runs == 1 ? "" : "s").)"
+        if evicted > 0 {
+            text += " Dropped the \(evicted) oldest to stay under the bank's size cap."
+        }
+        print(Ansi.dim(text))
     }
 
     /// How a banked `!` run is presented to the model: labelled, so it reads as
@@ -203,6 +235,8 @@ final class InteractiveSession {
                 print(Ansi.dim("Cleared pending attachments."))
             case "/reset":
                 history.removeAll(); pendingImages.removeAll(); pendingAudio = nil
+                // Banked `!` output belongs to the conversation being reset.
+                pendingShellContext.removeAll()
                 print(Ansi.dim("Conversation reset."))
             case "/history":
                 printHistory()

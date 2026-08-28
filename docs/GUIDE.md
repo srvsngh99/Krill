@@ -157,9 +157,10 @@ Type these inside the chat TUI:
 
 **Shell escapes:** a line starting with `!` runs as a shell command instead of
 being sent as a message. `!git status` shows the output *and* hands it to the
-model with your next message; `!!git status` keeps it local. The single bang
-follows the `shell_output_to_model` config key (default `true`); the double bang
-is always private. Full details in [`docs/TUI.md`](TUI.md#shell-escapes---).
+model with your next message; `!!git status` keeps it local; `\!like this`
+sends a message that really starts with `!`. The single bang follows the
+`shell_output_to_model` config key (default `true`); the double bang is always
+private. Full details in [`docs/TUI.md`](TUI.md#shell-escapes---).
 
 **Custom commands:** drop a markdown file at `~/.krill/commands/<name>.md` and it
 becomes `/<name>`. Placeholders `$ARGUMENTS`, `$INPUT`, `$1`..`$9` are

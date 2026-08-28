@@ -94,6 +94,7 @@ a `bash` step, shown in full (not collapsed: you ran it to read it).
 | `!git status` | Runs it, shows the output, and hands that output to the model with your **next** message |
 | `!!git status` | Runs it, shows the output, and the model never sees it |
 | `!` (bare) | Prints the usage reminder |
+| `\!not a command` | Sends a message that starts with a literal `!` |
 
 The output does not become a turn of its own — it is banked and rides in front
 of whatever you type next, so the model reads it as context you shared rather
@@ -112,8 +113,16 @@ Notes:
 - A shell escape is a **human** action, so it is not gated by the agent
   permission level: `plan` mode restrains the model, not you — exactly as a
   second terminal window would not be restrained.
-- Runs are capped at 5 minutes and the last 32 KB of combined stdout+stderr.
-- To send a message that genuinely begins with `!`, start it with a space.
+- The command is handed to `/bin/sh -c` verbatim, with stdin on `/dev/null`:
+  it cannot prompt you, so `!git commit` (no `-m`) or `!ssh` will not work.
+- Runs are capped at 5 minutes and the last 32 KB of combined stdout+stderr,
+  and the bank is capped at 32 KB in total — banking past that drops the oldest
+  runs and says so.
+- While a command runs the prompt is held: Esc or Ctrl-C stops waiting (the
+  command keeps running and its output is discarded).
+- `/clear` drops anything still banked, along with the conversation.
+- In the classic line REPL, escapes are honoured only on a real terminal —
+  piping a file into `krill run` never executes a `!` line in its content.
 
 ## Agent mode
 

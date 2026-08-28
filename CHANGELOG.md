@@ -23,7 +23,17 @@ reverse chronological order. Versioning follows
   and is always private. Escapes reuse the agent's `bash` tool, so they inherit
   its shell, working directory and output cap (5 minutes, last 32 KB here), and
   they are not gated by the agent permission level — `plan` restrains the model,
-  not the human at the keyboard.
+  not the human at the keyboard. `\!` escapes a message that really starts with
+  an exclamation mark, `/clear` drops anything still banked, and the classic
+  REPL honours escapes only on a real terminal, so piping a file into
+  `krill run` never executes a `!` line in its content.
+
+### Fixed
+
+- The `bash` tool no longer lets a command inherit Krill's stdin. A `git commit`,
+  `ssh` or bare `read` — issued by the model or typed as a `!` escape — used to
+  race the TUI's render loop for the user's keystrokes; the child now gets
+  `/dev/null` and an immediate EOF instead.
 
 ## [0.22.0] - 2026-08-24
 

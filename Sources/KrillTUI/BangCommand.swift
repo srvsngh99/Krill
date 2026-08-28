@@ -26,10 +26,11 @@ public struct BangCommand: Equatable, Sendable {
 
     /// Parse a submitted line as a shell escape.
     ///
-    /// Returns nil when the line is not one (no leading `!`), so the caller can
-    /// fall through to its normal slash-command / prompt handling. A leading
-    /// `!` always means "run this", so a message that genuinely starts with an
-    /// exclamation mark needs a leading space or a rephrase.
+    /// Returns nil when the line is not one, so the caller can fall through to
+    /// its normal slash-command / prompt handling. That covers two cases: a
+    /// line with no leading `!` at all, and a line escaped with `\!`, which is
+    /// how you send a message that genuinely starts with an exclamation mark
+    /// (the caller strips the backslash with `unescape`).
     public static func parse(_ line: String) -> BangCommand? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         guard trimmed.hasPrefix("!") else { return nil }
@@ -40,8 +41,20 @@ public struct BangCommand: Equatable, Sendable {
             isPrivate: isPrivate)
     }
 
+    /// Strip the `\!` escape so an ordinary message can start with a literal
+    /// exclamation mark. Callers apply this to any line `parse` declined, so
+    /// `\!important` is sent to the model as `!important`. Only the leading
+    /// marker is touched; a backslash anywhere else is the user's own text.
+    public static func unescape(_ line: String) -> String {
+        let leading = line.prefix { $0 == " " || $0 == "\t" }
+        let rest = line.dropFirst(leading.count)
+        guard rest.hasPrefix("\\!") else { return line }
+        return String(leading) + String(rest.dropFirst())
+    }
+
     /// One-line reminder shown for a bare `!` / `!!`, and in `/help`.
     public static let usage =
         "!<command> runs a shell command and shows its output; "
-        + "!!<command> keeps that output out of the model's context."
+        + "!!<command> keeps that output out of the model's context "
+        + "(\\! sends a literal leading exclamation mark to the model)."
 }

@@ -70,6 +70,13 @@ public struct BashTool: Tool {
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = pipe
+        // The tool is non-interactive by contract, so the child must never
+        // inherit the caller's stdin: under the TUI that is a raw-mode
+        // terminal, and `git commit`, `ssh` or a bare `read` would race the
+        // render loop for the user's keystrokes (and keep eating them after
+        // the user stops waiting). /dev/null gives such a command an immediate
+        // EOF instead.
+        proc.standardInput = FileHandle.nullDevice
 
         do {
             try proc.run()
