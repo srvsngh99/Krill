@@ -229,6 +229,7 @@ struct CodeCommand: AsyncParsableCommand {
                 voiceRateSetting: config.voiceRate,
                 voiceWhisperModelSetting: config.voiceWhisperModel,
                 thinkingSetting: config.thinking,
+                shellOutputToModelSetting: config.shellOutputToModel,
                 modeSetting: "agent", agentPermissionsSetting: mode.rawValue,
                 initialAgentTask: task)
             await tui.run()

@@ -135,4 +135,36 @@ final class ConfigSetTests: XCTestCase {
         XCTAssertTrue(KrillConfig.writableKeys.contains("voice_orb"))
     }
 
+    func testShellOutputToModelDefaultsOnAndRoundTrips() {
+        var cfg = KrillConfig()
+        XCTAssertTrue(cfg.shellOutputToModel, "a `!` run feeds the model by default")
+
+        cfg.mergeFromTOML(KrillConfig.upsertTOML("", key: "shell_output_to_model", value: "false"))
+        XCTAssertFalse(cfg.shellOutputToModel)
+
+        // The parser accepts the same truthy spellings as `thinking`.
+        for truthy in ["true", "1", "on", "yes"] {
+            var on = KrillConfig()
+            on.shellOutputToModel = false
+            on.mergeFromTOML("shell_output_to_model = \"\(truthy)\"\n")
+            XCTAssertTrue(on.shellOutputToModel, "\(truthy) reads as on")
+        }
+
+        // Case must not matter, and must not matter DIFFERENTLY in the file
+        // parser than in the TUI's live toggle - both go through parseBool.
+        for spelling in ["TRUE", "True", "On", "YES", " true "] {
+            var mixed = KrillConfig()
+            mixed.shellOutputToModel = false
+            mixed.mergeFromTOML("shell_output_to_model = \"\(spelling)\"\n")
+            XCTAssertTrue(mixed.shellOutputToModel, "\(spelling) reads as on")
+            XCTAssertTrue(KrillConfig.parseBool(spelling), "live toggle agrees on \(spelling)")
+        }
+        XCTAssertFalse(KrillConfig.parseBool("FALSE"))
+        XCTAssertFalse(KrillConfig.parseBool("nonsense"))
+
+        let display = Dictionary(uniqueKeysWithValues: cfg.displayPairs())
+        XCTAssertEqual(display["shell_output_to_model"], "false")
+        XCTAssertTrue(KrillConfig.writableKeys.contains("shell_output_to_model"))
+    }
+
 }

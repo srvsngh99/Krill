@@ -9,6 +9,32 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Added
+
+- **Shell escapes at the chat prompt.** A line starting with `!` runs as a shell
+  command instead of being sent as a message, in the full-screen TUI and the
+  classic line REPL. `!<command>` shows the output as a `bash` step and banks it
+  to ride along with your next message, so the model sees what happened without
+  it becoming a turn of its own — your message bubble still shows only what you
+  typed. `!!<command>` runs it with the output kept local, which the model never
+  sees. The new `shell_output_to_model` config key (default `true`,
+  `KRILL_SHELL_OUTPUT_TO_MODEL`) governs the single bang and can be retargeted
+  live with `/config shell_output_to_model=false`; the double bang ignores it
+  and is always private. Escapes reuse the agent's `bash` tool, so they inherit
+  its shell, working directory and output cap (5 minutes, last 32 KB here), and
+  they are not gated by the agent permission level — `plan` restrains the model,
+  not the human at the keyboard. `\!` escapes a message that really starts with
+  an exclamation mark, `/clear` drops anything still banked, and the classic
+  REPL honours escapes only on a real terminal, so piping a file into
+  `krill run` never executes a `!` line in its content.
+
+### Fixed
+
+- The `bash` tool no longer lets a command inherit Krill's stdin. A `git commit`,
+  `ssh` or bare `read` — issued by the model or typed as a `!` escape — used to
+  race the TUI's render loop for the user's keystrokes; the child now gets
+  `/dev/null` and an immediate EOF instead.
+
 ## [0.22.0] - 2026-08-24
 
 ### Added

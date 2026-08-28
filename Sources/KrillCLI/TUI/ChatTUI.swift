@@ -35,6 +35,10 @@ final class ChatTUI {
         var toolName: String = ""
         var toolError: Bool = false
         var toolDisplay: ToolDisplay? = nil
+        /// Show this observation in full even while tool output is collapsed.
+        /// A `!` shell escape sets it: the human typed the command to READ the
+        /// output, so hiding it behind ctrl+o would defeat the point.
+        var toolAlwaysExpanded: Bool = false
     }
     private var view: [Msg] = []
     private var modelTurns: [(role: String, content: String)] = []
@@ -133,6 +137,15 @@ final class ChatTUI {
     // Ctrl-T, seeded from the `thinking` config key. Passed to each generate()
     // so the model reasons before answering when on.
     private var thinkingOn = true
+    // `!<command>` shell escapes. When `shellOutputToModel` is on, a single-bang
+    // run's output rides along with the next message so the model can see what
+    // happened; `!!<command>` always stays local. Seeded from the
+    // `shell_output_to_model` config key and retargetable live with
+    // `/config shell_output_to_model=…`. `pendingShellContext` holds the runs
+    // banked since the last message (oldest first) and is drained by the next
+    // submission.
+    private var shellOutputToModel = true
+    private var pendingShellContext: [String] = []
     private lazy var synth = SpeechSynthesizer(language: voiceLanguage, voiceIdentifier: voiceIdentifier, rate: voiceRate)
     private var inputHistory: [String] = []
     private var historyIndex = 0
@@ -209,7 +222,7 @@ final class ChatTUI {
          voiceEngineSetting: String = "apple", voiceLanguageSetting: String = "auto",
          voiceIdentifierSetting: String = "", voiceRateSetting: Float = AppleSpeechSettings.systemRate,
          voiceWhisperModelSetting: String = WhisperModelManager.defaultSKU,
-         thinkingSetting: Bool = true,
+         thinkingSetting: Bool = true, shellOutputToModelSetting: Bool = true,
          modeSetting: String = "chat", agentPermissionsSetting: String = "plan",
          initialAgentTask: String? = nil) {
         self.engine = engine
@@ -234,6 +247,7 @@ final class ChatTUI {
         self.speech = SpeechRecognizer(language: voiceLanguageSetting)
         self.whisperSKU = WhisperModelManager.sku(voiceWhisperModelSetting)?.id ?? WhisperModelManager.defaultSKU
         self.thinkingOn = thinkingSetting
+        self.shellOutputToModel = shellOutputToModelSetting
         self.surface = modeSetting.lowercased() == "agent" ? .agent : .chat
         self.initialAgentTask = initialAgentTask
         self.contextWindow = AliasMap.resolve(modelName)?.context ?? 0
@@ -887,17 +901,28 @@ final class ChatTUI {
 
     // MARK: - Submit / commands
 
-    private func processSubmit(_ text: String) async {
+    private func processSubmit(_ text: String, allowShellEscape: Bool = true) async {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         inputHistory.append(text); historyIndex = inputHistory.count
 
-        if trimmed.hasPrefix("/"), isCommand(trimmed) {
-            await handleCommand(trimmed)
+        // A shell escape wins over everything: `!` is checked before the slash
+        // dispatch and before inline-media extraction, which would otherwise
+        // pull paths out of the command line and attach them as images.
+        if allowShellEscape, let bang = BangCommand.parse(trimmed) {
+            await runShellEscape(bang)
             render()
             return
         }
-        let (cleaned, atts, attachmentNotes) = extractInline(trimmed)
+        // Not a shell escape: drop a `\!` escape marker so the message reaches
+        // the model with the literal leading `!` the user meant.
+        let line = BangCommand.unescape(trimmed)
+        if line.hasPrefix("/"), isCommand(line) {
+            await handleCommand(line)
+            render()
+            return
+        }
+        let (cleaned, atts, attachmentNotes) = extractInline(line)
         pendingImages.append(contentsOf: atts.filter { $0.kind == .image })
         if let a = atts.last(where: { $0.kind == .audio }) { pendingAudio = a }
         for attachmentNote in attachmentNotes { view.append(Msg(role: .note, text: attachmentNote)) }
@@ -906,6 +931,10 @@ final class ChatTUI {
             if !atts.isEmpty || !attachmentNotes.isEmpty { view.append(Msg(role: .note, text: attachSummary())); render() }
             return
         }
+        // Output banked by `!` runs since the last message rides in front of
+        // this turn's text: the model gets it, the transcript bubble stays the
+        // words the user actually typed. Each branch drains at its own point of
+        // no return so a turn that never starts does not silently eat the bank.
         if surface == .agent {
             // Images ride into the agent turn when the model has vision; on a
             // text-only model KRILL says so up front (never the model
@@ -931,7 +960,13 @@ final class ChatTUI {
         // attached background session (its own history). Agent routing must win
         // above so attached sessions cannot bypass the foreground stats wiring.
         if let s = activeSession {
-            s.start(task: prompt)
+            // A session that cannot start surfaces its own error and consumes
+            // nothing, so the bank is only spent once the turn is committed.
+            if s.canStart {
+                s.start(task: drainShellContext(into: prompt), displayAs: prompt)
+            } else {
+                s.start(task: prompt)
+            }
             render()
             return
         }
@@ -974,6 +1009,9 @@ final class ChatTUI {
         case "/clear", "/reset":   // /reset kept as an alias for clearing the chat
             modelTurns.removeAll(); view.removeAll(); pendingImages.removeAll(); pendingAudio = nil
             agentMessages.removeAll(); agentSeeded = false; approver.reset()
+            // Banked `!` output belongs to the conversation being cleared - it
+            // must not ride into the next, supposedly fresh, message.
+            pendingShellContext.removeAll()
             // Cancel and drop every background agent too.
             sessions.forEach { $0.cancel() }; sessions.removeAll(); activeSessionID = nil
             note("Conversation cleared.")
@@ -997,9 +1035,18 @@ final class ChatTUI {
                 note("Switch to agent mode (/agent) before spawning a background agent."); break
             }
             guard !arg.isEmpty else { note("Usage: /bg <task>"); break }
-            spawnSession(title: DispatchTool.deriveTitle(arg), task: arg)
+            // A user-typed /bg drains the bank; the model's dispatch_agent
+            // path into spawnSession deliberately does not. `displayAs` keeps
+            // the new pane's bubble to the words the user typed, as the
+            // attached-session path does.
+            spawnSession(
+                title: DispatchTool.deriveTitle(arg),
+                task: drainShellContext(into: arg), displayAs: arg)
         case "/research":
             guard !arg.isEmpty else { note("Usage: /research <question>"); break }
+            // Not drained on purpose: research fans `arg` out into many
+            // generated sub-queries, so banked shell output would be repeated
+            // into each one. The bank waits for a real conversational turn.
             await runResearch(arg)
         case "/agents":
             guard !sessions.isEmpty else { note("No background agents yet. Start one with /bg <task>."); break }
@@ -1102,6 +1149,138 @@ final class ChatTUI {
 
     private func note(_ s: String) { view.append(Msg(role: .note, text: s)) }
 
+    // MARK: - Shell escapes (!command / !!command)
+
+    /// Hard ceiling on a `!` run so a hung command cannot own the session, and
+    /// on how much of its output is kept. Generous next to the agent's 30s,
+    /// because a human typing `!swift build` expects to wait for it.
+    private static let shellEscapeTimeout: TimeInterval = 300
+    private static let shellEscapeMaxBytes = 32_768
+
+    /// Run a `!<command>` / `!!<command>` shell escape typed at the prompt.
+    ///
+    /// This is a human action, so it deliberately does NOT consult the agent
+    /// permission box: `plan` mode restrains the MODEL, not the person at the
+    /// keyboard, exactly as a second terminal window would not be restrained.
+    /// The command runs in the session's working directory (`/cd`) in its own
+    /// subshell, so `!cd …` cannot move the session — use `/cd` for that.
+    private func runShellEscape(_ bang: BangCommand) async {
+        guard !bang.command.isEmpty else { note("Usage: " + BangCommand.usage); return }
+        let feedsModel = shellOutputToModel && !bang.isPrivate
+
+        view.append(Msg(role: .toolCall, text: Self.bashArgs(bang.command), toolName: "bash"))
+        scrollOffset = 0
+
+        let tool = BashTool(
+            timeout: Self.shellEscapeTimeout, maxOutputBytes: Self.shellEscapeMaxBytes)
+        let command = bang.command
+        let finished = CompletionFlag()
+        let run = Task { () -> ToolResult in
+            let result = await tool.run(command: command)
+            finished.set()
+            return result
+        }
+
+        // Spin the render loop while the subprocess works so the TUI keeps
+        // painting (and background agents keep advancing) instead of looking
+        // wedged, and so Esc / Ctrl-C can let go of a command that is taking
+        // longer than the user is willing to wait.
+        let dots = ["\u{2839}", "\u{2838}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}", "\u{2819}"]
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        var spin = 0
+        var abandoned = false
+        while !finished.isSet {
+            if tuiWinchFlag != 0 { tuiWinchFlag = 0; updateSize() }
+            pumpAll()
+            let elapsed = Self.formatElapsed(CFAbsoluteTimeGetCurrent() - startedAt)
+            lastStatus = "\(emberSpinner(spin, dots)) \(command) \u{00B7} \(elapsed) \u{00B7} Esc stop waiting"
+            render()
+            spin += 1
+            if raw.waitForInput(timeoutMs: 120) {
+                // A nil read is EOF (Ctrl-D, or stdin closed under us). Without
+                // this the loop spins hot on a always-ready descriptor.
+                guard let keys = reader.read() else { abandoned = true; break }
+                if keys.contains(where: { $0 == .escape || $0 == .ctrlC }) { abandoned = true; break }
+            }
+        }
+        lastStatus = ""
+        // Letting go is not killing: BashTool owns the process and reaps it at
+        // its own timeout. Say so rather than implying the command stopped.
+        if abandoned {
+            note("Stopped waiting for `\(command)` \u{2014} it keeps running "
+                + "(reaped after \(Int(Self.shellEscapeTimeout))s) and its output is discarded.")
+            return
+        }
+        let result = await run.value
+
+        view.append(Msg(
+            role: .toolResult, text: result.content, toolError: result.isError,
+            toolAlwaysExpanded: true))
+        if feedsModel {
+            bankShellOutput(command: command, output: result.content)
+        } else {
+            note(bang.isPrivate
+                ? "(kept local \u{2014} the model will not see this output.)"
+                : "(shell_output_to_model is off \u{2014} the model will not see this output.)")
+        }
+    }
+
+    /// The `bash` tool's argument envelope, so a `!` run's chip renders exactly
+    /// like a model-issued one (`\u{25B8} bash  git status`).
+    private static func bashArgs(_ command: String) -> String {
+        let encoded = (try? JSONSerialization.data(withJSONObject: ["command": command]))
+            .flatMap { String(data: $0, encoding: .utf8) }
+        return encoded ?? command
+    }
+
+    /// How a banked `!` run is presented to the model: labelled with the command
+    /// that produced it, so it reads as an observation the user handed over
+    /// rather than as their own words.
+    private static func shellContextBlock(command: String, output: String) -> String {
+        """
+        The user ran this shell command and shared its output with you:
+
+        $ \(command)
+        \(output)
+        """
+    }
+
+    /// Total bytes the bank may hold. One run is already capped at
+    /// `shellEscapeMaxBytes` by BashTool; this stops a run of `!` commands from
+    /// quietly stacking up until a one-word message drags tens of thousands of
+    /// tokens into the turn (and straight into the context truncation).
+    private static let shellBankMaxBytes = 32_768
+
+    /// Bank a run's output for the next message, evicting the oldest entries
+    /// when the bank would exceed its cap, and say on screen that it happened -
+    /// the whole point is that the effect lands on a LATER message, so it has to
+    /// be visible now.
+    private func bankShellOutput(command: String, output: String) {
+        pendingShellContext.append(Self.shellContextBlock(command: command, output: output))
+        var evicted = 0
+        while pendingShellContext.count > 1,
+              pendingShellContext.reduce(0, { $0 + $1.utf8.count }) > Self.shellBankMaxBytes {
+            pendingShellContext.removeFirst()
+            evicted += 1
+        }
+        let runs = pendingShellContext.count
+        var text = "(going to the model with your next message \u{2014} "
+            + "\(runs) banked run\(runs == 1 ? "" : "s").)"
+        if evicted > 0 {
+            text += " Dropped the \(evicted) oldest to stay under the bank's size cap."
+        }
+        note(text)
+    }
+
+    /// Prepend everything banked since the last message to `prompt` and clear
+    /// the bank. Returns `prompt` unchanged when nothing is pending.
+    private func drainShellContext(into prompt: String) -> String {
+        guard !pendingShellContext.isEmpty else { return prompt }
+        let banked = pendingShellContext.joined(separator: "\n\n")
+        pendingShellContext.removeAll()
+        return banked + "\n\n" + prompt
+    }
+
     // MARK: - Local commands (/config /init /diff /status /context /copy /cd /add-dir)
 
     /// Run a command and capture combined stdout+stderr (read-only helpers like
@@ -1150,8 +1329,24 @@ final class ChatTUI {
         guard !value.isEmpty else { note("Usage: /config key=value"); return }
         do {
             try KrillConfig.set(key: key, value: value)
+            // Keys the running session can adopt right now, so a `!` typed on
+            // the next line already honours the change.
+            var appliedNow = false
+            if key == "shell_output_to_model" {
+                // Read the value back the way the FILE parser will, so the live
+                // session and the persisted config can never disagree.
+                shellOutputToModel = KrillConfig.parseBool(value)
+                appliedNow = true
+                if !["true", "false", "1", "0", "on", "off", "yes", "no"]
+                    .contains(value.lowercased()) {
+                    note("'\(value)' is not a boolean - read as "
+                        + "\(shellOutputToModel). Use true or false.")
+                }
+            }
             note("Set \(key) = \(value) in ~/.krill/config.toml. "
-                + "Applies to new sessions (some keys also take effect now via /model, Shift+Tab, etc.).")
+                + (appliedNow
+                   ? "Active in this session too."
+                   : "Applies to new sessions (some keys also take effect now via /model, Shift+Tab, etc.)."))
         } catch { note("\(error)") }
     }
 
@@ -1438,6 +1633,11 @@ final class ChatTUI {
     /// events into the transcript, and poll keys for cancel / scroll / approval.
     /// Mirrors the code TUI's run loop, adapted to the chat surface.
     private func runAgentTurn(_ task: String, images: [Data] = []) async {
+        // Banked `!` output rides in front of the model's copy of this turn.
+        // Draining HERE rather than at the call sites is what makes the on-screen
+        // promise ("goes to the model with your next message") true for every way
+        // a turn can start - typed, custom slash command, /init, launch task.
+        let modelTask = drainShellContext(into: task)
         let shownTask = images.isEmpty ? task : "[\(images.count) img] \(task)"
         view.append(Msg(role: .user, text: shownTask))
         scrollOffset = 0
@@ -1448,8 +1648,8 @@ final class ChatTUI {
         let planningPrefix = AgentEnvironment.planTurnPrefix
             + (permissions == .adaptive ? " " + AgentEnvironment.adaptivePlanTail : "")
         let runTask = permissionBox.isPlanning
-            ? planningPrefix + "\n\n" + task
-            : task
+            ? planningPrefix + "\n\n" + modelTask
+            : modelTask
 
         var generator = EngineGenerator(engine: engine, maxTokens: maxTokens)
         generator.onStats = { [agentStats] in agentStats.put($0) }
@@ -1763,7 +1963,7 @@ final class ChatTUI {
 
     /// Create and start a background agent for `task`. It inherits the current
     /// engine + posture and the full toolset (so it can itself dispatch).
-    private func spawnSession(title: String, task: String) {
+    private func spawnSession(title: String, task: String, displayAs: String? = nil) {
         let s = AgentSession(
             id: nextSessionID, title: title, engine: engine,
             maxTokens: maxTokens, permissions: permissionBox.origin,
@@ -1772,7 +1972,7 @@ final class ChatTUI {
             asker: s.asker, permissionBox: s.permissionBox, todoTool: s.todoTool))
         nextSessionID += 1
         sessions.append(s)
-        s.start(task: task)
+        s.start(task: task, displayAs: displayAs)
         note("Started background agent [\(s.id)] '\(title)' (permissions: \(permissions.label)). "
             + "/agents to attach, /switch \(s.id) to jump in.")
     }
@@ -2106,6 +2306,9 @@ final class ChatTUI {
 
     private func generate(prompt: String, displayAs: String? = nil) async {
         synth.stop()   // a new turn hushes any still-speaking previous reply
+        // As in runAgentTurn: banked `!` output joins the model's copy of the
+        // turn here, so every caller (typed, custom command, voice) honours it.
+        let modelPrompt = drainShellContext(into: prompt)
         // `displayAs` is the on-screen bubble; the model always receives `prompt`.
         // They differ for a sent voice clip: the user sees "[voice message]" but
         // the model gets a plain instruction to answer the audio. Feeding the
@@ -2116,7 +2319,7 @@ final class ChatTUI {
             : (pendingAudio != nil ? "[voice message]"
                : (!pendingImages.isEmpty ? "[media]" : prompt)))
         view.append(Msg(role: .user, text: shown))
-        modelTurns.append((role: "user", content: prompt))
+        modelTurns.append((role: "user", content: modelPrompt))
         var messages: [[String: String]] = []
         // Chat carries the same ambient line as agent mode (date, cwd,
         // platform, model) so "what day is it" doesn't hallucinate from
@@ -2505,7 +2708,10 @@ final class ChatTUI {
             render(); return
         }
         input = ""; cursor = 0; menu.close()
-        await processSubmit(text)
+        // Hands-free sends without the user pressing Enter, so a transcript
+        // that happens to begin with "!" must not run as a shell command.
+        // Dictation is exempt: it lands in the composer for review first.
+        await processSubmit(text, allowShellEscape: false)
     }
 
     /// Transcribe a recorded clip with the audio model and drop the text into the
@@ -2940,7 +3146,7 @@ final class ChatTUI {
                 } else {
                     // Collapsed by default to keep the transcript scannable; ⌃O
                     // toggles full output (uncapped). Errors are never collapsed.
-                    rendered = (!toolOutputExpanded && !msg.toolError)
+                    rendered = (!toolOutputExpanded && !msg.toolError && !msg.toolAlwaysExpanded)
                         ? CodeView.toolResultCollapsed(content: msg.text, width: w)
                         : CodeView.toolResult(
                             content: msg.text, isError: msg.toolError, width: w,
@@ -3178,6 +3384,13 @@ final class ChatTUI {
         for (k, desc) in keys {
             lines.append("  " + k.padding(toLength: 14, withPad: " ", startingAt: 0) + desc)
         }
+        lines.append("")
+        lines.append("Shell")
+        lines.append("  !<command>     Run a shell command; its output goes to the model with")
+        lines.append("                 your next message (config: shell_output_to_model).")
+        lines.append("  !!<command>    Run it with the output kept local - the model never sees it.")
+        lines.append("  \\!<text>       Send a message that starts with a literal '!'.")
+        lines.append("  Commands run in a subshell, so use /cd to move the session.")
         lines.append("")
         lines.append("Attachments")
         lines.append("  Drag a file into the window, type a bare path or @path in your message.")

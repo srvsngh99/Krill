@@ -50,6 +50,26 @@ final class EventQueue: @unchecked Sendable {
     }
 }
 
+/// Thread-safe "the background work finished" latch, so the render loop can
+/// keep painting a spinner while a `!` shell escape runs and stop the instant
+/// it is done — without awaiting (which would freeze the frame).
+final class CompletionFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+
+    func set() {
+        lock.lock()
+        done = true
+        lock.unlock()
+    }
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return done
+    }
+}
+
 /// Thread-safe hand-off of deep-research progress and its final report to the
 /// render loop.
 final class ResearchProgressQueue: @unchecked Sendable {

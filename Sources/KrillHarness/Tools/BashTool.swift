@@ -21,7 +21,9 @@ public struct BashTool: Tool {
 
     /// Seconds before the command is force-terminated.
     public let timeout: TimeInterval
-    /// Maximum bytes of output returned to the model (older bytes kept).
+    /// Maximum bytes of output returned to the caller, keeping the NEWEST
+    /// bytes (an older prefix is dropped). The caller is the model for a
+    /// tool call, or the person at the prompt for a `!` shell escape.
     public let maxOutputBytes: Int
 
     public init(timeout: TimeInterval = 30, maxOutputBytes: Int = 16_384) {
@@ -40,6 +42,15 @@ public struct BashTool: Tool {
                 content: "Error: bash requires a non-empty 'command' string argument.",
                 isError: true)
         }
+        return await run(command: command)
+    }
+
+    /// Run `command` directly, without the model's JSON argument envelope.
+    ///
+    /// The TUI's `!` shell escape goes through here so a command the human
+    /// types gets exactly the same treatment as one the model issues: the same
+    /// shell, workspace, timeout, and output cap.
+    public func run(command: String) async -> ToolResult {
         // Capture the agent workspace HERE, in the async context: the task-local
         // does not propagate into the dispatch-queue closure below.
         let workspace = AgentWorkspace.root
@@ -61,6 +72,13 @@ public struct BashTool: Tool {
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = pipe
+        // The tool is non-interactive by contract, so the child must never
+        // inherit the caller's stdin: under the TUI that is a raw-mode
+        // terminal, and `git commit`, `ssh` or a bare `read` would race the
+        // render loop for the user's keystrokes (and keep eating them after
+        // the user stops waiting). /dev/null gives such a command an immediate
+        // EOF instead.
+        proc.standardInput = FileHandle.nullDevice
 
         do {
             try proc.run()
