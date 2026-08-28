@@ -7,6 +7,35 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.23.0 — 2026-08-29
+**A shell, in the chat.** Type `!git status` at the prompt and it runs — right
+there, in the session's working directory. The output lands in the transcript
+and rides along with your next message, so you can show the model what happened
+instead of describing it. No more switching windows and pasting.
+
+`!!` is the private form: same run, same output on screen, but the model never
+sees it. Handy when the command's output is noisy, irrelevant, or yours alone.
+Which behaviour the single bang gets is up to you — `shell_output_to_model` in
+`~/.krill/config.toml`, and `/config shell_output_to_model=false` retargets the
+running session, not just the next one.
+
+The output is banked rather than posted as a turn of its own: your message
+bubble still shows only what you typed, and Krill tells you when something is
+waiting to ride along. Stack up several runs before you write the message if
+you like. `\!` sends a message that really starts with an exclamation mark.
+
+Shell escapes are a human action, so they are not leashed by the agent's
+permission level — `plan` mode restrains the model, not you. In the classic
+line REPL they only work on a real terminal, so piping a file into `krill run`
+can never execute a line inside it.
+
+One fix worth calling out: the agent's `bash` tool used to hand its child
+Krill's own stdin. An `ssh`, a `git commit` with no `-m`, or a bare `read`
+would quietly compete with the TUI for your keystrokes. Commands now get
+`/dev/null` and an immediate end-of-input instead.
+
+---
+
 ## v0.22.0 — 2026-08-24
 **The agent can ask you things now.** Give it an ambiguous task and instead of
 guessing it asks — one question, a few concrete options, answered with a

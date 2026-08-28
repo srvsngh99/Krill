@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.23.0] - 2026-08-29
+
 ### Added
 
 - **Shell escapes at the chat prompt.** A line starting with `!` runs as a shell
