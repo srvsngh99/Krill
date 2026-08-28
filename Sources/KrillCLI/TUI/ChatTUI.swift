@@ -901,7 +901,7 @@ final class ChatTUI {
 
     // MARK: - Submit / commands
 
-    private func processSubmit(_ text: String) async {
+    private func processSubmit(_ text: String, allowShellEscape: Bool = true) async {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         inputHistory.append(text); historyIndex = inputHistory.count
@@ -909,7 +909,7 @@ final class ChatTUI {
         // A shell escape wins over everything: `!` is checked before the slash
         // dispatch and before inline-media extraction, which would otherwise
         // pull paths out of the command line and attach them as images.
-        if let bang = BangCommand.parse(trimmed) {
+        if allowShellEscape, let bang = BangCommand.parse(trimmed) {
             await runShellEscape(bang)
             render()
             return
@@ -1036,10 +1036,17 @@ final class ChatTUI {
             }
             guard !arg.isEmpty else { note("Usage: /bg <task>"); break }
             // A user-typed /bg drains the bank; the model's dispatch_agent
-            // path into spawnSession deliberately does not.
-            spawnSession(title: DispatchTool.deriveTitle(arg), task: drainShellContext(into: arg))
+            // path into spawnSession deliberately does not. `displayAs` keeps
+            // the new pane's bubble to the words the user typed, as the
+            // attached-session path does.
+            spawnSession(
+                title: DispatchTool.deriveTitle(arg),
+                task: drainShellContext(into: arg), displayAs: arg)
         case "/research":
             guard !arg.isEmpty else { note("Usage: /research <question>"); break }
+            // Not drained on purpose: research fans `arg` out into many
+            // generated sub-queries, so banked shell output would be repeated
+            // into each one. The bank waits for a real conversational turn.
             await runResearch(arg)
         case "/agents":
             guard !sessions.isEmpty else { note("No background agents yet. Start one with /bg <task>."); break }
@@ -1956,7 +1963,7 @@ final class ChatTUI {
 
     /// Create and start a background agent for `task`. It inherits the current
     /// engine + posture and the full toolset (so it can itself dispatch).
-    private func spawnSession(title: String, task: String) {
+    private func spawnSession(title: String, task: String, displayAs: String? = nil) {
         let s = AgentSession(
             id: nextSessionID, title: title, engine: engine,
             maxTokens: maxTokens, permissions: permissionBox.origin,
@@ -1965,7 +1972,7 @@ final class ChatTUI {
             asker: s.asker, permissionBox: s.permissionBox, todoTool: s.todoTool))
         nextSessionID += 1
         sessions.append(s)
-        s.start(task: task)
+        s.start(task: task, displayAs: displayAs)
         note("Started background agent [\(s.id)] '\(title)' (permissions: \(permissions.label)). "
             + "/agents to attach, /switch \(s.id) to jump in.")
     }
@@ -2701,7 +2708,10 @@ final class ChatTUI {
             render(); return
         }
         input = ""; cursor = 0; menu.close()
-        await processSubmit(text)
+        // Hands-free sends without the user pressing Enter, so a transcript
+        // that happens to begin with "!" must not run as a shell command.
+        // Dictation is exempt: it lands in the composer for review first.
+        await processSubmit(text, allowShellEscape: false)
     }
 
     /// Transcribe a recorded clip with the audio model and drop the text into the

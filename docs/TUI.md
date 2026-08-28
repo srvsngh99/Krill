@@ -120,7 +120,10 @@ Notes:
   runs and says so.
 - While a command runs the prompt is held: Esc or Ctrl-C stops waiting (the
   command keeps running and its output is discarded).
-- `/clear` drops anything still banked, along with the conversation.
+- `/clear` drops anything still banked, along with the conversation (`/reset`
+  in the classic REPL).
+- Hands-free voice never runs a shell command: a transcript that happens to
+  begin with `!` is sent as text, because you did not press Enter on it.
 - In the classic line REPL, escapes are honoured only on a real terminal —
   piping a file into `krill run` never executes a `!` line in its content.
 - The phone / web UI at `/ui` deliberately has **no** shell escape. That surface

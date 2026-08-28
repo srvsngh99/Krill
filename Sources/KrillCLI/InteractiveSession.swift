@@ -529,6 +529,16 @@ final class InteractiveSession {
     }
 
     private func printHelp() {
+        // Only when escapes are actually enabled - on a pipe they do nothing.
+        // Built here rather than inline so the block (and its trailing blank
+        // line) disappears completely when off.
+        let shellHelp = shellEscapesEnabled ? """
+        \(Ansi.bold("Shell"))
+          \(Ansi.cyan("!<command>"))      Run it; the output goes to the model with your next message
+          \(Ansi.cyan("!!<command>"))     Run it with the output kept local - the model never sees it
+          \(Ansi.cyan("\\!<text>"))        Send a message that starts with a literal '!'
+
+        """ : ""
         print("""
         \(Ansi.bold("Commands"))
           \(Ansi.cyan("/image <path>"))   Attach an image to your next message (\(Ansi.cyan("/img")) alias)
@@ -544,13 +554,7 @@ final class InteractiveSession {
           \(Ansi.cyan("/reset"))          Clear the conversation
           \(Ansi.cyan("/help"))           This help
           \(Ansi.cyan("/quit"))           Exit
-        \(shellEscapesEnabled ? """
-        \(Ansi.bold("Shell"))
-          \(Ansi.cyan("!<command>"))      Run it; the output goes to the model with your next message
-          \(Ansi.cyan("!!<command>"))     Run it with the output kept local - the model never sees it
-          \(Ansi.cyan("\\\\!<text>"))       Send a message that starts with a literal '!'
-        """ : "")
-        \(Ansi.dim("Attach a file by dragging it into the terminal, or inline with @path."))
+        \(shellHelp)\(Ansi.dim("Attach a file by dragging it into the terminal, or inline with @path."))
         \(Ansi.dim("Tab completes commands and paths; Up/Down recall history; Ctrl-C cancels a reply."))
         """)
     }

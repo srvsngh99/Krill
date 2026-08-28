@@ -21,7 +21,9 @@ public struct BashTool: Tool {
 
     /// Seconds before the command is force-terminated.
     public let timeout: TimeInterval
-    /// Maximum bytes of output returned to the model (older bytes kept).
+    /// Maximum bytes of output returned to the caller, keeping the NEWEST
+    /// bytes (an older prefix is dropped). The caller is the model for a
+    /// tool call, or the person at the prompt for a `!` shell escape.
     public let maxOutputBytes: Int
 
     public init(timeout: TimeInterval = 30, maxOutputBytes: Int = 16_384) {
