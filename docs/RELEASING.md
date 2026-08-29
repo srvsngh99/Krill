@@ -80,8 +80,18 @@ git checkout -b release/vX.Y.Z
    ```
 9. **Cross-check three digests**: local tarball == formula `sha256` ==
    published asset `digest` (`gh release view vX.Y.Z --json assets`).
-10. **Update the tap** — copy `Formula/krill.rb` to
-    `/opt/homebrew/Library/Taps/srvsngh99/homebrew-krill`, branch, PR, merge.
+10. **The tap bumps itself** — `homebrew-krill` runs its own `auto-bump.yml`,
+    which reads the latest Krill release, re-derives the sha256 from the
+    published asset, and commits the formula with the built-in `GITHUB_TOKEN`.
+    It polls every 6 hours, so trigger it instead of waiting:
+    ```bash
+    gh workflow run auto-bump.yml -R srvsngh99/homebrew-krill
+    # then confirm it landed and agrees with the release:
+    brew update && brew info krill      # must show the new version
+    ```
+    Do **not** hand-copy the formula unless the workflow has failed — a manual
+    commit races the bot. If you must, the tap's `main` is hook-protected and
+    enforces the author identity, so branch and PR there; never `--no-verify`.
 11. **Live-verify the published path**, not the local build:
     ```bash
     KRILL_PREFIX=/tmp/krillcheck KRILL_VERSION=X.Y.Z \
