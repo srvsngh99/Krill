@@ -92,7 +92,19 @@ git checkout -b release/vX.Y.Z
     Do **not** hand-copy the formula unless the workflow has failed — a manual
     commit races the bot. If you must, the tap's `main` is hook-protected and
     enforces the author identity, so branch and PR there; never `--no-verify`.
-11. **Live-verify the published path**, not the local build:
+11. **Publish the release notes to the site.** `souravailabs.ai/lab/krill/releases`
+    carries one page per version, so a release that stops at `gh release create`
+    is half-shipped: the site still shows the previous version as newest.
+    ```bash
+    cd ~/Desktop/playground/souravailabs
+    npm run sync:krill-releases     # pulls new releases into content/releases/
+    npm run build && npm run deploy
+    ```
+    **Read the new file before committing it.** The sync converts our em dashes
+    to hyphens mechanically, but that site forbids em dashes outright and asks
+    for a rewrite by meaning, with two scans that must return zero matches.
+    Deploys there build from the working tree, so check the branch first.
+12. **Live-verify the published path**, not the local build:
     ```bash
     KRILL_PREFIX=/tmp/krillcheck KRILL_VERSION=X.Y.Z \
       sh <(curl -fsSL https://raw.githubusercontent.com/srvsngh99/Krill/main/install.sh)
