@@ -158,6 +158,26 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     /// only. The checkpoint nests its text decoder under `text_config` and ships
     /// mlx_vlm-format affine-int4 weights.
     case qwen35 = "qwen3_5"
+    /// Prism ML `prism_hadamard_qwen35` family (Ternary-Bonsai-2-27B): the
+    /// SAME Qwen3.5-class hybrid decoder `.qwen35` serves - architecture is
+    /// unchanged from its base model, Alibaba's Qwen3.8-27B - but 402 weight
+    /// matrices carry a blockwise Hadamard rotation folded into their affine
+    /// 2-bit/group-128 quantization. A DISTINCT family (not `.qwen35`
+    /// reused) because loading is genuinely different: `loadPrismHadamardQwen35`
+    /// substitutes `PrismPackedLinear`/`PrismPackedEmbedding` at the 402
+    /// manifest paths, which apply the matching activation-side transform
+    /// (`fwht`) before/after the quantized matmul - an ordinary affine load
+    /// silently produces garbage, it does not error. TEXT-ONLY: the pack
+    /// ships a 333-tensor vision tower (`components.vision: true`), but none
+    /// of it is in the Hadamard manifest. The pack's documented loader
+    /// (`runtime/artifact.py`) refuses this pack outright on its
+    /// `schema_version == 1` gate; its OTHER bundled loader,
+    /// `runtime/vision_artifact.py`, opens it fine and builds a VL model.
+    /// Krill drops vision by choice here - no VL runtime is wired to this
+    /// pack - not because the pack or its runtime are text-only. See
+    /// `ModelCapabilities`, which deliberately omits `.visionInput` here
+    /// unlike `.qwen35`.
+    case prismHadamardQwen35 = "prism_hadamard_qwen35"
     /// LLaVA-1.5 vision-language family. A CLIP ViT vision tower + a
     /// multi-modal projector (linear -> gelu -> linear) + a Llama text
     /// backbone; the projected CLIP features are spliced into the token
@@ -300,6 +320,15 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         if archLower.contains("qwen3moe") || archLower.contains("qwen2moe") { return .moe }
         if archLower.contains("olmoe") { return .moe }
         if archLower.contains("qwen2_5_vl") || archLower.contains("qwen2vl") { return .qwen25vl }
+        // Prism ML `prism_hadamard_qwen35` before the generic qwen arm (and
+        // before the qwen3_5 arm, though the two do not actually collide:
+        // "prism_hadamard_qwen35" contains "qwen" but not "qwen3_5", no
+        // underscore before the "35"). Today's real pack ships no
+        // `architectures` field at all (falls through to `fromModelType`
+        // below), so this arm is defensive: it keeps a future config that
+        // adds one from being silently claimed by the generic `.qwen` arm,
+        // which would load it as an ordinary affine Qwen and emit garbage.
+        if archLower.contains("prism_hadamard_qwen35") { return .prismHadamardQwen35 }
         // Qwen3.5 (Ornith) hybrid before the generic qwen arm: its arch
         // `Qwen3_5ForConditionalGeneration` contains "qwen", so it would
         // otherwise route to the dense `.qwen` family. The `!moe` guard reserves
@@ -320,6 +349,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         case "gemma4", "gemma4_text": return .gemma4
         case "qwen2_5_vl", "qwen2_vl": return .qwen25vl
         case "qwen3_5", "qwen3_5_text": return .qwen35
+        case "prism_hadamard_qwen35": return .prismHadamardQwen35
         case "llava": return .llava
         case "mllama": return .llamaVision
         case "mixtral", "qwen3_moe", "qwen2_moe", "olmoe": return .moe

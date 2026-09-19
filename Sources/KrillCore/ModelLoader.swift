@@ -811,6 +811,152 @@ func loadQwen35(configData: Data, directory: URL) throws -> LoadedModel {
     )
 }
 
+/// Prism ML's `prism_hadamard_qwen35` checkpoints (Ternary-Bonsai-2-27B): the
+/// SAME Qwen3.5 hybrid decoder `loadQwen35` builds (`Qwen35ForCausalLM`
+/// reused, not forked), but 402 of its weight matrices carry a blockwise
+/// Hadamard rotation folded into their affine 2-bit/group-128 quantization -
+/// see `PrismHadamardQwen35.swift` (`fwht`, `PrismPackedLinear`,
+/// `PrismPackedEmbedding`, `PrismHadamardConfig`).
+///
+/// This deliberately does NOT go through `loadWeights`'s generic
+/// `quantize(model:...)`: MLX's `quantize()` swaps `Linear`/`Embedding` for
+/// `QuantizedLinear`/`QuantizedEmbedding`, which run a PLAIN quantized matmul
+/// with no activation-side transform - exactly the "ordinary affine load
+/// produces garbage" failure mode this family exists to avoid. Instead the
+/// 402 manifest paths are individually replaced with `PrismPackedLinear`/
+/// `PrismPackedEmbedding` (already carrying their real checkpoint tensors)
+/// via `Module.update(modules:)` - the same mechanism `quantize()` itself
+/// uses to swap `Linear` for `QuantizedLinear` - and the remaining (non-
+/// packed) weights load through the ordinary `model.update(parameters:)`
+/// path, applying the SAME conditional conv1d/RMSNorm sanitize `loadQwen35`
+/// uses. Verified empirically against this pack's real tensors: both are
+/// no-ops here (conv1d.weight already ships `[C,k,1]` and every RMSNorm
+/// weight already centers near 1.0 - mlx-vlm format, not raw torch) - the
+/// guard is kept so a future re-pack in torch layout does not load wrong.
+///
+/// TEXT-ONLY: the safetensors also carry a `vision_tower.*` weight set (333
+/// tensors, `components.vision: true`), but none of them appear in the
+/// Hadamard manifest. The pack's documented loader (`PACK-RUNTIME.md` /
+/// config.json's `requires_runtime`) points at `runtime/artifact.py`, which
+/// refuses this pack outright on its `schema_version == 1` gate - it does
+/// not serve it text-only, it does not open it at all. The pack's OTHER
+/// bundled loader, `runtime/vision_artifact.py`, does open it and builds a
+/// VL model on the unrotated vision tower. Krill drops vision here by
+/// choice - no VL runtime is wired to this pack - not because the pack or
+/// its runtime are text-only; dropped by construction (only
+/// `language_model.`-prefixed keys are read), mirroring `loadQwen35`'s
+/// vision-tower drop for Ornith.
+func loadPrismHadamardQwen35(configData: Data, directory: URL) throws -> LoadedModel {
+    let config = try PrismHadamardConfig(configData: configData, directory: directory)
+    let model = Qwen35ForCausalLM(config.textConfig)
+
+    // Strip `language_model.` -> `model.*` / `lm_head.*`. Anything without
+    // the prefix (`vision_tower.*` - no `mtp.*` in this pack) has no module
+    // in the text-only `Qwen35ForCausalLM` this loader drives, and is
+    // dropped here rather than carried forward and rejected later.
+    let prefix = "language_model."
+    var flat: [String: MLXArray] = [:]
+    for (key, value) in try loadWeightArrays(from: directory) where key.hasPrefix(prefix) {
+        flat[String(key.dropFirst(prefix.count))] = value
+    }
+
+    // Substitute the 402 packed modules BEFORE the generic parameter load
+    // below, so that load only has to cover the rest of the tree. Each
+    // record's 3 tensors are consumed out of `flat` here so they are not
+    // seen as "unused keys" by the strict verify on the second load. The
+    // pack also carries a redundant per-tensor `<path>.signs` copy
+    // (`artifact.py`'s own loader reads it); this loader sources signs from
+    // `hadamard.json`'s width-keyed table instead (the task's ground-truth
+    // contract), so that copy is dropped rather than left unmatched.
+    var moduleUpdates: [(String, Module)] = []
+    moduleUpdates.reserveCapacity(config.modules.count)
+    for record in config.modules {
+        guard let w = flat.removeValue(forKey: record.path + ".weight"),
+            let s = flat.removeValue(forKey: record.path + ".scales"),
+            let b = flat.removeValue(forKey: record.path + ".biases")
+        else {
+            throw ModelLoadError.invalidConfig("Missing packed tensors for \(record.path)")
+        }
+        flat.removeValue(forKey: record.path + ".signs")
+
+        let packed: Module =
+            if record.embedding {
+                try makePrismPackedEmbedding(
+                    path: record.path, block: record.block, weight: w, scales: s, biases: b,
+                    signs: config.signs)
+            } else {
+                try makePrismPackedLinear(
+                    path: record.path, block: record.block, weight: w, scales: s, biases: b,
+                    signs: config.signs)
+            }
+        moduleUpdates.append((record.path, packed))
+    }
+    // `.noUnusedKeys` catches a manifest path that does not resolve to a real
+    // child slot in `Qwen35ForCausalLM` - e.g. a typo, or the manifest
+    // drifting from the module tree this loader builds. It does NOT catch
+    // every failure mode: `PrismHadamardConfig` already rejects a malformed
+    // `record.path` before this point (a non-numeric or out-of-range layer
+    // index would otherwise crash or be silently dropped inside
+    // `Module.update(modules:)`'s array/dictionary merge), but the count
+    // check below is a second, independent layer of defense that costs
+    // nothing and catches ANY cause of the same silent-drop shape, not just
+    // the one that motivated it.
+    try model.update(modules: ModuleChildren.unflattened(moduleUpdates), verify: [.noUnusedKeys])
+    let packedCount = model.leafModules().flattened().filter {
+        $0.1 is PrismPackedLinear || $0.1 is PrismPackedEmbedding
+    }.count
+    guard packedCount == config.modules.count else {
+        throw ModelLoadError.invalidConfig(
+            "Expected \(config.modules.count) packed modules after substitution, found \(packedCount) - "
+            + "a manifest path did not resolve to the child slot it named")
+    }
+
+    // Same conditional sanitize loadQwen35 uses for conv1d layout / the
+    // RMSNorm `+1.0` shift (see that function's doc comment) - both no-ops
+    // for this checkpoint, per the empirical check above.
+    let hasMTP = flat.keys.contains { $0.hasPrefix("mtp.") || $0.contains(".mtp.") }
+    let hasUnsanitizedConv = flat.contains { key, value in
+        key.hasSuffix("conv1d.weight") && (value.shape.last ?? 1) != 1
+    }
+    let shouldShiftNorms = hasMTP || hasUnsanitizedConv
+    let normSuffixes = [
+        ".input_layernorm.weight", ".post_attention_layernorm.weight",
+        "model.norm.weight", ".q_norm.weight", ".k_norm.weight",
+    ]
+    for (key, value) in flat {
+        if key.hasSuffix("conv1d.weight") && (value.shape.last ?? 1) != 1 {
+            flat[key] = value.movedAxis(source: 2, destination: 1)
+        }
+        if shouldShiftNorms, value.ndim == 1, normSuffixes.contains(where: { key.hasSuffix($0) }) {
+            flat[key] = value + 1.0
+        }
+    }
+
+    let nested = ModuleParameters.unflattened(flat.map { ($0.key, $0.value) })
+    // NOT `.allModelKeysSet`: the 402 packed submodules' own weight/scales/
+    // biases were already set directly above via `update(modules:)`, so they
+    // are legitimately absent from `flat`. `.shapeMismatch` + `.noUnusedKeys`
+    // still catch a real loader bug in everything else.
+    try model.update(parameters: nested, verify: [.shapeMismatch, .noUnusedKeys])
+
+    // Per-layer cache kinds: GatedDeltaNet (linear) layers need the SSM
+    // conv/recurrent-state cache; full-attention layers use a standard KV cache.
+    let tc = config.textConfig
+    let cacheSpec: [KVCacheKind] = (0 ..< tc.numHiddenLayers).map {
+        tc.isLinearLayer($0) ? .ssm : .standard
+    }
+
+    return LoadedModel(
+        module: model,
+        numLayers: tc.numHiddenLayers,
+        family: "prism_hadamard_qwen35",
+        forward: { tokens, caches in model(tokens, caches: caches) },
+        multimodalForward: nil,
+        vocabSize: tc.vocabSize,
+        cacheSpec: cacheSpec
+    )
+}
+
 func loadMistral(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try JSONDecoder().decode(MistralConfig.self, from: configData)
     let model = MistralForCausalLM(config)

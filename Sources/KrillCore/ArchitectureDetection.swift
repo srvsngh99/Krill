@@ -243,6 +243,32 @@ let architectureRules: [ArchitectureRule] = [
         matches: { arch, mt in arch.contains("llama") || mt == "llama" },
         action: .load { try loadLlama(configData: $0, directory: $1) }),
 
+    // Prism ML `prism_hadamard_qwen35` (Ternary-Bonsai-2-27B): the SAME
+    // Qwen3.5-class hybrid decoder the `qwen3_5` rule below serves, but 402
+    // weight matrices carry a folded Hadamard rotation the ordinary loader
+    // does not know to undo. MUST precede `qwen3_5`: today's config carries
+    // no `architectures` field (so `arch` is always ""), but the model_type
+    // string itself contains "qwen" as a substring, and a future upstream
+    // config could plausibly add an `architectures` entry containing
+    // "qwen3_5" or "qwen" - either would let a less specific rule steal this
+    // checkpoint and load it as an ordinary affine Qwen3.5, which produces
+    // fluent-but-wrong output (no crash) rather than an error. Always routes
+    // to the TEXT loader regardless of `vision_config`: the pack's
+    // documented loader (`runtime/artifact.py`) refuses it outright on its
+    // `schema_version == 1` gate, and its other bundled loader
+    // (`runtime/vision_artifact.py`) DOES open it and build a VL model -
+    // Krill's text-only choice here is deliberate (no VL runtime wired to
+    // this pack), not a reflection of the pack or its runtime being
+    // text-only. Its vision tensors are present in the safetensors but
+    // excluded from the Hadamard manifest. Unlike the `qwen3_5` rule's
+    // VL/text branch below, this rule never routes to a VL loader at all.
+    ArchitectureRule(
+        id: "prism_hadamard_qwen35",
+        matches: { arch, mt in
+            arch.contains("prism_hadamard_qwen35") || mt == "prism_hadamard_qwen35"
+        },
+        action: .load { try loadPrismHadamardQwen35(configData: $0, directory: $1) }),
+
     // Qwen 3.5 (Ornith-9B) native Swift+MLX TEXT runtime: a Qwen3-Next-class
     // HYBRID decoder - GatedDeltaNet linear-attention (SSM) layers interleaved
     // with full softmax-attention every `full_attention_interval`. The vision

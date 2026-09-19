@@ -104,6 +104,17 @@ public enum ModelCapabilities {
             // strips it for a text-only checkpoint (no vision_config → loadQwen35),
             // so only a full VL checkpoint (loadQwen35VL) actually reports vision.
             return [.textGeneration, .visionInput, .tools]
+        case .prismHadamardQwen35:
+            // Ternary-Bonsai-2-27B: the loader is ALWAYS text-only -
+            // `loadPrismHadamardQwen35` never builds a vision tower at all
+            // (unlike `.qwen35`, there is no VL loader to fall back to), so
+            // `.visionInput` is never appropriate here, not even
+            // conditionally. `.tools` is deliberately NOT declared either:
+            // the checkpoint's chat template supports a Qwen-style
+            // `<function=...><parameter=...>` tool format, but that has not
+            // been verified against Krill's parser for this specific
+            // fine-tune, unlike the base Qwen3.5 lineage's `.tools` claim.
+            return [.textGeneration]
         case .gemma4:
             return [.textGeneration, .visionInput, .audioInput, .tools]
         case .gemma4Unified:
@@ -223,6 +234,20 @@ public enum ModelCapabilities {
             // hybrid decoder is parity-verified vs mlx_lm (scan + forward +
             // decode-cache gates), but real-checkpoint generation and a serving
             // benchmark are still landing, so `.experimental` until those gate.
+            return .experimental
+        case .prismHadamardQwen35:
+            // Ternary-Bonsai-2-27B: reuses the same parity-verified qwen3_5
+            // decoder, PLUS its own bisection against a working mlx_lm-based
+            // reference for the Hadamard-specific pieces
+            // (`PrismHadamardReferenceParityTests`): `fwht` forward/inverse
+            // exact, embedding-inverse exact, GDN layers match to float
+            // rounding, full-model logits match to ~3e-6 with the correct
+            // argmax, and cached decode is self-consistent with cacheless.
+            // Real-checkpoint generation is confirmed coherent end to end.
+            // Still `.experimental`, not `.productionNative`: no automated
+            // benchmark-report gate (vs Ollama or another reference) exists
+            // for this family yet, matching how every other family here is
+            // promoted only once that gate lands.
             return .experimental
         case .llava:
             // LLaVA-1.5 has a native Swift+MLX load+run path and an

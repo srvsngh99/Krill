@@ -87,6 +87,22 @@ public enum ModelProfiles {
                             "Compact 9B that fits a 24GB box at int4"],
                 weaknesses: ["Newer lineage with a smaller ecosystem than base Qwen"],
                 goodFor: ["General chat", "Coding", "Multilingual tasks", "Vision-language"])
+        case .prismHadamardQwen35:
+            return ModelProfile(
+                displayName: "BONSAI 2", vendor: "Prism ML", released: "2026 (Ternary-Bonsai-2-27B)",
+                trainingCutoff: "not publicly disclosed",
+                tagline: "27B-class reasoning ternary-requantized from Qwen3.8-27B to ~1.72 bits/weight; thinking on by default at xhigh reasoning effort.",
+                strengths: ["27B-class quality at ~8.6 GB on disk (2-bit/group-128 affine, Hadamard-folded)",
+                            "Loads in ~1.2s; ~12.8 tok/s decode on an M-series Mac",
+                            "Retains reasoning/coding/agentic ability deep in sub-4-bit (per the publisher's benchmarks)",
+                            "262K context inherited from the Qwen3.5 hybrid decoder"],
+                weaknesses: ["Prefill is slow (~2.8 tok/s on this box) - the Hadamard rotation runs every packed matmul",
+                             "Thinking is ON by default at `reasoning_effort: xhigh` and the template auto-opens `<think>` - "
+                             + "a small EXPLICIT --max-tokens is spent entirely inside the (correctly hidden) reasoning "
+                             + "block and the reply comes back empty; give it real headroom (hundreds of tokens) or omit "
+                             + "--max-tokens and let it derive from the context window",
+                             "Text-only in Krill - the pack's 333-tensor vision tower is not in the Hadamard manifest and this loader drops it"],
+                goodFor: ["General chat and reasoning", "Coding", "Resource-constrained high-quality local inference"])
         case .locateAnything:
             return ModelProfile(
                 displayName: "LOCATEANYTHING", vendor: "NVIDIA", released: "2025 (LocateAnything-3B)",

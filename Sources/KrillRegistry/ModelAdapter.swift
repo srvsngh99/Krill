@@ -42,7 +42,7 @@ public struct ModelAdapter: Sendable, Equatable {
     /// Which server chat handler a request for this family needs.
     public var chatRouting: ChatRouting {
         switch family {
-        case .llama, .qwen, .qwen25vl, .qwen35, .llava, .llamaVision, .locateAnything, .mistral, .gemma, .gemma4,
+        case .llama, .qwen, .qwen25vl, .qwen35, .prismHadamardQwen35, .llava, .llamaVision, .locateAnything, .mistral, .gemma, .gemma4,
              .gemma4Unified, .phi, .glm, .glm4, .deepseek, .unlimitedOcr, .bert, .reranker, .moe, .nanbeige,
              .museGlimmer:
             // Native Swift+MLX path. WS5 made Qwen 2.5-VL native, so
@@ -68,7 +68,7 @@ public struct ModelAdapter: Sendable, Equatable {
     /// kept so a future image-only family can opt back in.
     public var requiresImageInput: Bool {
         switch family {
-        case .llama, .qwen, .qwen25vl, .qwen35, .llava, .llamaVision, .locateAnything, .mistral, .gemma, .gemma4,
+        case .llama, .qwen, .qwen25vl, .qwen35, .prismHadamardQwen35, .llava, .llamaVision, .locateAnything, .mistral, .gemma, .gemma4,
              .gemma4Unified, .phi, .glm, .glm4, .deepseek, .unlimitedOcr, .bert, .reranker, .moe, .nanbeige,
              .museGlimmer:
             return false
@@ -117,11 +117,16 @@ public struct ModelAdapter: Sendable, Equatable {
             // (needs a new `ChatTemplatePolicy` case and a `ToolParser` arm).
             return .hermes
         case .gemma, .glm, .glm4, .deepseek, .unlimitedOcr, .bert, .qwen25vl, .llava, .llamaVision,
-             .locateAnything, .reranker:
+             .locateAnything, .reranker, .prismHadamardQwen35:
             // The generic Hermes-style `<tool_call>{…}</tool_call>`
             // prompt: an acceptable fallback, not a native template.
             // LLaVA does not advertise tools; its vicuna-style multimodal
             // prompt is built directly in the engine, not via this policy.
+            // Ternary-Bonsai-2-27B (`.prismHadamardQwen35`) does not advertise
+            // `.tools` (ModelCapabilities) - unverified for this fine-tune -
+            // so this value is inert until that changes; grouped here rather
+            // than with `.qwen35` for that reason, even though the base
+            // Qwen3.5 lineage's native template would otherwise apply.
             return .hermes
         }
     }
@@ -160,7 +165,7 @@ public struct ModelAdapter: Sendable, Equatable {
             // Vicuna prompt with the per-CLIP-patch image-token run placed
             // inline (`formatLlavaTokenIds`).
             return .llavaVicuna
-        case .llama, .qwen, .qwen25vl, .qwen35, .llamaVision, .locateAnything, .mistral, .gemma, .glm, .glm4, .deepseek,
+        case .llama, .qwen, .qwen25vl, .qwen35, .prismHadamardQwen35, .llamaVision, .locateAnything, .mistral, .gemma, .glm, .glm4, .deepseek,
              .unlimitedOcr, .bert, .reranker, .moe, .nanbeige, .museGlimmer:
             // Try the swift-transformers direct token-id template (keeps
             // ChatML / FIM / tool specials), else render + encode.
@@ -184,7 +189,7 @@ public struct ModelAdapter: Sendable, Equatable {
             // supported, but it is not yet end-to-end verified for this
             // family. Stay fp16-only until that gate lands (follow-up).
             return .fp16Only
-        case .llama, .qwen, .qwen25vl, .qwen35, .llava, .llamaVision, .locateAnything, .mistral, .gemma, .phi,
+        case .llama, .qwen, .qwen25vl, .qwen35, .prismHadamardQwen35, .llava, .llamaVision, .locateAnything, .mistral, .gemma, .phi,
              .glm, .glm4, .deepseek, .unlimitedOcr, .bert, .reranker, .moe, .nanbeige, .museGlimmer:
             return .fp16Only
         }

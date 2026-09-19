@@ -201,6 +201,39 @@ final class KrillRegistryTests: XCTestCase {
         XCTAssertEqual(ModelProfiles.profile(for: .qwen35)?.displayName, "ORNITH")
     }
 
+    /// Ternary-Bonsai-2-27B: a DISTINCT family from `.qwen35` (not the
+    /// runtime the qwen3.8-27b/ornith-9b/qwythos-9b aliases above share) -
+    /// wrong family here routes to `loadPrismHadamardQwen35`'s VS the
+    /// generic path is exactly the "ordinary affine load produces
+    /// confidently wrong output" failure this pack's loader exists to
+    /// avoid, so pin every field.
+    func testAliasMapResolvesBonsai2() {
+        let resolved = AliasMap.resolve("bonsai-2-27b")
+        XCTAssertNotNil(resolved)
+        XCTAssertEqual(resolved?.family, .prismHadamardQwen35)
+        XCTAssertEqual(resolved?.params, "27B")
+        XCTAssertEqual(resolved?.quant, "2bit")
+        XCTAssertEqual(resolved?.context, 262144)
+        XCTAssertEqual(resolved?.repo, "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit")
+    }
+
+    /// Its own vendor/tagline, not the shared `.qwen35` family profile
+    /// (Ornith) and not nil (the family switch must have an entry).
+    func testBonsai2HasItsOwnProfile() {
+        let profile = ModelProfiles.profile(for: .prismHadamardQwen35, name: "bonsai-2-27b")
+        XCTAssertEqual(profile?.displayName, "BONSAI 2")
+        XCTAssertEqual(profile?.vendor, "Prism ML")
+    }
+
+    /// The alias's declared capabilities must not silently vanish: without a
+    /// matching `ModelFamily(rawValue:)` case, `InferenceEngine.capabilities`
+    /// returns an EMPTY set for a loaded model (see its doc comment), which
+    /// would make the server refuse even plain text generation.
+    func testBonsai2DeclaresTextGenerationOnly() {
+        let caps = ModelCapabilities.capabilities(for: .prismHadamardQwen35)
+        XCTAssertEqual(caps, [.textGeneration])
+    }
+
     func testAliasMapResolvesHFPath() {
         let resolved = AliasMap.resolve("mlx-community/some-model-4bit")
         XCTAssertNotNil(resolved)
