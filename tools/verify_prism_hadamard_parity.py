@@ -4,15 +4,20 @@ Ternary-Bonsai-2-27B and any other checkpoint in the same pack format),
 built from mlx-lm's `qwen3_5.TextModel` + the pack's own `runtime/runtime.py`
 (`Packed`, `fwht`).
 
-WHY THIS SCRIPT EXISTS, NOT THE PACK'S OWN `runtime/artifact.py`: the
-bundled loader hard-requires `schema_version == 1` and refuses any pack
-whose `config.json` says otherwise - but every real pack shipped so far
-(Ternary-Bonsai-2-27B included) is `schema_version: 2`, which moved the
-tensor namespace to mlx-vlm's `language_model.` prefix. Their own loader
-cannot open their own pack. This script is schema-2-aware: it drives
-`mlx_lm.models.qwen3_5.TextModel` directly and swaps in `Packed` at the 402
-manifest paths with the `language_model.` prefix threaded through, then
-loads everything else with `strict=False`.
+WHY THIS SCRIPT EXISTS, NOT THE PACK'S OWN `runtime/artifact.py`:
+`artifact.py` is the entry point `PACK-RUNTIME.md` documents, but it
+hard-requires `schema_version == 1` while Ternary-Bonsai-2-27B ships
+`schema_version: 2`, so `load_model()` raises "Unsupported packed model
+schema" on it. Schema 2 also moved the tensor namespace to mlx-vlm's
+`language_model.` prefix, which `artifact.py` does not thread through.
+The pack's OTHER bundled loader, `runtime/vision_artifact.py`'s
+`load_vl_model`, handles both and opens this pack fine (verified against
+the mlx-vlm 0.6.3 pinned in `runtime/requirements.txt`); it is simply not
+the loader the docs point at. We do not reuse it here either, because it
+builds an mlx-vlm VL model while the parity target is Krill's text-only
+port. So this script drives `mlx_lm.models.qwen3_5.TextModel` directly and
+swaps in `Packed` at the 402 manifest paths with the `language_model.`
+prefix threaded through, then loads everything else with `strict=False`.
 
 KNOWN WRINKLE - READ BEFORE TRUSTING `layer3_out`/`layer7_out`: the per-layer
 intermediate dump below calls each decoder layer directly as

@@ -4,10 +4,13 @@ import KrillCache
 @testable import KrillCore
 
 /// Bisects `loadPrismHadamardQwen35` against a REFERENCE built from
-/// `mlx_lm.models.qwen3_5.TextModel`, schema-2-aware (the pack's own bundled
-/// `runtime/artifact.py` hard-requires `schema_version == 1` and refuses this
-/// pack outright - it is stale for schema 2, which moved the tensor
-/// namespace to mlx-vlm's `language_model.` prefix).
+/// `mlx_lm.models.qwen3_5.TextModel`, schema-2-aware. The pack's bundled
+/// `runtime/artifact.py` - the loader `PACK-RUNTIME.md` documents - refuses
+/// this pack: it hard-requires `schema_version == 1` while the pack ships
+/// `schema_version: 2`, which also moved the tensor namespace to mlx-vlm's
+/// `language_model.` prefix. The pack's other bundled loader,
+/// `runtime/vision_artifact.py`, does open it, but builds an mlx-vlm VL
+/// model rather than the text-only stack this port targets.
 ///
 /// Gated on two environment variables (no absolute paths in source, per the
 /// `DeepSeekParityTests` convention - neither the checkpoint nor the
