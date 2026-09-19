@@ -216,6 +216,30 @@ private let aliases: [String: ResolvedModel] = [
         repo: "srv-sngh/Qwen3.8-27B-mlx-4bit",
         name: "qwen3.8-27b", family: .qwen35, params: "27B", quant: "4bit", context: 262144),
 
+    // Prism ML Ternary-Bonsai-2-27B (2026): a from-scratch ternary requant of
+    // Alibaba's Qwen3.8-27B - architecture UNCHANGED (same Qwen3-Next-class
+    // hybrid decoder, ~75% GatedDeltaNet linear-attention / ~25% full
+    // attention), but 402 weight matrices carry a blockwise Hadamard
+    // rotation folded into their affine 2-bit/group-128 quantization (a true
+    // ~1.72 bits/weight; MLX's per-group scale+bias container stores it at
+    // ~2.25 bits/weight nominal, config declares `bits: 2`). 27.36B total
+    // params (24.35B backbone + 2.54B embed/lm_head + 0.46B vision tower).
+    // `family: .prismHadamardQwen35` routes to `loadPrismHadamardQwen35`
+    // (PrismHadamardQwen35.swift), NOT the generic `.qwen35` path — an
+    // ordinary affine load silently produces garbage (the Hadamard rotation
+    // must be undone on ACTIVATIONS at inference; it is not baked into the
+    // stored weights). Bisected against an mlx_lm-based reference: fwht /
+    // embedding-inverse / logits all match to ~1e-6-3e-6 with the correct
+    // argmax, cached decode is self-consistent with cacheless, and real
+    // generation is coherent (see PrismHadamardReferenceParityTests). TEXT-
+    // ONLY in Krill: the pack ships a 333-tensor vision tower, but it sits
+    // outside the Hadamard manifest and this loader drops it - see
+    // ModelCapabilities (deliberately no `.visionInput`). Apache 2.0.
+    "bonsai-2-27b": ResolvedModel(
+        repo: "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit",
+        name: "bonsai-2-27b", family: .prismHadamardQwen35, params: "27B", quant: "2bit",
+        context: 262144),
+
     // Unlimited-OCR (DeepSeek-OCR): native multimodal OCR runtime — DeepSeek-MoE
     // backbone (nvfp4 experts) + native DeepEncoder vision tower (SAM-ViT-B +
     // CLIP-L + projector, 8-bit). Mixed-precision Krill blob published under

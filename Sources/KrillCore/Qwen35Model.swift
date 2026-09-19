@@ -244,13 +244,20 @@ final class Qwen35GatedDeltaNet: Module {
     let convDim: Int
     let eps: Float
 
-    @ModuleInfo(key: "in_proj_qkv") var inProjQkv: Linear
-    @ModuleInfo(key: "in_proj_z") var inProjZ: Linear
+    // `inProjQkv`/`inProjZ`/`outProj` are `UnaryLayer` (not `Linear`) so a
+    // Prism-Hadamard checkpoint (`loadPrismHadamardQwen35`) can substitute a
+    // `PrismPackedLinear` at these paths post-construction via
+    // `Module.update(modules:)` - see PrismHadamardQwen35.swift. Ordinary
+    // checkpoints are unaffected: `Linear` conforms to `UnaryLayer` and every
+    // existing call site here is already just `xProj(x)`. `inProjA`/
+    // `inProjB` stay plain `Linear` - the Prism manifest never folds them.
+    @ModuleInfo(key: "in_proj_qkv") var inProjQkv: UnaryLayer
+    @ModuleInfo(key: "in_proj_z") var inProjZ: UnaryLayer
     @ModuleInfo(key: "in_proj_b") var inProjB: Linear
     @ModuleInfo(key: "in_proj_a") var inProjA: Linear
     @ModuleInfo(key: "conv1d") var conv1dLayer: Qwen35DepthwiseConv1d
     @ModuleInfo(key: "norm") var norm: Qwen35RMSNormGated
-    @ModuleInfo(key: "out_proj") var outProj: Linear
+    @ModuleInfo(key: "out_proj") var outProj: UnaryLayer
 
     @ParameterInfo(key: "A_log") var aLog: MLXArray
     @ParameterInfo(key: "dt_bias") var dtBias: MLXArray
@@ -267,13 +274,13 @@ final class Qwen35GatedDeltaNet: Module {
         convDim = keyDim * 2 + valueDim
         eps = c.rmsNormEps
 
-        _inProjQkv = ModuleInfo(wrappedValue: Linear(hiddenSize, keyDim * 2 + valueDim, bias: false), key: "in_proj_qkv")
-        _inProjZ = ModuleInfo(wrappedValue: Linear(hiddenSize, valueDim, bias: false), key: "in_proj_z")
+        _inProjQkv = ModuleInfo(wrappedValue: Linear(hiddenSize, keyDim * 2 + valueDim, bias: false) as UnaryLayer, key: "in_proj_qkv")
+        _inProjZ = ModuleInfo(wrappedValue: Linear(hiddenSize, valueDim, bias: false) as UnaryLayer, key: "in_proj_z")
         _inProjB = ModuleInfo(wrappedValue: Linear(hiddenSize, numVHeads, bias: false), key: "in_proj_b")
         _inProjA = ModuleInfo(wrappedValue: Linear(hiddenSize, numVHeads, bias: false), key: "in_proj_a")
         _conv1dLayer = ModuleInfo(wrappedValue: Qwen35DepthwiseConv1d(channels: convDim, kernel: convKernel), key: "conv1d")
         _norm = ModuleInfo(wrappedValue: Qwen35RMSNormGated(headVDim, eps: eps), key: "norm")
-        _outProj = ModuleInfo(wrappedValue: Linear(valueDim, hiddenSize, bias: false), key: "out_proj")
+        _outProj = ModuleInfo(wrappedValue: Linear(valueDim, hiddenSize, bias: false) as UnaryLayer, key: "out_proj")
         _aLog = ParameterInfo(wrappedValue: MLXArray.zeros([numVHeads]), key: "A_log")
         _dtBias = ParameterInfo(wrappedValue: MLXArray.ones([numVHeads]), key: "dt_bias")
     }
@@ -334,10 +341,12 @@ final class Qwen35Attention: Module {
     let headDim: Int
     let scale: Float
 
-    @ModuleInfo(key: "q_proj") var qProj: Linear
-    @ModuleInfo(key: "k_proj") var kProj: Linear
-    @ModuleInfo(key: "v_proj") var vProj: Linear
-    @ModuleInfo(key: "o_proj") var oProj: Linear
+    // `UnaryLayer`, not `Linear` - see the injectable-seam comment on
+    // `Qwen35GatedDeltaNet`'s `inProjQkv` above; same reason here.
+    @ModuleInfo(key: "q_proj") var qProj: UnaryLayer
+    @ModuleInfo(key: "k_proj") var kProj: UnaryLayer
+    @ModuleInfo(key: "v_proj") var vProj: UnaryLayer
+    @ModuleInfo(key: "o_proj") var oProj: UnaryLayer
     @ModuleInfo(key: "q_norm") var qNorm: RMSNorm
     @ModuleInfo(key: "k_norm") var kNorm: RMSNorm
     let rope: RoPE
@@ -350,10 +359,10 @@ final class Qwen35Attention: Module {
         numKVHeads = c.numKeyValueHeads
         headDim = c.headDim
         scale = 1.0 / Float(c.headDim).squareRoot()
-        _qProj = ModuleInfo(wrappedValue: Linear(c.hiddenSize, numHeads * headDim * 2, bias: false), key: "q_proj")
-        _kProj = ModuleInfo(wrappedValue: Linear(c.hiddenSize, numKVHeads * headDim, bias: false), key: "k_proj")
-        _vProj = ModuleInfo(wrappedValue: Linear(c.hiddenSize, numKVHeads * headDim, bias: false), key: "v_proj")
-        _oProj = ModuleInfo(wrappedValue: Linear(numHeads * headDim, c.hiddenSize, bias: false), key: "o_proj")
+        _qProj = ModuleInfo(wrappedValue: Linear(c.hiddenSize, numHeads * headDim * 2, bias: false) as UnaryLayer, key: "q_proj")
+        _kProj = ModuleInfo(wrappedValue: Linear(c.hiddenSize, numKVHeads * headDim, bias: false) as UnaryLayer, key: "k_proj")
+        _vProj = ModuleInfo(wrappedValue: Linear(c.hiddenSize, numKVHeads * headDim, bias: false) as UnaryLayer, key: "v_proj")
+        _oProj = ModuleInfo(wrappedValue: Linear(numHeads * headDim, c.hiddenSize, bias: false) as UnaryLayer, key: "o_proj")
         _qNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: headDim, eps: c.rmsNormEps), key: "q_norm")
         _kNorm = ModuleInfo(wrappedValue: RMSNorm(dimensions: headDim, eps: c.rmsNormEps), key: "k_norm")
         // Partial rotary: rotate the first floor(headDim * partialRotaryFactor) dims.
@@ -414,14 +423,16 @@ final class Qwen35Attention: Module {
 // MARK: - MLP
 
 final class Qwen35MLP: Module {
-    @ModuleInfo(key: "gate_proj") var gateProj: Linear
-    @ModuleInfo(key: "up_proj") var upProj: Linear
-    @ModuleInfo(key: "down_proj") var downProj: Linear
+    // `UnaryLayer`, not `Linear` - same injectable-seam reason as
+    // `Qwen35GatedDeltaNet.inProjQkv` above.
+    @ModuleInfo(key: "gate_proj") var gateProj: UnaryLayer
+    @ModuleInfo(key: "up_proj") var upProj: UnaryLayer
+    @ModuleInfo(key: "down_proj") var downProj: UnaryLayer
 
     init(_ dim: Int, _ hidden: Int) {
-        _gateProj = ModuleInfo(wrappedValue: Linear(dim, hidden, bias: false), key: "gate_proj")
-        _upProj = ModuleInfo(wrappedValue: Linear(dim, hidden, bias: false), key: "up_proj")
-        _downProj = ModuleInfo(wrappedValue: Linear(hidden, dim, bias: false), key: "down_proj")
+        _gateProj = ModuleInfo(wrappedValue: Linear(dim, hidden, bias: false) as UnaryLayer, key: "gate_proj")
+        _upProj = ModuleInfo(wrappedValue: Linear(dim, hidden, bias: false) as UnaryLayer, key: "up_proj")
+        _downProj = ModuleInfo(wrappedValue: Linear(hidden, dim, bias: false) as UnaryLayer, key: "down_proj")
     }
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         downProj(silu(gateProj(x)) * upProj(x))
@@ -488,12 +499,15 @@ func qwen35CausalMask(_ L: Int, offset: Int, _ dtype: DType) -> MLXArray {
 }
 
 final class Qwen35Model: Module {
-    @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
+    // `UnaryLayer`, not `Embedding` - same injectable-seam reason as
+    // `Qwen35GatedDeltaNet.inProjQkv` above (`Embedding` conforms to
+    // `UnaryLayer` too, so ordinary checkpoints are unaffected).
+    @ModuleInfo(key: "embed_tokens") var embedTokens: UnaryLayer
     let layers: [Qwen35DecoderLayer]
     @ModuleInfo(key: "norm") var norm: RMSNorm
 
     init(_ c: Qwen35Config) {
-        _embedTokens = ModuleInfo(wrappedValue: Embedding(embeddingCount: c.vocabSize, dimensions: c.hiddenSize), key: "embed_tokens")
+        _embedTokens = ModuleInfo(wrappedValue: Embedding(embeddingCount: c.vocabSize, dimensions: c.hiddenSize) as UnaryLayer, key: "embed_tokens")
         layers = (0 ..< c.numHiddenLayers).map { Qwen35DecoderLayer(c, layerIdx: $0) }
         _norm = ModuleInfo(wrappedValue: RMSNorm(dimensions: c.hiddenSize, eps: c.rmsNormEps), key: "norm")
     }
@@ -529,13 +543,16 @@ final class Qwen35Model: Module {
 
 public final class Qwen35ForCausalLM: Module {
     @ModuleInfo(key: "model") var model: Qwen35Model
-    @ModuleInfo(key: "lm_head") var lmHead: Linear
+    // `UnaryLayer`, not `Linear` - same injectable-seam reason as
+    // `Qwen35GatedDeltaNet.inProjQkv` (see that comment): lets
+    // `loadPrismHadamardQwen35` substitute a `PrismPackedLinear` here.
+    @ModuleInfo(key: "lm_head") var lmHead: UnaryLayer
     public let config: Qwen35Config
 
     public init(_ c: Qwen35Config) {
         self.config = c
         _model = ModuleInfo(wrappedValue: Qwen35Model(c), key: "model")
-        _lmHead = ModuleInfo(wrappedValue: Linear(c.hiddenSize, c.vocabSize, bias: false), key: "lm_head")
+        _lmHead = ModuleInfo(wrappedValue: Linear(c.hiddenSize, c.vocabSize, bias: false) as UnaryLayer, key: "lm_head")
     }
 
     public func callAsFunction(_ tokens: MLXArray, caches: [KVCacheProtocol]? = nil) -> MLXArray {
