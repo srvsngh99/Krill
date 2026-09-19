@@ -357,3 +357,108 @@ the design does *not* fix, or fixes only incidentally.
 - **No LSP integration exists anywhere in `Sources/`.** Noted because opencode's
   sidebar has an LSP row and a port of that layout will invite one. There is no
   counterpart to surface.
+
+---
+
+## Native 1-bit unpack + matmul for Prism ML's binary Bonsai-27B
+
+**Status:** blocked. Stock MLX (both the Python package and the C++ core
+`mlx-swift` binds against) rejects `bits: 1`, so this needs a custom kernel,
+not an alias.
+
+**Context.** `prism-ml/Bonsai-27B-mlx-1bit` (5.13 GB, ~1.06M downloads on
+HF; verified against the repo's `config.json` and file listing directly, not
+transcribed) is a PLAIN `model_type: "qwen3_5"` checkpoint quantized to
+`quantization: {group_size: 128, bits: 1}`. No `runtime/` directory ships
+with it, no `hadamard.json`, no sign tensors - unlike Ternary-Bonsai-2-27B
+(PR #315, shipped v0.24.0), this is NOT a Prism Hadamard pack. It is the
+same packed-affine layout Krill already reads for 2-bit/4-bit checkpoints,
+just at `bits: 1`: weight `U32 [rows, width/32]` (32 weights per uint32),
+`scales`/`biases` `F16 [rows, width/128]`.
+
+**Why it is blocked.** Verified directly against the installed `mlx`
+package: `mx.quantize(w, group_size=128, bits=1)` raises "The requested
+number of bits 1 is not supported. The supported bits are 2, 3, 4, 5, 6 and
+8." The identical check is in the MLX core `mlx-swift` vendors
+(`Source/Cmlx/mlx/mlx/ops.cpp`: `if (bits < 2 || bits > 8 || bits == 7) {
+... }`), so this is not a Python-only limitation Krill's Swift path
+sidesteps - `MLX.quantized`/`quantizedMM` reject `bits: 1` identically.
+Prism run their own MLX fork for this checkpoint. Krill needs its own
+unpack + matmul for 1-bit - the same SHAPE of problem the Hadamard pack's
+`fwht` solved for the rotation, but for the bit width instead.
+
+**Two options, with the tradeoff.**
+- **(a) Unpack to 2-bit affine at load time.** Roughly a day of work: read
+  the packed 1-bit weights, expand each bit into a 2-bit affine code, and
+  hand the result to the existing `MLX.quantized`/`quantizedMatmul` path
+  unchanged. Numerically exact (binary into 2-bit is lossless - no
+  precision lost, just wasted). But it lands at roughly 9 GB resident,
+  WORSE than the 8.6 GB Ternary-Bonsai-2-27B already ships, which defeats
+  the entire point of pulling a 1-bit checkpoint in the first place.
+- **(b) A native 1-bit matmul Metal kernel**, keeping the packed 5.13 GB
+  resident. This is the only version that delivers the actual benefit (a
+  27B model at roughly 5 GB), but it means hand-writing the unpack + GEMV
+  kernel from scratch - there is no MLX built-in to fall back to for
+  1-bit, unlike every other bit width Krill already quantizes at.
+
+**The prior art that should gate this.** `docs/FUSED_Q4_PROBE.md`: a
+hand-written fused affine-4bit dequant + GEMV Metal kernel, numerically
+correct (cosine > 0.9999, max abs diff < 1e-2 vs MLX's own
+`quantizedMatmul`, across group sizes 32/64/128), but 2.93x SLOWER (791.8
+us/call vs 270.3 us/call, O=4096 I=4096 gs=64, M-series, release) than
+MLX's built-in - because that built-in already has SIMD-group reductions
+and vectorized packed-weight loads a naive one-thread-per-row kernel
+cannot match, and matching it is a multi-day kernel-engineering effort
+with no guaranteed win. For 1-bit there is no built-in to fall back to if
+the custom kernel turns out slow: correctness alone is not sufficient
+here, the kernel has to be fast AND written well close to the first
+attempt, since there is no "ship correct-but-slow and let MLX's kernel
+carry decode" escape hatch the Q4 probe had.
+
+**The strategic caveat.** `Bonsai-27B` (this entry) is Prism's older
+BINARY line. `Ternary-Bonsai-2-27B` (PR #315, shipped v0.24.0, `krill pull
+bonsai-2-27b`) is the newer TERNARY flagship and the more capable model,
+at a similar-order footprint (8.6 GB). So this work buys a WEAKER 27B in
+less memory, not a better one in the same memory. It is only worth the
+kernel effort if "a 27B-class model that fits comfortably on a 16 GB Mac"
+is an explicit goal: 8.6 GB plus KV cache does not fit comfortably in
+16 GB, and 5.13 GB does.
+
+**Recommended framing.** Gate this on a stated tokens/sec floor decided up
+front (for example "must not be slower than N tok/s decode on the
+reference box"), so that if the kernel does not reach it the effort can
+close cleanly as a documented probe, `docs/FUSED_Q4_PROBE.md`-style,
+rather than lingering half-finished.
+
+---
+
+## `prism-ml/Ternary-Bonsai-27B-mlx-2bit`: likely just an AliasMap row, untested
+
+**Status:** not started; downloaded but unverified.
+
+Separate from, and much cheaper than, the 1-bit item above:
+`prism-ml/Ternary-Bonsai-27B-mlx-2bit` (8.49 GB, ~1.06M downloads) is
+plain `model_type: "qwen3_5"` at `quantization: {group_size: 128, bits:
+2}` - no Hadamard manifest, no `runtime/` directory, no sign tensors
+(verified directly against the local safetensors header: 0 tensors
+matching `signs`, 0 matching `mtp`, out of 2180 total). Same packed-affine
+layout the existing `qwen3_5` loaders already read for other bit widths,
+so this may need nothing beyond a new `AliasMap` row pointing at it
+(`family: .qwen35`).
+
+One nuance worth flagging before adding that row: `config.json` carries a
+`vision_config`, so the existing `qwen3_5` architecture rule
+(`ArchitectureDetection.swift`) would route it to `loadQwen35VL`, not the
+plain-text `loadQwen35`, exactly like Qwen3.8-27B does today. That
+loader's `quantize`/`loadWeights` machinery is generic over `bits`, so
+2-bit SHOULD load unchanged - but this has not been run, so treat it as a
+hypothesis, not a fact, until it has.
+
+Downloaded but UNTESTED at
+`/private/tmp/claude-501/-Users-sourav-linkedin/3a6c06ce-0c63-430a-a3ab-8345131b6166/scratchpad/bonsai1-mlx-2bit`
+(a session scratchpad - do not rely on that path surviving; re-download
+before picking this up). Do not claim it works until `loadModel(from:)`
+actually succeeds and a real prompt produces coherent output - "loads
+clean, tests green, silently wrong" is exactly the failure mode PR #315
+was bisected against, and an untested checkpoint is exposed to it by
+definition.
