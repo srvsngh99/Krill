@@ -14,10 +14,17 @@ import MLXNN
 // `runtime/runtime.py` (`fwht()` + class `Packed`) - see PACK-RUNTIME.md.
 //
 // TEXT-ONLY: the pack's safetensors also carry a `vision_tower.*` weight set
-// (333 tensors), but NONE of them appear in the 402-entry Hadamard manifest,
-// and PACK-RUNTIME.md states the bundled runtime is text-only. Loading is
-// wired up in `loadPrismHadamardQwen35` (ModelLoader.swift), which drops the
-// vision tower exactly as `loadQwen35` does.
+// (333 tensors, `components.vision: true` in config.json), but NONE of them
+// appear in the 402-entry Hadamard manifest. The pack's documented loader
+// (`PACK-RUNTIME.md` and config.json's own `requires_runtime` both point at
+// `runtime/artifact.py`) refuses this pack outright on its `schema_version
+// == 1` gate - it does not open it text-only, it does not open it at all.
+// The pack's OTHER bundled loader, `runtime/vision_artifact.py`, does open
+// it and builds a VL model on the unrotated vision tower. Krill drops vision
+// here by choice - no VL runtime is wired to this pack and the tower is
+// unverified against it - not because the pack or its runtime are text-only.
+// Loading is wired up in `loadPrismHadamardQwen35` (ModelLoader.swift),
+// which drops the vision tower exactly as `loadQwen35` does for Ornith.
 
 // MARK: - fwht (blockwise Walsh-Hadamard activation transform)
 
@@ -243,6 +250,7 @@ struct PrismHadamardConfig {
     /// sibling contract file (`hadamard_config`, defaults to
     /// `"hadamard.json"` when absent).
     private struct Wrapper: Decodable {
+        let schemaVersion: Int
         let modelType: String
         let textConfig: Qwen35Config
         let modules: [PrismModuleRecord]
@@ -253,6 +261,7 @@ struct PrismHadamardConfig {
         let hadamardConfigFile: String?
 
         enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
             case modelType = "model_type"
             case textConfig = "text_config"
             case modules
@@ -267,6 +276,18 @@ struct PrismHadamardConfig {
     init(configData: Data, directory: URL) throws {
         let wrapper = try JSONDecoder().decode(Wrapper.self, from: configData)
 
+        // `schema_version` is the field the pack's OWN `runtime/artifact.py`
+        // gates on (`!= 1` -> refuse) - this loader targets schema 2 (the
+        // mlx-vlm tensor namespace) exclusively, so a future schema 3 (a
+        // further namespace/layout move `artifact.py` also would not open)
+        // must fail loudly here rather than load under stale assumptions.
+        guard wrapper.schemaVersion == 2 else {
+            throw ModelLoadError.invalidConfig(
+                "Unsupported schema_version \(wrapper.schemaVersion); this loader targets schema 2 (mlx-vlm namespace)")
+        }
+        guard wrapper.modelType == "prism_hadamard_qwen35" else {
+            throw ModelLoadError.invalidConfig("Unsupported model_type \(wrapper.modelType)")
+        }
         // `tensor_namespace`/`gdn_activation_layout` are the two load-bearing
         // invariants PACK-RUNTIME.md calls out explicitly: this loader
         // assumes mlx-vlm key naming (so `loadWeights`'s `language_model.`
@@ -310,6 +331,18 @@ struct PrismHadamardConfig {
         guard hadamard.signMode == "explicit" else {
             throw ModelLoadError.invalidConfig("Explicit Hadamard signs required, got sign_mode=\(hadamard.signMode)")
         }
+        // `transform`/`axis` are decoded but were previously never checked:
+        // `fwht` implements exactly ONE transform (normalized Sylvester-
+        // Walsh-Hadamard) on exactly one axis (the input's last dimension).
+        // A pack declaring a different rotation or a different axis would
+        // otherwise load silently and produce garbage - these two guards are
+        // the difference between that and a clean refusal.
+        guard hadamard.transform == "normalized-sylvester-walsh-hadamard" else {
+            throw ModelLoadError.invalidConfig("Unsupported Hadamard transform \(hadamard.transform)")
+        }
+        guard hadamard.axis == "input-last-dimension" else {
+            throw ModelLoadError.invalidConfig("Unsupported Hadamard axis \(hadamard.axis)")
+        }
         guard hadamard.gdnVGrouped else {
             throw ModelLoadError.invalidConfig(
                 "hadamard.json declares gdn_v_grouped=false; this loader applies no GDN-v permutation")
@@ -352,6 +385,39 @@ struct PrismHadamardConfig {
             guard m.block == hadamard.blockSize else {
                 throw ModelLoadError.invalidConfig(
                     "Module \(m.path): block \(m.block) does not match hadamard.json block_size \(hadamard.blockSize)")
+            }
+            // The reference runtime enforces this explicitly (`artifact.py`,
+            // `vision_artifact.py`: `if record["dtype"] != "float16": raise`)
+            // - `PrismPackedEmbedding.callAsFunction` hardcodes
+            // `.asType(.float16)`, so a pack declaring e.g. "bfloat16" here
+            // would silently run its embedding output at the wrong dtype.
+            guard m.dtype == "float16" else {
+                throw ModelLoadError.invalidConfig("Module \(m.path): unsupported packed dtype \(m.dtype)")
+            }
+            // Validate the path SHAPE before it ever reaches
+            // `ModuleChildren.unflattened`/`Module.update(modules:)` in
+            // `loadPrismHadamardQwen35`: a non-numeric layer index there
+            // force-unwraps inside mlx-swift's `NestedDictionary` parsing and
+            // traps the process; an out-of-range layer index is silently
+            // dropped by the update's `zip(items, values)` truncation,
+            // leaving a randomly-initialized `Linear`/`Embedding` in place
+            // that no verify step catches (that loader also does a
+            // belt-and-braces post-substitution count as a second layer of
+            // defense, but a bad path should never reach it in the first
+            // place). Every real manifest path is `"lm_head"`,
+            // `"model.embed_tokens"`, or `"model.layers.<n>.…"` with `n` a
+            // valid layer index.
+            if m.path != "lm_head" && m.path != "model.embed_tokens" {
+                let parts = m.path.split(separator: ".").map(String.init)
+                guard parts.count >= 3, parts[0] == "model", parts[1] == "layers",
+                    let layerIndex = Int(parts[2]), layerIndex >= 0,
+                    layerIndex < wrapper.textConfig.numHiddenLayers
+                else {
+                    throw ModelLoadError.invalidConfig(
+                        "Invalid packed module path \"\(m.path)\": expected \"lm_head\", "
+                        + "\"model.embed_tokens\", or \"model.layers.<n>...\" with n in "
+                        + "0..<\(wrapper.textConfig.numHiddenLayers)")
+                }
             }
         }
 

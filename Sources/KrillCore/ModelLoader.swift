@@ -835,10 +835,17 @@ func loadQwen35(configData: Data, directory: URL) throws -> LoadedModel {
 /// guard is kept so a future re-pack in torch layout does not load wrong.
 ///
 /// TEXT-ONLY: the safetensors also carry a `vision_tower.*` weight set (333
-/// tensors), but none of them appear in the Hadamard manifest and
-/// PACK-RUNTIME.md states the bundled runtime is text-only; dropped here by
-/// construction (only `language_model.`-prefixed keys are read), mirroring
-/// `loadQwen35`'s vision-tower drop for Ornith.
+/// tensors, `components.vision: true`), but none of them appear in the
+/// Hadamard manifest. The pack's documented loader (`PACK-RUNTIME.md` /
+/// config.json's `requires_runtime`) points at `runtime/artifact.py`, which
+/// refuses this pack outright on its `schema_version == 1` gate - it does
+/// not serve it text-only, it does not open it at all. The pack's OTHER
+/// bundled loader, `runtime/vision_artifact.py`, does open it and builds a
+/// VL model on the unrotated vision tower. Krill drops vision here by
+/// choice - no VL runtime is wired to this pack - not because the pack or
+/// its runtime are text-only; dropped by construction (only
+/// `language_model.`-prefixed keys are read), mirroring `loadQwen35`'s
+/// vision-tower drop for Ornith.
 func loadPrismHadamardQwen35(configData: Data, directory: URL) throws -> LoadedModel {
     let config = try PrismHadamardConfig(configData: configData, directory: directory)
     let model = Qwen35ForCausalLM(config.textConfig)
@@ -886,8 +893,23 @@ func loadPrismHadamardQwen35(configData: Data, directory: URL) throws -> LoadedM
     }
     // `.noUnusedKeys` catches a manifest path that does not resolve to a real
     // child slot in `Qwen35ForCausalLM` - e.g. a typo, or the manifest
-    // drifting from the module tree this loader builds.
+    // drifting from the module tree this loader builds. It does NOT catch
+    // every failure mode: `PrismHadamardConfig` already rejects a malformed
+    // `record.path` before this point (a non-numeric or out-of-range layer
+    // index would otherwise crash or be silently dropped inside
+    // `Module.update(modules:)`'s array/dictionary merge), but the count
+    // check below is a second, independent layer of defense that costs
+    // nothing and catches ANY cause of the same silent-drop shape, not just
+    // the one that motivated it.
     try model.update(modules: ModuleChildren.unflattened(moduleUpdates), verify: [.noUnusedKeys])
+    let packedCount = model.leafModules().flattened().filter {
+        $0.1 is PrismPackedLinear || $0.1 is PrismPackedEmbedding
+    }.count
+    guard packedCount == config.modules.count else {
+        throw ModelLoadError.invalidConfig(
+            "Expected \(config.modules.count) packed modules after substitution, found \(packedCount) - "
+            + "a manifest path did not resolve to the child slot it named")
+    }
 
     // Same conditional sanitize loadQwen35 uses for conv1d layout / the
     // RMSNorm `+1.0` shift (see that function's doc comment) - both no-ops

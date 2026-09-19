@@ -299,6 +299,83 @@ final class PrismHadamardQwen35Tests: XCTestCase {
         XCTAssertThrowsError(try loadConfig(from: dir))
     }
 
+    /// A fixture with a THIRD packed module at `layerModulePath`, alongside
+    /// the lm_head/embed_tokens pair `makeFixture` builds - used to exercise
+    /// the manifest path-SHAPE validation in `PrismHadamardConfig.init`,
+    /// which only applies to `model.layers.*` paths (the 2-module default
+    /// fixture never reaches it). `hadamard.json`'s `weight_names` includes
+    /// the matching entry so the manifest cross-validation passes and only
+    /// the path-shape check is under test.
+    private func makeFixtureWithLayerModule(
+        path layerModulePath: String, numHiddenLayers: Int = 1, block: Int = 512
+    ) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("prism-hadamard-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let signValues = (0 ..< block).map { $0 % 2 == 0 ? "1" : "-1" }.joined(separator: ",")
+
+        let hadamardJSON = """
+        {
+            "prism.hadamard.version": 1,
+            "prism.hadamard.block_size": \(block),
+            "prism.hadamard.transform": "normalized-sylvester-walsh-hadamard",
+            "prism.hadamard.axis": "input-last-dimension",
+            "prism.hadamard.sign_mode": "explicit",
+            "prism.hadamard.weight_names": ["language_model.lm_head.weight", "language_model.\(layerModulePath).weight"],
+            "prism.hadamard.inverse_weight_names": ["language_model.model.embed_tokens.weight"],
+            "prism.hadamard.sign_widths": [\(block)],
+            "prism.hadamard.sign_values": [\(signValues)],
+            "prism.hadamard.gdn_v_grouped": true
+        }
+        """
+        let configJSON = """
+        {
+            "schema_version": 2,
+            "model_type": "prism_hadamard_qwen35",
+            "text_config": {
+                "hidden_size": \(block), "intermediate_size": \(block), "num_hidden_layers": \(numHiddenLayers),
+                "num_attention_heads": 4, "num_key_value_heads": 4, "head_dim": \(block / 4),
+                "vocab_size": 32, "linear_num_value_heads": 4, "linear_num_key_heads": 4,
+                "linear_key_head_dim": 32, "linear_value_head_dim": 32,
+                "full_attention_interval": 4, "tie_word_embeddings": false
+            },
+            "modules": [
+                {"path": "lm_head", "block": \(block), "embedding": false, "dtype": "float16"},
+                {"path": "model.embed_tokens", "block": \(block), "embedding": true, "dtype": "float16"},
+                {"path": "\(layerModulePath)", "block": \(block), "embedding": false, "dtype": "float16"}
+            ],
+            "quantization": {"bits": 2, "group_size": 128, "mode": "affine"},
+            "tensor_namespace": "mlx-vlm-qwen3_5",
+            "gdn_activation_layout": "grouped",
+            "tie_word_embeddings": false
+        }
+        """
+        try configJSON.write(to: dir.appendingPathComponent("config.json"), atomically: true, encoding: .utf8)
+        try hadamardJSON.write(to: dir.appendingPathComponent("hadamard.json"), atomically: true, encoding: .utf8)
+        return dir
+    }
+
+    /// A non-numeric layer index (`model.layers.x...`) must be rejected
+    /// during `PrismHadamardConfig` construction, BEFORE it can ever reach
+    /// `ModuleChildren.unflattened`/`Module.update(modules:)` in
+    /// `loadPrismHadamardQwen35` - there, it force-unwraps inside
+    /// mlx-swift's `NestedDictionary` parsing and traps the process.
+    func testRejectsNonNumericLayerIndexInPath() throws {
+        let dir = try makeFixtureWithLayerModule(path: "model.layers.x.mlp.gate_proj")
+        XCTAssertThrowsError(try loadConfig(from: dir))
+    }
+
+    /// An out-of-range layer index (`model.layers.5...` on a 1-layer model)
+    /// must be rejected too - unlike the non-numeric case this one would
+    /// NOT crash downstream, it would be silently dropped by
+    /// `Module.update(modules:)`'s array/dictionary merge, leaving a
+    /// randomly-initialized `Linear`/`Embedding` in place with no verify
+    /// step to catch it.
+    func testRejectsOutOfRangeLayerIndexInPath() throws {
+        let dir = try makeFixtureWithLayerModule(path: "model.layers.5.mlp.gate_proj", numHiddenLayers: 1)
+        XCTAssertThrowsError(try loadConfig(from: dir))
+    }
+
     private func hadamardWithSignMode(_ mode: String) -> String {
         let block = 512
         let signValues = (0 ..< block).map { $0 % 2 == 0 ? "1" : "-1" }.joined(separator: ",")
@@ -356,6 +433,135 @@ final class PrismHadamardQwen35Tests: XCTestCase {
         """
     }
 
+    private func hadamardWithTransform(_ transform: String) -> String {
+        let block = 512
+        let signValues = (0 ..< block).map { $0 % 2 == 0 ? "1" : "-1" }.joined(separator: ",")
+        return """
+        {
+            "prism.hadamard.version": 1,
+            "prism.hadamard.block_size": \(block),
+            "prism.hadamard.transform": "\(transform)",
+            "prism.hadamard.axis": "input-last-dimension",
+            "prism.hadamard.sign_mode": "explicit",
+            "prism.hadamard.weight_names": ["language_model.lm_head.weight"],
+            "prism.hadamard.inverse_weight_names": ["language_model.model.embed_tokens.weight"],
+            "prism.hadamard.sign_widths": [\(block)],
+            "prism.hadamard.sign_values": [\(signValues)],
+            "prism.hadamard.gdn_v_grouped": true
+        }
+        """
+    }
+
+    private func hadamardWithAxis(_ axis: String) -> String {
+        let block = 512
+        let signValues = (0 ..< block).map { $0 % 2 == 0 ? "1" : "-1" }.joined(separator: ",")
+        return """
+        {
+            "prism.hadamard.version": 1,
+            "prism.hadamard.block_size": \(block),
+            "prism.hadamard.transform": "normalized-sylvester-walsh-hadamard",
+            "prism.hadamard.axis": "\(axis)",
+            "prism.hadamard.sign_mode": "explicit",
+            "prism.hadamard.weight_names": ["language_model.lm_head.weight"],
+            "prism.hadamard.inverse_weight_names": ["language_model.model.embed_tokens.weight"],
+            "prism.hadamard.sign_widths": [\(block)],
+            "prism.hadamard.sign_values": [\(signValues)],
+            "prism.hadamard.gdn_v_grouped": true
+        }
+        """
+    }
+
+    func testRejectsUnsupportedTransform() throws {
+        let dir = try makeFixture(hadamardJSON: hadamardWithTransform("some-other-rotation"))
+        XCTAssertThrowsError(try loadConfig(from: dir))
+    }
+
+    func testRejectsUnsupportedAxis() throws {
+        let dir = try makeFixture(hadamardJSON: hadamardWithAxis("output-first-dimension"))
+        XCTAssertThrowsError(try loadConfig(from: dir))
+    }
+
+    func testRejectsUnsupportedSchemaVersion() throws {
+        let block = 512
+        let badConfig = """
+        {
+            "schema_version": 1,
+            "model_type": "prism_hadamard_qwen35",
+            "text_config": {
+                "hidden_size": \(block), "intermediate_size": \(block), "num_hidden_layers": 1,
+                "num_attention_heads": 4, "num_key_value_heads": 4, "head_dim": \(block / 4),
+                "vocab_size": 32, "linear_num_value_heads": 4, "linear_num_key_heads": 4,
+                "linear_key_head_dim": 32, "linear_value_head_dim": 32,
+                "full_attention_interval": 4, "tie_word_embeddings": false
+            },
+            "modules": [
+                {"path": "lm_head", "block": \(block), "embedding": false, "dtype": "float16"},
+                {"path": "model.embed_tokens", "block": \(block), "embedding": true, "dtype": "float16"}
+            ],
+            "quantization": {"bits": 2, "group_size": 128, "mode": "affine"},
+            "tensor_namespace": "mlx-vlm-qwen3_5",
+            "gdn_activation_layout": "grouped",
+            "tie_word_embeddings": false
+        }
+        """
+        let dir = try makeFixture(configJSON: badConfig)
+        XCTAssertThrowsError(try loadConfig(from: dir))
+    }
+
+    func testRejectsUnsupportedModelType() throws {
+        let block = 512
+        let badConfig = """
+        {
+            "schema_version": 2,
+            "model_type": "qwen3_5",
+            "text_config": {
+                "hidden_size": \(block), "intermediate_size": \(block), "num_hidden_layers": 1,
+                "num_attention_heads": 4, "num_key_value_heads": 4, "head_dim": \(block / 4),
+                "vocab_size": 32, "linear_num_value_heads": 4, "linear_num_key_heads": 4,
+                "linear_key_head_dim": 32, "linear_value_head_dim": 32,
+                "full_attention_interval": 4, "tie_word_embeddings": false
+            },
+            "modules": [
+                {"path": "lm_head", "block": \(block), "embedding": false, "dtype": "float16"},
+                {"path": "model.embed_tokens", "block": \(block), "embedding": true, "dtype": "float16"}
+            ],
+            "quantization": {"bits": 2, "group_size": 128, "mode": "affine"},
+            "tensor_namespace": "mlx-vlm-qwen3_5",
+            "gdn_activation_layout": "grouped",
+            "tie_word_embeddings": false
+        }
+        """
+        let dir = try makeFixture(configJSON: badConfig)
+        XCTAssertThrowsError(try loadConfig(from: dir))
+    }
+
+    func testRejectsUnsupportedModuleDtype() throws {
+        let block = 512
+        let badConfig = """
+        {
+            "schema_version": 2,
+            "model_type": "prism_hadamard_qwen35",
+            "text_config": {
+                "hidden_size": \(block), "intermediate_size": \(block), "num_hidden_layers": 1,
+                "num_attention_heads": 4, "num_key_value_heads": 4, "head_dim": \(block / 4),
+                "vocab_size": 32, "linear_num_value_heads": 4, "linear_num_key_heads": 4,
+                "linear_key_head_dim": 32, "linear_value_head_dim": 32,
+                "full_attention_interval": 4, "tie_word_embeddings": false
+            },
+            "modules": [
+                {"path": "lm_head", "block": \(block), "embedding": false, "dtype": "bfloat16"},
+                {"path": "model.embed_tokens", "block": \(block), "embedding": true, "dtype": "float16"}
+            ],
+            "quantization": {"bits": 2, "group_size": 128, "mode": "affine"},
+            "tensor_namespace": "mlx-vlm-qwen3_5",
+            "gdn_activation_layout": "grouped",
+            "tie_word_embeddings": false
+        }
+        """
+        let dir = try makeFixture(configJSON: badConfig)
+        XCTAssertThrowsError(try loadConfig(from: dir))
+    }
+
     // MARK: - Architecture-detection routing
 
     /// The real pack's config.json carries BOTH a `model_type` of
@@ -392,12 +598,16 @@ final class PrismHadamardQwen35Tests: XCTestCase {
 
     /// Real config.json from the downloaded pack, if present: confirms the
     /// fixture assumption above (`vision_config` really is in the real
-    /// file) without requiring the weights themselves.
+    /// file) without requiring the weights themselves. Gated on
+    /// `KRILL_PRISM_BONSAI2_DIR`, exactly like `PrismHadamardReferenceParityTests`
+    /// - no absolute path in source, and NOT a manual HF-cache guess: point
+    /// it at wherever the checkpoint actually lives (e.g. `krill pull
+    /// bonsai-2-27b`'s destination under `~/.krill/models/blobs/`).
     func testRealConfigCarriesVisionConfig() throws {
-        let path = "/Users/sourav/.cache/huggingface/bonsai2-mlx-2bit/config.json"
-        guard FileManager.default.fileExists(atPath: path) else {
-            throw XCTSkip("Prism Hadamard pack config.json not present")
+        guard let dir = ProcessInfo.processInfo.environment["KRILL_PRISM_BONSAI2_DIR"] else {
+            throw XCTSkip("Set KRILL_PRISM_BONSAI2_DIR (see tools/verify_prism_hadamard_parity.py)")
         }
+        let path = dir + "/config.json"
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         XCTAssertEqual(json?["model_type"] as? String, "prism_hadamard_qwen35")
@@ -412,11 +622,11 @@ final class PrismHadamardQwen35Tests: XCTestCase {
     /// Constructs the full model and loads every weight (including all 402
     /// packed modules) against the real 27B pack. Deliberately does NOT run
     /// a forward pass - this is a "the loader is wired correctly" smoke
-    /// test, not a generation test.
+    /// test, not a generation test. Gated on `KRILL_PRISM_BONSAI2_DIR` -
+    /// see `testRealConfigCarriesVisionConfig` above.
     func testRealCheckpointLoads() throws {
-        let path = "/Users/sourav/.cache/huggingface/bonsai2-mlx-2bit"
-        guard FileManager.default.fileExists(atPath: path) else {
-            throw XCTSkip("Prism Hadamard pack not present")
+        guard let path = ProcessInfo.processInfo.environment["KRILL_PRISM_BONSAI2_DIR"] else {
+            throw XCTSkip("Set KRILL_PRISM_BONSAI2_DIR (see tools/verify_prism_hadamard_parity.py)")
         }
         let model = try loadModel(from: URL(fileURLWithPath: path))
         XCTAssertEqual(model.family, "prism_hadamard_qwen35")

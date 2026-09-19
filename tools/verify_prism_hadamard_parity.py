@@ -130,28 +130,56 @@ def dump(checkpoint_dir: Path, output: Path, prompt: str) -> None:
     print("prompt ids:", ids)
     print("top5:", [(t, repr(tok.decode([t])), round(float(last[t]), 3)) for t in top])
 
+    # Which layers to capture: the first 3 GatedDeltaNet (linear-attention)
+    # layers and the first 2 full-attention layers, derived from THIS
+    # checkpoint's own `full_attention_interval` rather than hardcoded to
+    # (0, 1, 2, 3, 7) - that tuple is only correct for an interval of 4. On a
+    # pack with a different interval, capturing the wrong indices as "full
+    # attention" would make the Swift side assert tight tolerances against an
+    # UNMASKED linear-attention layer (see the module docstring) and fail for
+    # a reason that has nothing to do with the port - precisely the hour of
+    # bisection this script exists to prevent a repeat of.
+    full_attention_interval = model.args.full_attention_interval
+    num_layers = len(model.model.layers)
+
+    def is_linear_layer(i: int) -> bool:
+        return (i + 1) % full_attention_interval != 0
+
+    linear_layers = [i for i in range(num_layers) if is_linear_layer(i)][:3]
+    full_attention_layers = [i for i in range(num_layers) if not is_linear_layer(i)][:2]
+    capture_layers = sorted(set(linear_layers + full_attention_layers))
+    layer_ceiling = max(capture_layers) + 1 if capture_layers else 0
+    print(f"capturing layers {capture_layers} (full-attention: {full_attention_layers}, "
+          f"interval {full_attention_interval})")
+
     out = {"prompt_ids": mx.array(ids), "logits": last}
     h = model.model.embed_tokens(mx.array([ids]))
     out["embed_out"] = h.astype(mx.float32)
     for i, layer in enumerate(model.model.layers):
-        # See the module docstring: mask=None means layers 3/7 (full
-        # attention) are captured UNMASKED. Do not assert on them downstream.
+        # See the module docstring: mask=None means every full-attention
+        # layer captured below is UNMASKED. Do not assert on them downstream.
         h = layer(h, mask=None, cache=None)
-        if i in (0, 1, 2, 3, 7):
+        if i in capture_layers:
             out[f"layer{i}_out"] = h.astype(mx.float32)
-        if i >= 7:
+        if i >= layer_ceiling - 1:
             break
 
     # fwht fixture: fixed input, both directions, at the checkpoint's own
-    # block size and the width-5120 sign vector (hidden_size for this pack;
-    # adjust if verifying a differently-shaped checkpoint).
+    # block size and its own hidden_size's sign vector (derived, not
+    # hardcoded - a pack whose hidden_size is not itself a declared sign
+    # width is a malformed contract, not a case to silently mis-key into).
     block = int(json.loads((checkpoint_dir / "hadamard.json").read_text())["prism.hadamard.block_size"])
     hidden = model.args.hidden_size
+    if hidden not in ref_signs:
+        raise SystemExit(
+            f"hadamard.json has no sign vector for width {hidden} (hidden_size); "
+            f"declared sign_widths are {sorted(ref_signs)}")
+    hidden_signs = ref_signs[hidden]
     mx.random.seed(0)
     t = mx.random.normal([2, hidden]).astype(mx.float16)
     out["fwht_in"] = t.astype(mx.float32)
-    out["fwht_fwd"] = fwht(t, block, ref_signs[hidden]).astype(mx.float32)
-    out["fwht_inv"] = fwht(t, block, ref_signs[hidden], inverse=True).astype(mx.float32)
+    out["fwht_fwd"] = fwht(t, block, hidden_signs).astype(mx.float32)
+    out["fwht_inv"] = fwht(t, block, hidden_signs, inverse=True).astype(mx.float32)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     mx.save_safetensors(str(output), out)

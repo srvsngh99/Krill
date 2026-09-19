@@ -253,10 +253,15 @@ let architectureRules: [ArchitectureRule] = [
     // "qwen3_5" or "qwen" - either would let a less specific rule steal this
     // checkpoint and load it as an ordinary affine Qwen3.5, which produces
     // fluent-but-wrong output (no crash) rather than an error. Always routes
-    // to the TEXT loader regardless of `vision_config`: PACK-RUNTIME.md and
-    // the bundled runtime are text-only for this pack (its vision tensors
-    // are present in the safetensors but excluded from the Hadamard
-    // manifest), unlike the `qwen3_5` rule's VL/text branch below.
+    // to the TEXT loader regardless of `vision_config`: the pack's
+    // documented loader (`runtime/artifact.py`) refuses it outright on its
+    // `schema_version == 1` gate, and its other bundled loader
+    // (`runtime/vision_artifact.py`) DOES open it and build a VL model -
+    // Krill's text-only choice here is deliberate (no VL runtime wired to
+    // this pack), not a reflection of the pack or its runtime being
+    // text-only. Its vision tensors are present in the safetensors but
+    // excluded from the Hadamard manifest. Unlike the `qwen3_5` rule's
+    // VL/text branch below, this rule never routes to a VL loader at all.
     ArchitectureRule(
         id: "prism_hadamard_qwen35",
         matches: { arch, mt in

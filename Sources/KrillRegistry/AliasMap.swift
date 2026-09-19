@@ -225,7 +225,7 @@ private let aliases: [String: ResolvedModel] = [
     // ~2.25 bits/weight nominal, config declares `bits: 2`). 27.36B total
     // params (24.35B backbone + 2.54B embed/lm_head + 0.46B vision tower).
     // `family: .prismHadamardQwen35` routes to `loadPrismHadamardQwen35`
-    // (PrismHadamardQwen35.swift), NOT the generic `.qwen35` path — an
+    // (PrismHadamardQwen35.swift), NOT the generic `.qwen35` path - an
     // ordinary affine load silently produces garbage (the Hadamard rotation
     // must be undone on ACTIVATIONS at inference; it is not baked into the
     // stored weights). Bisected against an mlx_lm-based reference: fwht /

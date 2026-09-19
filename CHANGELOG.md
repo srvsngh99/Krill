@@ -9,6 +9,20 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Added
+
+- **Native runtime for Prism ML's Ternary-Bonsai-2-27B** (registered as
+  `bonsai-2-27b`). Reuses the existing `Qwen35ForCausalLM` hybrid decoder
+  unchanged; the checkpoint's only delta is that 402 weight matrices are
+  stored affine 2-bit/group-128 with a blockwise Hadamard rotation folded
+  in, so `PrismPackedLinear`/`PrismPackedEmbedding` apply the matching
+  transform to activations at inference instead of loading the weights as
+  an ordinary (and silently wrong) affine quant. 27B-class quality at
+  ~1.72 bits/weight, 8.6 GB on disk. A new `ModelFamily.prismHadamardQwen35`
+  case, threaded through every family-keyed switch in the registry.
+  Text-only: the pack ships a vision tower, but it is not wired to any
+  Krill runtime, so vision is not advertised.
+
 ## [0.23.0] - 2026-08-29
 
 ### Added

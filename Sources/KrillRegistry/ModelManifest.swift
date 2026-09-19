@@ -168,11 +168,15 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     /// manifest paths, which apply the matching activation-side transform
     /// (`fwht`) before/after the quantized matmul - an ordinary affine load
     /// silently produces garbage, it does not error. TEXT-ONLY: the pack
-    /// ships a 333-tensor vision tower, but none of it is in the Hadamard
-    /// manifest and PACK-RUNTIME.md states the bundled runtime is text-only,
-    /// so this loader drops it and declares text generation only (see
+    /// ships a 333-tensor vision tower (`components.vision: true`), but none
+    /// of it is in the Hadamard manifest. The pack's documented loader
+    /// (`runtime/artifact.py`) refuses this pack outright on its
+    /// `schema_version == 1` gate; its OTHER bundled loader,
+    /// `runtime/vision_artifact.py`, opens it fine and builds a VL model.
+    /// Krill drops vision by choice here - no VL runtime is wired to this
+    /// pack - not because the pack or its runtime are text-only. See
     /// `ModelCapabilities`, which deliberately omits `.visionInput` here
-    /// unlike `.qwen35`).
+    /// unlike `.qwen35`.
     case prismHadamardQwen35 = "prism_hadamard_qwen35"
     /// LLaVA-1.5 vision-language family. A CLIP ViT vision tower + a
     /// multi-modal projector (linear -> gelu -> linear) + a Llama text
