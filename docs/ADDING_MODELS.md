@@ -91,16 +91,53 @@ If the model uses special chat tokens that don't survive decode->encode, add a d
 ### 7. Declare the family's runtime adapter (new family only)
 
 Adding a whole new `ModelFamily` (not just an alias of an existing
-one) means declaring its server-side contract in the registry so the
-server routes it without a new hand-written branch:
+one) touches more of the registry than it looks like. PR #315
+(`ModelFamily.prismHadamardQwen35`) is the reference: verify against
+`git show 32e5f0d` rather than trusting this list, because it is easy
+to under-scope this step. Five files, all exhaustively `switch
+family` (or a `ModelFamily` lookup), so most of these will not
+compile until every case is given a value - but two of them
+(`ModelManifest.swift`'s `detect`/`fromModelType` and
+`ModelProfiles.swift`) are plain functions that silently do the wrong
+thing instead of failing to build, so the compiler will not catch a
+skipped one:
 
-- `ModelCapabilities.swift`: add a `capabilities(for:)` and a
+- `ModelManifest.swift`: the `ModelFamily` enum case itself, an arm in
+  `detect(from:)`'s arch-substring chain (ordered before any generic
+  arm whose substring could also match), and a case in
+  `fromModelType`.
+- `ModelCapabilities.swift`: a `capabilities(for:)` case and a
   `supportTier(for:)` case.
-- `ModelAdapter.swift`: the `switch family` in `chatRouting`,
-  `requiresImageInput`, and `chatTemplate` is exhaustive, so a new
-  `ModelFamily` case will not compile until each is given a value.
-  Pick `.denseEngine` for a native Swift+MLX text/vision family
-  (Qwen 2.5-VL is one); `.mixtureOfExperts` for the MoE path.
+- `ModelAdapter.swift`: **five** exhaustive switches, not three -
+  `chatRouting`, `requiresImageInput`, `chatTemplate`,
+  `tokenizerPrompt`, and `kvCacheQuantization` all need a value.
+  `chatRouting` is `.denseEngine` for every native Swift+MLX family
+  today (the MoE-sidecar case this doc used to point at was deleted
+  once the last MoE family went native); `kvCacheQuantization` is
+  `.fp16Only` unless the family's forward closure genuinely accepts
+  `[QuantizedKVCache]` (only Gemma 4 does today).
+- `ModelProfiles.swift`: a `profile(for family:)` case, so `/model`'s
+  deep-dive does not silently fall through to `nil` (no curated
+  story) for the new family.
+
+**The trap that will not show up in any test.**
+`InferenceEngine.capabilities` (`Sources/KrillEngine/InferenceEngine.swift`,
+around line 151) does `ModelFamily(rawValue: loaded.family)` and, when
+that lookup FAILS, silently returns an EMPTY capability set - no
+error, no crash, nothing. `loaded.family` is the plain string the
+loader sets on `LoadedModel` (e.g. `family: "prism_hadamard_qwen35"`
+in `loadPrismHadamardQwen35`), matched against the new `ModelFamily`
+case's `rawValue`, NOT its Swift case name. These two strings are a
+contract: if they do not match exactly, the checkpoint loads fine,
+every load-time test passes, and the server then refuses even plain
+text generation, with nothing obviously broken anywhere - the failure
+surfaces as "the model will not chat," several layers away from the
+actual bug. This is precisely the mistake #315 nearly made: reusing
+`.qwen35` (`rawValue == "qwen3_5"`) for a loader that sets `family:
+"prism_hadamard_qwen35"` would have left every request to that family
+silently capability-less. Give the new case a `rawValue` string that
+is IDENTICAL to the literal the loader passes to `LoadedModel(family:)`,
+and grep for that literal to confirm the two actually agree.
 
 The server's `dispatchFamilyChat` and `ToolFormat.forFamily` then
 pick the family up automatically — do not add a `family == …` branch
@@ -118,6 +155,9 @@ in `Server.swift`.
 - [ ] Attention scale is correct (1/sqrt(d) vs 1.0)
 - [ ] Bias presence matches (bias: true vs false)
 - [ ] RoPE base and dimensions are correct
+- [ ] New family only: the `ModelFamily` case's `rawValue` matches the
+      loader's `LoadedModel(family:)` string exactly (see section 7 -
+      a mismatch fails silently, not at build or test time)
 
 ## Common Config Fields
 
