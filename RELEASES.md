@@ -7,6 +7,19 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.24.0 - 2026-09-20
+**Ternary-Bonsai-2-27B runs natively now.** Prism ML's from-scratch ternary
+requant of Qwen3.8-27B needed no new architecture: it's the same GatedDeltaNet
+hybrid decoder Krill already runs for Ornith, Qwythos and Qwen3.8-27B, just
+with 402 weight matrices carrying a blockwise Hadamard rotation folded into
+the 2-bit quantization. Krill undoes that rotation on activations at inference
+time, so the checkpoint loads correctly instead of silently wrong. `krill pull
+bonsai-2-27b` and you have 27B-class reasoning quality at 8.6 GB on disk.
+Text-only for now: the pack ships a vision tower, but nothing in Krill drives
+it yet.
+
+---
+
 ## v0.23.0 — 2026-08-29
 **A shell, in the chat.** Type `!git status` at the prompt and it runs — right
 there, in the session's working directory. The output lands in the transcript

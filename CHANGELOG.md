@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.24.0] - 2026-09-20
+
 ### Added
 
 - **Native runtime for Prism ML's Ternary-Bonsai-2-27B** (registered as
@@ -18,10 +20,13 @@ reverse chronological order. Versioning follows
   in, so `PrismPackedLinear`/`PrismPackedEmbedding` apply the matching
   transform to activations at inference instead of loading the weights as
   an ordinary (and silently wrong) affine quant. 27B-class quality at
-  ~1.72 bits/weight, 8.6 GB on disk. A new `ModelFamily.prismHadamardQwen35`
-  case, threaded through every family-keyed switch in the registry.
-  Text-only: the pack ships a vision tower, but it is not wired to any
-  Krill runtime, so vision is not advertised.
+  2-bit, 8.6 GB on disk (Prism's idealized ternary representation is
+  ~1.72 bits/weight; MLX's per-group scale + bias container is what
+  actually ships, at ~2.25 bits/weight nominal). A new
+  `ModelFamily.prismHadamardQwen35` case, threaded through every
+  family-keyed switch in the registry. Text-only: the pack ships a vision
+  tower, but it is not wired to any Krill runtime, so vision is not
+  advertised.
 
 ## [0.23.0] - 2026-08-29
 

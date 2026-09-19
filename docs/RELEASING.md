@@ -17,7 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| 2026-09-20 | #315 | Native runtime for Prism ML's Ternary-Bonsai-2-27B (`bonsai-2-27b`), new `ModelFamily.prismHadamardQwen35` | New pullable alias: confirm `prism-ml/Ternary-Bonsai-2-27B-mlx-2bit` is reachable before cutting the release, per the "Model-blob aliases must point at a repo that exists" trap below |
+| _(empty - cleared at v0.24.0)_ | | | |
 
 ### Known-open, NOT yet merged
 

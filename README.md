@@ -163,7 +163,7 @@ Full methodology and gates: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md), [`docs/B
 ```bash
 krill pull gemma-4-e2b       # Gemma 4 — text + image + audio, all native (also: -e4b, -12b flagship)
 krill pull qwen3.8-27b       # Qwen 3.8 27B — hybrid linear-attention VLM, text + image (~16 GiB)
-krill pull bonsai-2-27b      # Ternary-Bonsai-2-27B - 27B reasoning at ~1.72 bits/weight, text-only (~8.6 GiB)
+krill pull bonsai-2-27b      # Ternary-Bonsai-2-27B - 27B reasoning at 2-bit, text-only (~8.6 GiB on disk)
 krill pull qwen3-14b         # Qwen 3 (incl. MoE: qwen3-30b) — also Qwen 2.5: qwen2.5-7b
 krill pull llama-3.2-3b      # Llama 3.2 / 3.1 (also: llama-3.2-1b, llama-3.1-8b)
 krill pull mistral-7b        # Mistral 7B v0.3
