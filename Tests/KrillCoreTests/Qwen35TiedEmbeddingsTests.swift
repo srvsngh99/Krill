@@ -5,13 +5,14 @@ import MLXNN
 
 /// Regression guard for `mlx-community/Qwen3.5-4B-MLX-4bit`: unlike
 /// Ornith-9B/Qwythos-9B/Qwen3.8-27B (all untied), this checkpoint uses TIED
-/// embeddings and ships no `lm_head.*` weight at all, with `tie_word_embeddings`
-/// placed at config.json's TOP level rather than nested inside `text_config`.
-/// Before this fix `Qwen35ForCausalLM` always built an independent `lm_head`
-/// regardless of `tie_word_embeddings`, so a tied checkpoint silently left it
-/// randomly-initialized (the VL loader's `verify: []` never caught it) and
-/// generated fluent-looking garbage with no load error — confirmed against the
-/// real checkpoint via `krill run` before this fix landed.
+/// embeddings (`text_config.tie_word_embeddings: true`) and ships no
+/// `lm_head.*` weight at all. `Qwen35Config` already decoded that flag
+/// correctly - the bug was that `Qwen35ForCausalLM` never consulted it and
+/// always built an independent `lm_head` regardless, so a tied checkpoint
+/// silently left it randomly-initialized (the VL loader's `verify: []` never
+/// caught it) and generated fluent-looking garbage with no load error -
+/// confirmed against the real checkpoint via `krill run` before this fix
+/// landed.
 final class Qwen35TiedEmbeddingsTests: XCTestCase {
     // `head_dim: 8` with the default `partial_rotary_factor` (0.25) gives a
     // rotary dim of 2 - MLX's fused RoPE kernel requires an even dim, and the
@@ -73,49 +74,5 @@ final class Qwen35TiedEmbeddingsTests: XCTestCase {
         let got = logits.asType(.float32).asArray(Float.self)
         let want = expected.asType(.float32).asArray(Float.self)
         XCTAssertEqual(got, want, "tied lm_head projection must equal embed_tokens.asLinear")
-    }
-
-    /// `mlx-community/Qwen3.5-4B-MLX-4bit`'s config.json places
-    /// `tie_word_embeddings` as a SIBLING of `text_config`, not nested inside
-    /// it — `Qwen35VLConfig.init(from:)` must still pick it up (Ornith/
-    /// Qwythos/Qwen3.8-27B never exercise this since they are all untied).
-    func testVLConfigPicksUpTopLevelTieWordEmbeddings() throws {
-        let json = """
-        {
-            "text_config": {
-                "hidden_size": 8, "intermediate_size": 16, "num_hidden_layers": 2,
-                "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 4,
-                "vocab_size": 32, "full_attention_interval": 2,
-                "linear_num_value_heads": 2, "linear_num_key_heads": 1,
-                "linear_key_head_dim": 4, "linear_value_head_dim": 4,
-                "linear_conv_kernel_dim": 4
-            },
-            "vision_config": {},
-            "tie_word_embeddings": true
-        }
-        """
-        let config = try JSONDecoder().decode(Qwen35VLConfig.self, from: Data(json.utf8))
-        XCTAssertTrue(config.textConfig.tieWordEmbeddings)
-    }
-
-    /// A nested (per-`text_config`) `false` must not be clobbered by a missing
-    /// top-level key — the override only ever flips false -> true, never true
-    /// -> false, since the top-level key is absent on every untied checkpoint.
-    func testVLConfigDefaultsUntiedWhenNeitherLevelSetsIt() throws {
-        let json = """
-        {
-            "text_config": {
-                "hidden_size": 8, "intermediate_size": 16, "num_hidden_layers": 2,
-                "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 4,
-                "vocab_size": 32, "full_attention_interval": 2,
-                "linear_num_value_heads": 2, "linear_num_key_heads": 1,
-                "linear_key_head_dim": 4, "linear_value_head_dim": 4,
-                "linear_conv_kernel_dim": 4
-            },
-            "vision_config": {}
-        }
-        """
-        let config = try JSONDecoder().decode(Qwen35VLConfig.self, from: Data(json.utf8))
-        XCTAssertFalse(config.textConfig.tieWordEmbeddings)
     }
 }

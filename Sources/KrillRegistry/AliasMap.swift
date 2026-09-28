@@ -217,29 +217,16 @@ private let aliases: [String: ResolvedModel] = [
         name: "qwen3.8-27b", family: .qwen35, params: "27B", quant: "4bit", context: 262144),
 
     // Qwen3.5-4B (2026): Alibaba's small qwen3_5-class model — same hybrid
-    // 3×GatedDeltaNet→1×full-attention decoder as Ornith/Qwythos/Qwen3.8-27B,
-    // scaled down to 32 layers / 2560 hidden; `mrope_section` is [11,11,10]
-    // and `full_attention_interval` is 4, identical to the larger members.
-    // Affine int4 gs64, vision tower preserved bf16, no MTP head in the
-    // checkpoint (nothing to strip). Weight layout matches what `loadQwen35VL`
-    // expects (`language_model.model.*` / `vision_tower.*`, mlx_vlm-style) —
-    // no Krill-specific repackaging needed, so this points straight at
-    // `mlx-community/Qwen3.5-4B-MLX-4bit` rather than a srv-sngh mirror.
-    // ~2.8 GiB on disk / resident.
+    // decoder as Ornith/Qwythos/Qwen3.8-27B, scaled to 32 layers / 2560
+    // hidden. Weight layout already matches `loadQwen35VL` (mlx_vlm-style) —
+    // no repackaging needed, so this points straight at
+    // `mlx-community/Qwen3.5-4B-MLX-4bit`. ~2.8 GiB on disk.
     //
-    // UNLIKE the larger qwen3_5 members, this checkpoint uses TIED
-    // embeddings (`tie_word_embeddings: true`, placed at config.json's TOP
-    // level rather than nested in `text_config`) and ships no `lm_head.*`
-    // weight at all — Ornith/Qwythos/Qwen3.8-27B are all untied, so
-    // `Qwen35ForCausalLM` previously always built (and expected checkpoint
-    // weights for) an independent `lm_head`, which silently left it
-    // randomly-initialized here (lax VL-loader verify) and produced fluent-
-    // looking garbage with no load error. Fixed in this change: `lmHead` is
-    // now `Optional`, nil'd out when `tie_word_embeddings` is true, with
-    // `project(_:)` falling back to the tied embedding matrix
-    // (`Embedding.asLinear`) — the same pattern QwenModel/Qwen25VLModel/
-    // Qwen3MoEModel already use. Verified via a real `krill run`/`krill serve`
-    // load test: coherent chat + step-by-step reasoning, correct arithmetic.
+    // UNLIKE the larger members, this checkpoint uses TIED embeddings
+    // (`text_config.tie_word_embeddings: true`) with no `lm_head.*` weight —
+    // see the `Qwen35ForCausalLM.lmHead` doc comment and this PR for the fix
+    // that was needed. Verified via a real `krill run`/`krill serve` load
+    // test: coherent chat + reasoning, correct arithmetic.
     "qwen3.5-4b": ResolvedModel(
         repo: "mlx-community/Qwen3.5-4B-MLX-4bit",
         name: "qwen3.5-4b", family: .qwen35, params: "4B", quant: "4bit", context: 262144),

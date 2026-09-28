@@ -85,30 +85,17 @@ public struct Qwen35VLConfig: Decodable {
         case visionStartTokenId = "vision_start_token_id"
         case visionEndTokenId = "vision_end_token_id"
         case quantization
-        case tieWordEmbeddings = "tie_word_embeddings"
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        var tc = try c.decode(Qwen35Config.self, forKey: .textConfig)
+        textConfig = try c.decode(Qwen35Config.self, forKey: .textConfig)
         visionConfig = try c.decode(Qwen35VLVisionConfig.self, forKey: .visionConfig)
         imageTokenId = try c.decodeIfPresent(Int.self, forKey: .imageTokenId) ?? 248056
         videoTokenId = try c.decodeIfPresent(Int.self, forKey: .videoTokenId) ?? 248057
         visionStartTokenId = try c.decodeIfPresent(Int.self, forKey: .visionStartTokenId) ?? 248053
         visionEndTokenId = try c.decodeIfPresent(Int.self, forKey: .visionEndTokenId) ?? 248054
         quantization = try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantization)
-        // Ornith/Qwythos/Qwen3.8-27B never set this (all untied), but
-        // `mlx-community/Qwen3.5-4B-MLX-4bit` places `tie_word_embeddings` at
-        // the TOP level of config.json, sibling to `text_config`, rather than
-        // nested inside it - `Qwen35Config`'s own decoder only ever sees the
-        // `text_config` sub-object, so without this it silently defaults to
-        // `false` and the checkpoint's real (missing) `lm_head.weight` builds
-        // a randomly-initialized head that generates fluent-looking garbage
-        // with no load error. A top-level `true` always wins.
-        if let topLevelTied = try c.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings), topLevelTied {
-            tc.tieWordEmbeddings = true
-        }
-        textConfig = tc
     }
 }
 
