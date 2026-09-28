@@ -720,20 +720,6 @@ private struct Qwen35ConfigWrapper: Decodable {
     enum CodingKeys: String, CodingKey {
         case textConfig = "text_config"
         case quantization
-        case tieWordEmbeddings = "tie_word_embeddings"
-    }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        var tc = try c.decode(Qwen35Config.self, forKey: .textConfig)
-        quantization = try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantization)
-        // See the identical override in `Qwen35VLConfig.init(from:)`: some
-        // qwen3_5 configs (Qwen3.5-4B) place `tie_word_embeddings` at the TOP
-        // level, sibling to `text_config`, rather than nested inside it.
-        if let topLevelTied = try c.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings), topLevelTied {
-            tc.tieWordEmbeddings = true
-        }
-        textConfig = tc
     }
 }
 

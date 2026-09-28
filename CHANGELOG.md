@@ -17,15 +17,15 @@ reverse chronological order. Versioning follows
   Krill-specific repackaging required; the checkpoint already ships MTP-free,
   mlx_vlm-format weights). ~2.8 GiB on disk.
 - **Tied-embedding support for the native `.qwen35` runtime.** Unlike
-  Ornith/Qwythos/Qwen3.8-27B (all untied), Qwen3.5-4B ships `tie_word_embeddings:
-  true` with no separate `lm_head.*` weight, and places that flag at
-  config.json's top level rather than nested in `text_config`. Previously
-  `Qwen35ForCausalLM` always built an independent `lm_head`, so a tied
-  checkpoint silently loaded it randomly-initialized and generated fluent-
-  looking garbage with no load error. `lmHead` is now `Optional`, and
-  `project(_:)` falls back to the input embedding matrix
-  (`Embedding.asLinear`) when nil — the same pattern already used by
-  QwenModel/Qwen25VLModel/Qwen3MoEModel.
+  Ornith/Qwythos/Qwen3.8-27B (all untied), Qwen3.5-4B ships
+  `tie_word_embeddings: true` with no separate `lm_head.*` weight.
+  `Qwen35Config` already decoded that flag correctly, but
+  `Qwen35ForCausalLM` never consulted it and always built an independent
+  `lm_head`, so a tied checkpoint silently loaded it randomly-initialized
+  (the VL loader's lax verify never caught it) and generated fluent-looking
+  garbage with no load error. `lmHead` is now `Optional`, and `project(_:)`
+  falls back to the input embedding matrix (`Embedding.asLinear`) when nil —
+  the same pattern already used by QwenModel/Qwen25VLModel/Qwen3MoEModel.
 
 ## [0.24.0] - 2026-09-20
 
