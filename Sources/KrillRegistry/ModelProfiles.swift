@@ -41,6 +41,15 @@ public enum ModelProfiles {
             weaknesses: ["~16 GiB resident at int4 — little headroom on a 24GB box",
                          "Thinking mode is on by default and can be verbose unless effort is lowered"],
             goodFor: ["Coding and agents", "Vision-language", "Long-context research", "Multilingual tasks"]),
+        "qwen3.5-4b": ModelProfile(
+            displayName: "QWEN3.5", vendor: "Alibaba", released: "2026 (Qwen3.5)",
+            trainingCutoff: "not publicly disclosed",
+            tagline: "Small 4B vision-language model on the same Qwen3.5 hybrid decoder as Qwen3.8-27B, sized for constrained hardware.",
+            strengths: ["Same hybrid decoder efficiency as the larger Qwen3.5-class models at a fraction of the memory",
+                        "Native image understanding",
+                        "262K context natively"],
+            weaknesses: ["Much lower raw capability than the 9B/27B members of the same runtime family"],
+            goodFor: ["Low-memory devices", "Fast local chat", "Vision-language on a budget"]),
     ]
 
     /// Curated profile for a family, or nil if we have not written one.

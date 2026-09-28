@@ -720,6 +720,20 @@ private struct Qwen35ConfigWrapper: Decodable {
     enum CodingKeys: String, CodingKey {
         case textConfig = "text_config"
         case quantization
+        case tieWordEmbeddings = "tie_word_embeddings"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        var tc = try c.decode(Qwen35Config.self, forKey: .textConfig)
+        quantization = try c.decodeIfPresent(QuantizationConfig.self, forKey: .quantization)
+        // See the identical override in `Qwen35VLConfig.init(from:)`: some
+        // qwen3_5 configs (Qwen3.5-4B) place `tie_word_embeddings` at the TOP
+        // level, sibling to `text_config`, rather than nested inside it.
+        if let topLevelTied = try c.decodeIfPresent(Bool.self, forKey: .tieWordEmbeddings), topLevelTied {
+            tc.tieWordEmbeddings = true
+        }
+        textConfig = tc
     }
 }
 
@@ -753,6 +767,11 @@ func loadQwen35(configData: Data, directory: URL) throws -> LoadedModel {
         // outside the language model (`vision_tower.*`) are preserved here and
         // dropped in the rewrite below.
         keyPrefix: "language_model.",
+        // `Qwen35ForCausalLM.lmHead` is nil when `tie_word_embeddings` is
+        // true (see that type's doc comment) - skip the generic
+        // embed_tokens->lm_head weight duplication so `loadWeights` does not
+        // try to assign into a module that no longer exists.
+        tieWordEmbeddings: config.tieWordEmbeddings,
         keyRewrite: { weights in
             // mlx_lm's qwen3_5 sanitize() is conditional: both transforms apply
             // only to ORIGINAL torch-format checkpoints. Detect that BEFORE
