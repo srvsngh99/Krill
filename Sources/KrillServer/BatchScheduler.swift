@@ -76,17 +76,16 @@ actor BatchScheduler {
     /// Whether a request can join a batch. Batching helps only at
     /// `numParallel >= 2` on a batch-capable engine; multimodal rows and
     /// per-row seeded non-greedy sampling (whose RNG can't be isolated under a
-    /// shared step) take the serial path. A `logprobs` request is excluded
-    /// too (docs/LOGPROBS_PLAN.md §5.3): the continuous batcher's per-row
-    /// `Sampler` call and its `argMax`-only fast paths never compute a
-    /// log-softmax, so Phase 1 falls back to the serial plain-decode path,
-    /// which does.
+    /// shared step) take the serial path. A `logprobs` request is excluded too
+    /// (docs/LOGPROBS_PLAN.md §5.3: the continuous batcher's per-row `Sampler`
+    /// call and its `argMax`-only fast paths never compute a log-softmax) but
+    /// is filtered out by `submit`'s own early return before this is ever
+    /// called, so this gate does not need to re-check it.
     private func isEligible(params: SamplingParams, imageData: Data?, audioData: Data?,
-                            useSpeculative: Bool?, wantLogprobs: Bool) -> Bool {
+                            useSpeculative: Bool?) -> Bool {
         guard numParallel >= 2, engine.supportsBatchedDecode else { return false }
         guard imageData == nil, audioData == nil else { return false }
         if useSpeculative == true { return false }   // honor explicit spec opt-in serially
-        if wantLogprobs { return false }
         let greedy = params.temperature <= 0 && params.mirostat == 0
         if params.seed != nil && !greedy { return false }
         return true
@@ -141,10 +140,11 @@ actor BatchScheduler {
            currentConcurrency <= Self.specConcurrencyMaxFromEnvironment() {
             return serial()
         }
-        // wantLogprobs is always false here - the early return above already
-        // sent every logprobs request to serial().
+        // A logprobs request never reaches here - the early return above
+        // already sent it to serial() - so isEligible needs no wantLogprobs
+        // parameter of its own.
         guard isEligible(params: params, imageData: anyImage, audioData: audioData,
-                         useSpeculative: useSpeculative, wantLogprobs: false) else {
+                         useSpeculative: useSpeculative) else {
             // Surface the one case where the user asked for two features that
             // do not compose: an explicit speculative opt-in on a request that
             // would batch if ONLY the speculative flag were dropped. Speculative

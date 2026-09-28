@@ -1676,14 +1676,21 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
             for await event in tokenStream {
                 if event.isEnd {
+                    let tailEntryCountBefore = logprobsAgg.entries.count
                     let tail = logprobsAgg.finish()
-                    if !tail.isEmpty {
-                        // Tail text has no per-token attribution (see
-                        // LogprobsAggregator's doc comment); its chunk gets
-                        // `logprobs: null` like any other token-less chunk
-                        // when the request asked for logprobs.
+                    // A truncated (max_tokens) stream can end mid-hold: any
+                    // token still pending gets resolved here (finish() drains
+                    // everything - docs/LOGPROBS_PLAN.md finding #1), which
+                    // may add entries even when `tail` itself is empty (e.g.
+                    // the held text turns out to be reasoning and is
+                    // discarded, but a PRECEDING visible token was also
+                    // waiting on this same resolution). Send the chunk
+                    // whenever there is text OR new entries to carry.
+                    let tailEntries = wantLogprobs
+                        ? Array(logprobsAgg.entries[tailEntryCountBefore...]) : []
+                    if !tail.isEmpty || !tailEntries.isEmpty {
                         let chunk = sseChunk(id: id, content: tail, finishReason: nil,
-                                             logprobs: wantLogprobs ? NSNull() : nil)
+                                             logprobs: wantLogprobs ? logprobsChoiceJSON(content: tailEntries) : nil)
                         var buf = ByteBufferAllocator().buffer(capacity: chunk.utf8.count)
                         buf.writeString(chunk)
                         self.writeOnLoop(ctx, .body(.byteBuffer(buf)))
@@ -1717,12 +1724,18 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
                 let entryCountBefore = logprobsAgg.entries.count
                 let emit = logprobsAgg.consume(event)
-                if emit.isEmpty { continue }
-                // Only the entries THIS call added belong on this chunk (0 or
-                // 1 today, since one TokenEvent yields at most one entry).
-                let chunkLogprobs: Any? = wantLogprobs
-                    ? logprobsChoiceJSON(content: Array(logprobsAgg.entries[entryCountBefore...]))
-                    : nil
+                // Only the entries THIS call added belong on this chunk - can
+                // be several (a call can drain more than one previously-held
+                // token at once, docs/LOGPROBS_PLAN.md finding #1).
+                let newEntries = wantLogprobs ? Array(logprobsAgg.entries[entryCountBefore...]) : []
+                // A call that resolves pending tokens as VISIBLE but with no
+                // characters of their own (a byte-fallback piece whose own
+                // decode is "") can add entries while `emit` is still empty;
+                // that chunk must still go out so the entries are not lost -
+                // previously such a chunk "carried no content" and was
+                // skipped outright.
+                if emit.isEmpty && newEntries.isEmpty { continue }
+                let chunkLogprobs: Any? = wantLogprobs ? logprobsChoiceJSON(content: newEntries) : nil
                 let chunk = sseChunk(id: id, content: emit, finishReason: nil, logprobs: chunkLogprobs)
                 var buf = ByteBufferAllocator().buffer(capacity: chunk.utf8.count)
                 buf.writeString(chunk)

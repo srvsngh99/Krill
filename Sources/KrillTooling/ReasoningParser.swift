@@ -289,6 +289,21 @@ public final class StreamingReasoningFilter {
 
     public init() {}
 
+    /// Number of UTF-8 bytes currently held in the internal buffer - fed via
+    /// `consume(_:)` but not yet resolved (emitted or discarded). Read-only
+    /// introspection; does not affect filtering behavior. Exposed for
+    /// `KrillServer.LogprobsAggregator` (docs/LOGPROBS_PLAN.md finding #1),
+    /// which needs to attribute per-token `logprobs.content[]` entries to
+    /// this filter's emit/discard decisions without duplicating its state
+    /// machine: comparing this value before and after a `consume(_:)` call
+    /// (together with the fed and emitted lengths) tells the caller how many
+    /// bytes were newly resolved (emitted + discarded) this call, in UTF-8
+    /// byte units so Unicode grapheme-cluster merging at buffer seams (e.g.
+    /// a Devanagari base+matra split across two fed chunks) can never throw
+    /// the accounting off - UTF-8 byte counts are exactly additive under
+    /// string concatenation, `Character` counts are not.
+    public var pendingUTF8Length: Int { buffer.utf8.count }
+
     /// Feed the next streamed chunk. Returns the substring that is
     /// safe to emit to the client now.
     public func consume(_ chunk: String) -> String {

@@ -8,6 +8,22 @@ import KrillTooling
 // the "which tokens get an entry" rule (§4.3, §6 decision on the reasoning
 // filter) lives in exactly one place.
 
+/// The narrow slice of `InferenceEngine` that logprobs formatting needs:
+/// byte-exact recovery for a token id, independent of the lossy
+/// `decodeForOutput` path (docs/LOGPROBS_PLAN.md §4.2), and whether a token
+/// is a structural/special one that must never reach the visible answer.
+/// `InferenceEngine` already has all three methods with these exact
+/// signatures, so it conforms with an empty extension below - the protocol
+/// exists purely so `LogprobsAggregatorTests` can drive the aggregator with
+/// a synthetic byte table instead of a real loaded tokenizer.
+protocol TokenLogprobResolver {
+    func rawTokenBytes(for tokenId: Int) -> [UInt8]?
+    func lossyTokenString(bytes: [UInt8]) -> String
+    func isOutputSuppressedToken(_ tokenId: Int) -> Bool
+}
+
+extension InferenceEngine: TokenLogprobResolver {}
+
 /// One `logprobs.content[]` (or `top_logprobs[]`) entry as OpenAI's wire
 /// shape: `{token, logprob, bytes, top_logprobs?}`. Pure - the caller
 /// resolves `token`/`bytes` from the tokenizer before calling this.
@@ -29,7 +45,7 @@ func logprobEntryJSON(
 /// as a required list). `eng` provides the raw-piece byte recovery
 /// (`rawTokenBytes(for:)`, independent of the lossy `decodeForOutput` path -
 /// §4.2).
-func logprobsContentEntry(tokenId: Int, info: TokenLogprobInfo, eng: InferenceEngine) -> [String: Any] {
+func logprobsContentEntry(tokenId: Int, info: TokenLogprobInfo, eng: TokenLogprobResolver) -> [String: Any] {
     let bytes = eng.rawTokenBytes(for: tokenId) ?? []
     let token = eng.lossyTokenString(bytes: bytes)
     let alternates: [[String: Any]] = info.topAlternates.map { alt in
@@ -47,27 +63,83 @@ func logprobsContentEntry(tokenId: Int, info: TokenLogprobInfo, eng: InferenceEn
 /// itself already gets (docs/LOGPROBS_PLAN.md §4.3, §6 "which tokens get
 /// entries").
 ///
-/// Conservative alignment rule (documented limitation, phase 1): a token
-/// gets an entry only when `StreamingReasoningFilter.consume(_:)` emits back
-/// EXACTLY that token's own text for that call - i.e. the filter passed the
-/// chunk straight through with no cross-token buffering. This is correct for
-/// every ordinary token (buffering only ever engages while the filter is
-/// disambiguating a possible `<think>`/ATEM tag prefix) and for every
-/// reasoning-block-interior token (which never emits anything, len 0, and is
-/// correctly dropped). The rare case this under-reports is a token whose
-/// text is held because it LOOKS LIKE the start of a reasoning tag but turns
-/// out not to be one (e.g. ordinary prose containing the literal fragment
-/// "<th"), where the held text is later flushed together with a NEIGHBORING
-/// token's text; both tokens are dropped from `logprobs.content[]` rather
-/// than risking a misattributed token/bytes pair. This never duplicates an
-/// entry and never attaches the wrong bytes to a token.
+/// Required behaviour (finding #1 fix, replacing the old same-call/
+/// same-length rule that silently dropped any held or empty-decode token):
+/// EVERY generated token that contributes to the visible answer gets exactly
+/// one entry, in order; a token inside a reasoning block, or a suppressed/
+/// special token, gets none. In particular:
+///
+/// - A token the filter HOLDS while disambiguating a possible tag prefix
+///   (it buffers on `<`, which shows up in code - `x < y`, `<div>`,
+///   generics) is not lost: it stays pending until the hold resolves, then
+///   gets its entry (or is dropped, if the hold resolved into a real
+///   reasoning tag).
+/// - A token whose OWN `decodeForOutput` text is empty (one piece of a
+///   multi-byte character split across tokens - byte-fallback or a partial
+///   byte-level-BPE sequence) still gets a FIFO slot and, if it sits in the
+///   visible region, its own entry (with real `bytes` from
+///   `rawTokenBytes(for:)`, independent of the empty `decodeForOutput`
+///   text) - this is exactly the gap OpenAI's `bytes` field exists to close.
+/// - The final `finish()` flush resolves every token still pending (a
+///   `max_tokens`-truncated stream can end mid-hold), attributing entries
+///   there too, not dropping them.
+///
+/// Design: a FIFO of tokens fed to the filter but not yet resolved
+/// (emitted or discarded). `StreamingReasoningFilter` is not made
+/// token-aware itself (it is shared by CLI/TUI call sites this feature must
+/// not touch); instead this aggregator owns a PRIVATE filter instance and
+/// reconstructs, from `StreamingReasoningFilter.pendingUTF8Length` before
+/// and after each call plus the actual emitted text, exactly how many UTF-8
+/// bytes were newly resolved this call and whether they were emitted or
+/// discarded (see `resolveNewlyProcessed` for the exact accounting - it
+/// works in UTF-8 byte units specifically because `Character`/grapheme-
+/// cluster counts are NOT additive under string concatenation, e.g. a
+/// Devanagari base+matra pair split across two fed chunks would throw a
+/// `Character`-count-based version of this accounting off). Draining the
+/// FIFO in order then tells us, per pending token, whether it fell in the
+/// resolved-emit region, the resolved-discard region, or is still pending.
 final class LogprobsAggregator {
     private let filter = StreamingReasoningFilter()
-    private let eng: InferenceEngine
+    private let eng: TokenLogprobResolver
     private let enabled: Bool
     private(set) var entries: [[String: Any]] = []
 
-    init(engine: InferenceEngine, enabled: Bool) {
+    /// One token fed to the filter whose emit/discard fate is not yet fully
+    /// resolved. FIFO order matches feed order.
+    private struct Pending {
+        let tokenId: Int
+        let info: TokenLogprobInfo?
+        /// This token's OWN REMAINING (not yet resolved) contribution to
+        /// the filter's input stream. Starts as exactly `event.text`
+        /// (possibly "" - a byte-fallback/partial byte-level-BPE piece
+        /// whose own decode is empty) and is trimmed from the front as a
+        /// resolution call consumes part of it without fully resolving the
+        /// whole token (e.g. the first few characters of a long token are
+        /// discarded as reasoning content while the rest is still held).
+        /// Concatenating every still-pending token's `text`, in FIFO order,
+        /// always reproduces EXACTLY the filter's own internal buffer
+        /// content, which is what makes the byte-offset attribution below
+        /// exact without needing to ask the filter for its buffer directly.
+        var text: String
+        var utf8Length: Int { text.utf8.count }
+        /// True for a structural/special token that must never get an
+        /// entry regardless of where it falls (`InferenceEngine.
+        /// isOutputSuppressedToken`). Still occupies a FIFO slot (its own
+        /// `event.text` is always "" by construction) purely so the byte
+        /// tiling invariant holds even in that case.
+        let suppressed: Bool
+        /// True once ANY portion of this token (across however many partial
+        /// resolutions it took) has overlapped the emit region. A token
+        /// whose bytes straddle an emit/discard boundary (vanishingly rare -
+        /// would need a single generated token literally spanning a
+        /// reasoning-tag boundary) is attributed as visible if it overlaps
+        /// the emit side AT ALL, rather than risk splitting one token's
+        /// logprob entry into two.
+        var sawEmit: Bool = false
+    }
+    private var pending: [Pending] = []
+
+    init(engine: TokenLogprobResolver, enabled: Bool) {
         self.eng = engine
         self.enabled = enabled
     }
@@ -76,19 +148,132 @@ final class LogprobsAggregator {
     /// safe to emit to the client now (identical to calling the filter
     /// directly) - callers use this exactly as they used
     /// `reasoningFilter.consume(event.text)` before, whether or not
-    /// logprobs were requested.
+    /// logprobs were requested. When `enabled` is false this is a pure
+    /// passthrough with none of the FIFO bookkeeping below, so a request
+    /// that does not ask for logprobs pays nothing extra.
     func consume(_ event: TokenEvent) -> String {
+        guard enabled else { return filter.consume(event.text) }
+        pending.append(Pending(
+            tokenId: event.tokenId, info: event.logprob, text: event.text,
+            suppressed: eng.isOutputSuppressedToken(event.tokenId)))
+        let beforeLen = filter.pendingUTF8Length
         let emitted = filter.consume(event.text)
-        if enabled, let info = event.logprob, !emitted.isEmpty, emitted.count == event.text.count {
-            entries.append(logprobsContentEntry(tokenId: event.tokenId, info: info, eng: eng))
-        }
+        let afterLen = filter.pendingUTF8Length
+        resolveNewlyProcessed(consumedLen: beforeLen + event.text.utf8.count - afterLen, emitted: emitted)
         return emitted
     }
 
     /// Flush any trailing held text at end-of-stream (mirrors
-    /// `StreamingReasoningFilter.finish()`). Never attributed to an entry -
-    /// see the conservative-rule note above.
-    func finish() -> String { filter.finish() }
+    /// `StreamingReasoningFilter.finish()`), resolving every token still
+    /// pending - the filter's buffer is always empty afterward, so nothing
+    /// is left unattributed.
+    func finish() -> String {
+        guard enabled else { return filter.finish() }
+        let beforeLen = filter.pendingUTF8Length
+        let output = filter.finish()
+        resolveNewlyProcessed(consumedLen: beforeLen, emitted: output)
+        return output
+    }
+
+    /// Drain FIFO tokens whose bytes are now fully accounted for by this
+    /// call's `consumedLen` newly-resolved bytes (emitted + discarded,
+    /// computed by the caller from `pendingUTF8Length` before/after), and
+    /// decide which ones get an entry.
+    ///
+    /// `emitted`'s bytes are always either an exact PREFIX of the resolved
+    /// region (ordinary "text, then a tag/reasoning-block starts") or an
+    /// exact SUFFIX of it ("finishing a held reasoning block, then trailing
+    /// visible text") - `StreamingReasoningFilter`'s buffer only ever holds
+    /// ONE dangling ambiguous run at a time (a partial tag-prefix scan, a
+    /// partial closing-tag/ATEM-terminator suffix, or a partial ATEM header
+    /// probe), so a single `consume`/`finish` call resolves at most one
+    /// emit-run and one discard-run, strictly in stream order. Reconstructing
+    /// the resolved region's true bytes (by concatenating pending tokens'
+    /// `text`, per the FIFO invariant) and locating `emitted`'s bytes as a
+    /// prefix or suffix of it (byte comparison, not `Character`-based, so
+    /// Unicode grapheme merging at a concatenation seam can't mislead it)
+    /// recovers that split exactly.
+    private func resolveNewlyProcessed(consumedLen: Int, emitted: String) {
+        guard consumedLen > 0 else { return }
+        var fullBytes: [UInt8] = []
+        fullBytes.reserveCapacity(consumedLen)
+        for tok in pending {
+            if fullBytes.count >= consumedLen { break }
+            fullBytes.append(contentsOf: tok.text.utf8)
+        }
+        let consumedBytes = Array(fullBytes.prefix(consumedLen))
+        let emittedBytes = Array(emitted.utf8)
+
+        let emitRange: Range<Int>
+        if consumedBytes.starts(with: emittedBytes) {
+            // Emit-first: text before a tag/reasoning-block start (or pure
+            // emit, if nothing was discarded this call).
+            emitRange = 0 ..< emittedBytes.count
+        } else if emittedBytes.count <= consumedBytes.count,
+                  Array(consumedBytes.suffix(emittedBytes.count)) == emittedBytes {
+            // Discard-first: a held reasoning block/ATEM message closes,
+            // then trailing visible text follows in the same call (or pure
+            // discard, if `emittedBytes` is empty).
+            emitRange = (consumedBytes.count - emittedBytes.count) ..< consumedBytes.count
+        } else {
+            // Should not happen given the filter's one-dangling-run
+            // structure (see doc comment). Fail safe: attribute nothing as
+            // visible rather than risk pairing the wrong bytes with the
+            // wrong token - this can only under-report, never misattribute.
+            emitRange = consumedLen ..< consumedLen
+        }
+        drain(consumedLen: consumedLen, emitRange: emitRange)
+    }
+
+    /// Walk the FIFO from the front, popping every token FULLY covered by
+    /// `[0, consumedLen)` and appending an entry for each one that overlaps
+    /// `emitRange` (a zero-length token - empty own decode - counts as
+    /// overlapping when its offset falls anywhere in `[emitRange.lowerBound,
+    /// emitRange.upperBound)`, grouping it with whichever visible text
+    /// starts right there, per the "attributed together with the next
+    /// visible text" requirement). A suppressed token never gets an entry
+    /// regardless of overlap.
+    ///
+    /// A token only PARTIALLY covered by `[0, consumedLen)` (its resolution
+    /// spans more than one `consume`/`finish` call - e.g. a long reasoning
+    /// token whose front is discarded this call while its tail stays held)
+    /// is not popped: its `text` is trimmed to the still-unresolved
+    /// remainder and `sawEmit` is updated, so the NEXT call that fully
+    /// resolves it has the complete picture. Trimming is always safe at a
+    /// valid UTF-8 scalar boundary - `consumedLen` is derived from
+    /// `StreamingReasoningFilter`'s own Character-based buffer operations,
+    /// which only ever cut at whole-scalar (grapheme-cluster) boundaries of
+    /// its buffer, and every pending token's own text is independently a
+    /// run of whole scalars starting where the previous token's ended.
+    private func drain(consumedLen: Int, emitRange: Range<Int>) {
+        var offset = 0
+        var i = 0
+        while i < pending.count {
+            let tokLen = pending[i].utf8Length
+            let tokEnd = offset + tokLen
+            if tokEnd <= consumedLen {
+                let overlapsEmit = tokLen > 0
+                    ? (offset < emitRange.upperBound && tokEnd > emitRange.lowerBound)
+                    : (offset >= emitRange.lowerBound && offset < emitRange.upperBound)
+                let visible = pending[i].sawEmit || overlapsEmit
+                if visible, !pending[i].suppressed, let info = pending[i].info {
+                    entries.append(logprobsContentEntry(tokenId: pending[i].tokenId, info: info, eng: eng))
+                }
+                offset = tokEnd
+                i += 1
+            } else if offset < consumedLen {
+                let resolvedHere = consumedLen - offset
+                let overlapsEmit = offset < emitRange.upperBound && consumedLen > emitRange.lowerBound
+                pending[i].sawEmit = pending[i].sawEmit || overlapsEmit
+                let remaining = Array(pending[i].text.utf8).dropFirst(resolvedHere)
+                pending[i].text = String(decoding: remaining, as: UTF8.self)
+                break
+            } else {
+                break
+            }
+        }
+        pending.removeFirst(i)
+    }
 }
 
 /// `choices[].logprobs` object for a non-streaming chat completion, or the

@@ -264,41 +264,72 @@ public final class Sampler: @unchecked Sendable {
     public func sampleWithLogprobs(
         _ logits: MLXArray, recent: [Int] = [], mask: MLXArray? = nil, topLogprobs: Int
     ) -> (token: Int, tokenArray: MLXArray, info: TokenLogprobInfo) {
-        // Materialize an INDEPENDENT float32 copy of the raw distribution via
-        // a host round-trip before anything else runs. `to1D` is a pure
-        // pass-through (no slicing at all) when `logits` is already 1-D, and
-        // `applyPenalties`'s indexed scatter (`updatedAt`, `out[indices] =
-        // values`) mutates its MLXArray in place - two `to1D(logits)` calls
-        // on an already-1-D `logits` return the SAME underlying array, so
-        // without this copy a penalized/history-tracked request would
-        // silently corrupt the "raw" distribution this function exists to
-        // report (caught by SamplerLogprobsTests.
-        // testRawLogprobIgnoresActivePenalties: reported logprob for a
-        // repetition-penalized token matched the PENALIZED distribution, not
-        // the raw one, until this fix). Off the hot path (wantLogprobs only),
-        // so the extra host sync is an acceptable, deliberate cost.
-        let rawHost: [Float] = to1D(logits).asType(.float32).asArray(Float.self)
-        let raw1D = MLXArray(rawHost)
-        let forSampling = recent.isEmpty ? to1D(logits) : applyPenalties(to1D(logits), recent: recent)
-        let chosenArr = sampleFrom(forSampling, mask: mask)
-        let chosen = chosenArr.item(Int.self)
-
+        // Build the raw log-softmax GRAPH from the raw logits BEFORE
+        // `applyPenalties` runs, entirely on the GPU - no host round trip.
+        //
+        // Why this is safe despite aliasing: `to1D` is a pure pass-through
+        // (no slicing) when `logits` is already 1-D, and `MLXArray.asType`
+        // short-circuits to `return self` when the dtype already matches
+        // (MLXArray.swift), so `raw1D` can literally be the SAME Swift
+        // `MLXArray` object (a `final class`, so `let`-binding it is a
+        // reference copy) as `logits` itself. `applyPenalties`'s indexed
+        // scatter (`updatedAt`, `out[indices] = values`) mutates that
+        // object's `ctx` field IN PLACE (`mlx_array_set`) to now describe
+        // the scattered result - a later read of `raw1D`/`logits` (e.g.
+        // `.item()`) would see the penalized values, not the raw ones
+        // (this WAS the bug: SamplerLogprobsTests.
+        // testRawLogprobIgnoresActivePenalties failed until the previous fix
+        // forced a host round trip to break the alias). But every MLX
+        // *operation* (subtract, logSumExp, argSort, take, ...) captures its
+        // input's CURRENT underlying array value at the C-API call site into
+        // a brand-new, independent result object; it does not keep watching
+        // the Swift wrapper for later reassignment. So as long as the
+        // log-softmax graph (and the top-N gather over it) is CONSTRUCTED
+        // here, before `applyPenalties` is called below, its captured inputs
+        // are immune to that later mutation - no independent copy needed,
+        // on the host or the GPU. `SamplerLogprobsTests` covers this
+        // ordering directly (float32 and non-float32 logits, penalties
+        // active).
+        let raw1D = to1D(logits).asType(.float32)
         let logSoftmax = raw1D - raw1D.logSumExp(keepDims: false)
+
         let n = Swift.max(0, Swift.min(topLogprobs, logSoftmax.dim(0)))
-        var alternates: [TokenAltLogprob] = []
+        var topIdx: MLXArray?
+        var topVals: MLXArray?
         if n > 0 {
             // Descending sort via the negation trick used elsewhere in this
             // file (topPFilter, mirostatSample); N <= 20 keeps the gather cheap.
             let order = argSort(MLXArray(Float(0)) - logSoftmax, axis: -1)
-            let topIdx = order[0 ..< n]
-            let topVals = take(logSoftmax, topIdx, axis: 0)
-            // One combined eval + host sync for the whole top-N gather.
-            eval(topIdx, topVals)
+            let idx = order[0 ..< n]
+            topIdx = idx
+            topVals = take(logSoftmax, idx, axis: 0)
+        }
+
+        // NOW run the normal sampling path - temperature/top-k/top-p/min-p/
+        // penalties/grammar mask - on its own array. `applyPenalties` may
+        // mutate `to1D(logits)`'s object in place (see above), but the
+        // log-softmax graph above has already captured what it needs.
+        let forSampling = recent.isEmpty ? to1D(logits) : applyPenalties(to1D(logits), recent: recent)
+        let chosenArr = sampleFrom(forSampling, mask: mask)
+        // Gather the chosen token's own raw logprob on the GPU (no host
+        // sync yet) so it evaluates in the SAME round trip as the top-N.
+        let chosenLogprobArr = take(logSoftmax, chosenArr, axis: 0)
+
+        // ONE combined eval + host sync per step for everything this
+        // function needs: the chosen token, its logprob, and the top-N.
+        if let topIdx, let topVals {
+            eval(chosenArr, chosenLogprobArr, topIdx, topVals)
+        } else {
+            eval(chosenArr, chosenLogprobArr)
+        }
+        let chosen = chosenArr.item(Int.self)
+        let chosenLogprob = chosenLogprobArr.item(Float.self)
+        var alternates: [TokenAltLogprob] = []
+        if let topIdx, let topVals {
             let idxHost = topIdx.asArray(Int32.self)
             let valHost = topVals.asArray(Float.self)
             alternates = zip(idxHost, valHost).map { TokenAltLogprob(tokenId: Int($0), logprob: $1) }
         }
-        let chosenLogprob = logSoftmax[chosen].item(Float.self)
         return (chosen, chosenArr, TokenLogprobInfo(logprob: chosenLogprob, topAlternates: alternates))
     }
 
