@@ -20,6 +20,16 @@ public final class KrillTokenizer: @unchecked Sendable {
     /// vocab). Used to size the grammar logit mask to the logits width.
     /// `nil` when neither file declares it.
     public let vocabSize: Int?
+    /// True when `tokenizer.json`'s `pre_tokenizer`/`decoder` (searched
+    /// through a `Sequence` wrapper, same nesting `injectMetaspaceAddPrefixSpace`
+    /// handles) is (or contains) a `ByteLevel` stage — the GPT-2 `Ġ`/`Ċ`-style
+    /// byte<->unicode mapping used by Qwen/Llama-3-family tokenizers. `false`
+    /// for SentencePiece-style tokenizers (Metaspace `▁`, `<0xHH>`
+    /// byte-fallback). Resolved once at load; used by `rawTokenBytes(for:)` to
+    /// pick the right byte-recovery branch without per-piece guessing (a raw
+    /// piece consisting only of Latin-1-range characters is ambiguous between
+    /// the two schemes on its own — see docs/LOGPROBS_PLAN.md §4.2).
+    public let usesByteLevelPieces: Bool
     /// Token IDs whose decoded text is suppressed (rendered empty) by
     /// `decodeForOutput` so structural Gemma-4 media markers cannot leak into
     /// the visible answer. Resolved once at load from `gemmaMediaMarkerLiterals`
@@ -127,6 +137,10 @@ public final class KrillTokenizer: @unchecked Sendable {
 
         // Model vocab size (for sizing the grammar logit mask). Best-effort.
         self.vocabSize = Self.readVocabSize(directory: directory)
+
+        // Byte-level-BPE vs. SentencePiece detection for rawTokenBytes(for:).
+        // Best-effort: false (SentencePiece-style fallback) when unreadable.
+        self.usesByteLevelPieces = Self.readUsesByteLevelPieces(directory: directory)
 
         // Resolve the media-marker suppression set once (no-op on non-Gemma
         // tokenizers). Computed eagerly so the streaming decode path stays
@@ -290,6 +304,31 @@ public final class KrillTokenizer: @unchecked Sendable {
             if let vocab = model["vocab"] as? [Any] { return vocab.count }
         }
         return nil
+    }
+
+    /// Detect a `ByteLevel` pre-tokenizer/decoder stage in `tokenizer.json`,
+    /// searching through a `Sequence` wrapper's nested list the same way
+    /// `injectMetaspaceAddPrefixSpace` does (`pretokenizers` for
+    /// `pre_tokenizer`, `decoders` for `decoder`).
+    internal static func readUsesByteLevelPieces(directory: URL) -> Bool {
+        let url = directory.appendingPathComponent("tokenizer.json")
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return false }
+        if let pre = obj["pre_tokenizer"] as? [String: Any], nodeIsByteLevel(pre) { return true }
+        if let dec = obj["decoder"] as? [String: Any], nodeIsByteLevel(dec) { return true }
+        return false
+    }
+
+    private static func nodeIsByteLevel(_ node: [String: Any]) -> Bool {
+        if (node["type"] as? String) == "ByteLevel" { return true }
+        if let subs = node["pretokenizers"] as? [[String: Any]] {
+            return subs.contains(where: nodeIsByteLevel)
+        }
+        if let subs = node["decoders"] as? [[String: Any]] {
+            return subs.contains(where: nodeIsByteLevel)
+        }
+        return false
     }
 
     internal static func readExternalChatTemplate(directory: URL) -> String? {
@@ -631,6 +670,107 @@ public final class KrillTokenizer: @unchecked Sendable {
         // The streaming output path: byte-fallback recovery matters most here,
         // since this is what actually reaches the user token by token.
         return recoverByteFallback(tokenizer.decode(tokens: [token]), token)
+    }
+
+    /// GPT-2 `bytes_to_unicode`, inverted to scalar -> byte. Duplicated from
+    /// `KrillCore/WhisperTokenizer.swift`'s `makeByteDecoder()` — KrillTokenizer
+    /// does not depend on KrillCore, and this is a small, dependency-free,
+    /// pure table. Used by `rawTokenBytes(for:)` to recover exact bytes from a
+    /// byte-level-BPE piece (Qwen/Llama-3-family tokenizers, GPT-2 style
+    /// `Ġ`/`Ċ` mapping) without going through the lossy `decode`/
+    /// `decodeForOutput` path (docs/LOGPROBS_PLAN.md §4.2).
+    private static let gpt2ByteDecoder: [Character: UInt8] = {
+        var bs = [Int]()
+        bs.append(contentsOf: Int(Character("!").asciiValue!) ... Int(Character("~").asciiValue!))
+        bs.append(contentsOf: 0xA1 ... 0xAC)
+        bs.append(contentsOf: 0xAE ... 0xFF)
+        var cs = bs
+        var n = 0
+        for b in 0 ..< 256 where !bs.contains(b) {
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+        }
+        var dec = [Character: UInt8]()
+        for i in 0 ..< bs.count {
+            dec[Character(UnicodeScalar(cs[i])!)] = UInt8(bs[i])
+        }
+        return dec
+    }()
+
+    /// The exact UTF-8 (or byte-fallback) bytes a single generated token
+    /// represents, for the OpenAI `logprobs.content[].bytes` field
+    /// (docs/LOGPROBS_PLAN.md §4.2). Deliberately independent of
+    /// `decode(token:)`/`decodeForOutput(token:)`, which are lossy for a
+    /// standalone multi-byte SentencePiece byte-fallback piece (they return
+    /// `""` — see `recoverByteFallback`'s doc comment above). `bytes` must be
+    /// exact even when the paired `token` string is a lossy
+    /// replacement-character rendering.
+    ///
+    /// Tries, in priority order:
+    /// 1. A SentencePiece byte-fallback piece (`<0xHH>`, exactly 6 chars) ->
+    ///    the single literal byte, whether or not it is valid UTF-8 alone.
+    ///    Checked regardless of `usesByteLevelPieces` since a byte-fallback
+    ///    literal cannot occur in a genuine byte-level-BPE vocab.
+    /// 2. When `usesByteLevelPieces` is true: every character of the piece is
+    ///    mapped back through `gpt2ByteDecoder` (GPT-2 `Ġ`/`Ċ`-style,
+    ///    Qwen/Llama-3-family). A character outside the table should not
+    ///    happen for a genuine byte-level-BPE piece; fall back to plain UTF-8
+    ///    rather than silently drop or truncate.
+    /// 3. When `usesByteLevelPieces` is false and the piece contains `▁`
+    ///    (SentencePiece): `▁` becomes a literal space, the rest of the piece
+    ///    is taken as its own UTF-8 bytes.
+    /// 4. Otherwise, the plain UTF-8 bytes of the raw piece text.
+    ///
+    /// Branching on `usesByteLevelPieces` (resolved once from
+    /// `tokenizer.json`, not guessed per piece) matters because a raw piece
+    /// made up only of Latin-1-range characters is genuinely ambiguous
+    /// on its own: those characters are BOTH valid literal SentencePiece
+    /// text AND valid GPT-2 byte-level-BPE encodings of different bytes.
+    ///
+    /// Exposed as a pure function of the raw piece string
+    /// (`rawBytes(forPiece:isByteLevelBPE:)`) so each tokenizer style can be
+    /// unit-tested with literal piece strings, without needing a real loaded
+    /// vocabulary.
+    public func rawTokenBytes(for tokenId: Int) -> [UInt8] {
+        guard let piece = tokenizer.convertIdToToken(tokenId), !piece.isEmpty else {
+            return []
+        }
+        return Self.rawBytes(forPiece: piece, isByteLevelBPE: usesByteLevelPieces)
+    }
+
+    /// Pure piece-string -> bytes logic behind `rawTokenBytes(for:)`. See that
+    /// method's doc comment for the priority order.
+    public static func rawBytes(forPiece piece: String, isByteLevelBPE: Bool) -> [UInt8] {
+        guard !piece.isEmpty else { return [] }
+        if piece.count == 6, piece.hasPrefix("<0x"), piece.hasSuffix(">"),
+           let byte = UInt8(piece.dropFirst(3).dropLast(), radix: 16) {
+            return [byte]
+        }
+        if isByteLevelBPE {
+            var mapped = [UInt8]()
+            mapped.reserveCapacity(piece.count)
+            for ch in piece {
+                guard let b = gpt2ByteDecoder[ch] else {
+                    return Array(piece.utf8)
+                }
+                mapped.append(b)
+            }
+            return mapped
+        }
+        if piece.contains("\u{2581}") {
+            return Array(piece.replacingOccurrences(of: "\u{2581}", with: " ").utf8)
+        }
+        return Array(piece.utf8)
+    }
+
+    /// A best-effort, possibly-lossy display string for `rawTokenBytes(for:)`'s
+    /// bytes — U+FFFD replacement characters where the bytes are not valid
+    /// UTF-8 on their own (e.g. one half of a multi-byte SentencePiece
+    /// byte-fallback sequence). The OpenAI spec explicitly allows `token` to
+    /// be lossy here as long as `bytes` (above) is exact.
+    public func lossyTokenString(bytes: [UInt8]) -> String {
+        String(decoding: bytes, as: UTF8.self)
     }
 
     /// Apply chat template formatting for a conversation.

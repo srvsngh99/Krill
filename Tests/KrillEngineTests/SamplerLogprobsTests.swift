@@ -1,0 +1,134 @@
+import XCTest
+import MLX
+import KrillSampler
+
+/// `Sampler.sampleWithLogprobs` backs OpenAI/Ollama `logprobs` (Phase 1,
+/// docs/LOGPROBS_PLAN.md). The single most consequential decision it
+/// implements (§4.1): the reported logprob is a log-softmax of the RAW
+/// forward-pass logits - computed BEFORE penalties, temperature scaling, and
+/// top-k/top-p/min-p truncation, and identically defined at temperature 0
+/// (greedy). These tests fail if that ever regresses to a post-filter
+/// distribution.
+final class SamplerLogprobsTests: XCTestCase {
+    private let vocab = 32
+
+    /// Manual log-softmax reference, independent of the Sampler / MLX path.
+    private func manualLogSoftmax(_ logits: [Float]) -> [Float] {
+        let m = logits.max() ?? 0
+        let sumExp = logits.reduce(Float(0)) { $0 + Foundation.expf($1 - m) }
+        let logSumExp = m + Foundation.logf(sumExp)
+        return logits.map { $0 - logSumExp }
+    }
+
+    func testRawLogprobMatchesManualLogSoftmaxAtGreedy() {
+        var logits = [Float](repeating: 0, count: vocab)
+        logits[3] = 5.0
+        logits[7] = 4.0
+        logits[15] = -2.0
+        let expected = manualLogSoftmax(logits)
+
+        // Greedy: temperature 0, no filters.
+        let sampler = Sampler(params: .greedy)
+        let (token, _, info) = sampler.sampleWithLogprobs(MLXArray(logits), topLogprobs: 5)
+
+        XCTAssertEqual(token, 3, "greedy must still pick the argmax token")
+        XCTAssertEqual(info.logprob, expected[3], accuracy: 1e-4)
+    }
+
+    func testRawLogprobIsUnaffectedByTemperatureTopKTopP() {
+        var logits = [Float](repeating: 0, count: vocab)
+        logits[3] = 5.0
+        logits[7] = 4.0
+        logits[15] = -2.0
+        let expected = manualLogSoftmax(logits)
+
+        // A request with temperature/top-k/top-p active still reports the
+        // SAME raw logprob for whichever token gets sampled - the
+        // post-filter distribution must never leak into the reported value.
+        let sampler = Sampler(params: SamplingParams(temperature: 1.0, topP: 1.0, topK: 0))
+        let (token, _, info) = sampler.sampleWithLogprobs(MLXArray(logits), topLogprobs: 0)
+        XCTAssertEqual(info.logprob, expected[token], accuracy: 1e-4)
+    }
+
+    func testRawLogprobIgnoresActivePenalties() {
+        // A heavily repetition-penalized token's REPORTED logprob must still
+        // reflect the untouched raw distribution (docs/LOGPROBS_PLAN.md §4.1:
+        // "penalties are decoding heuristics, not the model's belief").
+        var logits = [Float](repeating: 0, count: vocab)
+        logits[3] = 5.0
+        let expected = manualLogSoftmax(logits)
+
+        let sampler = Sampler(params: SamplingParams(temperature: 0.0, repetitionPenalty: 4.0))
+        // Token 3 is "recent", so applyPenalties would divide its logit by 4
+        // before sampling - but greedy still argmaxes the RAW logits here
+        // since nothing else is anywhere near as large, and the REPORTED
+        // logprob for token 3 must equal the raw log-softmax regardless.
+        let (_, _, info) = sampler.sampleWithLogprobs(MLXArray(logits), recent: [3], topLogprobs: 0)
+        XCTAssertEqual(info.logprob, expected[3], accuracy: 1e-4)
+    }
+
+    func testTopLogprobsOrderedDescendingAndCorrectCount() {
+        var logits = [Float](repeating: -10, count: vocab)
+        logits[1] = 5.0   // rank 0
+        logits[2] = 4.0   // rank 1
+        logits[3] = 3.0   // rank 2
+        let expected = manualLogSoftmax(logits)
+
+        let sampler = Sampler(params: .greedy)
+        let (_, _, info) = sampler.sampleWithLogprobs(MLXArray(logits), topLogprobs: 3)
+
+        XCTAssertEqual(info.topAlternates.count, 3)
+        XCTAssertEqual(info.topAlternates.map(\.tokenId), [1, 2, 3])
+        for alt in info.topAlternates {
+            XCTAssertEqual(alt.logprob, expected[alt.tokenId], accuracy: 1e-4)
+        }
+        // Strictly descending.
+        for i in 1 ..< info.topAlternates.count {
+            XCTAssertGreaterThan(info.topAlternates[i - 1].logprob, info.topAlternates[i].logprob)
+        }
+    }
+
+    func testTopLogprobsZeroReturnsEmptyArray() {
+        var logits = [Float](repeating: 0, count: vocab)
+        logits[0] = 1.0
+        let sampler = Sampler(params: .greedy)
+        let (_, _, info) = sampler.sampleWithLogprobs(MLXArray(logits), topLogprobs: 0)
+        XCTAssertEqual(info.topAlternates.count, 0)
+    }
+
+    func testSampleWithLogprobsChosenTokenMatchesPlainSampleForSameSeed() {
+        // The ACTUAL token drawn must be identical to the existing `sample`
+        // path for the same inputs - `sampleWithLogprobs` must not change
+        // what gets sampled, only add reporting.
+        var logits = [Float](repeating: 0, count: vocab)
+        logits[9] = 10.0
+        let plain = Sampler(params: .greedy)
+        let withLP = Sampler(params: .greedy)
+        let plainToken = plain.sample(MLXArray(logits))
+        let (lpToken, _, _) = withLP.sampleWithLogprobs(MLXArray(logits), topLogprobs: 1)
+        XCTAssertEqual(plainToken, lpToken)
+        XCTAssertEqual(plainToken, 9)
+    }
+
+    func testGrammarMaskDoesNotAffectReportedRawLogprob() {
+        // A grammar mask forbids a token for SAMPLING purposes only; the
+        // reported logprob must reflect the unmasked raw distribution
+        // (docs/LOGPROBS_PLAN.md §4.1 - "before... grammar mask").
+        var logits = [Float](repeating: 0, count: vocab)
+        logits[3] = 5.0
+        logits[7] = 4.0
+        let expected = manualLogSoftmax(logits)
+
+        var maskValues = [Float](repeating: 0, count: vocab)
+        maskValues[3] = -2e9   // forbid token 3 in the grammar mask
+        let mask = MLXArray(maskValues)
+
+        let sampler = Sampler(params: .greedy)
+        let (token, _, info) = sampler.sampleWithLogprobs(MLXArray(logits), mask: mask, topLogprobs: 2)
+        XCTAssertEqual(token, 7, "masked token 3 must never be sampled")
+        // The top alternate (rank 0 of the RAW distribution) is still token 3,
+        // even though it could never be sampled under the mask.
+        XCTAssertEqual(info.topAlternates.first?.tokenId, 3)
+        XCTAssertEqual(info.topAlternates.first?.logprob ?? .nan, expected[3], accuracy: 1e-4)
+    }
+}

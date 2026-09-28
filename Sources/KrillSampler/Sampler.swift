@@ -241,6 +241,67 @@ public final class Sampler: @unchecked Sendable {
         return token.asType(.int32)
     }
 
+    /// Sample the next token AND compute raw-distribution logprob info for
+    /// it, per docs/LOGPROBS_PLAN.md §4.1/§5.1. This is the ONLY sampling
+    /// entry point that pays the log-softmax + top-N cost; `sample`/
+    /// `sampleArray` above are byte-for-byte unchanged and remain the hot
+    /// path when logprobs are not requested (`InferenceEngine` only calls
+    /// this method when a request set `wantLogprobs`).
+    ///
+    /// The sampled token still goes through the normal path (penalties ->
+    /// `sampleFrom`, i.e. temperature/top-k/top-p/min-p/grammar mask) —
+    /// only the REPORTED logprob is computed from the raw, pre-filter
+    /// logits, taken independently so the penalty scatter in
+    /// `applyPenalties` cannot alias the array this reads.
+    ///
+    /// - Parameters:
+    ///   - logits: Raw logits, shape `[B, vocabSize]` / `[B, 1, vocabSize]` / `[vocab]`.
+    ///   - recent: Trailing token window for penalties (empty when `needsHistory` is false).
+    ///   - mask: Optional grammar logit mask, applied only to the sampling path (never to the reported logprobs).
+    ///   - topLogprobs: Number of raw top-N alternates to report (0...20).
+    /// - Returns: The sampled token ID, that token as a 1-element `MLXArray`
+    ///   (so callers needing an on-GPU handle don't have to re-box it), and its logprob info.
+    public func sampleWithLogprobs(
+        _ logits: MLXArray, recent: [Int] = [], mask: MLXArray? = nil, topLogprobs: Int
+    ) -> (token: Int, tokenArray: MLXArray, info: TokenLogprobInfo) {
+        // Materialize an INDEPENDENT float32 copy of the raw distribution via
+        // a host round-trip before anything else runs. `to1D` is a pure
+        // pass-through (no slicing at all) when `logits` is already 1-D, and
+        // `applyPenalties`'s indexed scatter (`updatedAt`, `out[indices] =
+        // values`) mutates its MLXArray in place - two `to1D(logits)` calls
+        // on an already-1-D `logits` return the SAME underlying array, so
+        // without this copy a penalized/history-tracked request would
+        // silently corrupt the "raw" distribution this function exists to
+        // report (caught by SamplerLogprobsTests.
+        // testRawLogprobIgnoresActivePenalties: reported logprob for a
+        // repetition-penalized token matched the PENALIZED distribution, not
+        // the raw one, until this fix). Off the hot path (wantLogprobs only),
+        // so the extra host sync is an acceptable, deliberate cost.
+        let rawHost: [Float] = to1D(logits).asType(.float32).asArray(Float.self)
+        let raw1D = MLXArray(rawHost)
+        let forSampling = recent.isEmpty ? to1D(logits) : applyPenalties(to1D(logits), recent: recent)
+        let chosenArr = sampleFrom(forSampling, mask: mask)
+        let chosen = chosenArr.item(Int.self)
+
+        let logSoftmax = raw1D - raw1D.logSumExp(keepDims: false)
+        let n = Swift.max(0, Swift.min(topLogprobs, logSoftmax.dim(0)))
+        var alternates: [TokenAltLogprob] = []
+        if n > 0 {
+            // Descending sort via the negation trick used elsewhere in this
+            // file (topPFilter, mirostatSample); N <= 20 keeps the gather cheap.
+            let order = argSort(MLXArray(Float(0)) - logSoftmax, axis: -1)
+            let topIdx = order[0 ..< n]
+            let topVals = take(logSoftmax, topIdx, axis: 0)
+            // One combined eval + host sync for the whole top-N gather.
+            eval(topIdx, topVals)
+            let idxHost = topIdx.asArray(Int32.self)
+            let valHost = topVals.asArray(Float.self)
+            alternates = zip(idxHost, valHost).map { TokenAltLogprob(tokenId: Int($0), logprob: $1) }
+        }
+        let chosenLogprob = logSoftmax[chosen].item(Float.self)
+        return (chosen, chosenArr, TokenLogprobInfo(logprob: chosenLogprob, topAlternates: alternates))
+    }
+
     /// Mirostat v2 (and a v1 approximation): keep the running surprise
     /// estimate `mu`, truncate the sorted distribution where surprise
     /// exceeds `mu`, sample, then update `mu` by `eta * (tau - observed)`.
@@ -271,6 +332,38 @@ public final class Sampler: @unchecked Sendable {
 
 private extension Float {
     static func log(_ x: Float) -> Float { Foundation.log(x) }
+}
+
+// MARK: - Logprobs (OpenAI/Ollama `logprobs` support, Phase 1)
+
+/// One alternate token's raw log-probability, part of `TokenLogprobInfo.topAlternates`.
+public struct TokenAltLogprob: Sendable, Equatable {
+    public let tokenId: Int
+    public let logprob: Float
+    public init(tokenId: Int, logprob: Float) {
+        self.tokenId = tokenId
+        self.logprob = logprob
+    }
+}
+
+/// Raw-distribution logprob info for one sampled token: a plain
+/// log-softmax of the RAW forward-pass logits, computed in float32,
+/// BEFORE `applyPenalties`, temperature scaling, top-k/top-p/min-p
+/// truncation, and any grammar mask — see docs/LOGPROBS_PLAN.md §4.1.
+/// `nil` on a `TokenEvent` unless the request asked for logprobs, so the
+/// default decode path never computes this.
+public struct TokenLogprobInfo: Sendable, Equatable {
+    /// The sampled token's own raw logprob (identically defined at
+    /// temperature 0 / greedy, since it does not depend on the sampling path).
+    public let logprob: Float
+    /// True top-N alternates of the raw distribution, highest logprob first.
+    /// Length equals the request's `top_logprobs` (0...20) — NOT necessarily
+    /// including the sampled token unless it is genuinely in the top-N.
+    public let topAlternates: [TokenAltLogprob]
+    public init(logprob: Float, topAlternates: [TokenAltLogprob]) {
+        self.logprob = logprob
+        self.topAlternates = topAlternates
+    }
 }
 
 /// Scatter `values` into `base` at `indices` (1-D), returning a new array.

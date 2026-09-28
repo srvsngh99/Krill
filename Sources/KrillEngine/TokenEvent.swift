@@ -1,4 +1,5 @@
 import KrillCore
+import KrillSampler
 
 /// A single token event emitted during generation.
 public struct TokenEvent: Sendable {
@@ -14,11 +15,19 @@ public struct TokenEvent: Sendable {
     /// Whether this is the final token (EOS or max_tokens reached).
     public let isEnd: Bool
 
-    public init(tokenId: Int, text: String, elapsed: Double, isEnd: Bool = false) {
+    /// Raw-distribution logprob info for this token (OpenAI/Ollama
+    /// `logprobs`, docs/LOGPROBS_PLAN.md). `nil` unless the request set
+    /// `wantLogprobs` on `InferenceEngine.generate(...)` — every existing
+    /// caller leaves this off, so this field costs nothing downstream of the
+    /// engine on the default path.
+    public let logprob: TokenLogprobInfo?
+
+    public init(tokenId: Int, text: String, elapsed: Double, isEnd: Bool = false, logprob: TokenLogprobInfo? = nil) {
         self.tokenId = tokenId
         self.text = text
         self.elapsed = elapsed
         self.isEnd = isEnd
+        self.logprob = logprob
     }
 }
 

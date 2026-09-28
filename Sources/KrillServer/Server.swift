@@ -688,7 +688,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         contextLimit: Int? = nil,
         promptTemplateOverride: String? = nil,
         format: OutputFormat? = nil,
-        imagesData: [Data] = []
+        imagesData: [Data] = [],
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0
     ) async -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         if let sched = await engines.scheduler(for: eng) {
             // Current concurrency drives the load-adaptive spec/batch decision in
@@ -699,14 +701,16 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
                 imageData: imageData, audioData: audioData,
                 contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
-                format: format, currentConcurrency: concurrency, imagesData: imagesData)
+                format: format, currentConcurrency: concurrency, imagesData: imagesData,
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
         }
         return eng.generate(
             messages: messages, params: params, maxTokens: maxTokens,
             useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
             imageData: imageData, audioData: audioData,
             contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
-            format: format, imagesData: imagesData)
+            format: format, imagesData: imagesData,
+            wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
     }
 
     /// Prompt-shaped convenience over ``runGenerate(_:messages:...)`` mirroring
@@ -967,13 +971,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 context: context, messages: genMessages,
                 params: effParams, maxTokens: effMax,
                 media: decodedMedia, responseFormat: request.responseFormat,
-                contextLimit: effCtx, includeUsage: request.includeUsage)
+                contextLimit: effCtx, includeUsage: request.includeUsage,
+                wantLogprobs: request.wantLogprobs, topLogprobs: request.topLogprobs)
         } else {
             handleNonStreamingCompletion(
                 context: context, messages: genMessages,
                 params: effParams, maxTokens: effMax,
                 media: decodedMedia, responseFormat: request.responseFormat,
-                contextLimit: effCtx)
+                contextLimit: effCtx,
+                wantLogprobs: request.wantLogprobs, topLogprobs: request.topLogprobs)
         }
     }
 
@@ -1360,13 +1366,25 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 contextLimit: toolCtx,
                 promptTemplateOverride: modelTemplateOverride(),
                 format: constrainFormat,
-                imagesData: imagesData)
+                imagesData: imagesData,
+                wantLogprobs: request.wantLogprobs, topLogprobs: request.topLogprobs)
 
+            // logprobs (Phase 1, OpenAI dialect only - docs/LOGPROBS_PLAN.md
+            // §3.3's tool-call note): collected the same way as the no-tools
+            // path, alongside (not instead of) the whole-string
+            // `ReasoningParser.strip` this handler already uses for
+            // tool-call extraction below - `full` (used for tool-call
+            // parsing) is untouched; the aggregator's own filtered text is
+            // used only to decide which tokens' entries survive.
+            let wantLogprobs = style == .openAI && request.wantLogprobs
+            let logprobsAgg = wantLogprobs ? LogprobsAggregator(engine: eng, enabled: true) : nil
             var full = ""
             for await event in tokenStream {
                 if event.isEnd { break }
                 full += event.text
+                _ = logprobsAgg?.consume(event)
             }
+            _ = logprobsAgg?.finish()
             if ProcessInfo.processInfo.environment["KRILL_TOOL_DEBUG"] != nil {
                 FileHandle.standardError.write(Data(
                     "[KRILL_TOOL_DEBUG] raw=<<<\(full)>>>\n".utf8))
@@ -1419,6 +1437,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     message["content"] = NSNull()
                     message["tool_calls"] = ToolCalling.openAIToolCalls(calls)
                 }
+                // Phase 1 (docs/LOGPROBS_PLAN.md §3.3): a tool_calls reply
+                // gets `logprobs: null` even if the request asked for it -
+                // the token-level entries collected above describe the raw
+                // (pre-tool-extraction) text, which is not what a tool_calls
+                // choice returns as content. A plain-content reply (tools
+                // were offered but not used) gets the real entries.
+                let choiceLogprobs: Any = (wantLogprobs && calls.isEmpty)
+                    ? logprobsChoiceJSON(content: logprobsAgg?.entries ?? [])
+                    : NSNull()
                 response = [
                     "id": "chatcmpl-\(UUID().uuidString.prefix(8))",
                     "object": "chat.completion",
@@ -1435,6 +1462,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         "finish_reason": calls.isEmpty
                             ? (stats?.hitTokenLimit == true ? "length" : "stop")
                             : "tool_calls",
+                        "logprobs": choiceLogprobs,
                     ]],
                     "usage": [
                         "prompt_tokens": stats?.promptTokens ?? 0,
@@ -1476,15 +1504,20 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 var delta: [String: Any] = ["role": "assistant"]
                 if let tc = msg["tool_calls"] { delta["tool_calls"] = tc }
                 if let c = msg["content"] as? String { delta["content"] = c }
+                var streamedChoice: [String: Any] = [
+                    "index": 0, "delta": delta,
+                    "finish_reason": choice["finish_reason"] ?? "stop",
+                ]
+                // Carry the same `logprobs` this turn's assembled response
+                // choice got (null for tool_calls, entries otherwise) onto
+                // this single SSE chunk (docs/LOGPROBS_PLAN.md §3.3).
+                if let lp = choice["logprobs"] { streamedChoice["logprobs"] = lp }
                 let chunk: [String: Any] = [
                     "id": response["id"] ?? "chatcmpl",
                     "object": "chat.completion.chunk",
                     "created": Int(Date().timeIntervalSince1970),
                     "model": modelName,
-                    "choices": [[
-                        "index": 0, "delta": delta,
-                        "finish_reason": choice["finish_reason"] ?? "stop",
-                    ]],
+                    "choices": [streamedChoice],
                 ]
                 self.writeOnLoop(ctx, .head(ServerResponseHeads.openAIStreaming(cors: self.corsHeaders())))
                 self.writeSSEJSON(ctx, chunk)
@@ -1586,7 +1619,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         media: DecodedMedia? = nil,
         responseFormat: ResponseFormat? = nil,
         contextLimit: Int? = nil,
-        includeUsage: Bool = false
+        includeUsage: Bool = false,
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0
     ) {
         // Write the SSE head synchronously within the channelRead call
         // chain (NIO requires the response begin here, not from a detached
@@ -1627,24 +1662,34 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 contextLimit: contextLimit,
                 promptTemplateOverride: modelTemplateOverride(),
                 format: StructuredOutput.engineFormat(for: responseFormat),
-                imagesData: imagesData)
+                imagesData: imagesData,
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
 
             let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
-            // Strip <think>/<thinking> from streamed chunks. Holds
-            // tokens only while an opening tag prefix is ambiguous;
-            // pure passthrough once outside any reasoning block.
-            let reasoningFilter = StreamingReasoningFilter()
+            // Strip <think>/<thinking> from streamed chunks (and, when
+            // logprobs were requested, collect the logprobs.content[] entry
+            // for each chunk's token alongside the same filtering decision -
+            // docs/LOGPROBS_PLAN.md §3.3/§4.3). Holds tokens only while an
+            // opening tag prefix is ambiguous; pure passthrough once outside
+            // any reasoning block.
+            let logprobsAgg = LogprobsAggregator(engine: eng, enabled: wantLogprobs)
 
             for await event in tokenStream {
                 if event.isEnd {
-                    let tail = reasoningFilter.finish()
+                    let tail = logprobsAgg.finish()
                     if !tail.isEmpty {
-                        let chunk = sseChunk(id: id, content: tail, finishReason: nil)
+                        // Tail text has no per-token attribution (see
+                        // LogprobsAggregator's doc comment); its chunk gets
+                        // `logprobs: null` like any other token-less chunk
+                        // when the request asked for logprobs.
+                        let chunk = sseChunk(id: id, content: tail, finishReason: nil,
+                                             logprobs: wantLogprobs ? NSNull() : nil)
                         var buf = ByteBufferAllocator().buffer(capacity: chunk.utf8.count)
                         buf.writeString(chunk)
                         self.writeOnLoop(ctx, .body(.byteBuffer(buf)))
                     }
-                    let chunk = sseChunk(id: id, content: nil, finishReason: "stop")
+                    let chunk = sseChunk(id: id, content: nil, finishReason: "stop",
+                                         logprobs: wantLogprobs ? NSNull() : nil)
                     var buf = ByteBufferAllocator().buffer(capacity: chunk.utf8.count)
                     buf.writeString(chunk)
                     self.writeOnLoop(ctx, .body(.byteBuffer(buf)))
@@ -1670,9 +1715,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     break
                 }
 
-                let emit = reasoningFilter.consume(event.text)
+                let entryCountBefore = logprobsAgg.entries.count
+                let emit = logprobsAgg.consume(event)
                 if emit.isEmpty { continue }
-                let chunk = sseChunk(id: id, content: emit, finishReason: nil)
+                // Only the entries THIS call added belong on this chunk (0 or
+                // 1 today, since one TokenEvent yields at most one entry).
+                let chunkLogprobs: Any? = wantLogprobs
+                    ? logprobsChoiceJSON(content: Array(logprobsAgg.entries[entryCountBefore...]))
+                    : nil
+                let chunk = sseChunk(id: id, content: emit, finishReason: nil, logprobs: chunkLogprobs)
                 var buf = ByteBufferAllocator().buffer(capacity: chunk.utf8.count)
                 buf.writeString(chunk)
                 self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
@@ -1688,7 +1739,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         params: SamplingParams, maxTokens: Int,
         media: DecodedMedia? = nil,
         responseFormat: ResponseFormat? = nil,
-        contextLimit: Int? = nil
+        contextLimit: Int? = nil,
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0
     ) {
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
@@ -1708,15 +1761,34 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 contextLimit: contextLimit,
                 promptTemplateOverride: modelTemplateOverride(),
                 format: StructuredOutput.engineFormat(for: responseFormat),
-                imagesData: imagesData)
+                imagesData: imagesData,
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
 
+            // logprobsAgg is built (and, when `wantLogprobs` is true, driven
+            // per-token below) ONLY on the logprobs path; the plain path
+            // below is untouched from before this feature existed - same
+            // whole-string accumulate-then-`ReasoningParser.strip` behavior,
+            // byte-for-byte, so a request that doesn't ask for logprobs never
+            // pays for or risks the incremental filter (docs/LOGPROBS_PLAN.md
+            // §5.2 "zero cost when off").
+            let logprobsAgg = wantLogprobs ? LogprobsAggregator(engine: eng, enabled: true) : nil
             var fullContent = ""
             for await event in tokenStream {
                 if event.isEnd { break }
-                fullContent += event.text
+                if let logprobsAgg {
+                    fullContent += logprobsAgg.consume(event)
+                } else {
+                    fullContent += event.text
+                }
             }
+            if let logprobsAgg { fullContent += logprobsAgg.finish() }
             // Strip reasoning before structured-output coercion so
-            // schema validators do not choke on `<think>` blocks.
+            // schema validators do not choke on `<think>` blocks. On the
+            // logprobs path `fullContent` is already reasoning-free (the
+            // aggregator already filtered it token-by-token so its entries
+            // line up with the visible text); `.strip` is then a no-op
+            // pass-through. On the plain path this is the ONLY stripping
+            // pass, unchanged from before.
             fullContent = ReasoningParser.strip(fullContent).visible
             fullContent = StructuredOutput.coerce(fullContent, format: responseFormat)
 
@@ -1728,7 +1800,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 "choices": [[
                     "index": 0,
                     "message": ["role": "assistant", "content": fullContent],
-                    "finish_reason": stats?.hitTokenLimit == true ? "length" : "stop"
+                    "finish_reason": stats?.hitTokenLimit == true ? "length" : "stop",
+                    "logprobs": logprobsAgg.map { logprobsChoiceJSON(content: $0.entries) as Any } ?? NSNull(),
                 ]],
                 "usage": [
                     "prompt_tokens": stats?.promptTokens ?? 0,

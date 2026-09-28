@@ -308,6 +308,48 @@ zero-overhead unless a penalty is set (the default decode path is
 unchanged). `typical_p`, `tfs_z`, `num_keep`, `penalize_newline` are
 accepted for client compatibility (no-op).
 
+## Logprobs (Phase 1)
+
+`POST /v1/chat/completions` accepts OpenAI's `logprobs` (bool) and
+`top_logprobs` (int, 0-20; ignored unless `logprobs: true`). Values are the
+model's **raw, pre-sampling log-probabilities** — a log-softmax of the
+forward-pass logits, computed BEFORE temperature scaling,
+top-k/top-p/min-p truncation, and repetition/presence/frequency penalties.
+This is deliberate (see `docs/LOGPROBS_PLAN.md` §4.1): it is well-defined at
+`temperature: 0` (greedy), reproducible from `(model, prompt, position)`
+alone, and matches `mlx_lm`/HF `transformers`. It is NOT always the exact
+probability the token was drawn with when temperature != 1 or a
+top-k/top-p/min-p filter is active.
+
+```bash
+curl http://127.0.0.1:57455/v1/chat/completions -d '{
+  "model": "llama-3.2-1b",
+  "messages": [{"role": "user", "content": "Hello"}],
+  "logprobs": true,
+  "top_logprobs": 5
+}'
+```
+
+Response (non-streaming): each `choices[]` entry gets `logprobs: {content:
+[{token, logprob, bytes, top_logprobs: [{token, logprob, bytes}, ...]},
+...]}`, one entry per generated token that reached the visible answer.
+Streaming: each `chat.completion.chunk` carrying content gets the same
+`choices[0].logprobs` shape for that chunk's token(s); chunks with no token
+(the role/finish chunks) get `logprobs: null`. `logprobs` is `null` on any
+choice when the request did not ask for it, or when the reply is a
+`tool_calls` turn (a tool-call reply's token stream reflects the raw
+pre-extraction text, not the structured `tool_calls` the client sees).
+`bytes` is the token's exact UTF-8 (or byte-fallback) bytes, independent of
+the display `token` string — the latter may show `U+FFFD` for a
+byte-fallback token that is not valid UTF-8 on its own; `bytes` never is.
+
+**Phase 1 limits**: only the plain (non-speculative, non-batched) decode
+path computes logprobs — a `logprobs` request transparently falls back to
+that path (same mechanism used to decline speculative decode for
+non-greedy/penalized requests). Legacy `POST /v1/completions` (`logprobs`
+as an int, `echo`) and the Ollama `/api/chat`/`/api/generate` dialects do
+not parse these fields yet — tracked in `docs/LOGPROBS_PLAN.md` phases 2-3.
+
 ## Model Lifecycle (keep-alive)
 
 Requests accept `keep_alive`: a duration string (`"5m"`, `"1h30m"`), an
