@@ -5,7 +5,11 @@ Status: Phase 1 implemented on `feat/logprobs-phase1` (chat `logprobs` +
 `top_logprobs`, non-streaming + streaming, plain decode path; spec/batch
 fallback). Phases 2-3 (this doc's §7) not started. See §4/§7 for the
 settled decisions and open-question resolutions recorded during
-implementation.
+implementation. A code-review pass on the PR found and fixed a critical
+under-reporting bug in the logprobs aggregator, an unnecessary host round
+trip in the sampler, and two harness bugs in the parity script (see the
+end of §4/§7's resolutions) — see the PR description for the full list and
+final numbers.
 Base branch: `main`
 Base commit: `db1a53f`
 Owner: unassigned
@@ -528,14 +532,48 @@ prompt (not just generated) tokens.
   entirely (no validation, no error, whatever its value/type) exactly when
   `logprobs` is not `true` — matches "silently ignored," including for a
   wrong-typed or out-of-range value in that case.
-- **Reasoning-model / suppressed-token logprobs (§3.3, §4.3)**: resolved to
-  the conservative default this plan already recommended — a token gets a
-  `content[]` entry iff it was emitted as *visible* `content` text, i.e. iff
-  it survived `StreamingReasoningFilter` and is not one of
-  `outputSuppressedTokenIDs`. If the filter holds text back and releases it
-  later, that text's logprob entries travel with it (not dropped, not
-  duplicated) — the aggregation counts entries by visible-text emission, not
-  by raw decode step.
+- **Reasoning-model / suppressed-token logprobs (§3.3, §4.3)**: a token gets
+  a `content[]` entry iff it reaches the visible answer, i.e. iff it
+  survived `StreamingReasoningFilter` and is not one of
+  `outputSuppressedTokenIDs`. The FIRST implementation of this (landed with
+  the rest of Phase 1) used a same-call/same-length shortcut that under-
+  reported in two real, non-rare cases — flagged in code review and fixed
+  in the same PR before merge: (1) any token the filter HOLDS while
+  disambiguating a possible tag prefix (it buffers on a bare `<`, which
+  shows up constantly in code — `x < y`, `<div>`, generics) got silently
+  dropped along with its neighbour, and (2) a token whose own
+  `decodeForOutput` text is empty (a byte-fallback/partial-UTF-8 piece of a
+  multi-byte character) never got an entry at all, defeating the `bytes`
+  field's whole purpose. `LogprobsAggregator` (`Sources/KrillServer/
+  LogprobsFormatting.swift`) now keeps a FIFO of pending (tokenId, info,
+  own text) tuples and drains it against `StreamingReasoningFilter`'s own
+  emit/discard decisions — reconstructed via a new `pendingUTF8Length`
+  introspection property plus the actual emitted text, in UTF-8 byte units
+  (not `Character` counts, which are not additive under concatenation for
+  scripts like Devanagari) — so every visible token gets exactly one entry,
+  in the right order, including ones only resolved at `finish()` (a
+  `max_tokens`-truncated stream ending mid-hold no longer loses that
+  token). Streaming: a chunk that resolves entries but has no text of its
+  own (an empty-decode token) is now still sent, carrying just the
+  entries. Covered by 11 `LogprobsAggregatorTests` (English; code with
+  `<`/`x < y`/an HTML tag; Devanagari; emoji; a `<think>` block; text held
+  and flushed at end-of-stream; empty-decode tokens; suppressed tokens) and
+  a real end-to-end check (`tools/logprobs_e2e_check.py`) against
+  `llama-3.2-1b` confirming `bytes`-concat reproduces `content` byte-for-
+  byte and streaming/non-streaming `content` match exactly, for both a
+  Hindi and a code-with-`<` prompt.
+- **Sampler cost (§5.2)**: the first implementation of `sampleWithLogprobs`
+  paid a full-vocabulary host round trip every step (`asArray(Float.self)`
+  then rebuilding an `MLXArray`) purely to get an object independent of
+  `applyPenalties`' in-place scatter — flagged in review as unnecessary for
+  a vocab up to 262k wide. Fixed by building the raw log-softmax graph from
+  the pre-penalty logits BEFORE `applyPenalties` runs: MLX operations
+  capture their input's value at the call site into a new, independent
+  result object, so this ordering alone protects the reported logprob from
+  the scatter's later in-place mutation of the SAME Swift object (the real
+  cause of the aliasing bug the host round trip was working around) — no
+  copy, host or device, needed. One combined `eval()` now covers the
+  chosen token, its logprob, and the top-N.
 - **Tool-call replies**: `"logprobs": null` on both the non-streaming choice
   and the single assembled SSE chunk for a tool-call turn. Not computed at
   all in Phase 1 (no partial data collected and discarded).
@@ -560,6 +598,53 @@ prompt (not just generated) tokens.
   lossy `token` string for a partial-UTF-8 byte-fallback token uses
   `String(decoding:as: UTF8.self)` (U+FFFD on invalid sequences), never the
   empty string `decodeForOutput` would give.
+- **Numeric parity investigation (§6 item 3)**: the first parity run
+  (`tools/logprobs_parity.py` against `llama-3.2-1b` 4-bit) reported a
+  sampled-token max diff of 2.34e-2 and a top-N alternate max diff of 0.95
+  nats, with no noise floor to compare against — not itself conclusive.
+  Investigation found two harness bugs, both fixed: (1) the script
+  teacher-forced its walk through the model with **mlx_lm's own greedy
+  pick**, not Krill's actual sampled id, so any single divergence (an
+  ordinary near-tie flip from fp noise) put every later position on a
+  genuinely different context than the one Krill's own forward pass
+  conditioned on, manufacturing large compounding diffs unrelated to
+  Krill's own correctness; (2) `build_bytes_to_id` resolved a vocabulary
+  piece's bytes with plain last-wins dict assignment, silently mis-
+  resolving any byte-string two pieces happen to share — fixed with
+  explicit collision detection (ambiguous byte strings are excluded, not
+  guessed). The script also now measures mlx_lm's own intrinsic noise floor
+  (one full-sequence forward vs. incremental KV-cache decode, both inside
+  mlx_lm, no Krill involved) as the yardstick to compare Krill against.
+  Re-run after both fixes, on `llama-3.2-1b` 4-bit (128256-token vocab, 40
+  generated tokens, no byte collisions found): floor max diff 1.5e-2 nats;
+  Krill vs. mlx_lm-incremental sampled-token max diff 2.52e-2 (1.68x the
+  floor — within the ~2x expectation), median diff 5.6e-4 (excellent
+  agreement typically). Alternates (non-sampled top-N entries) showed
+  larger diffs (median 4.3e-2, max 0.60 nats) — expected from log-softmax's
+  own sensitivity, not a separate bug: a dominant/sampled token's logprob
+  is comparatively self-stabilizing (its own logit drives most of the
+  `logsumexp` it's subtracted from), while a low-probability alternate's
+  logprob is driven by the DIFFERENCE of two independently-noisy logits
+  with no such cancellation, at positions where the probability itself is
+  already tiny, so the same underlying per-step logit noise shows up
+  larger in the reported nats. A second run against `qwen3-0.6b` 4-bit
+  (151669-token vocab) initially showed a catastrophic 28.5-nat mismatch at
+  the very first generated token — traced to a THIRD harness gap, not a
+  Krill bug: `apply_chat_template`'s default `enable_thinking` differs from
+  what Krill actually used, so the reconstructed prompt itself was wrong
+  (Qwen3's template inserts an empty `<think>\n\n</think>\n\n` scaffold
+  under `enable_thinking=False`, changing every position's context). Once
+  called with the matching kwarg, Qwen3-0.6b's diff (max 0.099, 0.89x its
+  own floor of 0.111) was, if anything, tighter than the floor. Neither an
+  unquantized (bf16/fp16) model comparison nor a permanent harness fix for
+  per-family chat-template kwargs was completed: the working machine had
+  only ~1.3 GB of free disk at investigation time (task instructions bar
+  downloading anything over 3 GB and, more fundamentally, filling the disk
+  further was unsafe regardless of the model's size), and a mid-investigation
+  benchmark side-comparison actually ran the disk to 0 bytes free via a
+  `.build` directory copy, confirming the margin was real. Re-run the
+  bf16/fp16 comparison from §6 item 3, and generalize `logprobs_parity.py`
+  to auto-detect per-family template kwargs, once disk headroom allows.
 
 ## 8. Registry: add Qwen3.5-4B (separate, small work item)
 
