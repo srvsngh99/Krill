@@ -648,6 +648,97 @@ final class ServerTests: XCTestCase {
         XCTAssertFalse(off.includeUsage)
     }
 
+    // MARK: - logprobs / top_logprobs (docs/LOGPROBS_PLAN.md, Phase 1)
+
+    func testOpenAIChatRequestAcceptsLogprobs() throws {
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "logprobs": true, "top_logprobs": 5,
+        ])
+        XCTAssertTrue(req.wantLogprobs)
+        XCTAssertEqual(req.topLogprobs, 5)
+    }
+
+    func testOpenAIChatRequestDefaultsLogprobsOff() throws {
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+        ])
+        XCTAssertFalse(req.wantLogprobs)
+        XCTAssertEqual(req.topLogprobs, 0)
+    }
+
+    func testOpenAIChatRequestTopLogprobsRangeAccepted() throws {
+        // Full documented range, 0-20 (verified against the OpenAI Python
+        // SDK's own type stubs during implementation - see LOGPROBS_PLAN.md).
+        for n in [0, 1, 20] {
+            let req = try ServerParsing.openAIChatRequest(from: [
+                "model": "m", "messages": [["role": "user", "content": "hi"]],
+                "logprobs": true, "top_logprobs": n,
+            ])
+            XCTAssertEqual(req.topLogprobs, n)
+        }
+    }
+
+    func testOpenAIChatRequestRejectsTopLogprobsAboveTwenty() {
+        XCTAssertThrowsError(try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "logprobs": true, "top_logprobs": 21,
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidValue(field: "top_logprobs", reason: "must be between 0 and 20")
+            )
+        }
+    }
+
+    func testOpenAIChatRequestRejectsNegativeTopLogprobs() {
+        XCTAssertThrowsError(try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "logprobs": true, "top_logprobs": -1,
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidValue(field: "top_logprobs", reason: "must be between 0 and 20")
+            )
+        }
+    }
+
+    func testOpenAIChatRequestRejectsNonBoolLogprobs() {
+        XCTAssertThrowsError(try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "logprobs": "yes",
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidType(field: "logprobs", expected: "a boolean")
+            )
+        }
+    }
+
+    func testOpenAIChatRequestRejectsNonIntTopLogprobs() {
+        XCTAssertThrowsError(try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "logprobs": true, "top_logprobs": "five",
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidType(field: "top_logprobs", expected: "an integer")
+            )
+        }
+    }
+
+    func testOpenAIChatRequestIgnoresTopLogprobsWithoutLogprobs() throws {
+        // OpenAI's documented behavior: top_logprobs "does nothing" without
+        // logprobs:true - it must never 400 a client that always sends both
+        // fields with logprobs left off, even with an out-of-range value.
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "top_logprobs": 99,
+        ])
+        XCTAssertFalse(req.wantLogprobs)
+        XCTAssertEqual(req.topLogprobs, 0)
+    }
+
     func testChatRequestNormalizesToolResultTurns() throws {
         // assistant tool_calls + role:tool result must round-trip into the
         // [String:String] message path without a 400.

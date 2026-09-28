@@ -106,6 +106,18 @@ public final class InferenceEngine: @unchecked Sendable {
     /// Tokenize raw text for the Stage B batched-decode tests.
     func encodeForBatchTest(_ text: String) -> [Int]? { tokenizer?.encode(text) }
 
+    /// The exact bytes a generated token represents, for the OpenAI
+    /// `logprobs.content[].bytes` field (docs/LOGPROBS_PLAN.md §4.2). `nil`
+    /// when no model is loaded (never happens on a real logprobs request,
+    /// which requires a loaded model to have generated the token at all).
+    public func rawTokenBytes(for tokenId: Int) -> [UInt8]? { tokenizer?.rawTokenBytes(for: tokenId) }
+    /// Best-effort, possibly-lossy display string for `rawTokenBytes(for:)`'s
+    /// bytes (U+FFFD where the bytes are not valid UTF-8 alone). Server-side
+    /// helper so response builders never need direct tokenizer access.
+    public func lossyTokenString(bytes: [UInt8]) -> String {
+        tokenizer?.lossyTokenString(bytes: bytes) ?? String(decoding: bytes, as: UTF8.self)
+    }
+
     /// The loaded model's directory name (useful for display/status).
     public var modelName: String? { isLoaded ? modelDirectory.lastPathComponent : nil }
 
@@ -749,7 +761,9 @@ public final class InferenceEngine: @unchecked Sendable {
         format: OutputFormat? = nil,
         useNgramSpeculative: Bool? = nil,
         imagesData: [Data] = [],
-        enableThinking: Bool? = nil
+        enableThinking: Bool? = nil,
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
@@ -766,7 +780,9 @@ public final class InferenceEngine: @unchecked Sendable {
                         format: format,
                         useNgramSpeculative: useNgramSpeculative,
                         imagesData: imagesData,
-                        enableThinking: enableThinking)
+                        enableThinking: enableThinking,
+                        wantLogprobs: wantLogprobs,
+                        topLogprobs: topLogprobs)
     }
 
     /// Generate tokens from a full conversation history, streaming results.
@@ -795,7 +811,9 @@ public final class InferenceEngine: @unchecked Sendable {
         format: OutputFormat? = nil,
         useNgramSpeculative: Bool? = nil,
         imagesData: [Data] = [],
-        enableThinking: Bool? = nil
+        enableThinking: Bool? = nil,
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         guard let loadedModel, let tokenizer else {
             let emptyStream = AsyncStream<TokenEvent> { $0.finish() }
@@ -1280,9 +1298,16 @@ public final class InferenceEngine: @unchecked Sendable {
         // rejected tokens' state and drift out of sync with the rolled-back
         // attention layers. Force the plain serial loop for qwen3_5 / Ornith.
         let hasSSMCacheSpec = (cacheSpec ?? []).contains(.ssm)
+        // A `logprobs` request needs the raw pre-filter logits at the exact
+        // step a token is chosen (docs/LOGPROBS_PLAN.md §5.1/§5.3); neither
+        // the draft-model spec path nor n-gram spec ever computes a
+        // log-softmax (they call `argMax` directly, bypassing `Sampler`), so
+        // both fall back to the plain decode loop when logprobs are wanted -
+        // same mechanism already used to decline spec for
+        // penalties/non-greedy/int8-KV/grammar requests above.
         let shouldSpec = wantsSpec && specDecoder != nil && !useInt8KV
             && !params.penaltiesActive && greedyRequest && grammarMask == nil
-            && !hasSSMCacheSpec
+            && !hasSSMCacheSpec && !wantLogprobs
         // N-gram (prompt-lookup) speculative decode shares every guard with the
         // draft path (greedy, fp16, no penalties, no grammar), needs no draft
         // model, and yields only when draft spec is NOT taken (a loaded draft
@@ -1291,6 +1316,7 @@ public final class InferenceEngine: @unchecked Sendable {
         let wantsNgram = useNgramSpeculative ?? autoUseNgram
         let shouldNgram = wantsNgram && !shouldSpec && !useInt8KV && !hasSSMCacheSpec
             && !params.penaltiesActive && greedyRequest && grammarMask == nil
+            && !wantLogprobs
         let ngramDecoder = shouldNgram ? SpeculativeDecoder.ngram(targetModel: loadedModel) : nil
         let ngramProposer = shouldNgram
             ? NgramProposer(config: NgramProposer.Config(), eosIds: stopIds) : nil
@@ -1711,14 +1737,30 @@ public final class InferenceEngine: @unchecked Sendable {
 
                 var nextToken: Int
                 var nextTokenArr: MLXArray
+                // Logprob info for `nextToken`, computed at the moment it was
+                // sampled (here, for the first/prefill-sampled token; inside
+                // the decode loop below for every subsequent one) and carried
+                // one iteration forward to be attached to the `TokenEvent`
+                // when that token is actually yielded (docs/LOGPROBS_PLAN.md
+                // §5.1/§5.3 - only the plain decode path computes this).
+                var pendingLogprobInfo: TokenLogprobInfo?
                 if shouldSpec || shouldNgram {
                     nextToken = sampler.sample(prefillLogits)
                     nextTokenArr = MLXArray(Int32(nextToken))
                 } else {
                     let prefillMask = grammarSession?.currentMask()
-                    nextTokenArr = sampler.sampleArray(prefillLogits, mask: prefillMask)
-                    asyncEval(nextTokenArr)
-                    nextToken = nextTokenArr.item(Int.self)
+                    if wantLogprobs {
+                        let (tok, tokArr, info) = sampler.sampleWithLogprobs(
+                            prefillLogits, mask: prefillMask, topLogprobs: topLogprobs)
+                        nextToken = tok
+                        nextTokenArr = tokArr
+                        pendingLogprobInfo = info
+                        asyncEval(nextTokenArr)
+                    } else {
+                        nextTokenArr = sampler.sampleArray(prefillLogits, mask: prefillMask)
+                        asyncEval(nextTokenArr)
+                        nextToken = nextTokenArr.item(Int.self)
+                    }
                 }
                 // Advance the grammar by the first (prefill) token. If the
                 // chosen token's piece does not extend the grammar (a mask
@@ -1856,7 +1898,14 @@ public final class InferenceEngine: @unchecked Sendable {
                     // the CLI). An explicit env value wins over config.
                     let pEnv = ProcessInfo.processInfo.environment["KRILL_DECODE_PIPELINE"]
                     let pipelineEnabled = !(pEnv == "0" || pEnv == "false" || pEnv == "off")
-                    let usePipeline = pipelineEnabled && !trackHistory && grammarSession == nil
+                    // `logprobs` needs the raw pre-filter logits paired with
+                    // the exact token they produced; the 2-deep pipeline
+                    // below sanples token N+1 before token N's TokenEvent is
+                    // built, which would need logprob info carried across an
+                    // extra iteration for no benefit (logprobs is not the
+                    // path this optimization exists for). Fall to the plain
+                    // loop instead - correctness over throughput here.
+                    let usePipeline = pipelineEnabled && !trackHistory && grammarSession == nil && !wantLogprobs
                     if usePipeline {
                         while generatedCount < maxTokens {
                             if genCancel.isCancelled { break }
@@ -1917,7 +1966,23 @@ public final class InferenceEngine: @unchecked Sendable {
                         // accepted so far (reflected in the grammar cursor).
                         let stepMask = grammarSession?.currentMask()
                         let nextTokenArr2: MLXArray
-                        if trackHistory {
+                        // The logprob info for the token THIS step samples
+                        // (nextTokenArr2) - carried into `pendingLogprobInfo`
+                        // and attached to ITS OWN TokenEvent one iteration
+                        // from now, not this one's (this iteration's event is
+                        // for `yieldedToken` = `nextToken`, sampled last step).
+                        var stepLogprobInfo: TokenLogprobInfo?
+                        if wantLogprobs {
+                            let (tok, tokArr, info) = trackHistory
+                                ? sampler.sampleWithLogprobs(
+                                    logits, recent: recent + [nextToken], mask: stepMask, topLogprobs: topLogprobs)
+                                : sampler.sampleWithLogprobs(
+                                    logits, mask: stepMask, topLogprobs: topLogprobs)
+                            if trackHistory { recent.append(nextToken) }
+                            _ = tok
+                            nextTokenArr2 = tokArr
+                            stepLogprobInfo = info
+                        } else if trackHistory {
                             recent.append(nextToken)
                             nextTokenArr2 = sampler.sampleArray(logits, recent: recent, mask: stepMask)
                         } else {
@@ -1930,6 +1995,7 @@ public final class InferenceEngine: @unchecked Sendable {
 
                         // While GPU is busy with iteration N+1, decode and yield N.
                         let yieldedToken = nextToken
+                        let yieldedLogprob = pendingLogprobInfo
                         // KRILL_BENCH_NO_DETOK isolates compute-rate from the
                         // per-token detokenization+yield cost folded into the
                         // decode timer (a benchmarking diagnostic only).
@@ -1937,12 +2003,13 @@ public final class InferenceEngine: @unchecked Sendable {
                             ? "" : capturedTokenizer.decodeForOutput(token: yieldedToken)
                         continuation.yield(TokenEvent(
                             tokenId: yieldedToken, text: tokenText,
-                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime, logprob: yieldedLogprob))
                         generatedCount += 1
 
                         // Sync once per step on a single 1-element int32 array.
                         nextTokenArr = nextTokenArr2
                         nextToken = nextTokenArr.item(Int.self)
+                        pendingLogprobInfo = stepLogprobInfo
                         // Advance the grammar by the freshly accepted token so
                         // the next iteration masks from the correct state. On a
                         // non-extending token, disable the mask for the rest of

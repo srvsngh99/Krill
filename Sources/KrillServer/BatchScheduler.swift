@@ -76,12 +76,17 @@ actor BatchScheduler {
     /// Whether a request can join a batch. Batching helps only at
     /// `numParallel >= 2` on a batch-capable engine; multimodal rows and
     /// per-row seeded non-greedy sampling (whose RNG can't be isolated under a
-    /// shared step) take the serial path.
+    /// shared step) take the serial path. A `logprobs` request is excluded
+    /// too (docs/LOGPROBS_PLAN.md §5.3): the continuous batcher's per-row
+    /// `Sampler` call and its `argMax`-only fast paths never compute a
+    /// log-softmax, so Phase 1 falls back to the serial plain-decode path,
+    /// which does.
     private func isEligible(params: SamplingParams, imageData: Data?, audioData: Data?,
-                            useSpeculative: Bool?) -> Bool {
+                            useSpeculative: Bool?, wantLogprobs: Bool) -> Bool {
         guard numParallel >= 2, engine.supportsBatchedDecode else { return false }
         guard imageData == nil, audioData == nil else { return false }
         if useSpeculative == true { return false }   // honor explicit spec opt-in serially
+        if wantLogprobs { return false }
         let greedy = params.temperature <= 0 && params.mirostat == 0
         if params.seed != nil && !greedy { return false }
         return true
@@ -96,14 +101,16 @@ actor BatchScheduler {
                 imageData: Data?, audioData: Data?,
                 contextLimit: Int?, promptTemplateOverride: String?,
                 format: OutputFormat? = nil, currentConcurrency: Int = 1,
-                imagesData: [Data] = []) async -> GenResult {
+                imagesData: [Data] = [],
+                wantLogprobs: Bool = false, topLogprobs: Int = 0) async -> GenResult {
         func serial() -> GenResult {
             engine.generate(
                 messages: messages, params: params, maxTokens: maxTokens,
                 useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
                 imageData: imageData, audioData: audioData,
                 contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
-                format: format, imagesData: imagesData)
+                format: format, imagesData: imagesData,
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
         }
         // A multi-image request carries its images in `imagesData` (not the
         // single `imageData`); treat either as "has image" so the batched/spec
@@ -113,6 +120,11 @@ actor BatchScheduler {
         // each step; the shared-step batched loop cannot isolate per-row
         // masks, so a format request always takes the serial path.
         if format != nil { return serial() }
+        // A `logprobs` request needs the raw pre-filter logits at the exact
+        // per-row sampling step, which the shared-step batched/continuous
+        // decode loop does not compute (docs/LOGPROBS_PLAN.md §5.3, phase 1);
+        // fall to the serial plain-decode path, same mechanism as `format`.
+        if wantLogprobs { return serial() }
 
         // Load-adaptive spec/batch decision. When n-gram (prompt-lookup)
         // speculative decode is enabled on the engine and this request is solo
@@ -129,8 +141,10 @@ actor BatchScheduler {
            currentConcurrency <= Self.specConcurrencyMaxFromEnvironment() {
             return serial()
         }
+        // wantLogprobs is always false here - the early return above already
+        // sent every logprobs request to serial().
         guard isEligible(params: params, imageData: anyImage, audioData: audioData,
-                         useSpeculative: useSpeculative) else {
+                         useSpeculative: useSpeculative, wantLogprobs: false) else {
             // Surface the one case where the user asked for two features that
             // do not compose: an explicit speculative opt-in on a request that
             // would batch if ONLY the speculative flag were dropped. Speculative

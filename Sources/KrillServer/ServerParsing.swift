@@ -86,6 +86,13 @@ internal struct ServerChatRequest: Equatable, Sendable {
     /// emits a final `usage` chunk (choices:[]) before `[DONE]`, so harnesses
     /// (opencode, the OpenAI SDK) can populate their context/token meter.
     var includeUsage: Bool = false
+    /// OpenAI `logprobs` (Phase 1, docs/LOGPROBS_PLAN.md). When true, each
+    /// generated token gets a raw-distribution logprob in the response.
+    var wantLogprobs: Bool = false
+    /// OpenAI `top_logprobs`, 0-20. Meaningful only when `wantLogprobs` is
+    /// true; silently ignored (parsed as 0, unvalidated) otherwise, matching
+    /// OpenAI's own documented behavior of "does nothing without logprobs".
+    var topLogprobs: Int = 0
 }
 
 internal struct ServerCompletionRequest: Equatable, Sendable {
@@ -142,9 +149,17 @@ internal enum ServerParsing {
     private static let unsupportedOpenAIChatFields: Set<String> = [
         "parallel_tool_calls",
         "functions", "function_call",
-        "logprobs", "top_logprobs",
         "stop", "logit_bias",
     ]
+    // `logprobs` (bool) / `top_logprobs` (int, 0-20) are accepted (not
+    // rejected) on /v1/chat/completions as of Phase 1
+    // (docs/LOGPROBS_PLAN.md): parsed in `openAIChatRequest` below, since
+    // they report on the raw distribution and never change what token is
+    // drawn (not sampling knobs, so they don't belong in
+    // `openAISamplingOptions`). Legacy /v1/completions `logprobs` (an int,
+    // different meaning - "top N" not a bool) and Ollama's
+    // `/api/chat`+`/api/generate` dialects are unchanged in this phase -
+    // still rejected/silently dropped below.
     // `stream_options` is accepted (not rejected): real clients (opencode, the
     // OpenAI SDK) send it on every streamed chat request, and rejecting it with
     // a 400 broke those agents before their first turn. Its `include_usage`
@@ -330,6 +345,15 @@ internal enum ServerParsing {
         try rejectUnsupportedFields(in: json, fields: unsupportedOpenAIChatFields)
         let tools = try parseTools(from: json)
         let extracted = try openAIMessages(from: normalizeToolTurns(in: json))
+        let wantLogprobs = try boolValue(json["logprobs"], field: "logprobs") ?? false
+        // `top_logprobs` is validated ONLY when `logprobs: true` - OpenAI's
+        // documented behavior is that it does nothing without `logprobs`, so
+        // an unvalidated/ignored value here must never 400 a request that
+        // simply always sends both fields with logprobs off (docs/LOGPROBS_
+        // PLAN.md §3.5).
+        let topLogprobs = wantLogprobs
+            ? try topLogprobsValue(json["top_logprobs"], field: "top_logprobs")
+            : 0
         return ServerChatRequest(
             messages: extracted.messages,
             stream: try boolValue(json["stream"], field: "stream") ?? false,
@@ -345,7 +369,9 @@ internal enum ServerParsing {
             responseFormat: parseOpenAIResponseFormat(json["response_format"]),
             keepAlive: KeepAliveParse.seconds(from: json["keep_alive"]),
             toolChoice: parseToolChoice(json["tool_choice"]),
-            includeUsage: ((json["stream_options"] as? [String: Any])?["include_usage"] as? Bool) ?? false
+            includeUsage: ((json["stream_options"] as? [String: Any])?["include_usage"] as? Bool) ?? false,
+            wantLogprobs: wantLogprobs,
+            topLogprobs: topLogprobs
         )
     }
 
@@ -873,6 +899,20 @@ internal enum ServerParsing {
         let value = try floatValue(rawValue, field: field)
         guard value > 0 else {
             throw ServerRequestError.invalidValue(field: field, reason: "must be greater than 0")
+        }
+        return value
+    }
+
+    /// `top_logprobs`: an integer 0-20. Matches both the current OpenAI
+    /// Python SDK's documented range (its `chat.completions.create` type
+    /// stubs and public docs pin `top_logprobs` to 0-20) and Ollama's own
+    /// documented `top_logprobs` range (docs.ollama.com/api/chat) - see
+    /// docs/LOGPROBS_PLAN.md §3.1's open question, resolved here.
+    private static func topLogprobsValue(_ rawValue: Any?, field: String) throws -> Int {
+        guard rawValue != nil else { return 0 }
+        let value = try intValue(rawValue, field: field)
+        guard value >= 0, value <= 20 else {
+            throw ServerRequestError.invalidValue(field: field, reason: "must be between 0 and 20")
         }
         return value
     }

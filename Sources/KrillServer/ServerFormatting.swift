@@ -3,12 +3,22 @@ import Foundation
 // Pure wire-format helpers shared by the server's streaming protocol paths.
 // Module-internal visibility keeps them testable without exposing public API.
 
-func sseChunk(id: String, content: String?, finishReason: String?) -> String {
+/// - Parameter logprobs: `choices[0].logprobs` for THIS chunk
+///   (docs/LOGPROBS_PLAN.md §3.3) - either a ready-made JSON object (e.g.
+///   from `logprobsChoiceJSON(content:)`) for a chunk carrying content, or
+///   `NSNull()` for a chunk with no token (role/finish chunks), whenever the
+///   REQUEST asked for logprobs. `nil` (the default, Swift's absence of a
+///   value - distinct from the JSON null `NSNull()`) omits the key entirely,
+///   leaving the emitted bytes IDENTICAL to before this field existed: every
+///   caller that never requested logprobs never passes this, so the off path
+///   is byte-for-byte unchanged.
+func sseChunk(id: String, content: String?, finishReason: String?, logprobs: Any? = nil) -> String {
     var delta: [String: Any] = [:]
     if let content { delta["content"] = content }
     delta["role"] = "assistant"
 
     var choice: [String: Any] = ["index": 0, "delta": delta]
+    if let logprobs { choice["logprobs"] = logprobs }
     if let reason = finishReason {
         choice["finish_reason"] = reason
         choice["delta"] = [String: Any]()

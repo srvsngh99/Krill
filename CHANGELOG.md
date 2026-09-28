@@ -26,6 +26,20 @@ reverse chronological order. Versioning follows
   garbage with no load error. `lmHead` is now `Optional`, and `project(_:)`
   falls back to the input embedding matrix (`Embedding.asLinear`) when nil —
   the same pattern already used by QwenModel/Qwen25VLModel/Qwen3MoEModel.
+- **`logprobs` / `top_logprobs` on `POST /v1/chat/completions`** (Phase 1,
+  see `docs/LOGPROBS_PLAN.md`). A request with `logprobs: true` gets a raw,
+  pre-sampling log-probability for each generated token, plus its true
+  top-N alternates (`top_logprobs`, 0-20) — matching the OpenAI wire shape,
+  non-streaming and streaming (SSE). Previously these fields 400'd every
+  request that sent them, including any client (the OpenAI SDK, eval
+  harnesses) that sets them by default. Zero cost when not requested: the
+  extra log-softmax only runs on the `if wantLogprobs` path, verified by a
+  direct decode-throughput A/B against `main` with logprobs never
+  requested. A logprobs request disables speculative decode and opts out of
+  the batched/continuous decode pool for this phase (falls back to the
+  plain decode path). Known Phase 1 limits: legacy `/v1/completions` and
+  the Ollama `/api/chat`/`/api/generate` dialects don't parse `logprobs`
+  yet; a `tool_calls` reply always reports `"logprobs": null`.
 
 ## [0.24.0] - 2026-09-20
 
