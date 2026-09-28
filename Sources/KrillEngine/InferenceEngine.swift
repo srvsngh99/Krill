@@ -117,6 +117,17 @@ public final class InferenceEngine: @unchecked Sendable {
     public func lossyTokenString(bytes: [UInt8]) -> String {
         tokenizer?.lossyTokenString(bytes: bytes) ?? String(decoding: bytes, as: UTF8.self)
     }
+    /// True for a structural/special token whose `decodeForOutput` is always
+    /// `""` by design (Gemma media markers, `TokenizerWrapper.
+    /// outputSuppressedTokenIDs`) - as opposed to a token that merely
+    /// decodes to `""` because it is one piece of a multi-byte character
+    /// (byte-fallback, partial UTF-8). `LogprobsAggregator`
+    /// (docs/LOGPROBS_PLAN.md finding #1) uses this to distinguish "never
+    /// gets an entry" from "empty text now, but still part of the visible
+    /// answer and must be attributed."
+    public func isOutputSuppressedToken(_ tokenId: Int) -> Bool {
+        tokenizer?.outputSuppressedTokenIDs.contains(tokenId) ?? false
+    }
 
     /// The loaded model's directory name (useful for display/status).
     public var modelName: String? { isLoaded ? modelDirectory.lastPathComponent : nil }
@@ -1900,7 +1911,7 @@ public final class InferenceEngine: @unchecked Sendable {
                     let pipelineEnabled = !(pEnv == "0" || pEnv == "false" || pEnv == "off")
                     // `logprobs` needs the raw pre-filter logits paired with
                     // the exact token they produced; the 2-deep pipeline
-                    // below sanples token N+1 before token N's TokenEvent is
+                    // below samples token N+1 before token N's TokenEvent is
                     // built, which would need logprob info carried across an
                     // extra iteration for no benefit (logprobs is not the
                     // path this optimization exists for). Fall to the plain

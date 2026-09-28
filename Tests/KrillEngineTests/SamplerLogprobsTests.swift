@@ -110,6 +110,42 @@ final class SamplerLogprobsTests: XCTestCase {
         XCTAssertEqual(plainToken, 9)
     }
 
+    func testRawLogprobUnaffectedWhenLogitsAlreadyFloat32AndPenaltiesMutateSharedObject() {
+        // `sampleWithLogprobs` no longer round-trips through the host to get
+        // an independent copy of the raw distribution (finding #2): it now
+        // relies on the log-softmax graph being BUILT before
+        // `applyPenalties` runs. `MLXArray(logits)` from a `[Float]` is
+        // ALREADY `.float32`, so `to1D(logits).asType(.float32)` is a
+        // double pass-through (`asType` short-circuits `return self` at
+        // matching dtype - MLXArray.swift) and really is the SAME Swift
+        // object `applyPenalties` mutates in place. This test drives that
+        // exact case with penalties on MULTIPLE recent tokens (including
+        // ones NOT chosen) and checks the raw logprob everywhere in the
+        // top-N, not just at the sampled token, so a partial/positional
+        // corruption from the scatter would be caught too.
+        var logits = [Float](repeating: -10, count: vocab)
+        logits[1] = 5.0
+        logits[2] = 4.0
+        logits[3] = 3.0
+        let mlxLogits = MLXArray(logits)
+        XCTAssertEqual(mlxLogits.dtype, .float32)
+        let expected = manualLogSoftmax(logits)
+
+        let sampler = Sampler(params: SamplingParams(temperature: 0.0, repetitionPenalty: 1.5))
+        // Penalize tokens 1 and 2 (mild enough that token 1 - 5.0/1.5=3.33 -
+        // still beats penalized token 2 - 4.0/1.5=2.67 - and unpenalized
+        // token 3 at 3.0, so the SAMPLED token is unaffected) while reading
+        // the raw logprob at every position in the top-3.
+        let (token, _, info) = sampler.sampleWithLogprobs(
+            mlxLogits, recent: [1, 2], topLogprobs: 3)
+        XCTAssertEqual(token, 1, "greedy still picks the raw argmax despite the penalty")
+        XCTAssertEqual(info.logprob, expected[1], accuracy: 1e-4)
+        XCTAssertEqual(info.topAlternates.map(\.tokenId), [1, 2, 3])
+        for alt in info.topAlternates {
+            XCTAssertEqual(alt.logprob, expected[alt.tokenId], accuracy: 1e-4)
+        }
+    }
+
     func testGrammarMaskDoesNotAffectReportedRawLogprob() {
         // A grammar mask forbids a token for SAMPLING purposes only; the
         // reported logprob must reflect the unmasked raw distribution
