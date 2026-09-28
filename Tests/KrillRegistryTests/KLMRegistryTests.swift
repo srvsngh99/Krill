@@ -190,6 +190,26 @@ final class KrillRegistryTests: XCTestCase {
         XCTAssertEqual(resolved?.repo, "srv-sngh/Qwen3.8-27B-mlx-4bit")
     }
 
+    /// Qwen3.5-4B rides the same existing `.qwen35` runtime as qwen3.8-27b —
+    /// a wrong family here would route it to the generic dense-Qwen loader
+    /// and emit garbage.
+    func testAliasMapResolvesQwen354B() {
+        let resolved = AliasMap.resolve("qwen3.5-4b")
+        XCTAssertNotNil(resolved)
+        XCTAssertEqual(resolved?.family, .qwen35)
+        XCTAssertEqual(resolved?.params, "4B")
+        XCTAssertEqual(resolved?.context, 262144)
+        XCTAssertEqual(resolved?.repo, "mlx-community/Qwen3.5-4B-MLX-4bit")
+    }
+
+    /// Qwen3.5-4B is Alibaba's own model, same as Qwen3.8-27B — it should get
+    /// its own wordmark/vendor, not the family-default ORNITH profile.
+    func testQwen354BHasItsOwnProfile() {
+        let profile = ModelProfiles.profile(for: .qwen35, name: "qwen3.5-4b")
+        XCTAssertEqual(profile?.displayName, "QWEN3.5")
+        XCTAssertEqual(profile?.vendor, "Alibaba")
+    }
+
     /// The `qwen3_5` runtime serves three vendors' checkpoints, so the `/model`
     /// deep-dive must not stamp the family's Ornith wordmark on all of them.
     func testQwen38HasItsOwnProfile() {

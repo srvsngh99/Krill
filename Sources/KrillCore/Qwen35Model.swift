@@ -543,20 +543,30 @@ final class Qwen35Model: Module {
 
 public final class Qwen35ForCausalLM: Module {
     @ModuleInfo(key: "model") var model: Qwen35Model
-    // `UnaryLayer`, not `Linear` - same injectable-seam reason as
+    // `UnaryLayer?`, not `Linear` - same injectable-seam reason as
     // `Qwen35GatedDeltaNet.inProjQkv` (see that comment): lets
     // `loadPrismHadamardQwen35` substitute a `PrismPackedLinear` here.
-    @ModuleInfo(key: "lm_head") var lmHead: UnaryLayer
+    // Optional (nil when `tie_word_embeddings` is true, e.g.
+    // `mlx-community/Qwen3.5-4B-MLX-4bit`): such a checkpoint ships NO
+    // `lm_head.*` weight at all, matching QwenModel/Qwen25VLModel/
+    // Qwen3MoEModel's established tied-embedding pattern elsewhere in this
+    // codebase. `loadPrismHadamardQwen35` always requires
+    // `tie_word_embeddings: false` (see PrismHadamardQwen35.swift), so its
+    // module substitution only ever swaps into the non-nil case.
+    @ModuleInfo(key: "lm_head") var lmHead: UnaryLayer?
     public let config: Qwen35Config
 
     public init(_ c: Qwen35Config) {
         self.config = c
         _model = ModuleInfo(wrappedValue: Qwen35Model(c), key: "model")
-        _lmHead = ModuleInfo(wrappedValue: Linear(c.hiddenSize, c.vocabSize, bias: false) as UnaryLayer, key: "lm_head")
+        if !c.tieWordEmbeddings {
+            _lmHead = ModuleInfo(
+                wrappedValue: Linear(c.hiddenSize, c.vocabSize, bias: false) as UnaryLayer, key: "lm_head")
+        }
     }
 
     public func callAsFunction(_ tokens: MLXArray, caches: [KVCacheProtocol]? = nil) -> MLXArray {
-        lmHead(model(tokens, caches: caches))
+        project(model(tokens, caches: caches))
     }
 
     /// VL forward: decode over image-augmented `embeds` with 3D mRoPE tables.
@@ -564,7 +574,7 @@ public final class Qwen35ForCausalLM: Module {
         embeds: MLXArray, caches: [KVCacheProtocol]? = nil,
         mropeCosSin: (cos: MLXArray, sin: MLXArray)? = nil
     ) -> MLXArray {
-        lmHead(model(embeds: embeds, caches: caches, mropeCosSin: mropeCosSin))
+        project(model(embeds: embeds, caches: caches, mropeCosSin: mropeCosSin))
     }
 
     /// Pre-lm_head normed hidden states over image-augmented `embeds` (lets the
@@ -576,8 +586,23 @@ public final class Qwen35ForCausalLM: Module {
         model(embeds: embeds, caches: caches, mropeCosSin: mropeCosSin)
     }
 
-    /// Project normed hidden states to vocab logits via the lm_head.
-    public func project(_ hidden: MLXArray) -> MLXArray { lmHead(hidden) }
+    /// Project normed hidden states to vocab logits via the lm_head - or, when
+    /// `tie_word_embeddings` is true and `lmHead` is therefore nil, by reusing
+    /// the input embedding matrix transposed (`Embedding.asLinear`), matching
+    /// QwenModel/Qwen25VLModel/Qwen3MoEModel's tied-embedding pattern. The
+    /// downcast is safe here: the only non-`Embedding` `embed_tokens`
+    /// (`PrismPackedEmbedding`, via `loadPrismHadamardQwen35`) is reachable
+    /// only when `tie_word_embeddings: false`, which always leaves `lmHead`
+    /// non-nil and takes the first branch instead.
+    public func project(_ hidden: MLXArray) -> MLXArray {
+        if let lmHead { return lmHead(hidden) }
+        guard let embedding = model.embedTokens as? Embedding else {
+            fatalError(
+                "Qwen3.5: tie_word_embeddings=true requires a plain Embedding "
+                + "embed_tokens (got \(type(of: model.embedTokens)))")
+        }
+        return embedding.asLinear(hidden)
+    }
 
     /// Token embedding lookup (for the VL wrapper's image-feature scatter).
     public func embed(_ tokens: MLXArray) -> MLXArray { model.embedTokens(tokens) }
