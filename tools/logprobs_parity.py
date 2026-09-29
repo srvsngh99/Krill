@@ -37,9 +37,24 @@ Fixes applied in this revision (docs/LOGPROBS_PLAN.md finding #3):
     detects such collisions, excludes them from the lookup table, and
     reports them instead of guessing.
 
-Usage: logprobs_parity.py <krill_response.json> <model_dir> <messages.json>
+This revision (2026-09-29 verification pass, docs/LOGPROBS_PLAN.md
+"Verification results") adds two things the prior revision's own Resolutions
+notes flagged as incomplete:
+  - An optional `enable_thinking` CLI arg, threaded into
+    `apply_chat_template`, so a per-family template kwarg mismatch (the
+    THIRD harness gap found investigating qwen3-0.6b - the template inserts
+    an empty `<think>\n\n</think>\n\n` scaffold under `enable_thinking=False`,
+    changing every position's context) can be pinned to match whatever Krill
+    actually used (`KRILL_ENABLE_THINKING` at serve time), instead of
+    silently taking the tokenizer's own template default.
+  - Median (not just max) abs diff for both the sampled-token and alternate
+    comparisons, since max alone does not distinguish "typically excellent
+    agreement with one noisy outlier" from "uniformly loose".
+
+Usage: logprobs_parity.py <krill_response.json> <model_dir> <messages.json> [enable_thinking: 0|1]
 """
 import json
+import statistics
 import sys
 from collections import defaultdict
 
@@ -100,13 +115,20 @@ def build_bytes_to_id(tokenizer):
     return table, collisions
 
 
-def load_ids(resp, messages, tokenizer, bytes_to_id):
+def load_ids(resp, messages, tokenizer, bytes_to_id, enable_thinking=None):
     """The exact id sequence Krill's own decode loop conditioned on: the
     prompt ids (via the model's own chat template) followed by KRILL'S OWN
     sampled id at each step (resolved via `bytes_to_id`), falling back to
     None (caller re-derives via argmax) only when a byte string is
-    unresolved or ambiguous."""
-    prompt_ids = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
+    unresolved or ambiguous.
+
+    `enable_thinking`, when not None, is threaded into the template exactly
+    as Krill's own `enableThinkingPrompt` would pin it (see the module
+    docstring) - not passing it lets the tokenizer's own template default
+    apply, matching Krill's "no explicit decision" behavior."""
+    kwargs = {} if enable_thinking is None else {"enable_thinking": enable_thinking}
+    prompt_ids = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=True, **kwargs)
     krill_ids = []
     unresolved = []
     for i, entry in enumerate(resp["choices"][0]["logprobs"]["content"]):
@@ -151,6 +173,9 @@ def incremental_logprobs(model, prompt_ids, gen_ids):
 
 def main():
     resp_path, model_dir, messages_path = sys.argv[1], sys.argv[2], sys.argv[3]
+    enable_thinking = None
+    if len(sys.argv) > 4:
+        enable_thinking = sys.argv[4].strip().lower() in ("1", "true", "yes", "on")
     resp = json.load(open(resp_path))
     messages = json.load(open(messages_path))
 
@@ -167,7 +192,8 @@ def main():
         for b, entries in sample:
             print(f"  collision {b!r}: {entries}")
 
-    prompt_ids, krill_ids, unresolved = load_ids(resp, messages, tokenizer, bytes_to_id)
+    prompt_ids, krill_ids, unresolved = load_ids(
+        resp, messages, tokenizer, bytes_to_id, enable_thinking=enable_thinking)
     if unresolved:
         print(f"Unresolved sampled-token byte->id lookups ({len(unresolved)}): {unresolved[:10]}")
 
@@ -203,16 +229,20 @@ def main():
 
     floor_max_diff = 0.0
     floor_detail = None
+    floor_diffs = []
     for i, tid in enumerate(gen_ids):
         pos = n_prompt - 1 + i  # method_a's position that predicts gen_ids[i]
         a_lp = float(method_a[pos, tid].item())
         b_lp = float(method_b[i][tid].item())
         d = abs(a_lp - b_lp)
+        floor_diffs.append(d)
         if d > floor_max_diff:
             floor_max_diff = d
             floor_detail = (i, tid, a_lp, b_lp)
+    floor_median = statistics.median(floor_diffs) if floor_diffs else 0.0
     print(f"\nmlx_lm intrinsic noise floor (full-sequence vs incremental, "
-          f"{len(gen_ids)} positions): max abs diff = {floor_max_diff:.6e}")
+          f"{len(gen_ids)} positions): max abs diff = {floor_max_diff:.6e}, "
+          f"median abs diff = {floor_median:.6e}")
     if floor_detail:
         print("  worst case (step, token id, full-seq logprob, incremental logprob):", floor_detail)
 
@@ -222,8 +252,8 @@ def main():
     max_abs_diff_detail = None
     top_alt_max_diff = 0.0
     top_alt_max_diff_detail = None
-    n_alt_compared = 0
-    n_sampled_compared = 0
+    sampled_diffs = []
+    alt_diffs = []
 
     for i, entry in enumerate(lp_content):
         logprobs = method_b[i]
@@ -233,7 +263,7 @@ def main():
         krill_logprob = entry["logprob"]
         mlx_logprob = float(logprobs[krill_id].item())
         diff = abs(krill_logprob - mlx_logprob)
-        n_sampled_compared += 1
+        sampled_diffs.append(diff)
         if diff > max_abs_diff:
             max_abs_diff = diff
             max_abs_diff_detail = (i, entry["token"], krill_logprob, mlx_logprob)
@@ -243,18 +273,25 @@ def main():
             if alt_id is None:
                 continue
             mlx_alt_logprob = float(logprobs[alt_id].item())
-            n_alt_compared += 1
             d = abs(alt["logprob"] - mlx_alt_logprob)
+            alt_diffs.append(d)
             if d > top_alt_max_diff:
                 top_alt_max_diff = d
                 top_alt_max_diff_detail = (i, alt["token"], alt["logprob"], mlx_alt_logprob)
 
+    n_sampled_compared = len(sampled_diffs)
+    n_alt_compared = len(alt_diffs)
+    sampled_median = statistics.median(sampled_diffs) if sampled_diffs else 0.0
+    alt_median = statistics.median(alt_diffs) if alt_diffs else 0.0
+
     print(f"\nKrill vs mlx_lm INCREMENTAL (apples-to-apples) - "
-          f"sampled-token max abs diff ({n_sampled_compared} compared): {max_abs_diff:.6e}")
+          f"sampled-token max abs diff ({n_sampled_compared} compared): {max_abs_diff:.6e}, "
+          f"median abs diff: {sampled_median:.6e}")
     if max_abs_diff_detail:
         print("  worst case (step, token, krill, mlx):", max_abs_diff_detail)
     print(f"Krill vs mlx_lm INCREMENTAL - top-N alternate max abs diff "
-          f"({n_alt_compared} compared): {top_alt_max_diff:.6e}")
+          f"({n_alt_compared} compared): {top_alt_max_diff:.6e}, "
+          f"median abs diff: {alt_median:.6e}")
     if top_alt_max_diff_detail:
         print("  worst case (step, token, krill, mlx):", top_alt_max_diff_detail)
 

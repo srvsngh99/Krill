@@ -37,6 +37,22 @@ public enum Qwen35VLRuntime {
     ///   - grid: full patch grid `(t, h, w)` of the image, or nil for text-only.
     ///   - maxTokens: generation cap (excludes the prompt).
     ///   - stopIds: terminating token ids.
+    /// - Parameters:
+    ///   - wantLogprobs: When true, every sampled token's raw-distribution
+    ///     logprob (and top-N alternates) is computed via `Sampler.
+    ///     sampleWithLogprobs` instead of the plain `sampleArray`/`sample`
+    ///     path, and threaded to `onToken`'s second argument - the same
+    ///     "raw pre-filter logits" semantics as the generic decode loop in
+    ///     `InferenceEngine.generate(messages:)` (docs/LOGPROBS_PLAN.md
+    ///     §4.1/§5.1). This was the root cause of `logprobs.content` always
+    ///     being `[]` for qwen3_5 models: this runtime never computed or
+    ///     threaded logprob info at all before, regardless of the request
+    ///     (docs/LOGPROBS_QWEN35_EMPTY.md).
+    ///   - topLogprobs: Number of raw top-N alternates to report (0...20),
+    ///     ignored when `wantLogprobs` is false.
+    ///   - onToken: called once per generated token (including the one that
+    ///     triggers a stop) with `(tokenId, logprobInfo)`; `logprobInfo` is
+    ///     `nil` unless `wantLogprobs` was set.
     public static func generate(
         model: Qwen35VLForConditionalGeneration,
         promptTokens: [Int],
@@ -46,7 +62,9 @@ public enum Qwen35VLRuntime {
         stopIds: Set<Int>,
         params: SamplingParams = .greedy,
         mediaHash: String? = nil,
-        onToken: ((Int) -> Void)? = nil
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0,
+        onToken: ((Int, TokenLogprobInfo?) -> Void)? = nil
     ) -> Output {
         let caches = model.makeCaches()
         let sampler = Sampler(params: params)
@@ -76,20 +94,37 @@ public enum Qwen35VLRuntime {
         let prefillSeconds = CFAbsoluteTimeGetCurrent() - prefillStart
 
         // -- Decode (two-deep on-GPU pipeline; offset = frontier + step) --
+        //
+        // `pendingLogprobInfo` mirrors the generic decode loop's convention
+        // (InferenceEngine.swift's main loop, `pendingLogprobInfo`): the
+        // logprob for a token is computed at the moment IT is sampled (one
+        // iteration before it is yielded via `onToken`), then carried
+        // forward one step so it can be attached when that token is
+        // actually reported.
         let decodeStart = CFAbsoluteTimeGetCurrent()
         var generated: [Int] = []
         var recent: [Int] = sampler.needsHistory
             ? Array(promptTokens.suffix(512)) : []
-        var nextTokenArr: MLXArray = sampler.needsHistory
-            ? sampler.sampleArray(prefillLogits, recent: recent)
-            : sampler.sampleArray(prefillLogits)
+        var nextTokenArr: MLXArray
+        var pendingLogprobInfo: TokenLogprobInfo?
+        if wantLogprobs {
+            let (_, tokArr, info) = sampler.needsHistory
+                ? sampler.sampleWithLogprobs(prefillLogits, recent: recent, topLogprobs: topLogprobs)
+                : sampler.sampleWithLogprobs(prefillLogits, topLogprobs: topLogprobs)
+            nextTokenArr = tokArr
+            pendingLogprobInfo = info
+        } else {
+            nextTokenArr = sampler.needsHistory
+                ? sampler.sampleArray(prefillLogits, recent: recent)
+                : sampler.sampleArray(prefillLogits)
+        }
         MLX.asyncEval(nextTokenArr)
         var nextToken = nextTokenArr.item(Int.self)
         let decodePlaceholder: [Int32] = [Int32(0)]
         var step = 0
         while generated.count < maxTokens {
             if stopIds.contains(nextToken) {
-                onToken?(nextToken)
+                onToken?(nextToken, pendingLogprobInfo)
                 generated.append(nextToken)
                 break
             }
@@ -103,14 +138,25 @@ public enum Qwen35VLRuntime {
                 hostTokenIds: decodePlaceholder,
                 lastTokenOnly: true)
             if sampler.needsHistory { recent.append(nextToken) }
-            let nextTokenArr2: MLXArray = sampler.needsHistory
-                ? sampler.sampleArray(logits, recent: recent)
-                : sampler.sampleArray(logits)
+            let nextTokenArr2: MLXArray
+            var stepLogprobInfo: TokenLogprobInfo?
+            if wantLogprobs {
+                let (_, tokArr, info) = sampler.needsHistory
+                    ? sampler.sampleWithLogprobs(logits, recent: recent, topLogprobs: topLogprobs)
+                    : sampler.sampleWithLogprobs(logits, topLogprobs: topLogprobs)
+                nextTokenArr2 = tokArr
+                stepLogprobInfo = info
+            } else {
+                nextTokenArr2 = sampler.needsHistory
+                    ? sampler.sampleArray(logits, recent: recent)
+                    : sampler.sampleArray(logits)
+            }
             MLX.asyncEval(nextTokenArr2)
-            onToken?(nextToken)
+            onToken?(nextToken, pendingLogprobInfo)
             generated.append(nextToken)
             nextTokenArr = nextTokenArr2
             nextToken = nextTokenArr.item(Int.self)
+            pendingLogprobInfo = stepLogprobInfo
             step += 1
         }
         let decodeSeconds = CFAbsoluteTimeGetCurrent() - decodeStart
