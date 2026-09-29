@@ -9,7 +9,13 @@ implementation. A code-review pass on the PR found and fixed a critical
 under-reporting bug in the logprobs aggregator, an unnecessary host round
 trip in the sampler, and two harness bugs in the parity script (see the
 end of §4/§7's resolutions) — see the PR description for the full list and
-final numbers.
+final numbers. A 2026-09-29 follow-up fix (`fix/logprobs-qwen35`) closed a
+real Phase-1 gap found in production use: `logprobs.content` was always `[]`
+for every qwen3_5-family model (qwen3.5-4b, Ornith-9B, Qwythos-9B,
+Qwen3.8-27B) because they route through a native VL decode runtime that
+never threaded `wantLogprobs` — see the "Verification results
+(2026-09-29)" subsection after §7's Resolutions for the root cause, the
+numeric parity re-run, and the no-slowdown re-check.
 Base branch: `main`
 Base commit: `db1a53f`
 Owner: unassigned
@@ -645,6 +651,189 @@ prompt (not just generated) tokens.
   `.build` directory copy, confirming the margin was real. Re-run the
   bf16/fp16 comparison from §6 item 3, and generalize `logprobs_parity.py`
   to auto-detect per-family template kwargs, once disk headroom allows.
+
+### Verification results (2026-09-29)
+
+**Bug fixed: `logprobs.content` was always `[]` for every qwen3_5-family
+model.** Root cause (`Sources/KrillEngine/InferenceEngine.swift`, the
+`Qwen35VLForConditionalGeneration` intercept in `generate(messages:)`,
+originally added around line 894): `qwen3.5-4b`'s checkpoint config.json
+carries `vision_config`/`image_token_id` even though it is used purely as a
+text model (confirmed: `python3 -c "import json; print('vision_config' in
+json.load(open('config.json')))"` on the local blob -> `True`).
+`ArchitectureDetection`'s `qwen3_5` rule (`Sources/KrillCore/
+ArchitectureDetection.swift:280-297`) treats that key's presence as "this
+checkpoint needs the VL loader" and calls `loadQwen35VL`, building a
+`Qwen35VLForConditionalGeneration`. Because of that, `generate(messages:)`
+routes EVERY request for this model - image or text-only - through the
+dedicated `generateQwen35VL` / `Qwen35VLRuntime.generate` native runtime
+(the same runtime Ornith-9B/Qwythos-9B/Qwen3.8-27B use), a completely
+separate decode loop from the generic dense path Phase 1's `wantLogprobs`
+plumbing was wired into. Neither `generateQwen35VL` nor `Qwen35VLRuntime.
+generate` accepted `wantLogprobs`/`topLogprobs` before this fix, and
+`Qwen35VLRuntime`'s `onToken` callback only ever passed a bare token id, so
+every `TokenEvent` for these models had `logprob: nil` regardless of the
+request - the SSM-cache guard (`hasSSMCacheSpec`) the original bug note
+suspected is real but irrelevant here: it never even runs for a request
+that took this earlier VL intercept. Fixed by threading `wantLogprobs`/
+`topLogprobs` through `generateQwen35VL` into `Qwen35VLRuntime.generate`,
+which now calls `Sampler.sampleWithLogprobs` (same one-step-behind
+"compute at sample time, attach at yield time" convention as the generic
+loop's `pendingLogprobInfo`) when requested, and passes the resulting
+`TokenLogprobInfo?` to `onToken`.
+
+**Other paths audited for the same gap** (native, model-family-specific
+decode runtimes that bypass the generic loop the same way qwen3_5 did):
+`generateQwen25VL`/`Qwen25VLRuntime` (Qwen 2.5-VL, always routes here per
+its own comment "Image and text-only requests both route here"),
+`generateLlamaVision`/`MllamaRuntime` (Llama-3.2-Vision, same "always"
+routing), `generateLocateAnything` (LocateAnything-3B, same), and
+`generateMuseGlimmer` (Muse Glimmer, image requests only - its text-only
+path already uses the generic loop and is unaffected). All four have the
+IDENTICAL structural gap: `onToken: { token in ... }` closures with no
+logprob threading, and none of their `generate...` functions accept
+`wantLogprobs`/`topLogprobs`. None of these were fixed in this change - the
+reported bug and its repro are entirely about qwen3_5, and fixing four more
+independent native runtimes (each its own file, its own `Output` struct,
+its own sampling call sites) is out of scope for this PR. Recorded here as
+a known, real, same-class gap for a follow-up: a request with
+`logprobs: true` against any Llama-3.2-Vision, Qwen 2.5-VL, or
+LocateAnything-3B checkpoint, or an IMAGE request against Muse Glimmer,
+still silently returns `logprobs.content: []` today.
+
+**Regression test**: `Tests/KrillEngineTests/Qwen35LogprobsTests.swift`,
+checkpoint-gated on `KRILL_QWEN35_MODEL_PATH`/`KRILL_ORNITH_MODEL_PATH`
+(same pattern as `Qwen35VLSmokeTests`). Asserts every generated token
+carries a `TokenLogprobInfo` with the requested `top_logprobs` count, and
+that a greedy request's sampled token is exactly its own raw distribution's
+top-1 alternate (catches a shallow "populate something non-nil" fix, not
+just presence). Both new tests pass against the real `qwen3.5-4b` 4-bit
+checkpoint post-fix; both assertions fail against the pre-fix code (every
+`event.logprob` was `nil`).
+
+**Task 1 end-to-end verification**, real `qwen3.5-4b` served via
+`krill serve --model qwen3.5-4b`:
+- Exact repro from `docs/LOGPROBS_QWEN35_EMPTY.md`
+  (`max_tokens:1, top_logprobs:5, temperature:0`, `KRILL_ENABLE_THINKING=0`)
+  now returns `choices[0].logprobs.content` with 1 entry (was `[]`).
+- `tools/logprobs_e2e_check.py` (bytes-concat == visible content, streaming
+  `content` == non-streaming `content`) against `qwen3.5-4b`,
+  `KRILL_ENABLE_THINKING=0`: **all checks pass** (Hindi prompt: 6 entries;
+  code-with-`<` prompt: 15 entries).
+- Same script with `KRILL_ENABLE_THINKING=1` and `max_tokens` raised to 400
+  (a copy of the script with `max_tokens=64` -> `400`, since the default
+  budget is consumed entirely by the reasoning block on some prompts - see
+  below): code-with-`<` prompt passes (15 entries, streaming ==
+  non-streaming, bytes-concat exact). The Hindi prompt produced `content:
+  ''` / `finish_reason: length` even at `max_tokens: 900` - reproduced
+  IDENTICALLY with `logprobs` entirely absent from the request, i.e. this
+  specific model+prompt combination spends its whole token budget inside
+  `<think>...</think>` and never reaches a visible answer. Pre-existing
+  reasoning-verbosity/token-budget behavior, unrelated to logprobs and not
+  a regression from this fix.
+- No regression on `llama-3.2-1b` (4-bit, unaffected dense-family
+  request): same e2e script, all checks pass (6 and 14 entries).
+
+**Task 2 numeric parity** (`tools/logprobs_parity.py`, extended in this
+change to report median abs diff alongside max, and to accept an optional
+`enable_thinking` CLI arg so the harness can match Krill's actual template
+kwarg instead of silently taking the tokenizer's own default - the "third
+harness gap" the 2026-09-28 investigation flagged as unresolved). Greedy,
+`top_logprobs=5`, 40 generated tokens per model, prompt "Explain in two
+sentences why the sky is blue.":
+
+| Model | Floor max / median | Krill sampled max / median | Krill alt max / median | Ratio (sampled/floor) | Byte collisions |
+|---|---|---|---|---|---|
+| `Qwen3-0.6B-bf16` (`enable_thinking=0`) | 1.537e-1 / 7.721e-3 | 7.337e-2 / 1.915e-3 | 3.016e-1 / 1.815e-2 | 0.48x | 0 |
+| `Llama-3.2-1B-Instruct-bf16` | 2.076e-2 / 2.756e-4 | 5.777e-2 / 3.948e-4 | 7.500e-1 / 6.260e-2 | 2.78x | 0 |
+| `qwen3.5-4b` (4-bit, `enable_thinking=0`, post-fix) | 9.206e-2 / 2.114e-3 | 4.041e-2 / 8.440e-4 | 3.750e-1 / 6.219e-2 | 0.44x | 0 |
+
+`Qwen3-0.6B-bf16` and `qwen3.5-4b` both land BELOW their own mlx_lm
+self-consistency floor (ratio < 1) - excellent agreement, and for
+`qwen3.5-4b` specifically this also confirms the fix is not merely
+"populates a field" but numerically correct (matches the SSM-hybrid raw
+distribution `mlx_lm` itself computes).
+
+`Llama-3.2-1B-Instruct-bf16` needed one prerequisite fix to run at all: it
+crashed with `Fatal error: [scaled_dot_product_attention] Mask type must
+promote to output type bfloat16` on EVERY generation request (including the
+load-time warmup pass), unrelated to logprobs - reproduced identically with
+`logprobs` absent. Root cause: `LlamaModelInner.callAsFunction`
+(`Sources/KrillCore/LlamaModel.swift`, ~line 52) built its causal mask via
+`createCachedCausalMask(newLen:cacheLen:)` without passing `dtype:`, so it
+defaulted to `.float16` - fine for the already-supported int4-quantized
+`llama-3.2-1b` alias (whose dequantized compute dtype is already float16,
+so the default happened to match), but wrong for a genuinely bf16
+checkpoint, where MLX's fused SDPA kernel requires the mask dtype to
+promote to the attention output's dtype and float16 does not promote to
+bfloat16. Fixed by passing `dtype: x.dtype`, matching the pattern every
+other family's call site already uses (`DeepSeekModel`/`Glm4Model`/
+`MixtralModel`/`Qwen3MoEModel`/etc. all pass `x.dtype`/`h.dtype`). Zero
+behavior change for the existing int4 `llama-3.2-1b` alias (`x.dtype`
+resolves to the same `.float16` the old hardcoded default gave).
+
+Regarding the plan's original "suggest 1e-3 in log-space" target (§6 item
+3): `Llama-3.2-1B-Instruct-bf16`'s own mlx_lm self-consistency FLOOR
+(full-sequence vs incremental, no Krill involved) is 2.076e-2 - already
+20x looser than 1e-3. This is an intrinsic property of bf16 arithmetic
+(7 mantissa bits vs float16's 10), not a Krill defect: the 1e-3 target was
+calibrated before anyone had tried a genuinely bf16 (as opposed to
+int4-dequantized-to-fp16) checkpoint. Krill's own diff-to-floor ratio
+(2.78x) is close to the same ~2x-ish range already accepted for the
+llama-3.2-1b 4-bit run recorded in the Resolutions section above (1.68x),
+and both `median abs diff` values (3.948e-4) are tight; the `max` statistic
+is dominated by a small handful of positions out of 40 and swings easily.
+No fix attempted beyond the SDPA mask dtype crash above - closing the
+remaining gap to the floor would mean computing in float32 throughout
+(a materially bigger, riskier change, and arguably WRONG - it would no
+longer report what the bf16 model actually computed). Diagnosis, not a
+bug: report as-is per the task's own instruction for this case.
+
+**Task 3 no-slowdown check** (`krill bench <model> --runs 3 --gen-len 128`,
+alternating baseline `7f8a506` (A) and this fix (B), A/B/A/B/A/B, in a
+scratch worktree removed afterward). The machine was NOT actually idle
+during this run - a long-running `kreach-crawler` background process (an
+unrelated project, pre-existing, left running per this session's
+instructions) and several other concurrent agent sessions were competing
+for CPU/memory throughout, which shows up directly in the numbers below as
+a large mid-run step change affecting BOTH builds identically (strong
+evidence the swing is environmental, not code-related).
+
+`llama-3.2-1b` (4-bit), decode tok/s per round: A 26.6, B 22.9, A 18.8,
+B 22.9, A 21.8, B 19.4. A mean 22.4 (range 7.8), B mean 21.7 (range 3.5) -
+prefill and TTFT show the same magnitude of run-to-run spread. The A-B mean
+difference (0.7 tok/s) is far smaller than the intra-group spread; no
+directional regression.
+
+`qwen3.5-4b` (4-bit), decode tok/s per round: A1 6.7, B1 6.4 (both hit the
+same severe ambient slowdown - 15+ second TTFT on both builds, a swap/
+contention event unrelated to either binary), A2 32.9, B2 36.1, A3 35.3,
+B3 36.6. Restricting to the three rounds after the machine settled (A2/A3
+vs B2/B3): A mean decode 34.1 tok/s, B mean 36.4 tok/s - B is NOT slower;
+prefill (A 118.7-88.6, B 117.5-118.8) and TTFT (A 7367-4315ms, B
+4360-4308ms) tell the same story. No slowdown from this fix when logprobs
+is not requested, on either model.
+
+**Logprobs-ON decode tok/s, for reference** (fix build, `krill serve` +
+streaming HTTP client measuring inter-chunk timing, `max_tokens: 128`,
+greedy, `top_logprobs: 5` when on - NOT the same measurement method as the
+`krill bench` numbers above, which call `model.forward`/`Sampler.sample`
+directly and do not go through `InferenceEngine`/the server at all, so the
+absolute numbers are not comparable across the two tables):
+
+| Model | logprobs off | logprobs on | Overhead |
+|---|---|---|---|
+| `llama-3.2-1b` (4-bit) | ~163.8 tok/s | ~64.2 tok/s | ~2.6x slower |
+| `qwen3.5-4b` (4-bit) | ~33.3 tok/s | ~32.7 tok/s | ~2% slower |
+
+The overhead is real and expected when `logprobs` IS requested (a
+128k-261k-vocab log-softmax + top-N gather every step, plus a materially
+larger SSE payload per chunk) - it is NOT a violation of §5.2's "zero cost
+by default" requirement, which is specifically about the case logprobs is
+absent (verified above). The overhead is proportionally much larger on
+`llama-3.2-1b` because its per-step forward pass is tiny (1B params), so a
+fixed extra cost dominates; on `qwen3.5-4b`'s much heavier 4B hybrid-SSM
+forward pass the same fixed cost is nearly invisible.
 
 ## 8. Registry: add Qwen3.5-4B (separate, small work item)
 

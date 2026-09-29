@@ -43,6 +43,24 @@ class LlamaModelInner: Module {
         // verify) the mask must extend across the cached prefix too.
         // On the batched ragged-decode path an explicit per-row mask is
         // passed in (and rowOffsets carries each row's position).
+        //
+        // `dtype: x.dtype` (not the `createCachedCausalMask` default of
+        // `.float16`) matches every other family's call site
+        // (DeepSeekModel/Glm4Model/MixtralModel/Qwen3MoEModel/etc, all pass
+        // `x.dtype`/`h.dtype`) and is required for correctness, not just
+        // parity: MLX's fused `scaled_dot_product_attention` kernel requires
+        // the mask's dtype to "promote to" the attention output's dtype. A
+        // genuinely bf16 checkpoint (e.g. `mlx-community/Llama-3.2-1B-
+        // Instruct-bf16`, found while running docs/LOGPROBS_PLAN.md's
+        // numeric-parity check - unrelated to logprobs itself) computes in
+        // bfloat16 throughout, so a hardcoded float16 mask does not promote
+        // and this hit a hard `Fatal error: [scaled_dot_product_attention]
+        // Mask type must promote to output type bfloat16` on EVERY
+        // generation request (including the load-time warmup pass) -
+        // Llama-3.2-1B-Instruct-bf16 could not be served at all before this
+        // fix. The existing float16-quantized `llama-3.2-1b` alias is
+        // unaffected: its compute dtype is already float16, so `x.dtype`
+        // resolves to the exact same value the old hardcoded default gave.
         let seqLen = x.dim(1)
         let cacheLen = caches?.first?.sequenceLength ?? 0
         let effectiveMask: MLXArray?
@@ -50,7 +68,7 @@ class LlamaModelInner: Module {
             effectiveMask = mask
         } else {
             effectiveMask = createCachedCausalMask(
-                newLen: seqLen, cacheLen: cacheLen)
+                newLen: seqLen, cacheLen: cacheLen, dtype: x.dtype)
         }
 
         for (i, layer) in layers.enumerated() {

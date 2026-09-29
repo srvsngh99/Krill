@@ -896,6 +896,23 @@ public final class InferenceEngine: @unchecked Sendable {
             // resolution, so resolve it here (same rule: explicit flag, else
             // env, else off) - the qwen3_5 template needs the decision to
             // emit the right think scaffold after the assistant cue.
+            //
+            // This is the actual root cause of the "logprobs.content is
+            // always []" bug for qwen3_5 models (docs/LOGPROBS_QWEN35_EMPTY.md):
+            // `qwen3.5-4b`'s checkpoint carries `vision_config`/`image_token_id`
+            // in its config.json even though it is used purely as a text model,
+            // so `ArchitectureDetection`'s `hasVision` check
+            // (Sources/KrillCore/ArchitectureDetection.swift) routes EVERY
+            // request - image or text-only - through this dedicated native
+            // runtime instead of the generic dense decode loop below. The SSM
+            // cache guard (`hasSSMCacheSpec`) further down in this function
+            // never even runs for these requests, and neither `wantLogprobs`
+            // nor `topLogprobs` was threaded through this call before - the
+            // generic loop's `sampleWithLogprobs` plumbing was simply never
+            // reachable. Same class of gap as the other native multimodal
+            // runtimes (`generateQwen25VL`, `generateLlamaVision`,
+            // `generateLocateAnything`, `generateMuseGlimmer`'s image path) -
+            // see docs/LOGPROBS_PLAN.md's "Verification results" section.
             return generateQwen35VL(
                 model: vlModel, tokenizer: tokenizer, messages: messages,
                 params: params, maxTokens: derivedMaxTokens, imageData: imageData,
@@ -903,7 +920,9 @@ public final class InferenceEngine: @unchecked Sendable {
                     explicit: enableThinking,
                     env: ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"]),
                 reasoningEffort: Self.resolveReasoningEffort(
-                    ProcessInfo.processInfo.environment["KRILL_REASONING_EFFORT"]))
+                    ProcessInfo.processInfo.environment["KRILL_REASONING_EFFORT"]),
+                wantLogprobs: wantLogprobs,
+                topLogprobs: topLogprobs)
         }
 
         // LocateAnything-3B native runtime. Uses 1D RoPE (so decode needs no
@@ -2694,7 +2713,9 @@ public final class InferenceEngine: @unchecked Sendable {
         maxTokens: Int,
         imageData: Data?,
         enableThinking: Bool,
-        reasoningEffort: String? = nil
+        reasoningEffort: String? = nil,
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         // Preprocess the image (if any) into the flattened patch batch + full
         // patch grid. The merged grid sizes the `<|image_pad|>` run + mRoPE.
@@ -2770,7 +2791,9 @@ public final class InferenceEngine: @unchecked Sendable {
                     stopIds: capturedStops,
                     params: captures.params,
                     mediaHash: captures.mediaHash,
-                    onToken: { token in
+                    wantLogprobs: wantLogprobs,
+                    topLogprobs: topLogprobs,
+                    onToken: { token, logprob in
                         guard !capturedStops.contains(token) else { return }
                         // When thinking is on, the template pre-opens the
                         // reasoning block INSIDE the prompt (`<think>\n` after
@@ -2787,7 +2810,8 @@ public final class InferenceEngine: @unchecked Sendable {
                         continuation.yield(TokenEvent(
                             tokenId: token,
                             text: text,
-                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime,
+                            logprob: logprob))
                     })
                 let sawStop = output.tokens.last.map {
                     capturedStops.contains($0)

@@ -41,6 +41,30 @@ reverse chronological order. Versioning follows
   the Ollama `/api/chat`/`/api/generate` dialects don't parse `logprobs`
   yet; a `tool_calls` reply always reports `"logprobs": null`.
 
+### Fixed
+
+- **`logprobs.content` was always `[]` for every qwen3_5-family model**
+  (`qwen3.5-4b`, Ornith-9B, Qwythos-9B, Qwen3.8-27B). Their config.json
+  carries `vision_config`/`image_token_id` even for a purely-text
+  checkpoint, so `ArchitectureDetection` routes every request through the
+  native `Qwen35VLForConditionalGeneration` decode runtime
+  (`generateQwen35VL`/`Qwen35VLRuntime`) instead of the generic dense path
+  Phase 1's `logprobs` plumbing was wired into — that runtime never threaded
+  `wantLogprobs`/`topLogprobs` at all. Fixed by threading both through
+  `Qwen35VLRuntime.generate`, which now calls the same `Sampler.
+  sampleWithLogprobs` Phase 1 added. See `docs/LOGPROBS_PLAN.md`'s
+  "Verification results (2026-09-29)" for the full root cause, the other
+  native VL/multimodal runtimes audited (Qwen 2.5-VL, Llama-3.2-Vision,
+  LocateAnything-3B, Muse Glimmer image requests — same class of gap, not
+  fixed in this change), and numeric-parity / no-slowdown re-verification.
+- A genuinely-bf16 checkpoint (as opposed to an int4-quantized one that
+  dequantizes to float16) crashed the dense `LlamaModel` decode path with
+  `Fatal error: [scaled_dot_product_attention] Mask type must promote to
+  output type bfloat16` on every request — the causal mask was hardcoded to
+  `.float16` instead of matching the model's actual compute dtype. Found
+  serving `mlx-community/Llama-3.2-1B-Instruct-bf16` for this same fix's
+  numeric-parity check; unrelated to logprobs.
+
 ## [0.24.0] - 2026-09-20
 
 ### Added
