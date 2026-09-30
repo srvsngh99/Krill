@@ -492,13 +492,71 @@ func loadLocateAnything(configData: Data, directory: URL) throws -> LoadedModel 
     )
 }
 
+/// Rewrite a raw HF/torch-format Qwen3.5-VL checkpoint's top-level key
+/// prefixes into the mlx_vlm-format layout `Qwen35VLForConditionalGeneration`
+/// expects (`vision_tower.*`, `language_model.model.*`,
+/// `language_model.lm_head.*`). A no-op when the checkpoint is already in
+/// mlx_vlm format (none of the raw prefixes are present), so this is safe to
+/// call unconditionally on every checkpoint `loadQwen35VL` sees.
+///
+/// Mirrors mlx_vlm's own `sanitize_key` (`mlx_vlm/models/qwen3_5/qwen3_5.py`)
+/// byte-for-byte:
+///
+///     raw HF (transformers)          mlx_vlm (what this runtime builds)
+///     model.language_model.*    ->   language_model.model.*
+///     model.visual.*             ->  vision_tower.*
+///     lm_head.*  (bare, top-level) -> language_model.lm_head.*
+///
+/// Only the top-level prefix differs between the two layouts — everything
+/// after it (e.g. `blocks.0.attn.proj.bias`) is byte-identical, verified by
+/// diffing the raw `Qwen/Qwen3.5-4B` weight index against
+/// `mlx-community/Qwen3.5-4B-MLX-4bit`'s. `mtp.*` keys and the conv1d/RMSNorm
+/// layout are handled separately by `loadQwen35VL`'s existing conditional
+/// sanitize, which runs after this rewrite.
+func qwen35VLKeyRewrite(_ flat: [String: MLXArray]) -> [String: MLXArray] {
+    let needsRewrite = flat.keys.contains {
+        $0.hasPrefix("model.language_model.") || $0.hasPrefix("model.visual.")
+    }
+    guard needsRewrite else { return flat }
+
+    var out: [String: MLXArray] = [:]
+    out.reserveCapacity(flat.count)
+    for (key, value) in flat {
+        let rewritten: String
+        if key.hasPrefix("model.language_model.") {
+            rewritten = "language_model.model." + key.dropFirst("model.language_model.".count)
+        } else if key.hasPrefix("model.visual.") {
+            rewritten = "vision_tower." + key.dropFirst("model.visual.".count)
+        } else if key.hasPrefix("lm_head.") {
+            rewritten = "language_model.lm_head." + key.dropFirst("lm_head.".count)
+        } else {
+            rewritten = key
+        }
+        out[rewritten] = value
+    }
+    return out
+}
+
 /// Native Qwen3.5-VL (Ornith) multimodal loader. Unlike `loadQwen35` (which
 /// drops the vision tower and loads only the text decoder), this materializes
 /// the WHOLE checkpoint into `Qwen35VLForConditionalGeneration`: the native
 /// vision tower + the native hybrid text decoder. The mlx_vlm-format int4
 /// checkpoint's on-disk keys (`vision_tower.*`, `language_model.model.*`,
-/// `language_model.lm_head.*`) map straight onto the module tree, so NO prefix
-/// rewrite is needed. Only the language model is quantized (the vision tower
+/// `language_model.lm_head.*`) map straight onto the module tree, so no prefix
+/// rewrite is needed for THAT layout. A raw HF/torch snapshot (e.g. `git clone`
+/// or `huggingface-cli download Qwen/Qwen3.5-4B` with no `mlx_vlm.convert`
+/// step) ships different top-level prefixes — `model.language_model.*`,
+/// `model.visual.*`, and a bare top-level `lm_head.*` — because that is how
+/// transformers' `Qwen3_5ForConditionalGeneration` names its state dict. Those
+/// keys share NO prefix with the module tree above, so `qwen35VLKeyRewrite`
+/// below renames them to the mlx_vlm layout first (mirrors mlx_vlm's own
+/// `sanitize_key` in `models/qwen3_5/qwen3_5.py` exactly). Skipping this step
+/// used to be silently fatal: with the lax `verify: []` below, every renamed
+/// key fails to match any module parameter, `model.update` drops all of them
+/// without error, and the whole model stays at its random Swift init —
+/// `krill serve` starts fine and then emits confident garbage (see
+/// docs/ADDING_MODELS.md, "raw HF snapshot loads but produces garbage").
+/// Only the language model is quantized (the vision tower
 /// ships fp16, exactly like the Qwen 2.5-VL checkpoints) — the quantize
 /// predicate is restricted to `language_model.*`. The conditional mlx_lm
 /// sanitize (conv1d `moveaxis`, RMSNorm `+1`, torch conv3d transpose) is a
@@ -522,7 +580,7 @@ func loadQwen35VL(configData: Data, directory: URL) throws -> LoadedModel {
         }
     }
 
-    var flat = try loadWeightArrays(from: directory)
+    var flat = qwen35VLKeyRewrite(try loadWeightArrays(from: directory))
     // Conditional sanitize (fires only for a raw torch-format checkpoint; the
     // mlx_vlm-format int4 triggers none of these). Detect BEFORE dropping mtp.
     let hasMTP = flat.keys.contains { $0.hasPrefix("mtp.") || $0.contains(".mtp.") }

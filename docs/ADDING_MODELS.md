@@ -143,6 +143,37 @@ The server's `dispatchFamilyChat` and `ToolFormat.forFamily` then
 pick the family up automatically — do not add a `family == …` branch
 in `Server.swift`.
 
+## Gotcha: a raw HF snapshot's keys are not an mlx conversion's keys
+
+A loader built and verified against an already-`mlx_vlm.convert`-ed or
+`mlx_lm.convert`-ed checkpoint (the normal case — that's what every
+registry alias points at) can silently mis-load a **raw HF/torch snapshot**
+of the same model (`huggingface-cli download <org>/<model>`, no conversion
+step) if you ever add support for pointing `--model` straight at one.
+transformers' state-dict prefixes for a `*ForConditionalGeneration` wrapper
+almost never match the mlx conversion's module-tree prefixes — e.g. Qwen3.5
+(Ornith / `qwen3_5`)'s raw checkpoint keys its text decoder
+`model.language_model.*` and its vision tower `model.visual.*`, while the
+mlx_vlm-format checkpoint `loadQwen35VL` is built against uses
+`language_model.model.*` and `vision_tower.*` (see `qwen35VLKeyRewrite` in
+`ModelLoader.swift`, and mlx_vlm's own `sanitize_key` in
+`mlx_vlm/models/<family>/<family>.py` for the source of truth on any given
+family's raw-vs-converted prefixes).
+
+The dangerous part: if the loader's `model.update(parameters:verify:)` uses
+a lax `verify: []` (tolerated for checkpoints with genuinely-optional keys,
+e.g. a tied-embedding `lm_head`), a total prefix mismatch is **silently
+tolerated** — every checkpoint key fails to match any module parameter, the
+model stays at its random Swift initialization, and `krill serve` starts
+without error and then generates confident garbage. This is not a
+hypothetical: it is exactly what happened loading a raw `Qwen/Qwen3.5-4B`
+snapshot through `loadQwen35VL` before the fix in this repo's git history
+(search the CHANGELOG for "raw HF/torch snapshot"). When adding a new
+family, either reject a checkpoint whose keys do not match your expected
+layout with a real error, or add the prefix rewrite up front and prove it
+against BOTH a converted checkpoint (registry alias) and a raw snapshot,
+not just the one you happened to test with.
+
 ## Checklist
 
 - [ ] Config decodes from the model's `config.json`
