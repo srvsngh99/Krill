@@ -478,23 +478,37 @@ func ollamaLogprobsArrayJSON(entries: [[String: Any]]) -> [[String: Any]] {
 /// - `text_offset[i]`: the character offset (Unicode scalar count, matching
 ///   Python's code-point-based string indexing that the real API's
 ///   `text_offset` is defined against) of `tokens[i]`'s first character
-///   within the returned completion TEXT (not prompt+completion - this
-///   endpoint has no `echo` support yet, Phase 3, so there is no prompt
-///   prefix to offset past).
+///   within the returned TEXT. Since the Phase 3 `echo` follow-up, `entries`
+///   may carry PROMPT entries before the completion ones (see
+///   `echoPromptLogprobEntry` below); `text_offset` accumulates across both
+///   uniformly, since the returned `text` is prompt+completion in that case
+///   too - no special-casing needed here, it falls out of the same running
+///   `offset` this function has always kept.
+/// - A `nil`/`NSNull` `entry["logprob"]` (the Phase 3 `echo` convention for
+///   the very first PROMPT token, which has no preceding context to score)
+///   produces a `null` `token_logprobs[i]` AND a `null` `top_logprobs[i]`
+///   (not `{}`) - matching OpenAI's own documented behavior for that one
+///   position. No generated-token entry (from `LogprobsAggregator`) ever
+///   carries this sentinel, so completion-only responses are unaffected.
 func legacyCompletionLogprobsJSON(entries: [[String: Any]]) -> [String: Any] {
     var tokens: [String] = []
     var tokenLogprobs: [Any] = []
-    var topLogprobsList: [[String: Any]] = []
+    var topLogprobsList: [Any] = []
     var textOffset: [Int] = []
     var offset = 0
     for entry in entries {
         let token = entry["token"] as? String ?? ""
-        let logprob = entry["logprob"] ?? 0
+        let rawLogprob = entry["logprob"]
+        let isNullPosition = rawLogprob == nil || rawLogprob is NSNull
         tokens.append(token)
-        tokenLogprobs.append(logprob)
+        tokenLogprobs.append(isNullPosition ? NSNull() : (rawLogprob ?? 0))
         textOffset.append(offset)
         offset += token.unicodeScalars.count
 
+        if isNullPosition {
+            topLogprobsList.append(NSNull())
+            continue
+        }
         var dict: [String: Any] = [:]
         let alternates = entry["top_logprobs"] as? [[String: Any]] ?? []
         for alt in alternates {
@@ -506,7 +520,7 @@ func legacyCompletionLogprobsJSON(entries: [[String: Any]]) -> [String: Any] {
         // were actually requested (`alternates` non-empty). A `logprobs: 0`
         // request must get `{}`, not `{token: logprob}` for every position.
         if !alternates.isEmpty, dict[token] == nil {
-            dict[token] = logprob
+            dict[token] = rawLogprob ?? 0
         }
         topLogprobsList.append(dict)
     }
@@ -516,4 +530,29 @@ func legacyCompletionLogprobsJSON(entries: [[String: Any]]) -> [String: Any] {
         "top_logprobs": topLogprobsList,
         "text_offset": textOffset,
     ]
+}
+
+/// Build one PROMPT-side legacy-completions logprobs entry (`echo`, Phase 3,
+/// docs/LOGPROBS_PLAN.md §3.2/§5.4), in the same `[String: Any]` shape
+/// `LogprobsAggregator`'s generated-token entries use, so both prepend
+/// cleanly into one `legacyCompletionLogprobsJSON(entries:)` call and the
+/// combined `text_offset` accumulates correctly across prompt+completion.
+///
+/// `info == nil` is the FIRST prompt token: OpenAI's documented convention
+/// is that it carries a null logprob and a null (not empty) `top_logprobs`,
+/// since there is no preceding context to score it against - encoded here as
+/// `NSNull()` sentinels that `legacyCompletionLogprobsJSON` recognizes.
+func echoPromptLogprobEntry(
+    tokenString: String, info: TokenLogprobInfo?, eng: TokenLogprobResolver
+) -> [String: Any] {
+    guard let info else {
+        return ["token": tokenString, "logprob": NSNull(), "top_logprobs": NSNull()]
+    }
+    let alternates: [[String: Any]] = info.topAlternates.map { alt in
+        let altBytes = eng.rawTokenBytes(for: alt.tokenId) ?? []
+        return logprobEntryJSON(
+            token: eng.lossyTokenString(bytes: altBytes), logprob: alt.logprob, bytes: altBytes)
+    }
+    return logprobEntryJSON(
+        token: tokenString, logprob: info.logprob, bytes: [], topLogprobs: alternates)
 }

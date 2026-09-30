@@ -907,13 +907,72 @@ final class ServerTests: XCTestCase {
         }
     }
 
-    func testLegacyCompletionsEchoStillRejected() {
-        // Phase 3, not this change - `echo` needs a prefix-cache bypass
-        // (§5.4) and remains out of scope.
-        XCTAssertThrowsError(try ServerParsing.openAICompletionRequest(from: [
+    // MARK: - `echo` (Phase 3, docs/LOGPROBS_PLAN.md §3.2/§5.4)
+
+    func testLegacyCompletionsAcceptsEcho() throws {
+        let req = try ServerParsing.openAICompletionRequest(from: [
             "prompt": "hi", "echo": true,
+        ])
+        XCTAssertTrue(req.echo)
+    }
+
+    func testLegacyCompletionsEchoDefaultsFalse() throws {
+        let req = try ServerParsing.openAICompletionRequest(from: ["prompt": "hi"])
+        XCTAssertFalse(req.echo)
+    }
+
+    func testLegacyCompletionsRejectsNonBoolEcho() {
+        XCTAssertThrowsError(try ServerParsing.openAICompletionRequest(from: [
+            "prompt": "hi", "echo": "yes",
         ])) { error in
-            XCTAssertEqual(error as? ServerRequestError, .unsupportedField("echo"))
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidType(field: "echo", expected: "a boolean")
+            )
+        }
+    }
+
+    func testLegacyCompletionsEchoWithLogprobsAndMaxTokensZero() throws {
+        let req = try ServerParsing.openAICompletionRequest(from: [
+            "prompt": "hi", "echo": true, "logprobs": 3, "max_tokens": 0,
+        ])
+        XCTAssertTrue(req.echo)
+        XCTAssertEqual(req.logprobs, 3)
+        XCTAssertEqual(req.maxTokens, 0)
+    }
+
+    // MARK: - `max_tokens: 0` (Phase 3: "echo: true with max_tokens: 0
+    // returns just the scored prompt" - confirmed against the OpenAI SDK's
+    // `completion_create_params.py` doc comment for `echo`). This endpoint
+    // is the only one that documents a meaning for 0; chat/Ollama keep
+    // rejecting it via `positiveInt` (unchanged, not re-tested here).
+
+    func testLegacyCompletionsAcceptsMaxTokensZero() throws {
+        let req = try ServerParsing.openAICompletionRequest(from: [
+            "prompt": "hi", "max_tokens": 0,
+        ])
+        XCTAssertEqual(req.maxTokens, 0)
+    }
+
+    func testLegacyCompletionsRejectsNegativeMaxTokens() {
+        XCTAssertThrowsError(try ServerParsing.openAICompletionRequest(from: [
+            "prompt": "hi", "max_tokens": -5,
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidValue(field: "max_tokens", reason: "must be greater than or equal to 0")
+            )
+        }
+    }
+
+    func testLegacyCompletionsMaxTokensZeroConflictWithMaxCompletionTokens() {
+        XCTAssertThrowsError(try ServerParsing.openAICompletionRequest(from: [
+            "prompt": "hi", "max_tokens": 0, "max_completion_tokens": 5,
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidValue(field: "max_completion_tokens", reason: "conflicts with 'max_tokens'")
+            )
         }
     }
 

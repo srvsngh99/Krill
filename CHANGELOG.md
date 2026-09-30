@@ -11,6 +11,36 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **`echo` on legacy `/v1/completions` (Phase 3, `docs/LOGPROBS_PLAN.md`)** —
+  `echo: true` now returns the prompt text in front of the completion, and
+  combined with `logprobs` also scores every PROMPT token (not just
+  generated ones), matching the OpenAI SDK's documented `echo`/`logprobs`
+  contract (`completion_create_params.py`). A dedicated ECHO-ONLY engine
+  path (`InferenceEngine.echoPromptLogprobs`) tokenizes the raw prompt
+  string the client sent (no chat template — Krill's `/v1/completions`
+  already always wraps the prompt into one chat-template turn for the
+  actual completion, a pre-existing, unrelated behavior this feature does
+  not touch) and forwards it chunk-by-chunk through a fresh, request-scoped
+  KVCache that never touches the shared prefix cache (§5.4's bypass option),
+  computing each chunk's raw log-softmax + top-N without ever materializing
+  a full `[promptLen, vocab]` matrix. `max_tokens: 0` (`echo: true` or not)
+  returns just the scored prompt with no completion — no engine call at all
+  — matching the OpenAI SDK's documented behavior; the legacy `/v1/
+  completions` `max_tokens`/`max_completion_tokens` fields now accept an
+  explicit `0` (previously rejected everywhere as "must be greater than 0").
+  A leading BOS token (needed to feed the model correctly, but not literal
+  text the client sent) is stripped from the reported `tokens`/
+  `token_logprobs`/`top_logprobs`/`text_offset` arrays so `tokens` joined
+  always reproduces the returned `text` exactly; the new first reported
+  token still gets a REAL logprob (scored against the hidden BOS context),
+  not a forced null — only a prompt with no preceding context at all gets a
+  null first entry, matching OpenAI's documented convention for that case.
+  Verified via numeric parity against `mlx_lm` (a full-sequence forward over
+  the same raw token ids) on `llama-3.2-1b` (4-bit) and `Qwen3-0.6B-bf16`;
+  see `docs/LOGPROBS_PLAN.md`'s Phase 3 section for the numbers. The prefill
+  path for every OTHER request (no `echo`) is untouched by this feature —
+  it lives entirely behind the `echo` flag in a new function, never inside
+  `generate(messages:)`'s own prefill.
 - **`logprobs` / `top_logprobs` on the speculative and batched/continuous
   decode paths (Phase 2)** — previously a `logprobs` request silently
   disabled draft-model AND n-gram speculative decode and dropped out of the

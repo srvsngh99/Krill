@@ -1,6 +1,17 @@
 import Foundation
 import XCTest
+import KrillSampler
 @testable import KrillServer
+
+/// Minimal synthetic `TokenLogprobResolver` for `echoPromptLogprobEntry`
+/// tests below - no real tokenizer needed, every alternate token id maps to
+/// its own fixed byte sequence.
+private final class FakeEchoResolver: TokenLogprobResolver {
+    var bytesByToken: [Int: [UInt8]] = [:]
+    func rawTokenBytes(for tokenId: Int) -> [UInt8]? { bytesByToken[tokenId] }
+    func lossyTokenString(bytes: [UInt8]) -> String { String(decoding: bytes, as: UTF8.self) }
+    func isOutputSuppressedToken(_ tokenId: Int) -> Bool { false }
+}
 
 final class ServerFormattingTests: XCTestCase {
     func testSSEContentChunkShape() throws {
@@ -258,6 +269,51 @@ final class ServerFormattingTests: XCTestCase {
         XCTAssertEqual((json["token_logprobs"] as? [Any])?.count, 0)
         XCTAssertEqual((json["top_logprobs"] as? [Any])?.count, 0)
         XCTAssertEqual((json["text_offset"] as? [Int])?.count, 0)
+    }
+
+    // MARK: - `echo` prompt logprobs (Phase 3, docs/LOGPROBS_PLAN.md §3.2/§5.4)
+
+    func testEchoPromptLogprobEntryFirstTokenIsNull() {
+        let resolver = FakeEchoResolver()
+        let entry = echoPromptLogprobEntry(tokenString: "Hello", info: nil, eng: resolver)
+        XCTAssertEqual(entry["token"] as? String, "Hello")
+        XCTAssertTrue(entry["logprob"] is NSNull)
+        XCTAssertTrue(entry["top_logprobs"] is NSNull)
+    }
+
+    func testEchoPromptLogprobEntryNonFirstTokenHasRealValues() {
+        let resolver = FakeEchoResolver()
+        resolver.bytesByToken[7] = Array(" world".utf8)
+        let info = TokenLogprobInfo(
+            logprob: -0.4, topAlternates: [TokenAltLogprob(tokenId: 7, logprob: -0.4)])
+        let entry = echoPromptLogprobEntry(tokenString: " world", info: info, eng: resolver)
+        XCTAssertEqual(entry["token"] as? String, " world")
+        XCTAssertEqual(entry["logprob"] as? Float, -0.4)
+        let alternates = entry["top_logprobs"] as? [[String: Any]]
+        XCTAssertEqual(alternates?.count, 1)
+        XCTAssertEqual(alternates?.first?["token"] as? String, " world")
+    }
+
+    func testLegacyCompletionLogprobsJSONHandlesNullFirstPromptEntry() throws {
+        // The whole point of the null sentinel: prepending an echo prompt's
+        // first-token entry must NOT crash or coerce to `{}`/`0` - it stays
+        // `null` in both `token_logprobs` and `top_logprobs`, and does not
+        // disturb the running `text_offset` for the entries after it.
+        let resolver = FakeEchoResolver()
+        let firstPromptEntry = echoPromptLogprobEntry(tokenString: "Hel", info: nil, eng: resolver)
+        let completionEntry = logprobEntryJSON(token: "lo", logprob: -0.02, bytes: Array("lo".utf8))
+        let json = legacyCompletionLogprobsJSON(entries: [firstPromptEntry, completionEntry])
+
+        let tokens = try XCTUnwrap(json["tokens"] as? [String])
+        XCTAssertEqual(tokens, ["Hel", "lo"])
+        let tokenLogprobs = try XCTUnwrap(json["token_logprobs"] as? [Any])
+        XCTAssertTrue(tokenLogprobs[0] is NSNull)
+        XCTAssertEqual(tokenLogprobs[1] as? Float, -0.02)
+        let topLogprobs = try XCTUnwrap(json["top_logprobs"] as? [Any])
+        XCTAssertTrue(topLogprobs[0] is NSNull)
+        XCTAssertEqual((topLogprobs[1] as? [String: Any])?.count, 0)
+        let textOffset = try XCTUnwrap(json["text_offset"] as? [Int])
+        XCTAssertEqual(textOffset, [0, 3], "offset accumulates across prompt+completion uniformly")
     }
 
     private func parseSSE(_ event: String) throws -> [String: Any] {

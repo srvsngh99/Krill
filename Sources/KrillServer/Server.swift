@@ -1880,61 +1880,111 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             // WS-E: /v1/completions is engine-touching too - serialize it.
             guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
             defer { self.leaveQueue(releasing: eng) }
-            let (tokenStream, getStats) = await self.runGenerate(eng,
-                prompt: request.prompt,
-                params: request.sampling.samplingParams,
-                maxTokens: request.maxTokens,
-                promptTemplateOverride: modelTemplateOverride(),
-                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
 
-            // logprobs (2026-09-30 follow-up, docs/LOGPROBS_PLAN.md §3.2):
-            // built the same way as `handleNonStreamingCompletion` - the
-            // aggregator is only constructed (and only pays the incremental
-            // reasoning-filter cost) on the logprobs path, so a request that
-            // never sets `logprobs` is byte-for-byte unchanged from before
-            // this field existed (same whole-string accumulate-then-strip as
-            // always).
-            let logprobsAgg = wantLogprobs ? LogprobsAggregator(engine: eng, enabled: true) : nil
-            var fullText = ""
-            for await event in tokenStream {
-                if event.isEnd { break }
-                if let logprobsAgg {
-                    fullText += logprobsAgg.consume(event)
-                } else {
-                    fullText += event.text
+            // `echo` (Phase 3, docs/LOGPROBS_PLAN.md §3.2/§5.4): the prompt
+            // text (and, combined with `logprobs`, a raw logprob for every
+            // PROMPT token) is computed by a dedicated ECHO-ONLY engine path
+            // (`InferenceEngine.echoPromptLogprobs`) that never touches
+            // `generate(messages:)` - so a non-echo request's prefill is
+            // provably byte-for-byte unaffected by this feature's existence.
+            // `promptEntries` stays empty for every non-echo request (the
+            // pre-existing behavior, unchanged).
+            var promptEntries: [[String: Any]] = []
+            var promptTokenCount = 0
+            if request.echo || request.maxTokens == 0 {
+                // Cheap tokenize-only count (includes the implicit leading
+                // BOS the model actually consumes - `usage.prompt_tokens`
+                // measures real cost, unlike the echoed `tokens` array below,
+                // which strips it so it lines up with the returned text) for
+                // `usage.prompt_tokens` when there is no generation call to
+                // read it from below (`max_tokens: 0`, or `echo` without
+                // `logprobs`). Computed unconditionally so it stays
+                // consistent with the `wantLogprobs` branch just below,
+                // which reports one fewer count for its OWN (BOS-stripped)
+                // `tokenIds` - two different questions ("how many tokens did
+                // the model process" vs. "how many tokens does the echoed
+                // text decompose into").
+                promptTokenCount = eng.promptTokenIds(request.prompt).count
+            }
+            if request.echo, wantLogprobs,
+               let echoResult = eng.echoPromptLogprobs(prompt: request.prompt, topLogprobs: topLogprobs) {
+                promptEntries = zip(echoResult.tokenStrings, echoResult.infos).map { tokenString, info in
+                    echoPromptLogprobEntry(tokenString: tokenString, info: info, eng: eng)
                 }
             }
-            if let logprobsAgg { fullText += logprobsAgg.finish() }
-            // /v1/completions has no thinking field; just drop the block. On
-            // the logprobs path `fullText` is already reasoning-free (the
-            // aggregator filtered it token-by-token so its entries line up
-            // with the returned text), so this is then a no-op pass-through,
-            // same pattern as `handleNonStreamingCompletion`.
-            fullText = ReasoningParser.strip(fullText).visible
 
-            let stats = getStats()
+            var fullText = request.echo ? request.prompt : ""
+            var completionEntries: [[String: Any]] = []
+            var stats: GenerationStats?
+            // `max_tokens: 0` (confirmed against the OpenAI SDK's
+            // `completion_create_params.py` doc comment for `echo`: "echo:
+            // true with max_tokens: 0 returns just the scored prompt") skips
+            // generation entirely - no engine call, no TokenBudget
+            // resolution, just the (optionally scored) prompt.
+            if request.maxTokens > 0 {
+                let (tokenStream, getStats) = await self.runGenerate(eng,
+                    prompt: request.prompt,
+                    params: request.sampling.samplingParams,
+                    maxTokens: request.maxTokens,
+                    promptTemplateOverride: modelTemplateOverride(),
+                    wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
+
+                // logprobs (2026-09-30 follow-up, docs/LOGPROBS_PLAN.md §3.2):
+                // built the same way as `handleNonStreamingCompletion` - the
+                // aggregator is only constructed (and only pays the incremental
+                // reasoning-filter cost) on the logprobs path, so a request that
+                // never sets `logprobs` is byte-for-byte unchanged from before
+                // this field existed (same whole-string accumulate-then-strip as
+                // always).
+                let logprobsAgg = wantLogprobs ? LogprobsAggregator(engine: eng, enabled: true) : nil
+                var completionText = ""
+                for await event in tokenStream {
+                    if event.isEnd { break }
+                    if let logprobsAgg {
+                        completionText += logprobsAgg.consume(event)
+                    } else {
+                        completionText += event.text
+                    }
+                }
+                if let logprobsAgg { completionText += logprobsAgg.finish() }
+                // /v1/completions has no thinking field; just drop the block. On
+                // the logprobs path `completionText` is already reasoning-free
+                // (the aggregator filtered it token-by-token so its entries line
+                // up with the returned text), so this is then a no-op
+                // pass-through, same pattern as `handleNonStreamingCompletion`.
+                completionText = ReasoningParser.strip(completionText).visible
+                completionEntries = logprobsAgg?.entries ?? []
+                fullText += completionText
+                stats = getStats()
+            }
+
             var choice: [String: Any] = [
                 "text": fullText,
                 "index": 0,
-                "finish_reason": stats?.hitTokenLimit == true ? "length" : "stop"
+                "finish_reason": request.maxTokens == 0
+                    ? "length" : (stats?.hitTokenLimit == true ? "length" : "stop")
             ]
             // The `logprobs` key is added ONLY when the request asked for it
             // (`request.logprobs != nil`) - unlike the chat endpoint's
             // always-present `logprobs: null`, a request that never sets
             // `logprobs` here must get the EXACT SAME response bytes as
-            // before this field existed (no new key at all).
-            if let logprobsAgg {
-                choice["logprobs"] = legacyCompletionLogprobsJSON(entries: logprobsAgg.entries)
+            // before this field existed (no new key at all). Prompt entries
+            // (empty for every non-echo request) come first, so the combined
+            // `text_offset` runs across prompt then completion.
+            if wantLogprobs {
+                choice["logprobs"] = legacyCompletionLogprobsJSON(
+                    entries: promptEntries + completionEntries)
             }
+            let usagePromptTokens = stats?.promptTokens ?? promptTokenCount
             let response: [String: Any] = [
                 "id": "cmpl-\(UUID().uuidString.prefix(8))",
                 "object": "text_completion",
                 "created": Int(Date().timeIntervalSince1970),
                 "choices": [choice],
                 "usage": [
-                    "prompt_tokens": stats?.promptTokens ?? 0,
+                    "prompt_tokens": usagePromptTokens,
                     "completion_tokens": stats?.generatedTokens ?? 0,
-                    "total_tokens": (stats?.promptTokens ?? 0) + (stats?.generatedTokens ?? 0)
+                    "total_tokens": usagePromptTokens + (stats?.generatedTokens ?? 0)
                 ]
             ]
             self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)

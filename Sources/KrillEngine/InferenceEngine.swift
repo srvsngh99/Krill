@@ -129,6 +129,140 @@ public final class InferenceEngine: @unchecked Sendable {
         tokenizer?.outputSuppressedTokenIDs.contains(tokenId) ?? false
     }
 
+    /// Raw prompt token ids for `/v1/completions` `echo`/usage accounting
+    /// (docs/LOGPROBS_PLAN.md Phase 3, §3.2): plain `tokenizer.encode`, no
+    /// chat template - matching the RAW prompt string the client sent, not
+    /// whatever `generate(prompt:)` internally wraps it into for the actual
+    /// completion (see `echoPromptLogprobs` below for why that split is
+    /// deliberate). Cheap - tokenization only, no forward pass - so it is
+    /// safe to call even when the request does not want logprobs at all
+    /// (e.g. `echo: true, logprobs: absent`, or `max_tokens: 0` usage
+    /// counting).
+    public func promptTokenIds(_ prompt: String) -> [Int] {
+        tokenizer?.encode(prompt) ?? []
+    }
+
+    /// Chunk width for `echoPromptLogprobs`' per-position log-softmax, capped
+    /// well below the model's own `prefillChunkSize` (which can be as large
+    /// as 2048): unlike normal prefill (which only ever needs the LAST
+    /// position's logits per chunk, via `prefillForward`), echo needs a
+    /// float32 log-softmax over EVERY position in the chunk, so its
+    /// `[chunk, vocab]` working set is `chunk`x bigger. 512 keeps that under
+    /// ~550MB even at Gemma 4's 262144-entry vocab, on a machine that may
+    /// already be under memory pressure from other jobs.
+    private static let echoLogprobsChunkSize = 512
+
+    /// Phase 3 (docs/LOGPROBS_PLAN.md §3.2/§5.4): raw per-position logprobs
+    /// for EVERY prompt token, for legacy `/v1/completions` `echo` +
+    /// `logprobs`. This is an ECHO-ONLY path, entirely separate from
+    /// `generate(messages:)`'s prefill:
+    ///  - It tokenizes the RAW prompt string the client sent with NO chat
+    ///    template (`tokenizer.encode`, the same as `promptTokenIds` above) -
+    ///    Krill's `/v1/completions` already always wraps the prompt into one
+    ///    chat-template user turn for the actual COMPLETION (a pre-existing,
+    ///    unrelated behavior `runGenerate(prompt:)` retains unchanged); echo's
+    ///    prompt tokens/logprobs are scored against the prompt AS SENT,
+    ///    matching both the legacy completions API's historical
+    ///    no-chat-wrapping behavior and this repo's own `mlx_lm` parity oracle
+    ///    (a full-sequence forward over the same token ids, no template).
+    ///  - It always does a full, uncached forward: a fresh, request-scoped
+    ///    `KVCache` that is never looked up in or stored into the shared
+    ///    `PrefixCache` (§5.4 option (a) - "bypass the prefix cache entirely").
+    ///    Chunked (`echoLogprobsChunkSize`) so a long prompt's per-position
+    ///    log-softmax is never materialized as one `[promptLen, vocab]`
+    ///    matrix - only one `[chunk, vocab]` slice at a time, discarded
+    ///    between chunks.
+    ///  - It never touches `Sampler.sample`/`sampleArray`/`sampleWithLogprobs`
+    ///    or any decode-loop state, so the plain decode path (and every other
+    ///    request) is provably byte-for-byte unaffected by this method's
+    ///    existence.
+    ///
+    /// - Returns: `nil` when no model is loaded. Otherwise `(tokenIds,
+    ///   tokenStrings, infos)`, all the same length as `tokenIds`.
+    ///   `infos[0]` is `nil` when there is truly no preceding context to
+    ///   score the first REPORTED token against - OpenAI's documented
+    ///   convention. `infos[i]` for `i > 0` scores `tokenIds[i]` given
+    ///   `tokenIds[0..<i]`, computed from the model's raw (pre-sampling)
+    ///   logits, identically to every other logprob this repo reports (§4.1).
+    ///
+    ///   One wrinkle `tokenIds`/`tokenStrings` handle so callers don't have
+    ///   to: `tokenizer.encode` prepends a leading BOS token (needed to feed
+    ///   the model correctly) that is NOT literal text the client sent - its
+    ///   `decodeForOutput` can be a non-empty string like
+    ///   `"<|begin_of_text|>"`, which would break the
+    ///   "concatenating `tokens` reproduces the returned `text`" invariant
+    ///   `/v1/completions`' response shape promises. A leading BOS is
+    ///   therefore STRIPPED from the returned arrays (though it is still fed
+    ///   to the model as hidden context, so the new first entry's logprob -
+    ///   if any - is a REAL, meaningfully-conditioned value scored against
+    ///   that BOS, not forced to `nil`; only a prompt with no preceding
+    ///   context at all, BOS or otherwise, gets a `nil` first entry).
+    public func echoPromptLogprobs(
+        prompt: String, topLogprobs: Int
+    ) -> (tokenIds: [Int], tokenStrings: [String], infos: [TokenLogprobInfo?])? {
+        guard let loadedModel, let tokenizer else { return nil }
+        let tokenIds = tokenizer.encode(prompt)
+        let tokenStrings = tokenIds.map { tokenizer.decodeForOutput(token: $0) }
+        // Drop a leading BOS from what gets REPORTED (see the doc comment
+        // above) - `dropLeadingBOS` slices it off `tokenIds`/`tokenStrings`/
+        // `infos` uniformly right before every return in this function.
+        let hasLeadingBOS = tokenIds.first == tokenizer.bosTokenId && tokenIds.count > 1
+        func dropLeadingBOS<T>(_ arr: [T]) -> [T] { hasLeadingBOS ? Array(arr.dropFirst()) : arr }
+
+        guard tokenIds.count > 1 else {
+            // A single-token (or empty) prompt has no position with a known
+            // "next" token to score - the one token present (if any) is the
+            // first, which is always null per the convention above.
+            return (tokenIds, tokenStrings, tokenIds.isEmpty ? [] : [nil])
+        }
+
+        let caches: [KVCacheProtocol] = makeKVCaches(
+            spec: loadedModel.cacheSpec, numLayers: loadedModel.numLayers)
+        let forward = loadedModel.forward
+        let chunkSize = Self.echoLogprobsChunkSize
+        var infos: [TokenLogprobInfo?] = [nil]
+        let total = tokenIds.count
+        var start = 0
+        while start < total - 1 {
+            let end = Swift.min(start + chunkSize, total)
+            let chunkIds = Array(tokenIds[start ..< end])
+            let inputArray = MLXArray(chunkIds.map { Int32($0) }).reshaped(1, chunkIds.count)
+            let logits = forward(inputArray, caches)
+            MLX.eval(logits)
+            let chunkLen = chunkIds.count
+            let logits2D = logits.reshaped(chunkLen, -1)
+            let (logSoftmax, topIdx, topVals, n) = Sampler.rawLogSoftmaxAndTopN(
+                logits2D, topLogprobs: topLogprobs)
+            // Position p (local to this chunk) predicts the NEXT token,
+            // globally at `start + p + 1`. The very last prompt token overall
+            // has no "next" token within the PROMPT to score here - Server.swift
+            // stitches it to the first GENERATED token's own logprob instead
+            // (already computed by the normal decode path), so the final chunk
+            // scores one fewer position than it has tokens.
+            let scoreCount = (end < total) ? chunkLen : chunkLen - 1
+            if scoreCount > 0 {
+                let nextIds = Array(tokenIds[(start + 1) ... (start + scoreCount)])
+                let chosenIdsArr = MLXArray(nextIds.map { Int32($0) })
+                let scoredLogSoftmax = logSoftmax[0 ..< scoreCount, 0...]
+                let chosenLogprobArr = Sampler.gatherChosenLogprob(
+                    scoredLogSoftmax, chosenIds: chosenIdsArr)
+                let scoredTopIdx = topIdx?[0 ..< scoreCount, 0...]
+                let scoredTopVals = topVals?[0 ..< scoreCount, 0...]
+                if let scoredTopIdx, let scoredTopVals {
+                    eval(chosenLogprobArr, scoredTopIdx, scoredTopVals)
+                } else {
+                    eval(chosenLogprobArr)
+                }
+                let chunkInfos = Sampler.logprobInfos(
+                    chosenLogprobs: chosenLogprobArr, topIdx: scoredTopIdx,
+                    topVals: scoredTopVals, n: n)
+                infos.append(contentsOf: chunkInfos)
+            }
+            start = end
+        }
+        return (dropLeadingBOS(tokenIds), dropLeadingBOS(tokenStrings), dropLeadingBOS(infos))
+    }
+
     /// The loaded model's directory name (useful for display/status).
     public var modelName: String? { isLoaded ? modelDirectory.lastPathComponent : nil }
 
