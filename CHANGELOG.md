@@ -37,9 +37,9 @@ reverse chronological order. Versioning follows
   direct decode-throughput A/B against `main` with logprobs never
   requested. A logprobs request disables speculative decode and opts out of
   the batched/continuous decode pool for this phase (falls back to the
-  plain decode path). Known Phase 1 limits: legacy `/v1/completions` and
-  the Ollama `/api/chat`/`/api/generate` dialects don't parse `logprobs`
-  yet; a `tool_calls` reply always reports `"logprobs": null`.
+  plain decode path). Known limit: a `tool_calls` reply always reports
+  `"logprobs": null`. (Legacy `/v1/completions` and the Ollama
+  `/api/chat`/`/api/generate` dialects gained `logprobs` in the entry below.)
 - **`logprobs` / `top_logprobs` on Ollama `/api/chat` + `/api/generate`, and
   legacy `logprobs` on `POST /v1/completions`** (2026-09-30 follow-up,
   closing the Phase 1 gap above — see `docs/LOGPROBS_PLAN.md`'s new
