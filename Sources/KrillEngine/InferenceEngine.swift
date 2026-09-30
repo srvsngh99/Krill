@@ -881,14 +881,30 @@ public final class InferenceEngine: @unchecked Sendable {
         return false
     }
 
-    /// Resolve the reasoning-depth level for templates that expose one
-    /// (`KRILL_REASONING_EFFORT` = xhigh | medium | low). An unrecognized value
-    /// resolves to nil rather than erroring, so the template's own default
-    /// (`xhigh`) applies — the chat template would `raise_exception` on a bad
-    /// level, and a typo'd env var should not fail a request.
-    public static func resolveReasoningEffort(_ env: String?) -> String? {
+    /// Reasoning-depth levels Krill's Qwen3.8-class templates accept. The
+    /// per-request `reasoning_effort` field (OpenAI dialect) is intersected
+    /// against this SAME list — Krill does not map OpenAI's own values
+    /// (`"high"`, `"minimal"`) onto it; an unrecognized level is ignored, not
+    /// guessed at (see `resolveReasoningEffort` below).
+    static let supportedReasoningEffortLevels: Set<String> = ["xhigh", "medium", "low"]
+
+    /// Resolve the reasoning-depth level for templates that expose one.
+    /// `explicit` (a per-request `reasoning_effort` value, docs/LOGPROBS_
+    /// PLAN.md's sibling per-request thinking-switch work) wins over `env`
+    /// (`KRILL_REASONING_EFFORT`) when it is itself one of the recognized
+    /// levels — mirroring `resolveThinking`'s explicit-wins-over-env
+    /// precedence. An unrecognized value, in EITHER source, resolves to nil
+    /// rather than erroring (falling through to `env`, then to nil), so the
+    /// template's own default (`xhigh`) applies — the chat template would
+    /// `raise_exception` on a bad level, and a typo'd request/env value
+    /// should not fail a request.
+    public static func resolveReasoningEffort(explicit: String? = nil, env: String?) -> String? {
+        if let level = explicit?.lowercased().trimmingCharacters(in: .whitespaces),
+           supportedReasoningEffortLevels.contains(level) {
+            return level
+        }
         guard let level = env?.lowercased().trimmingCharacters(in: .whitespaces),
-              ["xhigh", "medium", "low"].contains(level) else { return nil }
+              supportedReasoningEffortLevels.contains(level) else { return nil }
         return level
     }
 
@@ -907,6 +923,7 @@ public final class InferenceEngine: @unchecked Sendable {
         useNgramSpeculative: Bool? = nil,
         imagesData: [Data] = [],
         enableThinking: Bool? = nil,
+        reasoningEffort: String? = nil,
         wantLogprobs: Bool = false,
         topLogprobs: Int = 0
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
@@ -926,6 +943,7 @@ public final class InferenceEngine: @unchecked Sendable {
                         useNgramSpeculative: useNgramSpeculative,
                         imagesData: imagesData,
                         enableThinking: enableThinking,
+                        reasoningEffort: reasoningEffort,
                         wantLogprobs: wantLogprobs,
                         topLogprobs: topLogprobs)
     }
@@ -957,6 +975,7 @@ public final class InferenceEngine: @unchecked Sendable {
         useNgramSpeculative: Bool? = nil,
         imagesData: [Data] = [],
         enableThinking: Bool? = nil,
+        reasoningEffort: String? = nil,
         wantLogprobs: Bool = false,
         topLogprobs: Int = 0
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
@@ -1057,7 +1076,8 @@ public final class InferenceEngine: @unchecked Sendable {
                     explicit: enableThinking,
                     env: ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"]),
                 reasoningEffort: Self.resolveReasoningEffort(
-                    ProcessInfo.processInfo.environment["KRILL_REASONING_EFFORT"]),
+                    explicit: reasoningEffort,
+                    env: ProcessInfo.processInfo.environment["KRILL_REASONING_EFFORT"]),
                 wantLogprobs: wantLogprobs,
                 topLogprobs: topLogprobs)
         }

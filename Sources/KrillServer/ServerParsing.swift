@@ -93,6 +93,24 @@ internal struct ServerChatRequest: Equatable, Sendable {
     /// true; silently ignored (parsed as 0, unvalidated) otherwise, matching
     /// OpenAI's own documented behavior of "does nothing without logprobs".
     var topLogprobs: Int = 0
+    /// Per-request thinking override. `nil` = no decision made by this
+    /// request (falls back to `KRILL_ENABLE_THINKING`, the server-start-time
+    /// default - unchanged); `true`/`false` is an explicit per-request
+    /// decision that overrides the env default either way. OpenAI dialect:
+    /// `chat_template_kwargs.enable_thinking` (the vLLM/SGLang convention).
+    /// Ollama dialect: `think` (top-level `bool`; see `ServerGenerateRequest`
+    /// for the same field on `/api/generate`).
+    var enableThinking: Bool? = nil
+    /// OpenAI `reasoning_effort` (top-level string). Only meaningful for
+    /// checkpoints whose chat template exposes a `reasoning_effort` variable
+    /// (`TokenizerWrapper.supportsReasoningEffort` - Qwen3.8-class templates
+    /// today); Krill only maps the same three levels
+    /// `KRILL_REASONING_EFFORT` already does (`xhigh`/`medium`/`low`) - an
+    /// unrecognized value (including OpenAI's own `"high"`/`"minimal"`,
+    /// which Krill has no mapping for and does not invent one for) is
+    /// silently ignored, exactly like an unrecognized `KRILL_REASONING_
+    /// EFFORT` env value already is (`InferenceEngine.resolveReasoningEffort`).
+    var reasoningEffort: String? = nil
 }
 
 internal struct ServerCompletionRequest: Equatable, Sendable {
@@ -130,6 +148,9 @@ internal struct ServerGenerateRequest: Equatable, Sendable {
     /// fields of the same name.
     var wantLogprobs: Bool = false
     var topLogprobs: Int = 0
+    /// Ollama `think` (top-level `bool`). Same semantics as
+    /// `ServerChatRequest.enableThinking`.
+    var enableThinking: Bool? = nil
 }
 
 internal enum ServerRequestError: Error, Equatable, Sendable {
@@ -399,8 +420,25 @@ internal enum ServerParsing {
             toolChoice: parseToolChoice(json["tool_choice"]),
             includeUsage: ((json["stream_options"] as? [String: Any])?["include_usage"] as? Bool) ?? false,
             wantLogprobs: wantLogprobs,
-            topLogprobs: topLogprobs
+            topLogprobs: topLogprobs,
+            enableThinking: try chatTemplateKwargsEnableThinking(json["chat_template_kwargs"]),
+            reasoningEffort: try optionalString(json["reasoning_effort"], field: "reasoning_effort")
         )
+    }
+
+    /// OpenAI/vLLM/SGLang `chat_template_kwargs: {"enable_thinking": bool}` -
+    /// a per-request override of the server-start-time `KRILL_ENABLE_
+    /// THINKING` default (docs/LOGPROBS_PLAN.md's sibling per-request
+    /// thinking-switch work). An explicit `null` - of the whole object, or
+    /// just the `enable_thinking` key - means "use the default", the same
+    /// convention every other optional field has followed since PR #321
+    /// (`isAbsent` treats a JSON `null` exactly like an absent key).
+    private static func chatTemplateKwargsEnableThinking(_ raw: Any?) throws -> Bool? {
+        guard !isAbsent(raw) else { return nil }
+        guard let obj = raw as? [String: Any] else {
+            throw ServerRequestError.invalidType(field: "chat_template_kwargs", expected: "an object")
+        }
+        return try boolValue(obj["enable_thinking"], field: "chat_template_kwargs.enable_thinking")
     }
 
     /// Parse OpenAI `tool_choice`: `"auto"|"none"|"required"` or
@@ -487,7 +525,16 @@ internal enum ServerParsing {
             keepAlive: KeepAliveParse.seconds(from: json["keep_alive"]),
             contextLimit: (try? optionsObject(from: json))?["num_ctx"] as? Int ?? json["num_ctx"] as? Int,
             wantLogprobs: wantLogprobs,
-            topLogprobs: topLogprobs
+            topLogprobs: topLogprobs,
+            // Ollama `think` (docs.ollama.com/api/chat, confirmed 2026-09-30):
+            // top-level `bool` - `true`/`false` overrides the server's
+            // `KRILL_ENABLE_THINKING` default; `null`/absent means "use the
+            // default". Ollama's own schema also allows a model-defined
+            // STRING level for models that expose more than on/off - Krill
+            // has no such per-model mapping to invent, so a string value
+            // here is rejected with `invalidType` (via `boolValue`) rather
+            // than silently guessed at.
+            enableThinking: try boolValue(json["think"], field: "think")
         )
     }
 
@@ -539,7 +586,9 @@ internal enum ServerParsing {
             keepAlive: KeepAliveParse.seconds(from: json["keep_alive"]),
             contextLimit: (try? optionsObject(from: json))?["num_ctx"] as? Int ?? json["num_ctx"] as? Int,
             wantLogprobs: wantLogprobs,
-            topLogprobs: topLogprobs
+            topLogprobs: topLogprobs,
+            // Same top-level `think` field as `ollamaChatRequest`.
+            enableThinking: try boolValue(json["think"], field: "think")
         )
     }
 

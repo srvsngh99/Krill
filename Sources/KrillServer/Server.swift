@@ -690,7 +690,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         format: OutputFormat? = nil,
         imagesData: [Data] = [],
         wantLogprobs: Bool = false,
-        topLogprobs: Int = 0
+        topLogprobs: Int = 0,
+        enableThinking: Bool? = nil,
+        reasoningEffort: String? = nil
     ) async -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         if let sched = await engines.scheduler(for: eng) {
             // Current concurrency drives the load-adaptive spec/batch decision in
@@ -702,7 +704,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 imageData: imageData, audioData: audioData,
                 contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
                 format: format, currentConcurrency: concurrency, imagesData: imagesData,
-                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs,
+                enableThinking: enableThinking, reasoningEffort: reasoningEffort)
         }
         return eng.generate(
             messages: messages, params: params, maxTokens: maxTokens,
@@ -710,6 +713,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             imageData: imageData, audioData: audioData,
             contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
             format: format, imagesData: imagesData,
+            enableThinking: enableThinking, reasoningEffort: reasoningEffort,
             wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
     }
 
@@ -732,7 +736,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         format: OutputFormat? = nil,
         imagesData: [Data] = [],
         wantLogprobs: Bool = false,
-        topLogprobs: Int = 0
+        topLogprobs: Int = 0,
+        enableThinking: Bool? = nil,
+        reasoningEffort: String? = nil
     ) async -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
@@ -745,7 +751,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             imageData: imageData, audioData: audioData,
             contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
             format: format, imagesData: imagesData,
-            wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
+            wantLogprobs: wantLogprobs, topLogprobs: topLogprobs,
+            enableThinking: enableThinking, reasoningEffort: reasoningEffort)
     }
 
     /// Apply a created model's Modelfile `PARAMETER` overrides (WS-C) as
@@ -975,14 +982,16 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 params: effParams, maxTokens: effMax,
                 media: decodedMedia, responseFormat: request.responseFormat,
                 contextLimit: effCtx, includeUsage: request.includeUsage,
-                wantLogprobs: request.wantLogprobs, topLogprobs: request.topLogprobs)
+                wantLogprobs: request.wantLogprobs, topLogprobs: request.topLogprobs,
+                enableThinking: request.enableThinking, reasoningEffort: request.reasoningEffort)
         } else {
             handleNonStreamingCompletion(
                 context: context, messages: genMessages,
                 params: effParams, maxTokens: effMax,
                 media: decodedMedia, responseFormat: request.responseFormat,
                 contextLimit: effCtx,
-                wantLogprobs: request.wantLogprobs, topLogprobs: request.topLogprobs)
+                wantLogprobs: request.wantLogprobs, topLogprobs: request.topLogprobs,
+                enableThinking: request.enableThinking, reasoningEffort: request.reasoningEffort)
         }
     }
 
@@ -1370,7 +1379,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 promptTemplateOverride: modelTemplateOverride(),
                 format: constrainFormat,
                 imagesData: imagesData,
-                wantLogprobs: request.wantLogprobs, topLogprobs: request.topLogprobs)
+                wantLogprobs: request.wantLogprobs, topLogprobs: request.topLogprobs,
+                enableThinking: request.enableThinking, reasoningEffort: request.reasoningEffort)
 
             // logprobs (docs/LOGPROBS_PLAN.md §3.3's tool-call note, extended
             // to the Ollama dialect in the 2026-09-30 follow-up): collected
@@ -1640,7 +1650,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         contextLimit: Int? = nil,
         includeUsage: Bool = false,
         wantLogprobs: Bool = false,
-        topLogprobs: Int = 0
+        topLogprobs: Int = 0,
+        enableThinking: Bool? = nil,
+        reasoningEffort: String? = nil
     ) {
         // Write the SSE head synchronously within the channelRead call
         // chain (NIO requires the response begin here, not from a detached
@@ -1682,7 +1694,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 promptTemplateOverride: modelTemplateOverride(),
                 format: StructuredOutput.engineFormat(for: responseFormat),
                 imagesData: imagesData,
-                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs,
+                enableThinking: enableThinking, reasoningEffort: reasoningEffort)
 
             let id = "chatcmpl-\(UUID().uuidString.prefix(8))"
             // Strip <think>/<thinking> from streamed chunks (and, when
@@ -1773,7 +1786,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         responseFormat: ResponseFormat? = nil,
         contextLimit: Int? = nil,
         wantLogprobs: Bool = false,
-        topLogprobs: Int = 0
+        topLogprobs: Int = 0,
+        enableThinking: Bool? = nil,
+        reasoningEffort: String? = nil
     ) {
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
@@ -1794,7 +1809,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 promptTemplateOverride: modelTemplateOverride(),
                 format: StructuredOutput.engineFormat(for: responseFormat),
                 imagesData: imagesData,
-                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs,
+                enableThinking: enableThinking, reasoningEffort: reasoningEffort)
 
             // logprobsAgg is built (and, when `wantLogprobs` is true, driven
             // per-token below) ONLY on the logprobs path; the plain path
@@ -2177,7 +2193,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 promptTemplateOverride: modelTemplateOverride(),
                 format: StructuredOutput.engineFormat(for: respFormat),
                 imagesData: imagesData,
-                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs,
+                enableThinking: request.enableThinking)
 
             if request.stream {
                 var firstTokenTime: Double?
@@ -2435,7 +2452,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 promptTemplateOverride: modelTemplateOverride(),
                 format: StructuredOutput.engineFormat(for: respFormat),
                 imagesData: imagesData,
-                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs,
+                enableThinking: request.enableThinking)
 
             if request.stream {
                 var firstTokenTime: Double?

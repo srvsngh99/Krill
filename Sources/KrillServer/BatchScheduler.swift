@@ -101,7 +101,8 @@ actor BatchScheduler {
                 contextLimit: Int?, promptTemplateOverride: String?,
                 format: OutputFormat? = nil, currentConcurrency: Int = 1,
                 imagesData: [Data] = [],
-                wantLogprobs: Bool = false, topLogprobs: Int = 0) async -> GenResult {
+                wantLogprobs: Bool = false, topLogprobs: Int = 0,
+                enableThinking: Bool? = nil, reasoningEffort: String? = nil) async -> GenResult {
         func serial() -> GenResult {
             engine.generate(
                 messages: messages, params: params, maxTokens: maxTokens,
@@ -109,6 +110,7 @@ actor BatchScheduler {
                 imageData: imageData, audioData: audioData,
                 contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
                 format: format, imagesData: imagesData,
+                enableThinking: enableThinking, reasoningEffort: reasoningEffort,
                 wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
         }
         // A multi-image request carries its images in `imagesData` (not the
@@ -119,6 +121,15 @@ actor BatchScheduler {
         // each step; the shared-step batched loop cannot isolate per-row
         // masks, so a format request always takes the serial path.
         if format != nil { return serial() }
+        // A per-request thinking/reasoning-effort override changes the
+        // PROMPT (which chat-template scaffold gets rendered), but
+        // `buildBatchedPromptTokens` (the batched/continuous path's prompt
+        // builder) has no notion of either - it always renders with the
+        // template's own default. Rather than let a per-request override be
+        // silently dropped for a row that happens to batch, decline batching
+        // for it entirely and take the serial path, which threads both
+        // through `generate(messages:)` correctly.
+        if enableThinking != nil || reasoningEffort != nil { return serial() }
 
         // Load-adaptive spec/batch decision. When n-gram (prompt-lookup)
         // speculative decode is enabled on the engine and this request is solo

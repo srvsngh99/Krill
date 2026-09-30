@@ -11,6 +11,38 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **Per-request thinking switch (`chat_template_kwargs.enable_thinking` /
+  Ollama `think`)** — thinking could previously only be turned on/off for
+  the whole server at start time (`KRILL_ENABLE_THINKING`). A single request
+  can now override that default either way: the OpenAI/vLLM/SGLang
+  convention `chat_template_kwargs: {"enable_thinking": bool}` on
+  `/v1/chat/completions`, and Ollama's own top-level `think: bool` on
+  `/api/chat` + `/api/generate` (confirmed against `docs.ollama.com/api/chat`
+  — Ollama's schema also allows a model-defined STRING level; Krill has no
+  such per-model mapping to invent, so a string `think` value is rejected
+  with `invalidType` rather than guessed at). An explicit `null` means "use
+  the server default," matching every optional field's convention since
+  #321. Threaded through `BatchScheduler.submit` (new `enableThinking`/
+  `reasoningEffort` parameters): a request that sets either is declined by
+  the batched/continuous pool (which has no per-row notion of either — it
+  always renders the prompt with the template's own default) and runs the
+  serial path instead, which threads both into
+  `InferenceEngine.generate(messages:)`'s existing `enableThinking`
+  parameter (already used by the CLI) correctly. `reasoning_effort`
+  (OpenAI's top-level field) is also accepted, but ONLY intersected against
+  the three levels Krill already maps from `KRILL_REASONING_EFFORT`
+  (`xhigh`/`medium`/`low`) — an unrecognized value (including OpenAI's own
+  `"high"`/`"minimal"`, which Krill has no mapping for) is silently ignored,
+  identically to an unrecognized env value today, never erroring. Verified
+  on `qwen3.5-4b`: the same prompt with `enable_thinking: false` (or no
+  override) answers immediately (2 completion tokens); `enable_thinking:
+  true` spends a genuine reasoning pass before answering (162 completion
+  tokens) — checked on both dialects, streaming and non-streaming. Krill
+  does not surface the raw `<think>` trace in any response today (the
+  reasoning filter strips it from every request, always), so `think: true`
+  does not add an Ollama `message.thinking` field — documented as
+  intentional, matching existing behavior rather than inventing new
+  plumbing for it.
 - **`echo` on legacy `/v1/completions` (Phase 3, `docs/LOGPROBS_PLAN.md`)** —
   `echo: true` now returns the prompt text in front of the completion, and
   combined with `logprobs` also scores every PROMPT token (not just
