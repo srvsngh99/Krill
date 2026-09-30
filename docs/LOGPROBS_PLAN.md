@@ -1973,12 +1973,16 @@ multi-chunk-specific regression is ever suspected.
 
 ### Limits / not done
 
-- The four native VL/multimodal decode runtimes flagged as a known gap in
-  the 2026-09-29 and 2026-09-30 verification sections (Qwen 2.5-VL,
-  Llama-3.2-Vision, LocateAnything-3B, Muse Glimmer image requests) are
-  irrelevant to `echo` specifically (`/v1/completions` carries no media
-  payload at all — `ServerCompletionRequest` has no `media` field), so this
-  follow-up neither touches nor is affected by that gap.
+- `echo` carries no media payload at all (`ServerCompletionRequest` has no
+  `media` field), so it has no interaction whatsoever with the four native
+  VL/multimodal decode runtimes (Qwen 2.5-VL, Llama-3.2-Vision,
+  LocateAnything-3B, Muse Glimmer image requests) — not because of any
+  remaining gap in them: their `logprobs` support was already fixed (`main`
+  commit `6101a5b`, `fix(engine): thread logprobs into the four remaining
+  native VL runtimes`) and, for LocateAnything, verified against a real
+  checkpoint (this doc's own "LocateAnything" real-model section), both
+  BEFORE this branch's base commit. That work predates and is unrelated to
+  this `echo` follow-up.
 - No multi-chunk (prompt > 512 tokens) real-model run was performed in this
   pass (both parity prompts were short) — the chunking loop is exercised by
   `make test`'s existing coverage of the pattern it reuses
