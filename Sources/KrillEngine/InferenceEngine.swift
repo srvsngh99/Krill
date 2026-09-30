@@ -858,7 +858,8 @@ public final class InferenceEngine: @unchecked Sendable {
             let images = !imagesData.isEmpty ? imagesData : (imageData.map { [$0] } ?? [])
             return generateLlamaVision(
                 model: mllama, tokenizer: tokenizer, messages: messages,
-                params: params, maxTokens: derivedMaxTokens, images: images)
+                params: params, maxTokens: derivedMaxTokens, images: images,
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
         }
 
         // Qwen 2.5-VL native runtime. Its 3D-mRoPE decode loop needs
@@ -870,7 +871,8 @@ public final class InferenceEngine: @unchecked Sendable {
             return generateQwen25VL(
                 model: vlModel, tokenizer: tokenizer, messages: messages,
                 params: params, maxTokens: derivedMaxTokens, imageData: imageData,
-                usePrefixCache: usePrefixCache)
+                usePrefixCache: usePrefixCache,
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
         }
 
         // Muse Glimmer native runtime. Routed here ONLY for image requests: its
@@ -884,7 +886,8 @@ public final class InferenceEngine: @unchecked Sendable {
             return generateMuseGlimmer(
                 model: mg, tokenizer: tokenizer, messages: messages,
                 params: params, maxTokens: derivedMaxTokens,
-                imageData: imageData ?? imagesData.first)
+                imageData: imageData ?? imagesData.first,
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
         }
 
         // Qwen3.5-VL (Ornith) native runtime. Same 3D-mRoPE decode reason as
@@ -933,7 +936,8 @@ public final class InferenceEngine: @unchecked Sendable {
         if let laModel = loadedModel.module as? LocateAnythingForConditionalGeneration {
             return generateLocateAnything(
                 model: laModel, tokenizer: tokenizer, messages: messages,
-                params: params, maxTokens: derivedMaxTokens, imageData: imageData)
+                params: params, maxTokens: derivedMaxTokens, imageData: imageData,
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
         }
 
         // Inject media placeholders into the first user message before
@@ -2237,7 +2241,9 @@ public final class InferenceEngine: @unchecked Sendable {
         messages: [[String: String]],
         params: SamplingParams,
         maxTokens: Int,
-        images: [Data]
+        images: [Data],
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var vision: MllamaProcessing.VisionInputs? = nil
         if !images.isEmpty {
@@ -2292,12 +2298,15 @@ public final class InferenceEngine: @unchecked Sendable {
                     maxTokens: captures.max,
                     stopIds: captures.stops,
                     params: captures.params,
-                    onToken: { token in
+                    wantLogprobs: wantLogprobs,
+                    topLogprobs: topLogprobs,
+                    onToken: { token, logprob in
                         guard !captures.stops.contains(token) else { return }
                         continuation.yield(TokenEvent(
                             tokenId: token,
                             text: captures.tokenizer.decodeForOutput(token: token),
-                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime,
+                            logprob: logprob))
                     })
                 let sawStop = output.tokens.last.map { captures.stops.contains($0) } ?? false
                 statsHolder.stats = GenerationStats(
@@ -2325,7 +2334,9 @@ public final class InferenceEngine: @unchecked Sendable {
         params: SamplingParams,
         maxTokens: Int,
         imageData: Data?,
-        usePrefixCache: Bool = true
+        usePrefixCache: Bool = true,
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         // Preprocess the image (if any) into the per-patch batch and
         // its post-spatial-merge grid. The grid sizes the
@@ -2439,7 +2450,9 @@ public final class InferenceEngine: @unchecked Sendable {
                     mediaHash: capturedMediaHash,
                     prefixCache: capturedPrefixCache,
                     modelId: capturedModelId,
-                    onToken: { token in
+                    wantLogprobs: wantLogprobs,
+                    topLogprobs: topLogprobs,
+                    onToken: { token, logprob in
                         // Stream content tokens only. The terminal
                         // (isEnd) event is emitted below - AFTER the
                         // stats are published - so a consumer that
@@ -2451,7 +2464,8 @@ public final class InferenceEngine: @unchecked Sendable {
                         continuation.yield(TokenEvent(
                             tokenId: token,
                             text: capturedTokenizer.decodeForOutput(token: token),
-                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime,
+                            logprob: logprob))
                     })
                 // Publish stats BEFORE the terminal event. The server
                 // reads the stats accessor as soon as it sees isEnd;
@@ -2486,7 +2500,9 @@ public final class InferenceEngine: @unchecked Sendable {
         messages: [[String: String]],
         params: SamplingParams,
         maxTokens: Int,
-        imageData: Data?
+        imageData: Data?,
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         // Preprocess the image (if any) into the flattened patch batch + the
         // pre-merge (gridH, gridW). The merged token count sizes the
@@ -2551,12 +2567,15 @@ public final class InferenceEngine: @unchecked Sendable {
                     maxTokens: captures.max,
                     stopIds: captures.stops,
                     params: captures.params,
-                    onToken: { token in
+                    wantLogprobs: wantLogprobs,
+                    topLogprobs: topLogprobs,
+                    onToken: { token, logprob in
                         guard !captures.stops.contains(token) else { return }
                         continuation.yield(TokenEvent(
                             tokenId: token,
                             text: captures.tokenizer.decodeForOutput(token: token),
-                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime,
+                            logprob: logprob))
                     })
                 let sawStop = output.tokens.last.map { captures.stops.contains($0) } ?? false
                 statsHolder.stats = GenerationStats(
@@ -2592,7 +2611,9 @@ public final class InferenceEngine: @unchecked Sendable {
         messages: [[String: String]],
         params: SamplingParams,
         maxTokens: Int,
-        imageData: Data?
+        imageData: Data?,
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0
     ) -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var pixelValues: MLXArray? = nil
         var grid: (t: Int, h: Int, w: Int)? = nil
@@ -2681,12 +2702,15 @@ public final class InferenceEngine: @unchecked Sendable {
                     stopIds: captures.stops,
                     params: captures.params,
                     mediaHash: captures.mediaHash,
-                    onToken: { token in
+                    wantLogprobs: wantLogprobs,
+                    topLogprobs: topLogprobs,
+                    onToken: { token, logprob in
                         guard !captures.stops.contains(token) else { return }
                         continuation.yield(TokenEvent(
                             tokenId: token,
                             text: captures.tokenizer.decodeForOutput(token: token),
-                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime,
+                            logprob: logprob))
                     })
                 let sawStop = output.tokens.last.map { captures.stops.contains($0) } ?? false
                 statsHolder.stats = GenerationStats(

@@ -88,6 +88,36 @@ reverse chronological order. Versioning follows
   native VL/multimodal runtimes audited (Qwen 2.5-VL, Llama-3.2-Vision,
   LocateAnything-3B, Muse Glimmer image requests — same class of gap, not
   fixed in this change), and numeric-parity / no-slowdown re-verification.
+- **`logprobs.content` was always `[]` for Qwen 2.5-VL, Llama-3.2-Vision,
+  LocateAnything-3B, and Muse Glimmer image requests** — the same class of
+  gap as the qwen3_5 fix above, for the four other native VL/multimodal
+  runtimes flagged there as "not fixed in this change." Each of
+  `generateQwen25VL`/`Qwen25VLRuntime`, `generateLlamaVision`/
+  `MllamaRuntime`, `generateLocateAnything`/`LocateAnythingRuntime`, and
+  `generateMuseGlimmer`/`MuseGlimmerRuntime` never threaded `wantLogprobs`/
+  `topLogprobs` at all. Fixed the same way: thread both through, call
+  `Sampler.sampleWithLogprobs` at sample time, attach the resulting
+  `TokenLogprobInfo` one step later at yield time. Gemma 4 was audited too
+  and needed no fix — its image/audio forward has no dedicated runtime and
+  already goes through the generic decode loop Phase 1 wired up; verified
+  for real against `gemma-4-e2b` with a generated PNG and a generated WAV.
+  See `docs/LOGPROBS_PLAN.md`'s "Engine follow-ups (2026-09-30)" for the
+  full runtime-by-runtime verification status, the remaining `generate...`
+  paths still audited-but-not-fixed (batched cohort decode and the
+  continuous batcher — `BatchGenRequest` carries no logprobs fields at
+  all), and the sampler speed fix below.
+- **`Sampler.sampleWithLogprobs`'s top-N selection was a full `argSort` over
+  the entire vocabulary every decode step** (O(V log V), V = 128k-262k for
+  these models) even though only the top 0-20 entries are ever reported.
+  Replaced with `argPartition` to select the top N in O(V), followed by a
+  real sort of just those N candidates (O(N log N)) — same reported values,
+  same descending order, verified against a full-sort reference on random
+  logits (including the N == vocab-size boundary). On this shared,
+  contended dev machine, `top_logprobs: 20` against llama-3.2-1b (vocab
+  128,256) never exceeded ~53 tok/s across 8 trials before this fix; after,
+  it reached the same ~204-216 tok/s the logprobs-OFF path reaches, in 3 of
+  8 trials — see `docs/LOGPROBS_PLAN.md`'s "Engine follow-ups (2026-09-30)"
+  for the full numbers and the machine-noise caveat.
 - A genuinely-bf16 checkpoint (as opposed to an int4-quantized one that
   dequantizes to float16) crashed the dense `LlamaModel` decode path with
   `Fatal error: [scaled_dot_product_attention] Mask type must promote to
