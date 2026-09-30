@@ -21,7 +21,12 @@ Phase-1-documented gap for `logprobs`/`top_logprobs`: Ollama `/api/chat` +
 `/api/generate`, and legacy `/v1/completions`'s `logprobs` (int, 0-5; NOT
 `echo`, still Phase 3) — see the "Ollama + legacy completions (2026-09-30)"
 section after §7's Verification results for the pinned wire formats and
-test evidence.
+test evidence. Phase 2 (`feat/logprobs-phase2-spec-batched`, 2026-09-30) is
+now implemented: draft-model + n-gram speculative decode, and the
+batched/continuous decode paths, all compute logprobs natively instead of
+falling back to plain serial decode — see the "Phase 2 — spec + batched
+logprobs (2026-09-30)" section at the end of this doc for the per-path
+table, numbers, and limits. Only `echo`/prompt logprobs (Phase 3) remains.
 Base branch: `main`
 Base commit: `db1a53f`
 Owner: unassigned
@@ -1375,3 +1380,198 @@ four got the fix rather than a documented decline.
 Recorded here as the known, real, same-class gap for a future follow-up —
 exactly how this plan's own "Verification results (2026-09-29)" section
 originally flagged the four now-fixed VL runtimes.
+
+## Phase 2 — spec + batched logprobs (2026-09-30)
+
+Closes this plan's §7 Phase 2 scope: a `logprobs` request no longer disables
+draft-model speculative decode, n-gram speculative decode, or the
+batched/continuous decode pool. Branch `feat/logprobs-phase2-spec-batched`,
+base `main`@`be00f91`. Scope per the task brief: `Sources/KrillEngine/*`,
+`Sources/KrillSampler/*`, `Sources/KrillServer/BatchScheduler.swift`.
+
+### Shared primitive (`Sources/KrillSampler/Sampler.swift`)
+
+Every argMax-only decode path (speculative verify, the continuous batcher's
+fast paths, Stage-B batched decode) needs the same "raw log-softmax + top-N
+from a logits row and an already-chosen token id" computation `Sampler.
+sampleWithLogprobs` already did internally. Factored into three static,
+batch-capable (1-D or `[N, vocab]`) functions, and `sampleWithLogprobs`
+itself now calls them (same numbers, verified byte-for-byte against the
+pre-existing `SamplerLogprobsTests` — all 9 still pass unchanged):
+
+- `Sampler.rawLogSoftmaxAndTopN(_:topLogprobs:)` — the log-softmax graph plus
+  the `argPartition`(O(V)) + `argSort`(O(N log N)) top-N graph, built from RAW
+  logits only (no notion of "chosen token" yet, so it's safe to build before
+  or after a caller's own `argMax`/penalty step - ordering only matters for
+  `sampleWithLogprobs`'s own pre-existing alias hazard with `applyPenalties`,
+  documented in place).
+- `Sampler.gatherChosenLogprob(_:chosenIds:)` — gathers each row's own
+  logprob from an already-built `logSoftmax` via `takeAlong` (per-row
+  gather, not `take`'s flat semantics — required for a real batch).
+- `Sampler.logprobInfos(chosenLogprobs:topIdx:topVals:n:)` — host-side
+  materialization into `[TokenLogprobInfo]`, one per row.
+
+All three are lazy (no `eval`) so every call site controls its own batching
+of host syncs.
+
+### Per-path implementation and status
+
+| Path | File | Status | How |
+|---|---|---|---|
+| Draft-model speculative decode | `SpeculativeDecoder.step` | **Done** | `wantLogprobs`/`topLogprobs` params (default off); logprobs for every verify-accepted token come from the SAME `targetLogits` already computed to verify the draft (one batched `rawLogSoftmaxAndTopN` call over the accepted positions); the bonus token (full-acceptance case) uses `sampleWithLogprobs` on its own forward. Draft-model logits are never reported. Return type changed to `(tokens: [Int], logprobs: [TokenLogprobInfo]?)` — `nil` array when `wantLogprobs` is false. |
+| N-gram (prompt-lookup) speculative decode | `SpeculativeDecoder.ngramStep` | **Done** | Identical approach: the no-match (`k==0`) single-decode branch uses `sampleWithLogprobs`; the verify branch derives logprobs from the same verify forward as the accepted/bonus tokens. |
+| `InferenceEngine.generate` spec/n-gram gating | `InferenceEngine.swift` | **Done** | Removed `&& !wantLogprobs` from `shouldSpec`/`shouldNgram` (byte-identical for `wantLogprobs == false`, since the term was simply `true` there before). The prefill-sampled first token (emitted before the spec loop starts) now uses `sampleWithLogprobs` when requested; the n-gram-stall handoff into the plain pipeline seeds `pendingLogprobInfo` correctly so the pipeline's own entry invariant holds. |
+| Continuous batcher, per-row `Sampler` path | `ContinuousBatcher.swift` (non-pipeline decode loop) | **Done** | Per row: `sampleWithLogprobs` only when `row.wantLogprobs`; every other row in the same step is untouched. |
+| Continuous batcher, all-greedy pipeline fast path | `ContinuousBatcher.swift` (`pipeEligible` loop) | **Done** | Pipeline stays eligible regardless of `wantLogprobs` (no epoch-wide fallback). Per step: gather ONLY the subset of rows with `wantLogprobs` out of the batched `logits`/`sampled` tensors (`take` on the row-index subset), run the batched primitive on just that subset, and carry the result one iteration forward the same way the existing `pendingSample` token is carried — so a step with no wanting rows touches the logprobs code path not at all (`wantIdx.isEmpty` short-circuit), and a step with some wanting rows pays a log-softmax sized to the subset, not the batch. |
+| Continuous batcher, n-gram-spec verify round | `ContinuousBatcher.swift` (`decodeSpecRound`) | **Done** | Per row with `wantLogprobs`: derive logprobs for that row's `accepted` tokens from its own slice of the round's verify logits `bl[i, 0..<cacheEntries, :]` — same "reuse the verify forward" reasoning as the single-stream spec path. Non-wanting rows in the same round are untouched. |
+| Stage-B fixed-cohort batched decode | `InferenceEngine.swift` (`BatchedCaptures`/`runBatchedDecode`) | **Done** | `BatchedCaptures` gained per-row `wantLogprobs`/`topLogprobs` arrays (from each `BatchGenRequest`). Prefill and the per-step per-row sampling call `sampleWithLogprobs` only for a row that asked; `emit` carries the pending logprob the same one-step-ahead way the single-stream loop does. `generateBatched`'s `serialFallback()` now also threads `wantLogprobs`/`topLogprobs` (was silently dropped before, a real gap for any fallback row). NOTE: this static-cohort path is not reachable from the server today (`BatchScheduler` only calls `submitBatched`→`ContinuousBatcher`) — exercised only by `Tests/KrillEngineTests/BatchedDecodeLiveTests.swift`. |
+| `InferenceEngine.submitBatched`/`ContinuousBatcher` admission | `BatchGenRequest` (`InferenceEngineTypes.swift`) | **Done** | New `wantLogprobs: Bool = false`/`topLogprobs: Int = 0` fields (source-compatible defaults). |
+| `BatchScheduler.submit` | `Sources/KrillServer/BatchScheduler.swift` | **Done** | Removed the Phase-1 `if wantLogprobs { return serial() }` early return; a logprobs request is now eligible for the batched pool under the same rules as any other request (still excluded by `format`, an explicit speculative opt-in, or the existing seeded-non-greedy/multimodal guards — unchanged). `BatchGenRequest` construction now threads `wantLogprobs`/`topLogprobs` through. |
+
+### Tests
+
+**Unit** (`Tests/KrillEngineTests/SpeculativeLogprobsTests.swift`, new): a
+tiny, fully deterministic, CONTEXT-FREE synthetic `LoadedModel` (forward =
+table lookup from the input token id, ignoring KV caches — see the file's
+class doc) drives real calls to `SpeculativeDecoder.step`/`.ngramStep`
+against an independent, from-scratch reference log-softmax (plain Swift
+`Double` math, no `Sampler` involved). 5 tests: full-acceptance (bonus token
+included) and rejection cases for `.step`, `wantLogprobs: false` returns
+`nil`, n-gram no-match and n-gram accepted-run cases for `.ngramStep`. All
+assert the reported logprob matches the independent reference within `1e-4`
+at every position, not just "is non-nil". All 5 pass. Existing suites
+unaffected: `SamplerLogprobsTests` (9), `SpeculativeDecodingTests` (15),
+`NgramSpeculativeDecodingTests` (19) all still pass unchanged.
+
+**`make test` full run**: **1775 tests, 141 skipped, 0 failures**, re-run
+alone (not concurrently with other agents' work) to rule out the known
+`AgentSessionTests` ordering race — none observed on either run.
+
+**Real model — token/logprob parity** (`krill serve`, release build, port
+57483, `KRILL_API_KEY` set; OpenAI Python SDK via `/Users/sourav/.krill/
+venv`), greedy, `top_logprobs: 5`, prompt "Explain in two sentences why the
+sky is blue.":
+
+- **`llama-3.2-1b` (4-bit)**: plain serial reference (`KRILL_NGRAM_SPEC=0`,
+  `KRILL_NUM_PARALLEL=1`) vs n-gram spec (default-on, solo request, so the
+  engine's own low-concurrency spec preference engages) — **tokens identical
+  (24/24)**, logprobs max diff **7.49e-3**, median **2.65e-4** (tighter than
+  this plan's own previously-recorded 1.5e-2 floor for this exact
+  model/quantization). Plain serial vs 3 CONCURRENT batched requests
+  (`KRILL_NGRAM_SPEC=0`, `KRILL_NUM_PARALLEL=3`, same prompt) — **all 3 rows'
+  tokens identical to the serial reference**, logprobs max diff 7.49e-3 /
+  1.46e-2 / 7.46e-3 across the three rows, median diffs 1.4e-4 - 4.1e-4 — the
+  same noise class the batched path's fp16/bf16 shape-dependent evaluation
+  order already produces (documented in this plan's Phase-1 resolutions).
+- **Mixed-row batch, real server**: 3 concurrent requests to the SAME
+  batched server, `[wantLogprobs=true, false, true]` — the `false` row got
+  `logprobs: null` (Ollama/OpenAI-null convention, no entries computed for
+  it), the two `true` rows got real 24-entry `logprobs.content`, and **all
+  three rows produced byte-identical `message.content`** — proves per-row
+  opt-in doesn't perturb a non-wanting row's own tokens or a wanting row's
+  neighbor.
+- **`qwen3-0.6b-bf16`**: needed `KRILL_ENABLE_THINKING=0` (else the
+  `<think>` block consumes the whole token budget — a pre-existing,
+  already-documented behavior in this plan's Phase-1 resolutions, not new).
+  At `max_tokens: 300`: the plain-serial and 3-concurrent-batched GREEDY
+  TOKEN SEQUENCES themselves diverge for this bf16 model (confirmed
+  reproducible with `logprobs` entirely ABSENT from every request, i.e. a
+  pre-existing numeric-precision property of the batched/padded attention
+  path for a genuinely-bf16 model, NOT a regression introduced by this
+  change — see below). Where two rows of an identical-prompt 3-way batch
+  happened to follow the exact same 44-token greedy path (rows 0 and 1 in
+  this run), their logprobs agreed with each other with max diff **0.134**,
+  median **0.011** nats — looser than the 4-bit llama case, consistent with
+  this plan's own observation that a genuinely-bf16 model's floor is roughly
+  20x looser than a 4-bit-quantized one (Phase-1 resolutions,
+  `Llama-3.2-1B-Instruct-bf16` floor 2.076e-2 vs llama-3.2-1b-4bit floor
+  1.5e-2), now compounded by 3-way batch left-padding's own fp arithmetic
+  variance. **This token-sequence divergence for `qwen3-0.6b-bf16` under
+  concurrent batching is a real, pre-existing engine limitation** (confirmed
+  with a from-scratch repro sending 3 identical-prompt concurrent requests
+  with NO logprobs involved at all, both before measuring diffs and as a
+  sanity check against this PR's own build) — recording it here as a known
+  gap for a future investigation, out of scope for a logprobs-plumbing PR to
+  fix (it would mean changing the batched attention/padding numerics, not
+  logprobs reporting).
+- **Draft-model speculative decode**: **not run against a real checkpoint.**
+  `draftPairs` (`SpeculativeDecoder.swift`) only pairs larger targets
+  (llama-3.2-3b, llama-3.1-8b, qwen2.5-7b/14b/3b, gemma-2-9b, gemma-4-e4b)
+  with smaller drafts; none of those TARGETS are present in this
+  environment's local model store (`~/.krill/models/blobs/`), only
+  `llama-3.2-1b` itself (which is a draft, never a target) and `qwen3.5-4b`/
+  `Qwen3-0.6B-bf16`/`Llama-3.2-1B-Instruct-bf16`/`gemma-4-*`, none of which
+  have a registered draft. Downloading a valid pair was possible within the
+  3 GB budget (e.g. a 4-bit `llama-3.2-3b`) but was not attempted given the
+  session's time budget; the synthetic-model unit tests above (which
+  exercise the real `SpeculativeDecoder.step` code path end to end, just
+  against a hand-built deterministic forward function instead of a real
+  transformer) are the correctness evidence for this path instead. Flagged
+  here explicitly per the task's own "skip + say so" instruction.
+
+**Speed — logprobs-OFF regression check** (`llama-3.2-1b`, release build;
+"before" = `main`@`be00f91` built fresh in a scratch worktree, "after" = this
+branch; alternating A/B, restarting the server between rounds since each
+config needs a different `KRILL_NGRAM_SPEC`/`KRILL_NUM_PARALLEL`; streaming
+HTTP client, decode tok/s = 1/(median inter-chunk gap for the single-request
+case) or aggregate tokens/wall-clock for the 3-concurrent batched case). This
+dev Mac was NOT idle during measurement (other agents' concurrent Krill work
+plus this repo's own documented background load), and **only 2 rounds per
+config were run** (not the 3 this plan's own template asks for) due to this
+session's time budget — a materially smaller sample than ideal; treat the
+signal as suggestive, not conclusive, on its own.
+
+- **N-gram spec, OFF** (`KRILL_NUM_PARALLEL=1`, ngram default-on, `max_tokens:
+  320`, decode tok/s per round): before 54.4, 37.0 (mean 45.7); after 30.4,
+  47.3 (mean 38.85). Overlapping ranges; the before/after gap is within the
+  round-to-round spread of either series. No clean directional regression,
+  but not a clean "no regression" proof either at n=2 — the STRUCTURAL
+  argument is stronger here: `shouldSpec`/`shouldNgram`'s `wantLogprobs`
+  guard was REMOVED, not added, and for a `wantLogprobs == false` request the
+  boolean expression's VALUE is unchanged (the removed term was simply
+  `true`), so the off-path through `InferenceEngine.generate`'s spec gating
+  is byte-for-byte the same code as before this change for every request
+  that doesn't ask for logprobs.
+- **Batched, OFF** (`KRILL_NGRAM_SPEC=0`, `KRILL_NUM_PARALLEL=3`, 3
+  concurrent requests, `max_tokens: 200`, aggregate tok/s per round): before
+  24.9, 28.9 (mean 26.9); after 27.8, 27.9 (mean 27.85) — **this-PR is not
+  slower** (marginally higher, within noise). Matches the structural
+  expectation: the only new code in the off-path is an O(R) `wantIdx =
+  rows.indices.filter { ... }` per epoch (empty when nothing asks for
+  logprobs) and a closure definition, both negligible next to a batched
+  forward pass.
+- **Logprobs-ON, for reference** (not a regression gate — the overhead IS
+  expected when logprobs is requested): n-gram spec, `top_logprobs: 5`,
+  `max_tokens: 320`: **31.2 tok/s** (within the OFF series' own spread,
+  20-54 tok/s across the 4 OFF rounds above — at `top_logprobs: 5` on this
+  4-bit 1B model the overhead is small relative to the machine's own
+  round-to-round noise, consistent with the O(V)-not-O(V log V) top-N fix
+  already landed). Batched, `top_logprobs: 5`, 3 concurrent, `max_tokens:
+  200`: **24.96 tok/s** aggregate vs the OFF series' 26.9-27.85 mean — a
+  roughly 7-13% overhead, the expected cost of the per-wanting-row
+  log-softmax + top-N gather each step.
+
+### Limits / not done
+
+- **Draft-model speculative decode has no real-checkpoint run** in this
+  environment (no target+draft pair on disk) — see above. The code path is
+  implemented and covered by synthetic unit tests exercising the real
+  `SpeculativeDecoder.step` logic end to end.
+- **`qwen3-0.6b-bf16`'s batched-vs-serial token-sequence divergence** is a
+  pre-existing engine limitation (confirmed unrelated to logprobs), not
+  fixed here — recorded as a known gap.
+- **Speed A/B sample size is 2 rounds per config**, not 3, due to this
+  session's time budget on a machine already carrying other agents' work;
+  the structural "the off-path code is unchanged / touches only an empty
+  `wantIdx` filter" argument is offered alongside the numbers rather than in
+  place of them.
+- `InferenceEngine.generateBatched`/`runBatchedDecode` (Stage B) is not
+  reachable from the server (`BatchScheduler` never calls it) — its
+  `wantLogprobs` support was added for completeness and is covered only by
+  the pre-existing `BatchedDecodeLiveTests.swift`-style live tests when a
+  developer runs them directly against a real checkpoint, not by this PR's
+  own new tests.
+- `make bench-release-gate` was not re-run for this Phase 2 change (the
+  logprobs-OFF spec/batched A/B above is the intended stand-in given this
+  session's constraints); re-run it before a release if a stricter proof is
+  wanted, per this plan's own §6 item 4 convention.

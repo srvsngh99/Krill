@@ -108,12 +108,23 @@ public final class SpeculativeDecoder: @unchecked Sendable {
     ///   - lastToken: The last accepted token
     ///   - targetCaches: KV caches for the target model
     ///   - draftCaches: KV caches for the draft model
-    /// - Returns: Array of accepted tokens (1 to K+1 tokens)
+    ///   - wantLogprobs: when true, also return a `TokenLogprobInfo` for
+    ///     every accepted token (docs/LOGPROBS_PLAN.md §5.3 Phase 2),
+    ///     derived from the SAME `targetLogits` this step already computes
+    ///     to verify the draft — no extra forward pass. Draft-model logits
+    ///     are never used for a reported logprob, only the target's.
+    ///   - topLogprobs: top-N alternates per accepted token (0...20).
+    /// - Returns: accepted token ids (1 to K+1 tokens), and — only when
+    ///   `wantLogprobs` — one `TokenLogprobInfo` per accepted token in the
+    ///   same order (`nil` array when `wantLogprobs` is false, so the
+    ///   default caller pays no extra cost).
     public func step(
         lastToken: Int,
         targetCaches: [RestorableKVCache],
-        draftCaches: [KVCache]
-    ) -> [Int] {
+        draftCaches: [KVCache],
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0
+    ) -> (tokens: [Int], logprobs: [TokenLogprobInfo]?) {
         guard let targetModel, let draftModel else {
             preconditionFailure("SpeculativeDecoder.step requires target and draft models")
         }
@@ -182,6 +193,33 @@ public final class SpeculativeDecoder: @unchecked Sendable {
             }
         }
 
+        // Logprobs for every verify-step-accepted token (everything in
+        // `accepted` so far — the bonus token below, if any, is computed
+        // separately from its own forward), derived from the SAME
+        // `targetLogits` already computed above for verification: position
+        // i's target distribution already covers `accepted[i]` (either the
+        // draft's own greedy match, which IS the target's argmax at that
+        // position, or the target's own rejection replacement, which is
+        // trivially its argmax) — identical to what the plain decode path
+        // reports at that (model, position), no extra forward pass. Draft
+        // logits are never used for a reported logprob.
+        var verifyLogprobs: [TokenLogprobInfo] = []
+        if wantLogprobs {
+            let vocab = targetLogits.dim(-1)
+            let rows = targetLogits.reshaped(k, vocab)[0 ..< accepted.count]
+            let chosenIds = MLXArray(accepted.map { Int32($0) })
+            let (logSoftmax, topIdx, topVals, n) = Sampler.rawLogSoftmaxAndTopN(
+                rows, topLogprobs: topLogprobs)
+            let chosenLogprobs = Sampler.gatherChosenLogprob(logSoftmax, chosenIds: chosenIds)
+            if let topIdx, let topVals {
+                MLX.eval(chosenLogprobs, topIdx, topVals)
+            } else {
+                MLX.eval(chosenLogprobs)
+            }
+            verifyLogprobs = Sampler.logprobInfos(
+                chosenLogprobs: chosenLogprobs, topIdx: topIdx, topVals: topVals, n: n)
+        }
+
         // Roll back KV state for rejected tokens so the cache reflects exactly
         // the tokens that were accepted. Both target and draft caches need
         // the same trim:
@@ -219,8 +257,15 @@ public final class SpeculativeDecoder: @unchecked Sendable {
             let bonusInput = MLXArray([Int32(draftTokens.last!)]).reshaped(1, 1)
             let bonusLogits = targetModel.forward(bonusInput, targetCaches)
             MLX.eval(bonusLogits)
-            let bonusToken = sampler.sample(bonusLogits)
-            accepted.append(bonusToken)
+            if wantLogprobs {
+                let (bonusToken, _, bonusInfo) = sampler.sampleWithLogprobs(
+                    bonusLogits, topLogprobs: topLogprobs)
+                accepted.append(bonusToken)
+                verifyLogprobs.append(bonusInfo)
+            } else {
+                let bonusToken = sampler.sample(bonusLogits)
+                accepted.append(bonusToken)
+            }
 
             let draftBonusLogits = draftModel.forward(bonusInput, draftCaches)
             MLX.eval(draftBonusLogits)
@@ -228,7 +273,7 @@ public final class SpeculativeDecoder: @unchecked Sendable {
 
         recordVerification(acceptedTokenCount: accepted.count, proposedTokenCount: k)
 
-        return accepted
+        return (accepted, wantLogprobs ? verifyLogprobs : nil)
     }
 
     /// Run one **n-gram (prompt-lookup)** speculative step. The draft comes from
@@ -245,12 +290,22 @@ public final class SpeculativeDecoder: @unchecked Sendable {
     /// forward's at an fp16 near-tie — the same nondeterminism the batched decoder
     /// already exhibits, not a divergence in the speculation logic.
     ///
-    /// - Returns: 1 to K+1 accepted tokens (1 on a no-match plain step).
+    /// - Parameters:
+    ///   - wantLogprobs: when true, also return a `TokenLogprobInfo` for
+    ///     every accepted (or no-match plain-decode) token, derived from the
+    ///     same target forward already computed for verification/decode —
+    ///     no extra forward pass (docs/LOGPROBS_PLAN.md §5.3 Phase 2).
+    ///   - topLogprobs: top-N alternates per token (0...20).
+    /// - Returns: 1 to K+1 accepted tokens (1 on a no-match plain step), and
+    ///   — only when `wantLogprobs` — one `TokenLogprobInfo` per token in the
+    ///   same order (`nil` when `wantLogprobs` is false).
     public func ngramStep(
         lastToken: Int,
         targetCaches: [RestorableKVCache],
-        proposer: NgramProposer
-    ) -> [Int] {
+        proposer: NgramProposer,
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0
+    ) -> (tokens: [Int], logprobs: [TokenLogprobInfo]?) {
         guard let targetModel else {
             preconditionFailure("SpeculativeDecoder.ngramStep requires a target model")
         }
@@ -265,13 +320,22 @@ public final class SpeculativeDecoder: @unchecked Sendable {
             let input = MLXArray([Int32(lastToken)]).reshaped(1, 1)
             let logits = targetModel.forward(input, targetCaches)
             MLX.eval(logits)
-            let tok = sampler.sample(logits)
+            let tok: Int
+            let info: TokenLogprobInfo?
+            if wantLogprobs {
+                let (t, _, i) = sampler.sampleWithLogprobs(logits, topLogprobs: topLogprobs)
+                tok = t
+                info = i
+            } else {
+                tok = sampler.sample(logits)
+                info = nil
+            }
             proposer.append([tok])
             // A no-match round saved nothing beyond the single decoded token —
             // feed 0 to the stall monitor so non-echo stretches drive it down.
             proposer.recordRound(extraTokens: 0)
             recordVerification(acceptedTokenCount: 1, proposedTokenCount: 0, doAdapt: false)
-            return [tok]
+            return ([tok], info.map { [$0] })
         }
 
         // Verify all k proposed tokens in one batched forward:
@@ -306,6 +370,27 @@ public final class SpeculativeDecoder: @unchecked Sendable {
             }
         }
 
+        // Logprobs for the verify-accepted tokens, from the same
+        // `targetLogits` — identical reasoning to `step`'s draft-model path
+        // above (each position's chosen token IS that position's target
+        // argmax, whether via a draft match or the rejection replacement).
+        var verifyLogprobs: [TokenLogprobInfo] = []
+        if wantLogprobs {
+            let vocab = targetLogits.dim(-1)
+            let rows = targetLogits.reshaped(k, vocab)[0 ..< accepted.count]
+            let chosenIds = MLXArray(accepted.map { Int32($0) })
+            let (logSoftmax, topIdx, topVals, n) = Sampler.rawLogSoftmaxAndTopN(
+                rows, topLogprobs: topLogprobs)
+            let chosenLogprobs = Sampler.gatherChosenLogprob(logSoftmax, chosenIds: chosenIds)
+            if let topIdx, let topVals {
+                MLX.eval(chosenLogprobs, topIdx, topVals)
+            } else {
+                MLX.eval(chosenLogprobs)
+            }
+            verifyLogprobs = Sampler.logprobInfos(
+                chosenLogprobs: chosenLogprobs, topIdx: topIdx, topVals: topVals, n: n)
+        }
+
         // Roll back the target cache to exactly the accepted prefix. The verify
         // wrote k rows; keep `accepted.count` (the rejection replacement is itself
         // never forwarded, so it is not in the cache). Identical math to `step`'s
@@ -324,7 +409,14 @@ public final class SpeculativeDecoder: @unchecked Sendable {
             let bonusInput = MLXArray([Int32(draftTokens.last!)]).reshaped(1, 1)
             let bonusLogits = targetModel.forward(bonusInput, targetCaches)
             MLX.eval(bonusLogits)
-            accepted.append(sampler.sample(bonusLogits))
+            if wantLogprobs {
+                let (bonusToken, _, bonusInfo) = sampler.sampleWithLogprobs(
+                    bonusLogits, topLogprobs: topLogprobs)
+                accepted.append(bonusToken)
+                verifyLogprobs.append(bonusInfo)
+            } else {
+                accepted.append(sampler.sample(bonusLogits))
+            }
         }
 
         // Feed the adaptive cap: on full acceptance all k drafts were correct;
@@ -337,7 +429,7 @@ public final class SpeculativeDecoder: @unchecked Sendable {
         proposer.recordRound(extraTokens: acceptedDraft)
         proposer.append(accepted)
         recordVerification(acceptedTokenCount: accepted.count, proposedTokenCount: k, doAdapt: false)
-        return accepted
+        return (accepted, wantLogprobs ? verifyLogprobs : nil)
     }
 
     @discardableResult

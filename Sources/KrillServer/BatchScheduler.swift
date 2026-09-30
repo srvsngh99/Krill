@@ -76,11 +76,11 @@ actor BatchScheduler {
     /// Whether a request can join a batch. Batching helps only at
     /// `numParallel >= 2` on a batch-capable engine; multimodal rows and
     /// per-row seeded non-greedy sampling (whose RNG can't be isolated under a
-    /// shared step) take the serial path. A `logprobs` request is excluded too
-    /// (docs/LOGPROBS_PLAN.md §5.3: the continuous batcher's per-row `Sampler`
-    /// call and its `argMax`-only fast paths never compute a log-softmax) but
-    /// is filtered out by `submit`'s own early return before this is ever
-    /// called, so this gate does not need to re-check it.
+    /// shared step) take the serial path. A `logprobs` request is eligible
+    /// too as of Phase 2 (docs/LOGPROBS_PLAN.md §5.3): `ContinuousBatcher`'s
+    /// per-row `Sampler` call and its `argMax`-only fast paths now compute
+    /// logprobs for exactly the rows that asked for them, at no cost to rows
+    /// that did not.
     private func isEligible(params: SamplingParams, imageData: Data?, audioData: Data?,
                             useSpeculative: Bool?) -> Bool {
         guard numParallel >= 2, engine.supportsBatchedDecode else { return false }
@@ -119,11 +119,6 @@ actor BatchScheduler {
         // each step; the shared-step batched loop cannot isolate per-row
         // masks, so a format request always takes the serial path.
         if format != nil { return serial() }
-        // A `logprobs` request needs the raw pre-filter logits at the exact
-        // per-row sampling step, which the shared-step batched/continuous
-        // decode loop does not compute (docs/LOGPROBS_PLAN.md §5.3, phase 1);
-        // fall to the serial plain-decode path, same mechanism as `format`.
-        if wantLogprobs { return serial() }
 
         // Load-adaptive spec/batch decision. When n-gram (prompt-lookup)
         // speculative decode is enabled on the engine and this request is solo
@@ -140,9 +135,6 @@ actor BatchScheduler {
            currentConcurrency <= Self.specConcurrencyMaxFromEnvironment() {
             return serial()
         }
-        // A logprobs request never reaches here - the early return above
-        // already sent it to serial() - so isEligible needs no wantLogprobs
-        // parameter of its own.
         guard isEligible(params: params, imageData: anyImage, audioData: audioData,
                          useSpeculative: useSpeculative) else {
             // Surface the one case where the user asked for two features that
@@ -172,7 +164,8 @@ actor BatchScheduler {
         let req = BatchGenRequest(
             messages: messages, params: params, maxTokens: maxTokens,
             contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
-            useSpeculative: useSpeculative, usePrefixCache: usePrefixCache)
+            useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
+            wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
         // submitBatched returns nil only when the model turned out not to be
         // batch-eligible after prompt construction (unknown family / empty
         // prompt) — fall back to serial so the request is always served.

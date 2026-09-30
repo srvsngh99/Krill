@@ -133,9 +133,16 @@ final class ContinuousBatcher: @unchecked Sendable {
         var isFinished = false  // set once by finalize(); guards double-finish
         var decodeStartedAt: Double?   // wall time of this row's first batched step
         var proposer: NgramProposer?   // per-row n-gram draft source (spec path only)
+        /// docs/LOGPROBS_PLAN.md Phase 2, per-row opt-in (from `BatchGenRequest`).
+        /// A row with `wantLogprobs == false` must never be the reason a
+        /// log-softmax is computed — every decode site below gathers only the
+        /// SUBSET of rows with this set before doing any logprobs math.
+        let wantLogprobs: Bool
+        let topLogprobs: Int
         init(promptLen: Int, sampler: Sampler, cont: AsyncStream<TokenEvent>.Continuation,
              stats: StatsBox, cancelled: CancelFlag, maxTokens: Int, caches: [KVCacheProtocol],
-             current: Int, recent: [Int], prefillTime: Double, admittedAt: Double) {
+             current: Int, recent: [Int], prefillTime: Double, admittedAt: Double,
+             wantLogprobs: Bool = false, topLogprobs: Int = 0) {
             self.promptLen = promptLen
             self.sampler = sampler
             self.needsHistory = sampler.needsHistory
@@ -148,6 +155,8 @@ final class ContinuousBatcher: @unchecked Sendable {
             self.recent = recent
             self.prefillTime = prefillTime
             self.admittedAt = admittedAt
+            self.wantLogprobs = wantLogprobs
+            self.topLogprobs = topLogprobs
         }
     }
 
@@ -367,8 +376,35 @@ final class ContinuousBatcher: @unchecked Sendable {
                     && ProcessInfo.processInfo.environment["KRILL_DECODE_PIPELINE"] != "0"
                     && rows.allSatisfy { $0.sampler.isGreedy && !$0.needsHistory }
                 if pipeEligible {
+                    // docs/LOGPROBS_PLAN.md Phase 2: fixed for the whole epoch
+                    // (row membership doesn't change mid-epoch). When empty,
+                    // every step below skips the logprobs block entirely - the
+                    // "gate the whole step when no row wants it" case, so a
+                    // batch with no logprobs requests pays nothing extra.
+                    let wantIdx = rows.indices.filter { rows[$0].wantLogprobs }
+                    let maxWantN = wantIdx.map { rows[$0].topLogprobs }.max() ?? 0
+                    // Per-row logprobs for one already-sampled batched step,
+                    // truncated to each row's OWN `topLogprobs` (the batched
+                    // top-N graph above used the max across wanting rows).
+                    func rowInfos(
+                        _ pl: (chosenLogprobs: MLXArray, topIdx: MLXArray?, topVals: MLXArray?, n: Int)?
+                    ) -> [Int: TokenLogprobInfo] {
+                        guard let pl else { return [:] }
+                        let infos = Sampler.logprobInfos(
+                            chosenLogprobs: pl.chosenLogprobs, topIdx: pl.topIdx, topVals: pl.topVals, n: pl.n)
+                        var out: [Int: TokenLogprobInfo] = [:]
+                        for (j, rowIdx) in wantIdx.enumerated() {
+                            let info = infos[j]
+                            out[rowIdx] = TokenLogprobInfo(
+                                logprob: info.logprob,
+                                topAlternates: Array(info.topAlternates.prefix(rows[rowIdx].topLogprobs)))
+                        }
+                        return out
+                    }
+
                     var fedArr = MLXArray(rows.map { Int32($0.current) })   // [R]
                     var pendingSample: MLXArray? = nil
+                    var pendingLogprobs: (chosenLogprobs: MLXArray, topIdx: MLXArray?, topVals: MLXArray?, n: Int)?
                     while true {
                         if Task.isCancelled { cancelledMidEpoch = true; break }
                         let R = rows.count
@@ -380,10 +416,26 @@ final class ContinuousBatcher: @unchecked Sendable {
                         let logits = deps.batchedForward(fedArr.reshaped(R, 1), stacked, mask, offsets)
                         let sampled = argMax(logits, axis: -1).reshaped([R]).asType(.int32)
                         MLX.asyncEval(sampled)
+                        var stepLogprobs: (chosenLogprobs: MLXArray, topIdx: MLXArray?, topVals: MLXArray?, n: Int)?
+                        if !wantIdx.isEmpty {
+                            let idxArr = MLXArray(wantIdx.map { Int32($0) })
+                            let subsetLogits = take(logits.reshaped(R, -1), idxArr, axis: 0)
+                            let subsetChosen = take(sampled, idxArr, axis: 0)
+                            let (logSoftmax, topIdx, topVals, n) = Sampler.rawLogSoftmaxAndTopN(
+                                subsetLogits, topLogprobs: maxWantN)
+                            let chosenLogprobs = Sampler.gatherChosenLogprob(logSoftmax, chosenIds: subsetChosen)
+                            if let topIdx, let topVals {
+                                MLX.asyncEval(chosenLogprobs, topIdx, topVals)
+                            } else {
+                                MLX.asyncEval(chosenLogprobs)
+                            }
+                            stepLogprobs = (chosenLogprobs, topIdx, topVals, n)
+                        }
                         step += 1
                         var doBreak = false
                         if let prev = pendingSample {
                             let host = prev.asArray(Int32.self)
+                            let infoByRow = rowInfos(pendingLogprobs)
                             let now = CFAbsoluteTimeGetCurrent()
                             for i in 0 ..< R {
                                 let row = rows[i]
@@ -397,18 +449,20 @@ final class ContinuousBatcher: @unchecked Sendable {
                                 // does not gap its history and falsely stall if the
                                 // batch tips back to spec later.
                                 row.proposer?.append([next])
-                                if emit(row, token: next, now: now) { doBreak = true }
+                                if emit(row, token: next, now: now, logprob: infoByRow[i]) { doBreak = true }
                                 if row.cancelled.isCancelled { doBreak = true }
                             }
                             if !pendingIsEmpty() { doBreak = true }
                         }
                         pendingSample = sampled
+                        pendingLogprobs = stepLogprobs
                         fedArr = sampled
                         if doBreak {
                             // Flush the last sample to rows still live (rows that
                             // finished in the loop above are already finalized and
                             // skipped). Their forward ran but no token is emitted.
                             let host = sampled.asArray(Int32.self)
+                            let infoByRow = rowInfos(stepLogprobs)
                             let now = CFAbsoluteTimeGetCurrent()
                             for i in 0 ..< R {
                                 let row = rows[i]
@@ -417,7 +471,7 @@ final class ContinuousBatcher: @unchecked Sendable {
                                 let next = Int(host[i])
                                 row.current = next
                                 row.proposer?.append([next])   // keep proposer in sync (see above)
-                                _ = emit(row, token: next, now: now)
+                                _ = emit(row, token: next, now: now, logprob: infoByRow[i])
                             }
                             break
                         }
@@ -456,10 +510,24 @@ final class ContinuousBatcher: @unchecked Sendable {
                         // so decodeTime excludes prefill + admission/epoch wait.
                         if row.decodeStartedAt == nil { row.decodeStartedAt = now }
                         if row.needsHistory { row.recent.append(row.current) }
-                        let next = row.sampler.sample(logits[i ..< (i + 1)], recent: row.recent)
+                        let next: Int
+                        let logprob: TokenLogprobInfo?
+                        // docs/LOGPROBS_PLAN.md Phase 2: only a row that asked for
+                        // logprobs pays for the log-softmax + top-N here - every
+                        // other row in the same step keeps the plain `sample` call,
+                        // byte-for-byte unchanged.
+                        if row.wantLogprobs {
+                            let (tok, _, info) = row.sampler.sampleWithLogprobs(
+                                logits[i ..< (i + 1)], recent: row.recent, topLogprobs: row.topLogprobs)
+                            next = tok
+                            logprob = info
+                        } else {
+                            next = row.sampler.sample(logits[i ..< (i + 1)], recent: row.recent)
+                            logprob = nil
+                        }
                         row.current = next
                         row.proposer?.append([next])   // keep proposer in sync (see above)
-                        if emit(row, token: next, now: now) { setChanged = true }
+                        if emit(row, token: next, now: now, logprob: logprob) { setChanged = true }
                         if row.cancelled.isCancelled { setChanged = true }
                     }
 
@@ -508,7 +576,17 @@ final class ContinuousBatcher: @unchecked Sendable {
         // write-behind. Honors the row's own `usePrefixCache`.
         let logits = deps.prefillRow(p.promptTokens, caches, p.req.usePrefixCache)
         MLX.eval(logits)
-        let firstTok = p.sampler.sample(logits)
+        let firstTok: Int
+        let firstLogprob: TokenLogprobInfo?
+        if p.req.wantLogprobs {
+            let (tok, _, info) = p.sampler.sampleWithLogprobs(
+                logits, topLogprobs: p.req.topLogprobs)
+            firstTok = tok
+            firstLogprob = info
+        } else {
+            firstTok = p.sampler.sample(logits)
+            firstLogprob = nil
+        }
         let prefillTime = CFAbsoluteTimeGetCurrent() - start
 
         let row = Row(
@@ -516,7 +594,8 @@ final class ContinuousBatcher: @unchecked Sendable {
             stats: p.stats, cancelled: p.cancelled, maxTokens: p.req.maxTokens,
             caches: caches, current: firstTok,
             recent: p.sampler.needsHistory ? Array(p.promptTokens.suffix(512)) : [],
-            prefillTime: prefillTime, admittedAt: CFAbsoluteTimeGetCurrent())
+            prefillTime: prefillTime, admittedAt: CFAbsoluteTimeGetCurrent(),
+            wantLogprobs: p.req.wantLogprobs, topLogprobs: p.req.topLogprobs)
 
         // Spec path (fp16 only): seed this row's n-gram proposer with the full
         // prompt + the prefill-sampled first token (the running context the
@@ -544,7 +623,7 @@ final class ContinuousBatcher: @unchecked Sendable {
 
         // Emit the first (prefill-sampled) token, matching the serial path which
         // yields the prefill token before the decode loop.
-        if emit(row, token: firstTok, now: CFAbsoluteTimeGetCurrent()) {
+        if emit(row, token: firstTok, now: CFAbsoluteTimeGetCurrent(), logprob: firstLogprob) {
             return nil   // first token already ended the row
         }
         return row
@@ -552,7 +631,9 @@ final class ContinuousBatcher: @unchecked Sendable {
 
     /// Emit one token to a row's stream, applying the serial loop's terminal
     /// semantics (stop-token / maxTokens). Returns true if the row finished.
-    private func emit(_ row: Row, token: Int, now: Double) -> Bool {
+    /// `logprob` is attached to the token's own event only — a stop/maxTokens
+    /// terminal event carries none (mirrors the serial engine loop).
+    private func emit(_ row: Row, token: Int, now: Double, logprob: TokenLogprobInfo? = nil) -> Bool {
         if deps.stopIds.contains(token) {
             row.cont.yield(TokenEvent(tokenId: token, text: "",
                                       elapsed: now - row.admittedAt, isEnd: true))
@@ -561,7 +642,7 @@ final class ContinuousBatcher: @unchecked Sendable {
             return true
         }
         row.cont.yield(TokenEvent(tokenId: token, text: deps.decode(token),
-                                  elapsed: now - row.admittedAt))
+                                  elapsed: now - row.admittedAt, logprob: logprob))
         row.generated += 1
         if row.generated >= row.maxTokens {
             row.cont.yield(TokenEvent(tokenId: -1, text: "",
@@ -698,6 +779,31 @@ final class ContinuousBatcher: @unchecked Sendable {
             let cacheEntries = allAccepted ? k + 1 : a + 1
             accepted.append(finalToken)
 
+            // docs/LOGPROBS_PLAN.md Phase 2: derive logprobs for every token in
+            // `accepted` from the SAME verify forward `bl` already computed
+            // above - position j of row i's verify slice covers exactly
+            // `accepted[j]` (a draft match, which IS that position's target
+            // argmax, or the rejection/bonus replacement, which trivially is)
+            // - no extra forward pass. Only rows that asked for this pay for
+            // it; every other row in the same round is untouched.
+            var acceptedLogprobs: [TokenLogprobInfo]?
+            if row.wantLogprobs {
+                let vocab = bl.dim(-1)
+                let rowLogits = bl[i ..< (i + 1), 0 ..< accepted.count, 0...]
+                    .reshaped(accepted.count, vocab)
+                let chosenIds = MLXArray(accepted.map { Int32($0) })
+                let (logSoftmax, topIdx, topVals, n) = Sampler.rawLogSoftmaxAndTopN(
+                    rowLogits, topLogprobs: row.topLogprobs)
+                let chosenLogprobs = Sampler.gatherChosenLogprob(logSoftmax, chosenIds: chosenIds)
+                if let topIdx, let topVals {
+                    MLX.eval(chosenLogprobs, topIdx, topVals)
+                } else {
+                    MLX.eval(chosenLogprobs)
+                }
+                acceptedLogprobs = Sampler.logprobInfos(
+                    chosenLogprobs: chosenLogprobs, topIdx: topIdx, topVals: topVals, n: n)
+            }
+
             for l in 0 ..< row.caches.count {
                 guard let snap = snaps[l] else { continue }   // KV-shared placeholder
                 let dst = row.caches[l]
@@ -719,8 +825,8 @@ final class ContinuousBatcher: @unchecked Sendable {
             row.proposer?.recordRound(extraTokens: accepted.count - 1)
             row.proposer?.append(accepted)
 
-            for tok in accepted where !row.isFinished {
-                _ = emit(row, token: tok, now: now)
+            for (j, tok) in accepted.enumerated() where !row.isFinished {
+                _ = emit(row, token: tok, now: now, logprob: acceptedLogprobs?[j])
             }
             row.current = finalToken
         }
