@@ -1674,3 +1674,65 @@ close.
 **Real-server verification (qwen3.5-4b, real tool definition, both
 dialects, stream + non-stream).** See the PR body for the exact requests
 and responses captured against a locally-running `krill serve` build.
+
+## Real-model runtime checks (2026-09-30)
+
+Verification against real checkpoints on this machine (not synthetic
+weights), run to close out the qwen3_5 raw-snapshot fix and the open
+prefix-cache/LocateAnything/Muse Glimmer questions from earlier phases.
+
+**Task A: raw HF Qwen3.5-4B snapshot, before/after `qwen35VLKeyRewrite`.**
+Loaded the raw bf16 snapshot at
+`/Users/sourav/laya-demo/.hf-semif/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`
+(read-only, belongs to another project) through `loadQwen35VL`. Before the
+fix it produced confident garbage (random-init output); after the fix it
+produces coherent multi-sentence output. Numeric parity against `mlx_lm`
+(enable_thinking=0, greedy, top_logprobs=5, 40 tokens, prompt "Explain in
+two sentences why the sky is blue."): `mlx_lm` floor max 9.813881e-02 /
+median 1.014709e-03; Krill sampled-token max 7.489395e-02 / median
+1.163483e-03 — 0.76x of the floor, the same excellent-agreement pattern
+already established for the converted 4-bit alias. The registered 4-bit
+alias `qwen3.5-4b` (`mlx-community/Qwen3.5-4B-MLX-4bit`) was re-checked
+after the rewrite and is unaffected: still coherent, output unchanged (the
+rewrite is a no-op on an already mlx_vlm-format checkpoint).
+
+**Prefix cache, qwen3_5 family.** Confirmed by design and by a live check
+that the prefix cache never engages for `.ssm`-cache-spec families
+(`InferenceEngine.swift`: `effectiveUsePrefixCache = usePrefixCache &&
+!hasSSMCacheSpec`, with a rationale comment — a GatedDeltaNet layer's
+recurrent state is not position-addressable, so a partial KV-prefix hit
+would desync it). Sent an identical ~500-token prompt twice to a live
+qwen3_5 server: 12.84s then 7.11s. For comparison, a dense control model
+(llama-3.2-1b, prefix-cache-eligible) on the same repeat pattern: 0.43s
+then 0.18s. No prefix-cache log line was emitted for either family — Krill
+does not log a prefix-cache hit for any model — so the qwen3_5 repeat
+speedup is ordinary warm-cache/kernel-reuse, not a KV-prefix hit, unlike
+the dense control's.
+
+**LocateAnything (`srv-sngh/LocateAnything-3B-mlx-nvfp4`).** Downloaded the
+real checkpoint (`model.safetensors`, verified 3,255,388,251 bytes against
+the expected size) and served it with a release build (`make release`,
+metallib required — a bare `swift build -c release` is not enough; `krill
+serve` fails fast with "MLX Metal runtime library was not found" without
+it). Sent a real image request (`test_box.png`, prompt "Locate the red box
+in the image.") with `logprobs: true, top_logprobs: 3` alongside an
+identical request with logprobs off:
+
+- `content[]` was non-empty: 16 entries.
+- bytes-concat of the logprobs entries equalled the visible text exactly.
+- the logprobs-on and logprobs-off responses produced identical token
+  sequences: `<ref>Locate the red box in the image</ref><box><221><221>
+  <673><561></box>`.
+
+LocateAnything emits its box/coordinate tokens as ordinary tokenizer text
+(`<box><x1><y1><x2><y2></box>`), so this is not a special case for the
+logprobs pipeline — the per-token log-probabilities cover the coordinate
+tokens the same as any other text token, with no separate code path.
+
+**Muse Glimmer.** Every real MLX build of this family is ≥19.4 GiB, and no
+smaller checkpoint of the family exists on HF. On this 24 GiB machine that
+leaves no room to load a real one alongside anything else, so Muse Glimmer
+stays verified only against synthetic weights (as in the phase above) —
+not against a real checkpoint. No download was attempted for this pass;
+revisit if a smaller variant is ever published or this runs on a
+larger-memory machine.
