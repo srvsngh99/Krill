@@ -155,6 +155,27 @@ reverse chronological order. Versioning follows
   `.float16` instead of matching the model's actual compute dtype. Found
   serving `mlx-community/Llama-3.2-1B-Instruct-bf16` for this same fix's
   numeric-parity check; unrelated to logprobs.
+- **`RemoteAgentSession`'s `question_answered`/`approval_resolved` events
+  could be recorded before their own `question_request`/`approval_request`**
+  — a genuine race, not a test artifact. `RemoteQuestionAsker.ask()` (and
+  `RemoteApprover.register(...)`) published `request`/`continuation` under
+  `lock` and released the lock BEFORE calling the `onRequest` notifier that
+  appends the event, so a caller polling `pending()` (the `/agent` summary
+  endpoint, or a test) could observe the question/approval as pending and
+  resolve it before the request's own event had actually been appended —
+  landing the answer ahead of the request in the append-only event log any
+  client tails. `resolve(...)` had the mirror bug: it resumed the parked
+  continuation (letting the run loop immediately ask its *next* question)
+  before calling the `onResolve` notifier for the current one, so two
+  back-to-back questions could interleave their events too. Fixed by
+  announcing before publishing (`onRequest` now runs before `request`/
+  `continuation` are stored) and resolving before resuming (`onResolve` now
+  runs before `cont.resume`), in both gates. Root-caused and fixed after
+  `Tests/KrillServerTests/AgentSessionTests.swift`'s
+  `testSummaryReportsOriginEffectivePosturePhaseAndPendingQuestion` failed
+  intermittently on CI for PR #319; reproduced locally at 2/60 runs
+  (targeted) and 13/30 runs (whole `AgentSessionTests` suite, run alongside
+  its siblings) before the fix, 0/60 and 0/30 after.
 
 ## [0.24.0] - 2026-09-20
 
