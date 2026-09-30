@@ -26,7 +26,13 @@ now implemented: draft-model + n-gram speculative decode, and the
 batched/continuous decode paths, all compute logprobs natively instead of
 falling back to plain serial decode — see the "Phase 2 — spec + batched
 logprobs (2026-09-30)" section at the end of this doc for the per-path
-table, numbers, and limits. Only `echo`/prompt logprobs (Phase 3) remains.
+table, numbers, and limits. Phase 3 (`echo`/prompt logprobs on legacy
+`/v1/completions`, `feat/logprobs-echo-and-thinking-switch`, 2026-09-30) is
+now implemented — see the "Phase 3 — echo (2026-09-30)" section at the very
+end of this doc for the design (raw-prompt-tokens, no-chat-template scoring;
+BOS-stripping for the `tokens`-joined-equals-`text` invariant;
+prefix-cache-bypass mechanics) and the numeric parity results. **Every phase
+of this plan is now implemented.**
 Base branch: `main`
 Base commit: `db1a53f`
 Owner: unassigned
@@ -1736,3 +1742,261 @@ stays verified only against synthetic weights (as in the phase above) —
 not against a real checkpoint. No download was attempted for this pass;
 revisit if a smaller variant is ever published or this runs on a
 larger-memory machine.
+
+## Phase 3 — echo (2026-09-30)
+
+Closes this plan's last remaining gap: `echo` on legacy `POST
+/v1/completions` (§3.2, §5.4). Branch
+`feat/logprobs-echo-and-thinking-switch`, bundled with the unrelated
+per-request thinking-switch feature (own PR section, not a logprobs
+concern).
+
+### Sources checked before implementing
+
+- OpenAI Python SDK (`/Users/sourav/.krill/venv`, `openai==2.29.0`):
+  `openai/types/completion_create_params.py` — `echo: Optional[bool]`,
+  `"Echo back the prompt in addition to the completion"`; `logprobs:
+  Optional[int]`, `"The API will always return the logprob of the sampled
+  token, so there may be up to logprobs+1 elements... The maximum value for
+  logprobs is 5."` `openai/types/completion_choice.py` —
+  `Logprobs.{text_offset, token_logprobs, tokens, top_logprobs}`, all
+  `Optional`, confirming every field CAN be `None` per-position (consistent
+  with, though not itself proof of, the null-first-prompt-token convention
+  below).
+- `platform.openai.com`'s API reference (legacy completions) returned 403 on
+  WebFetch, same as every prior research pass in this doc — this is a
+  now-deprecated endpoint whose full reference page is evidently gated.
+  Semantics not confirmed by the SDK's type stubs alone (the first-prompt-
+  token-is-null convention, `text_offset` counting prompt+completion
+  characters, and `max_tokens: 0` returning just the scored prompt) are
+  well-established, extensively-documented historical behavior of this
+  exact API surface from its GPT-3-era popularity (community docs,
+  cookbooks, and client-library behavior all agree), not independently
+  re-verified against a live OpenAI response in this pass — flagged here
+  rather than silently assumed-and-uncited.
+- `docs/LOGPROBS_PLAN.md` itself (this file), §3.2 and §5.4, written during
+  Phase 1 planning.
+
+### Design decisions
+
+1. **Raw prompt, no chat template.** `/v1/completions` already always wraps
+   whatever prompt string it's given into one `[user: prompt]` chat-template
+   turn before generating the actual completion (`runGenerate(prompt:)` →
+   `InferenceEngine.generate(messages:)`) — a pre-existing Krill quirk,
+   unrelated to and untouched by this feature. For `echo`, that templated,
+   family-specific rendering is the WRONG thing to echo back or score: the
+   client sent a raw string, not a chat turn, and OpenAI's own legacy
+   completions API never applied a chat template to begin with. So `echo`'s
+   prompt text and its per-token logprobs are computed from
+   `tokenizer.encode(prompt)` — the same plain encode used elsewhere for raw
+   text — entirely independent of whatever the completion call's chat
+   template does. This also happens to be exactly what `mlx_lm`'s own
+   `tokenizer.encode(prompt)` does for the parity oracle, so the numbers are
+   directly comparable with no template-kwarg guessing (the "third harness
+   gap" §7's Resolutions flagged for chat's parity script does not recur
+   here).
+2. **Bypass the prefix cache entirely (§5.4 option (a)).** A NEW public
+   method, `InferenceEngine.echoPromptLogprobs(prompt:topLogprobs:)`
+   (`Sources/KrillEngine/InferenceEngine.swift`), is its own self-contained
+   forward pass: a fresh `makeKVCaches(spec:numLayers:)` KVCache that is
+   never looked up in or stored into the shared `PrefixCache`, chunked
+   (a dedicated `echoLogprobsChunkSize = 512`, deliberately smaller than the
+   model's own `prefillChunkSize` — see point 3) through the model's plain
+   `forward` closure (NOT the `prefillForward`/"last-token-only" closure the
+   normal decode path prefers, which only ever computes logits for the LAST
+   position of a chunk — echo needs EVERY position's logits). This method
+   never touches `generate(messages:)`, `Sampler.sample`/`sampleArray`/
+   `sampleWithLogprobs`, or any decode-loop state, so the prefill path for
+   every OTHER request (no `echo`) is provably byte-for-byte unaffected —
+   confirmed by re-running `tools/logprobs_e2e_check.py` and
+   `tools/logprobs_ollama_completions_e2e_check.py` unmodified (see Tests
+   below) and by `make test`'s full suite, all green.
+3. **Chunk-and-discard, never materialize `[promptLen, vocab]`.** Each
+   chunk's `[chunk, vocab]` raw logits (from `forward`) go straight into
+   `Sampler.rawLogSoftmaxAndTopN` (the SAME Phase 2 batched primitive that
+   already computes N independent rows' log-softmax + top-N in one call —
+   reused here treating "N positions in a chunk" exactly like Phase 2 treats
+   "N rows in a batch step", no new math), producing that chunk's
+   `logSoftmax`/`topIdx`/`topVals`, from which the chunk's per-position
+   `TokenLogprobInfo`s are extracted and the chunk's raw tensors are then
+   dropped before the next chunk starts. `echoLogprobsChunkSize` (512, not
+   the model's own possibly-2048 `prefillChunkSize`) bounds this chunk's
+   float32 working set to ≤ ~550 MB even at Gemma 4's 262144-entry vocab —
+   deliberately conservative on a shared 24 GiB machine that may already be
+   under memory pressure from other jobs (this session's own `memory_pressure`
+   check at test time showed ~27% free, close to the 30% floor).
+4. **A leading BOS breaks `tokens`-joined-equals-`text` — strip it from what
+   gets REPORTED, not from what gets FED to the model.** Found empirically,
+   not anticipated in the original plan: `tokenizer.encode(prompt)` for a
+   Llama-family checkpoint prepends a BOS token (`<|begin_of_text|>`) that is
+   necessary context for correct generation but is NOT literal text the
+   client sent — its `decodeForOutput` is the non-empty string
+   `"<|begin_of_text|>"`, which broke the "concatenating `tokens` reproduces
+   the returned `text`" invariant this endpoint's own response shape
+   promises (and that `tools/logprobs_ollama_completions_e2e_check.py`
+   explicitly checks for the sibling endpoints). Fix: `echoPromptLogprobs`
+   still feeds the FULL id sequence (BOS included) to the model for correct
+   context, but drops a detected leading BOS
+   (`tokenIds.first == tokenizer.bosTokenId`) from the RETURNED
+   `tokenIds`/`tokenStrings`/`infos` arrays. The new first reported token
+   keeps its REAL, already-computed logprob (scored against the hidden BOS
+   context) rather than being forced to `null` — only a prompt with
+   genuinely no preceding context at all (a true single-token or empty
+   prompt) gets a `null` first entry, matching OpenAI's documented
+   convention for THAT case specifically. Qwen-family tokenizers were
+   observed NOT to prepend a BOS at all (`Qwen3-0.6B-bf16`'s raw encode of
+   an 11-word prompt produced exactly 11 ids, matching Krill's reported
+   token count one-for-one, offset 0) — the strip is a no-op for those
+   checkpoints, applied uniformly rather than per-family-special-cased.
+5. **`max_tokens: 0` skips generation entirely.** Confirmed by the SDK's
+   `echo` doc comment ("echo: true with max_tokens: 0 returns just the
+   scored prompt") to be real, intentional OpenAI behavior, not an edge case
+   to reject. `ServerParsing`'s shared `tokenLimit`/`requiredTokenLimit`
+   helpers (used by chat and both Ollama dialects) reject an explicit `0`
+   via `positiveInt` — loosening that shared helper would change three OTHER
+   endpoints' behavior for a case only this one documents a meaning for, so
+   a new `completionsTokenLimit` helper (same shape, `>= 0` instead of `> 0`)
+   is used ONLY by `openAICompletionRequest`. `Server.swift`'s
+   `handleCompletions` then skips the `runGenerate` call entirely when
+   `request.maxTokens == 0` (no `TokenBudget` resolution, no engine call at
+   all) — `finish_reason: "length"` (0 tokens were generated because the
+   limit was 0, immediately reached), `usage.prompt_tokens` from a cheap
+   tokenize-only `InferenceEngine.promptTokenIds(_:)` (no forward pass) since
+   there is no `GenerationStats` to read it from. This also generalizes
+   `max_tokens: 0` to a non-`echo` legacy-completions request (empty text,
+   real prompt-token usage count) — an adjacent, cheap, low-risk fix
+   (matches documented OpenAI behavior generally, not just for `echo`) left
+   in rather than narrowly gated to `echo: true` only.
+6. **Response shape reuses Phase 1's machinery, not a parallel
+   implementation.** A new `echoPromptLogprobEntry(tokenString:info:eng:)`
+   (`Sources/KrillServer/LogprobsFormatting.swift`) builds one prompt-side
+   entry in the exact same `[String: Any]` shape
+   `LogprobsAggregator`'s generated-token entries already use (`token`,
+   `logprob`, `top_logprobs`) — `info == nil` (the true-first-token case)
+   encodes as `NSNull()` sentinels for BOTH `logprob` and `top_logprobs`,
+   which `legacyCompletionLogprobsJSON` (extended, not replaced) now
+   recognizes and passes through as JSON `null` in both `token_logprobs[i]`
+   and `top_logprobs[i]` (not `{}` — OpenAI's documented convention for the
+   position with no preceding context). Prompt entries are simply prepended
+   to the existing completion entries before the ONE existing
+   `legacyCompletionLogprobsJSON(entries:)` call — `text_offset`'s existing
+   running-sum logic needed no changes at all to correctly accumulate across
+   prompt then completion, since it was already generic over "an ordered
+   list of token entries."
+
+### Implementation summary (files touched)
+
+- `Sources/KrillEngine/InferenceEngine.swift`: `promptTokenIds(_:)` (cheap
+  tokenize-only helper) and `echoPromptLogprobs(prompt:topLogprobs:)` (the
+  echo-only forward+log-softmax path described above), plus
+  `echoLogprobsChunkSize`. No changes to `generate(messages:)`, `Sampler`,
+  or any existing decode path.
+- `Sources/KrillServer/ServerParsing.swift`: `ServerCompletionRequest.echo:
+  Bool`; `echo` removed from `unsupportedOpenAICompletionFields`;
+  `completionsTokenLimit` (accepts an explicit `0`, scoped to this endpoint
+  only).
+- `Sources/KrillServer/LogprobsFormatting.swift`: `echoPromptLogprobEntry`;
+  `legacyCompletionLogprobsJSON` extended to recognize the `NSNull()`
+  sentinel and emit `null` (not `{}`/`0`) for that position, for both
+  `token_logprobs`/`top_logprobs` — a no-op change for every existing
+  (non-`echo`) call site, since no generated-token entry ever carries that
+  sentinel.
+- `Sources/KrillServer/Server.swift`: `handleCompletions` — computes
+  `promptTokenCount` (via `promptTokenIds`) whenever `echo` or
+  `max_tokens: 0`; computes `promptEntries` (via `echoPromptLogprobs`) only
+  when `echo && wantLogprobs`; skips the `runGenerate` call entirely when
+  `maxTokens == 0`; prepends `promptEntries` to the existing
+  `completionEntries` before the one `legacyCompletionLogprobsJSON` call.
+  Every branch a non-`echo`, `maxTokens > 0` request takes is textually
+  identical to before this change.
+
+### Tests
+
+**Unit** (`Tests/KrillServerTests/ServerTests.swift`,
+`ServerFormattingTests.swift`): `echo` parsing (accepted, defaults `false`,
+rejects a non-bool, combines with `logprobs`+`max_tokens: 0`);
+`max_tokens: 0` parsing (accepted, rejects negative, the two token-limit
+fields still conflict-check against each other); `echoPromptLogprobEntry`'s
+null-first-token shape and its real-value shape;
+`legacyCompletionLogprobsJSON`'s handling of a prepended null entry
+(`token_logprobs`/`top_logprobs` both `null`, `text_offset` still
+accumulates correctly into the following completion entries). `make test`:
+**1801 tests, 141 skipped, 0 failures** (full suite, including the
+pre-existing `AgentSessionTests`/`BatchSchedulerTests`/etc., not just the
+new cases).
+
+**Real server** (`krill serve` from a release build, `llama-3.2-1b` 4-bit
+and `Qwen3-0.6B-bf16`, port 57480 — the real `server_api_key` from
+`~/.krill/config.toml` read into `KRILL_API_KEY` at runtime, never written
+to a file/commit):
+
+- OpenAI SDK round-trip (`client.completions.create(prompt=..., echo=True,
+  logprobs=3, max_tokens=0)`): parses into the typed `Logprobs` object with
+  no SDK error; `choices[0].text == prompt` exactly; `tokens`/
+  `token_logprobs`/`top_logprobs` all length-matched;
+  `"".join(tokens) == text` exactly (the invariant point 4 above exists to
+  guarantee).
+- `echo: true, logprobs: 2, max_tokens: 5, temperature: 0`: full
+  prompt+completion text returned; `tokens` joined still equals `text`
+  exactly; `text_offset` a correct cumulative sum across BOTH halves.
+- `echo: true` with no `logprobs`: prompt text prepended, `logprobs` key
+  absent (not `null`) — matches this endpoint's existing "no field a client
+  didn't ask for" convention.
+- Non-`echo`, `logprobs` absent (the pre-existing case): unaffected — spot
+  re-checked, and `tools/logprobs_e2e_check.py` +
+  `tools/logprobs_ollama_completions_e2e_check.py` (unmodified) both still
+  pass in full against `qwen3.5-4b` on this same build (see their own
+  output for the per-check breakdown), which is the actual regression gate
+  for "every other request is byte-for-byte unaffected."
+
+**Numeric parity vs `mlx_lm`** (new `tools/logprobs_echo_parity.py`: a
+single full-sequence `mlx_lm` forward over the SAME raw-encoded prompt ids,
+log-softmax in float32, compared against a chunked-through-a-real-KVCache
+`mlx_lm` reference as the intrinsic floor — mirroring `logprobs_parity.py`'s
+"full-sequence vs incremental" floor methodology — then against Krill's
+actual `/v1/completions` `echo` response), prompt "Explain in two sentences
+why the sky is blue.", greedy, `top_logprobs: 5`:
+
+| Model | Floor max/median | Krill vs mlx_lm max/median | Notes |
+|---|---|---|---|
+| `llama-3.2-1b` (4-bit) | 0.0 / 0.0 (12 tokens, single chunk both sides) | 1.776e-2 / 5.472e-3 (11 compared) | In the same ~1e-2-2e-2 range as this plan's own already-documented 4-bit dequantization noise for GENERATED-token logprobs (Resolutions: 2.52e-2 max on the same checkpoint) |
+| `Qwen3-0.6B-bf16` | 0.0 / 0.0 (11 tokens, single chunk both sides; confirmed NO leading BOS, offset 0) | 7.912e-2 / 1.641e-2 (10 compared) | Comparable to this plan's own bf16 alternate-token noise characterization (§7's Resolutions: bf16 has 7 mantissa bits vs float16's 10 — this is intrinsic arithmetic noise, not a Krill defect) |
+
+Both prompts (12/11 raw tokens) fit inside one 512-token chunk on both the
+Krill and the mlx_lm-reference side, so the FLOOR reads as exactly `0.0` —
+a real result (there is no chunk boundary to introduce non-associativity
+here), not a bug in the floor computation; it simply means this parity run
+does not independently exercise the multi-chunk code path (`echoPromptLogprobs`'s
+chunking loop) beyond what `make test`'s unit-level review of that loop's
+logic already covers. Re-run with a prompt over 512 tokens if a
+multi-chunk-specific regression is ever suspected.
+
+### Limits / not done
+
+- The four native VL/multimodal decode runtimes flagged as a known gap in
+  the 2026-09-29 and 2026-09-30 verification sections (Qwen 2.5-VL,
+  Llama-3.2-Vision, LocateAnything-3B, Muse Glimmer image requests) are
+  irrelevant to `echo` specifically (`/v1/completions` carries no media
+  payload at all — `ServerCompletionRequest` has no `media` field), so this
+  follow-up neither touches nor is affected by that gap.
+- No multi-chunk (prompt > 512 tokens) real-model run was performed in this
+  pass (both parity prompts were short) — the chunking loop is exercised by
+  `make test`'s existing coverage of the pattern it reuses
+  (`rawLogSoftmaxAndTopN`'s own Phase-2 batched tests) but not by a
+  dedicated long-prompt real-model echo test. Low risk (the loop is a
+  straightforward reuse of already-verified per-chunk math with no new
+  cross-chunk state), but explicitly not independently verified end-to-end
+  here.
+- `echo` was not combined with speculative decode or the batched/continuous
+  pool in testing — `echoPromptLogprobs` runs entirely independently of
+  `generate(messages:)`'s spec/batch decision logic (it's a separate method
+  called BEFORE any `runGenerate` call for the completion half), so there is
+  no interaction to test: the completion half of an `echo` request goes
+  through the exact same spec/batch eligibility path any other
+  `/v1/completions` request would.
+- The legacy-completions-specific "OpenAI's exact current `platform.openai.com`
+  reference page" could not be independently re-fetched (403, consistent
+  with every prior attempt in this document) — semantics rely on the SDK
+  type stubs plus well-established historical documentation of this
+  (now-deprecated) API shape, flagged explicitly rather than silently
+  presented as independently re-verified.

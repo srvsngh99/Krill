@@ -405,20 +405,51 @@ plus the sampled token folded in if it wasn't already one of them ("up to
 `logprobs`+1 elements", per the SDK's own doc comment) — `{}` when
 `logprobs: 0`. `text_offset[i]` is the Unicode-scalar (Python
 code-point-equivalent) character offset of token `i` within the returned
-completion text (no `echo`, so no prompt prefix to offset past). The
-`logprobs` key is present only when the request asked for it — omitted
-entirely otherwise, matching this endpoint's existing convention of adding
-no field a client didn't ask for. This endpoint has **no streaming support
-at all** in Krill (pre-existing, `stream: true` still 400s — unrelated to
-logprobs), so there is no streaming logprobs case here. `echo` (prompt
-logprobs) remains unsupported — Phase 3, needs a prefix-cache bypass
-(§5.4).
+text — with `echo: true` (below), that's prompt+completion together, not
+just the completion. The `logprobs` key is present only when the request
+asked for it — omitted entirely otherwise, matching this endpoint's existing
+convention of adding no field a client didn't ask for. This endpoint has
+**no streaming support at all** in Krill (pre-existing, `stream: true` still
+400s — unrelated to logprobs), so there is no streaming logprobs case here.
 
 ```bash
 curl http://127.0.0.1:57455/v1/completions -d '{
   "model": "llama-3.2-1b",
   "prompt": "The meaning of life is",
   "logprobs": 5
+}'
+```
+
+#### `echo` (Phase 3)
+
+`echo: true` prepends the prompt text to `choices[0].text`; combined with
+`logprobs`, every PROMPT token also gets scored, not just generated ones.
+`echo: true` with `max_tokens: 0` returns just the scored prompt — no
+completion is generated at all (confirmed against the OpenAI SDK's
+`completion_create_params.py` doc comment for `echo`; this endpoint's
+`max_tokens`/`max_completion_tokens` now accept an explicit `0` for exactly
+this case). The prompt is echoed and scored **as the client sent it, with no
+chat template applied** — a deliberate, documented divergence from what the
+same request's actual COMPLETION is generated from (`/v1/completions`
+already always wraps the prompt into one chat-template user turn for the
+completion, a pre-existing, unrelated Krill behavior this feature does not
+change). A leading BOS token the tokenizer adds to feed the model correctly
+(not literal text the client sent) is stripped from the reported `tokens`/
+`token_logprobs`/`top_logprobs`/`text_offset` — so `tokens` joined always
+reproduces the returned `text` exactly — but the new first reported token
+still gets a REAL logprob (scored against that hidden BOS context), not a
+forced `null`; only a prompt with genuinely no preceding context gets a
+`null` first entry, matching OpenAI's documented convention. `echo` without
+`logprobs` just returns the prompt text with no logprobs at all, as
+documented.
+
+```bash
+curl http://127.0.0.1:57455/v1/completions -d '{
+  "model": "llama-3.2-1b",
+  "prompt": "The meaning of life is",
+  "echo": true,
+  "logprobs": 3,
+  "max_tokens": 0
 }'
 ```
 

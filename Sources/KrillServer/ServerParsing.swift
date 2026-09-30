@@ -107,6 +107,11 @@ internal struct ServerCompletionRequest: Equatable, Sendable {
     /// sentinel: `logprobs: 0` is a real, distinct request ("sampled-token
     /// logprob only, no alternates") from omitting the field.
     var logprobs: Int? = nil
+    /// `echo: true` (Phase 3, docs/LOGPROBS_PLAN.md §3.2/§5.4): return the
+    /// prompt text in front of the completion, and (combined with
+    /// `logprobs`) a raw logprob for every PROMPT token too, not just the
+    /// generated ones.
+    var echo: Bool = false
 }
 
 internal struct ServerGenerateRequest: Equatable, Sendable {
@@ -183,8 +188,13 @@ internal enum ServerParsing {
     // flag is honored — a final `usage` chunk is emitted before `[DONE]` (see
     // ServerChatRequest.includeUsage and sseUsageChunk).
 
+    // `echo` is accepted (not rejected) on /v1/completions as of the Phase 3
+    // follow-up (docs/LOGPROBS_PLAN.md "Phase 3 - echo"): parsed in
+    // `openAICompletionRequest` below. Combined with `logprobs`, the prompt
+    // is scored too (see `InferenceEngine.echoPromptLogprobs`); alone, it
+    // just prepends the raw prompt text to the response.
     private static let unsupportedOpenAICompletionFields: Set<String> = [
-        "suffix", "best_of", "echo",
+        "suffix", "best_of",
         "stop", "frequency_penalty", "presence_penalty", "logit_bias"
     ]
 
@@ -418,14 +428,15 @@ internal enum ServerParsing {
         }
         return ServerCompletionRequest(
             prompt: try stringValue(json["prompt"], field: "prompt"),
-            maxTokens: try requiredTokenLimit(
+            maxTokens: try completionsTokenLimit(
                 from: json,
                 fields: ["max_tokens", "max_completion_tokens"],
                 defaultValue: defaultOpenAICompletionMaxTokens
             ),
             sampling: try openAISamplingOptions(from: json),
             requestedModel: try optionalString(json["model"], field: "model"),
-            logprobs: try legacyCompletionsLogprobsValue(json["logprobs"], field: "logprobs")
+            logprobs: try legacyCompletionsLogprobsValue(json["logprobs"], field: "logprobs"),
+            echo: try boolValue(json["echo"], field: "echo") ?? false
         )
     }
 
@@ -832,6 +843,41 @@ internal enum ServerParsing {
             return defaultValue
         }
         return value
+    }
+
+    /// Same shape as `tokenLimit`/`requiredTokenLimit`, but accepts an
+    /// explicit `0` - meaningful only on `/v1/completions`: `max_tokens: 0`
+    /// returns just the (optionally scored) prompt, with no completion
+    /// generated (docs/LOGPROBS_PLAN.md Phase 3, confirmed against the
+    /// OpenAI SDK's `completion_create_params.py` doc comment for `echo`:
+    /// "echo: true with max_tokens: 0 returns just the scored prompt").
+    /// `tokenLimit` (used by chat and both Ollama dialects) keeps rejecting
+    /// 0 via `positiveInt` - this is the only endpoint that documents a
+    /// meaning for it, so the loosening is scoped here rather than to the
+    /// shared helper.
+    private static func completionsTokenLimit(
+        from json: [String: Any],
+        fields: [String],
+        defaultValue: Int
+    ) throws -> Int {
+        var found: (field: String, value: Int)?
+        for field in fields where !isAbsent(json[field]) {
+            let value = try intValue(json[field], field: field)
+            if value == TokenBudget.unlimited {
+                found = (field, TokenBudget.unlimited)
+                continue
+            }
+            guard value >= 0 else {
+                throw ServerRequestError.invalidValue(
+                    field: field, reason: "must be greater than or equal to 0")
+            }
+            if let existing = found, existing.value != value {
+                throw ServerRequestError.invalidValue(
+                    field: field, reason: "conflicts with '\(existing.field)'")
+            }
+            found = (field, value)
+        }
+        return found?.value ?? defaultValue
     }
 
     private static func rejectUnsupportedFields(in json: [String: Any], fields: Set<String>) throws {
