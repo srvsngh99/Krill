@@ -134,6 +134,104 @@ final class ServerFormattingTests: XCTestCase {
         XCTAssertEqual(parsed["value"], original)
     }
 
+    // MARK: - Ollama + legacy completions logprobs (2026-09-30 follow-up)
+
+    func testOllamaLogprobEntryJSONDropsEmptyTopLogprobsKey() {
+        // Go's `TopLogprobs []TokenLogprob json:"top_logprobs,omitempty"` -
+        // an EMPTY alternates list is omitted entirely, unlike OpenAI chat's
+        // always-present `[]` (a required list per that SDK's own model).
+        let entry = logprobEntryJSON(token: "x", logprob: -1.0, bytes: [120], topLogprobs: [])
+        let converted = ollamaLogprobEntryJSON(entry)
+        XCTAssertNil(converted["top_logprobs"])
+        XCTAssertEqual(converted["token"] as? String, "x")
+        XCTAssertEqual(converted["logprob"] as? Float, -1.0)
+        XCTAssertEqual(converted["bytes"] as? [Int], [120])
+    }
+
+    func testOllamaLogprobEntryJSONKeepsNonEmptyTopLogprobs() {
+        let alt = logprobEntryJSON(token: "Hi", logprob: -1.8, bytes: [72, 105])
+        let entry = logprobEntryJSON(token: "Hello", logprob: -0.31, bytes: [72, 101], topLogprobs: [alt])
+        let converted = ollamaLogprobEntryJSON(entry)
+        let top = converted["top_logprobs"] as? [[String: Any]]
+        XCTAssertEqual(top?.count, 1)
+    }
+
+    func testOllamaLogprobsArrayJSONShape() {
+        let e1 = logprobEntryJSON(token: "a", logprob: -0.1, bytes: [97])
+        let e2 = logprobEntryJSON(token: "b", logprob: -0.2, bytes: [98])
+        let arr = ollamaLogprobsArrayJSON(entries: [e1, e2])
+        XCTAssertEqual(arr.count, 2)
+        XCTAssertEqual(arr[0]["token"] as? String, "a")
+        XCTAssertEqual(arr[1]["token"] as? String, "b")
+        XCTAssertNil(arr[0]["top_logprobs"])
+    }
+
+    func testLegacyCompletionLogprobsJSONGoldenShapeWithAlternates() throws {
+        // logprobs: 2 requested - each position's dict gets the top-2
+        // alternates, plus the sampled token folded in when it is not
+        // already one of them ("up to logprobs+1 elements").
+        let alt1 = logprobEntryJSON(token: " world", logprob: -0.05, bytes: Array(" world".utf8))
+        let alt2 = logprobEntryJSON(token: " there", logprob: -3.2, bytes: Array(" there".utf8))
+        let entry = logprobEntryJSON(
+            token: " earth", logprob: -4.1, bytes: Array(" earth".utf8), topLogprobs: [alt1, alt2])
+        let json = legacyCompletionLogprobsJSON(entries: [entry])
+
+        let tokens = try XCTUnwrap(json["tokens"] as? [String])
+        XCTAssertEqual(tokens, [" earth"])
+        let tokenLogprobs = try XCTUnwrap(json["token_logprobs"] as? [Float])
+        XCTAssertEqual(tokenLogprobs, [-4.1])
+        let textOffset = try XCTUnwrap(json["text_offset"] as? [Int])
+        XCTAssertEqual(textOffset, [0])
+        let topLogprobs = try XCTUnwrap(json["top_logprobs"] as? [[String: Any]])
+        XCTAssertEqual(topLogprobs.count, 1)
+        let dict = topLogprobs[0]
+        XCTAssertEqual(dict.count, 3, "2 alternates + the sampled token, not already among them")
+        XCTAssertEqual(dict[" world"] as? Float, -0.05)
+        XCTAssertEqual(dict[" there"] as? Float, -3.2)
+        XCTAssertEqual(dict[" earth"] as? Float, -4.1)
+    }
+
+    func testLegacyCompletionLogprobsJSONSampledTokenNotDuplicatedWhenAlreadyTopAlternate() {
+        // When the sampled token IS already one of the reported alternates,
+        // the dict must not gain a second (redundant) entry under the same
+        // key - "up to logprobs+1", not always +1.
+        let sampledAsAlt = logprobEntryJSON(token: " world", logprob: -0.05, bytes: Array(" world".utf8))
+        let entry = logprobEntryJSON(
+            token: " world", logprob: -0.05, bytes: Array(" world".utf8), topLogprobs: [sampledAsAlt])
+        let json = legacyCompletionLogprobsJSON(entries: [entry])
+        let topLogprobs = json["top_logprobs"] as? [[String: Any]]
+        XCTAssertEqual(topLogprobs?.first?.count, 1)
+    }
+
+    func testLegacyCompletionLogprobsJSONZeroRequestedGivesEmptyDicts() {
+        // logprobs: 0 - sampled-token logprob only via `token_logprobs`; the
+        // per-position dict stays `{}`, the sampled token is NOT duplicated
+        // into it (docs/LOGPROBS_PLAN.md §3.2, the 2026-09-30 addendum).
+        let entry = logprobEntryJSON(token: "OK", logprob: -0.02, bytes: Array("OK".utf8), topLogprobs: [])
+        let json = legacyCompletionLogprobsJSON(entries: [entry])
+        let tokenLogprobs = json["token_logprobs"] as? [Float]
+        XCTAssertEqual(tokenLogprobs, [-0.02])
+        let topLogprobs = json["top_logprobs"] as? [[String: Any]]
+        XCTAssertEqual(topLogprobs?.first?.count, 0)
+    }
+
+    func testLegacyCompletionLogprobsJSONTextOffsetsAccumulate() throws {
+        let e1 = logprobEntryJSON(token: "ab", logprob: -0.1, bytes: Array("ab".utf8))
+        let e2 = logprobEntryJSON(token: "cde", logprob: -0.2, bytes: Array("cde".utf8))
+        let e3 = logprobEntryJSON(token: "f", logprob: -0.3, bytes: Array("f".utf8))
+        let json = legacyCompletionLogprobsJSON(entries: [e1, e2, e3])
+        let textOffset = try XCTUnwrap(json["text_offset"] as? [Int])
+        XCTAssertEqual(textOffset, [0, 2, 5])
+    }
+
+    func testLegacyCompletionLogprobsJSONEmptyEntriesGivesEmptyArrays() throws {
+        let json = legacyCompletionLogprobsJSON(entries: [])
+        XCTAssertEqual((json["tokens"] as? [String])?.count, 0)
+        XCTAssertEqual((json["token_logprobs"] as? [Any])?.count, 0)
+        XCTAssertEqual((json["top_logprobs"] as? [Any])?.count, 0)
+        XCTAssertEqual((json["text_offset"] as? [Int])?.count, 0)
+    }
+
     private func parseSSE(_ event: String) throws -> [String: Any] {
         XCTAssertTrue(event.hasPrefix("data: "))
         XCTAssertTrue(event.hasSuffix("\n\n"))

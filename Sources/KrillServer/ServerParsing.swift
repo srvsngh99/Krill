@@ -100,6 +100,13 @@ internal struct ServerCompletionRequest: Equatable, Sendable {
     let maxTokens: Int
     let sampling: ServerSamplingOptions
     let requestedModel: String?
+    /// Legacy `/v1/completions` `logprobs`: an integer 0-5 ("top N" - a
+    /// different meaning from the chat endpoint's `logprobs: bool`), or
+    /// `nil` when the request did not include the field at all.
+    /// docs/LOGPROBS_PLAN.md §3.2. `nil` (not `0`) is the "not requested"
+    /// sentinel: `logprobs: 0` is a real, distinct request ("sampled-token
+    /// logprob only, no alternates") from omitting the field.
+    var logprobs: Int? = nil
 }
 
 internal struct ServerGenerateRequest: Equatable, Sendable {
@@ -113,6 +120,11 @@ internal struct ServerGenerateRequest: Equatable, Sendable {
     var responseFormat: ResponseFormat? = nil
     var keepAlive: Int? = nil
     var contextLimit: Int? = nil
+    /// Ollama `/api/generate` `logprobs` (bool) / `top_logprobs` (int, 0-20).
+    /// docs/LOGPROBS_PLAN.md §3.4. Same semantics as `ServerChatRequest`'s
+    /// fields of the same name.
+    var wantLogprobs: Bool = false
+    var topLogprobs: Int = 0
 }
 
 internal enum ServerRequestError: Error, Equatable, Sendable {
@@ -157,9 +169,14 @@ internal enum ServerParsing {
     // they report on the raw distribution and never change what token is
     // drawn (not sampling knobs, so they don't belong in
     // `openAISamplingOptions`). Legacy /v1/completions `logprobs` (an int,
-    // different meaning - "top N" not a bool) and Ollama's
-    // `/api/chat`+`/api/generate` dialects are unchanged in this phase -
-    // still rejected/silently dropped below.
+    // 0-5 - a different meaning ("top N") AND a different range from the
+    // chat endpoint's `top_logprobs` 0-20, confirmed against the OpenAI
+    // Python SDK's `completion_create_params.py`) is accepted as of the
+    // 2026-09-30 follow-up (see the new §"Ollama + legacy completions"
+    // subsection of docs/LOGPROBS_PLAN.md); `echo` remains rejected (Phase 3,
+    // not this change - it needs a prefix-cache bypass, §5.4). Ollama's
+    // `/api/chat`+`/api/generate` `logprobs`/`top_logprobs` are accepted the
+    // same way, parsed in `ollamaChatRequest`/`ollamaGenerateRequest` below.
     // `stream_options` is accepted (not rejected): real clients (opencode, the
     // OpenAI SDK) send it on every streamed chat request, and rejecting it with
     // a 400 broke those agents before their first turn. Its `include_usage`
@@ -167,7 +184,7 @@ internal enum ServerParsing {
     // ServerChatRequest.includeUsage and sseUsageChunk).
 
     private static let unsupportedOpenAICompletionFields: Set<String> = [
-        "suffix", "best_of", "logprobs", "echo",
+        "suffix", "best_of", "echo",
         "stop", "frequency_penalty", "presence_penalty", "logit_bias"
     ]
 
@@ -406,7 +423,8 @@ internal enum ServerParsing {
                 defaultValue: defaultOpenAICompletionMaxTokens
             ),
             sampling: try openAISamplingOptions(from: json),
-            requestedModel: try optionalString(json["model"], field: "model")
+            requestedModel: try optionalString(json["model"], field: "model"),
+            logprobs: try legacyCompletionsLogprobsValue(json["logprobs"], field: "logprobs")
         )
     }
 
@@ -434,6 +452,17 @@ internal enum ServerParsing {
         try rejectUnsupportedFields(in: json, fields: unsupportedOllamaChatFields)
         let tools = try parseTools(from: json)
         let extracted = try ollamaMessages(from: normalizeToolTurns(in: json))
+        // Ollama `logprobs`/`top_logprobs`: top-level request fields (NOT
+        // inside `options`), confirmed against docs.ollama.com/api/chat and
+        // the ollama Go source (`api/types.go`'s `ChatRequest.Logprobs`/
+        // `TopLogprobs`) - docs/LOGPROBS_PLAN.md §3.4. Same
+        // parse-only-when-logprobs-is-true convention as the OpenAI dialect
+        // (§3.5): a client that always sends both fields with logprobs off
+        // must never 400.
+        let wantLogprobs = try boolValue(json["logprobs"], field: "logprobs") ?? false
+        let topLogprobs = wantLogprobs
+            ? try topLogprobsValue(json["top_logprobs"], field: "top_logprobs")
+            : 0
         return ServerChatRequest(
             messages: extracted.messages,
             stream: try boolValue(json["stream"], field: "stream") ?? true,
@@ -444,7 +473,9 @@ internal enum ServerParsing {
             tools: tools,
             responseFormat: parseOllamaFormat(json["format"]),
             keepAlive: KeepAliveParse.seconds(from: json["keep_alive"]),
-            contextLimit: (try? optionsObject(from: json))?["num_ctx"] as? Int ?? json["num_ctx"] as? Int
+            contextLimit: (try? optionsObject(from: json))?["num_ctx"] as? Int ?? json["num_ctx"] as? Int,
+            wantLogprobs: wantLogprobs,
+            topLogprobs: topLogprobs
         )
     }
 
@@ -477,6 +508,13 @@ internal enum ServerParsing {
         if let fmt = try optionalString(json["audio_format"], field: "audio_format") {
             media.audioFormat = fmt
         }
+        // Same top-level (not `options`) logprobs fields as `ollamaChatRequest`
+        // - docs/LOGPROBS_PLAN.md §3.4, confirmed against
+        // docs.ollama.com/api/generate + the Go source.
+        let wantLogprobs = try boolValue(json["logprobs"], field: "logprobs") ?? false
+        let topLogprobs = wantLogprobs
+            ? try topLogprobsValue(json["top_logprobs"], field: "top_logprobs")
+            : 0
         return ServerGenerateRequest(
             prompt: try stringValue(json["prompt"], field: "prompt"),
             system: try optionalString(json["system"], field: "system"),
@@ -487,7 +525,9 @@ internal enum ServerParsing {
             media: media,
             responseFormat: parseOllamaFormat(json["format"]),
             keepAlive: KeepAliveParse.seconds(from: json["keep_alive"]),
-            contextLimit: (try? optionsObject(from: json))?["num_ctx"] as? Int ?? json["num_ctx"] as? Int
+            contextLimit: (try? optionsObject(from: json))?["num_ctx"] as? Int ?? json["num_ctx"] as? Int,
+            wantLogprobs: wantLogprobs,
+            topLogprobs: topLogprobs
         )
     }
 
@@ -913,6 +953,22 @@ internal enum ServerParsing {
         let value = try intValue(rawValue, field: field)
         guard value >= 0, value <= 20 else {
             throw ServerRequestError.invalidValue(field: field, reason: "must be between 0 and 20")
+        }
+        return value
+    }
+
+    /// Legacy `/v1/completions` `logprobs`: an integer 0-5 (NOT chat's 0-20 -
+    /// a real, deliberate difference between the two endpoints, confirmed
+    /// against the OpenAI Python SDK's `completion_create_params.py`: "The
+    /// maximum value for `logprobs` is 5."). `nil` when the field is absent
+    /// from the request at all (the "not requested" sentinel - distinct from
+    /// an explicit `logprobs: 0`, which IS a request, just for zero
+    /// alternates). docs/LOGPROBS_PLAN.md §3.2.
+    private static func legacyCompletionsLogprobsValue(_ rawValue: Any?, field: String) throws -> Int? {
+        guard rawValue != nil else { return nil }
+        let value = try intValue(rawValue, field: field)
+        guard value >= 0, value <= 5 else {
+            throw ServerRequestError.invalidValue(field: field, reason: "must be between 0 and 5")
         }
         return value
     }

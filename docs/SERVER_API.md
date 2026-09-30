@@ -308,7 +308,7 @@ zero-overhead unless a penalty is set (the default decode path is
 unchanged). `typical_p`, `tfs_z`, `num_keep`, `penalize_newline` are
 accepted for client compatibility (no-op).
 
-## Logprobs (Phase 1)
+## Logprobs
 
 `POST /v1/chat/completions` accepts OpenAI's `logprobs` (bool) and
 `top_logprobs` (int, 0-20; ignored unless `logprobs: true`). Values are the
@@ -319,7 +319,9 @@ This is deliberate (see `docs/LOGPROBS_PLAN.md` §4.1): it is well-defined at
 `temperature: 0` (greedy), reproducible from `(model, prompt, position)`
 alone, and matches `mlx_lm`/HF `transformers`. It is NOT always the exact
 probability the token was drawn with when temperature != 1 or a
-top-k/top-p/min-p filter is active.
+top-k/top-p/min-p filter is active. The same raw-distribution semantics
+apply to every endpoint below — they all thread through the same engine
+call.
 
 ```bash
 curl http://127.0.0.1:57455/v1/chat/completions -d '{
@@ -343,12 +345,71 @@ pre-extraction text, not the structured `tool_calls` the client sees).
 the display `token` string — the latter may show `U+FFFD` for a
 byte-fallback token that is not valid UTF-8 on its own; `bytes` never is.
 
-**Phase 1 limits**: only the plain (non-speculative, non-batched) decode
-path computes logprobs — a `logprobs` request transparently falls back to
-that path (same mechanism used to decline speculative decode for
-non-greedy/penalized requests). Legacy `POST /v1/completions` (`logprobs`
-as an int, `echo`) and the Ollama `/api/chat`/`/api/generate` dialects do
-not parse these fields yet — tracked in `docs/LOGPROBS_PLAN.md` phases 2-3.
+Only the plain (non-speculative, non-batched) decode path computes
+logprobs — a `logprobs` request transparently falls back to that path (same
+mechanism used to decline speculative decode for non-greedy/penalized
+requests).
+
+### Ollama `/api/chat` and `/api/generate`
+
+Same request fields as chat (`logprobs: bool`, `top_logprobs: int` 0-20),
+**top-level, not inside `options`** (matches `docs.ollama.com` and the
+`ollama` Go source). Response: a top-level `logprobs` array (sibling of
+`message`/`response`, not nested), `[{token, logprob, bytes, top_logprobs:
+[{token, logprob, bytes}, ...]}]` — Ollama's own shape copies OpenAI's
+per-token object almost exactly, with one real difference: **`top_logprobs`
+is omitted (not `[]`) when there are no alternates**, and the whole
+`logprobs` key is **omitted (not `null`) when the request didn't ask for it
+or when this line/response carries no entries**, matching Go's
+`json:"...,omitempty"` on every one of these fields — the opposite
+convention from the OpenAI chat endpoint's always-present `logprobs: null`.
+Streaming (NDJSON): each line's `logprobs` covers only that line's new
+token(s), same per-chunk-not-cumulative convention as chat's SSE. A
+`tool_calls` reply omits `logprobs` entirely, the same rule as chat's
+`null`. `/api/generate` with a `system` override still works with
+`logprobs` on; `raw: true` remains unsupported (pre-existing, unrelated).
+
+```bash
+curl http://127.0.0.1:57455/api/chat -d '{
+  "model": "llama-3.2-1b",
+  "messages": [{"role": "user", "content": "Hello"}],
+  "logprobs": true,
+  "top_logprobs": 5
+}'
+```
+
+### Legacy `POST /v1/completions`
+
+`logprobs` here is an **integer, 0-5** (not a bool, and a smaller range than
+chat's `top_logprobs` — confirmed against the OpenAI Python SDK's
+`completion_create_params.py`: "The maximum value for `logprobs` is 5").
+`0` means "sampled-token logprob only, no alternates" — a real, distinct
+request from omitting the field. Response: the older flat shape,
+`choices[].logprobs = {tokens: [...], token_logprobs: [...], top_logprobs:
+[{token: logprob}, ...], text_offset: [...]}` (confirmed against
+`completion_choice.py`) — note `top_logprobs` here is a list of `{token:
+logprob}` dicts, one per position, NOT chat's separate object array. Each
+position's dict holds its top-N alternates (N = the request's `logprobs`)
+plus the sampled token folded in if it wasn't already one of them ("up to
+`logprobs`+1 elements", per the SDK's own doc comment) — `{}` when
+`logprobs: 0`. `text_offset[i]` is the Unicode-scalar (Python
+code-point-equivalent) character offset of token `i` within the returned
+completion text (no `echo`, so no prompt prefix to offset past). The
+`logprobs` key is present only when the request asked for it — omitted
+entirely otherwise, matching this endpoint's existing convention of adding
+no field a client didn't ask for. This endpoint has **no streaming support
+at all** in Krill (pre-existing, `stream: true` still 400s — unrelated to
+logprobs), so there is no streaming logprobs case here. `echo` (prompt
+logprobs) remains unsupported — Phase 3, needs a prefix-cache bypass
+(§5.4).
+
+```bash
+curl http://127.0.0.1:57455/v1/completions -d '{
+  "model": "llama-3.2-1b",
+  "prompt": "The meaning of life is",
+  "logprobs": 5
+}'
+```
 
 ## Model Lifecycle (keep-alive)
 

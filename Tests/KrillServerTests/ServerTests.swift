@@ -739,6 +739,184 @@ final class ServerTests: XCTestCase {
         XCTAssertEqual(req.topLogprobs, 0)
     }
 
+    // MARK: - logprobs: Ollama + legacy completions (2026-09-30 follow-up)
+
+    func testOllamaChatRequestAcceptsLogprobs() throws {
+        let req = try ServerParsing.ollamaChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "logprobs": true, "top_logprobs": 5,
+        ])
+        XCTAssertTrue(req.wantLogprobs)
+        XCTAssertEqual(req.topLogprobs, 5)
+    }
+
+    func testOllamaChatRequestDefaultsLogprobsOff() throws {
+        let req = try ServerParsing.ollamaChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+        ])
+        XCTAssertFalse(req.wantLogprobs)
+        XCTAssertEqual(req.topLogprobs, 0)
+    }
+
+    func testOllamaChatRequestLogprobsAreTopLevelNotInsideOptions() throws {
+        // Confirmed against docs.ollama.com/api/chat + the Go source
+        // (`ChatRequest.Logprobs`/`TopLogprobs`): top-level fields, NOT
+        // nested in `options` the way sampling knobs are.
+        let req = try ServerParsing.ollamaChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "options": ["logprobs": true, "top_logprobs": 9],
+        ])
+        XCTAssertFalse(req.wantLogprobs)
+        XCTAssertEqual(req.topLogprobs, 0)
+    }
+
+    func testOllamaChatRequestRejectsTopLogprobsAboveTwenty() {
+        XCTAssertThrowsError(try ServerParsing.ollamaChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "logprobs": true, "top_logprobs": 21,
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidValue(field: "top_logprobs", reason: "must be between 0 and 20")
+            )
+        }
+    }
+
+    func testOllamaChatRequestIgnoresTopLogprobsWithoutLogprobs() throws {
+        let req = try ServerParsing.ollamaChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "top_logprobs": 99,
+        ])
+        XCTAssertFalse(req.wantLogprobs)
+        XCTAssertEqual(req.topLogprobs, 0)
+    }
+
+    func testOllamaGenerateRequestAcceptsLogprobs() throws {
+        let req = try ServerParsing.ollamaGenerateRequest(from: [
+            "model": "m", "prompt": "hi", "stream": false,
+            "logprobs": true, "top_logprobs": 3,
+        ])
+        XCTAssertTrue(req.wantLogprobs)
+        XCTAssertEqual(req.topLogprobs, 3)
+    }
+
+    func testOllamaGenerateRequestDefaultsLogprobsOff() throws {
+        let req = try ServerParsing.ollamaGenerateRequest(from: [
+            "model": "m", "prompt": "hi", "stream": false,
+        ])
+        XCTAssertFalse(req.wantLogprobs)
+        XCTAssertEqual(req.topLogprobs, 0)
+    }
+
+    func testOllamaGenerateRequestRejectsNonBoolLogprobs() {
+        XCTAssertThrowsError(try ServerParsing.ollamaGenerateRequest(from: [
+            "model": "m", "prompt": "hi", "stream": false, "logprobs": "yes",
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidType(field: "logprobs", expected: "a boolean")
+            )
+        }
+    }
+
+    func testOllamaGenerateRequestRawStillRejected() {
+        // Pre-existing, unrelated to logprobs: `raw:true` on /api/generate
+        // is not supported at all (still 400s the same way it did before
+        // this change).
+        XCTAssertThrowsError(try ServerParsing.ollamaGenerateRequest(from: [
+            "model": "m", "prompt": "hi", "raw": true,
+            "logprobs": true,
+        ])) { error in
+            XCTAssertEqual(error as? ServerRequestError, .unsupportedField("raw"))
+        }
+    }
+
+    func testOllamaGenerateRequestSystemOverrideStillWorksWithLogprobs() throws {
+        let req = try ServerParsing.ollamaGenerateRequest(from: [
+            "model": "m", "prompt": "hi", "stream": false,
+            "system": "You are terse.", "logprobs": true, "top_logprobs": 2,
+        ])
+        XCTAssertEqual(req.system, "You are terse.")
+        XCTAssertTrue(req.wantLogprobs)
+        XCTAssertEqual(req.topLogprobs, 2)
+    }
+
+    func testLegacyCompletionsAcceptsLogprobs() throws {
+        let req = try ServerParsing.openAICompletionRequest(from: [
+            "prompt": "hi", "logprobs": 5,
+        ])
+        XCTAssertEqual(req.logprobs, 5)
+    }
+
+    func testLegacyCompletionsDefaultsLogprobsToNilNotZero() throws {
+        // `nil` (not requested) must be distinguishable from an explicit
+        // `logprobs: 0` (requested, zero alternates) - docs/LOGPROBS_PLAN.md
+        // §3.2's "sampled-token-only" case.
+        let req = try ServerParsing.openAICompletionRequest(from: ["prompt": "hi"])
+        XCTAssertNil(req.logprobs)
+
+        let zero = try ServerParsing.openAICompletionRequest(from: [
+            "prompt": "hi", "logprobs": 0,
+        ])
+        XCTAssertEqual(zero.logprobs, 0)
+    }
+
+    func testLegacyCompletionsLogprobsRangeIsZeroToFive() throws {
+        // Deliberately different range/type from chat's `top_logprobs`
+        // (0-20, bool `logprobs`) - confirmed against the OpenAI Python
+        // SDK's `completion_create_params.py`: "The maximum value for
+        // `logprobs` is 5."
+        for n in [0, 1, 5] {
+            let req = try ServerParsing.openAICompletionRequest(from: [
+                "prompt": "hi", "logprobs": n,
+            ])
+            XCTAssertEqual(req.logprobs, n)
+        }
+    }
+
+    func testLegacyCompletionsRejectsLogprobsAboveFive() {
+        XCTAssertThrowsError(try ServerParsing.openAICompletionRequest(from: [
+            "prompt": "hi", "logprobs": 6,
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidValue(field: "logprobs", reason: "must be between 0 and 5")
+            )
+        }
+    }
+
+    func testLegacyCompletionsRejectsNegativeLogprobs() {
+        XCTAssertThrowsError(try ServerParsing.openAICompletionRequest(from: [
+            "prompt": "hi", "logprobs": -1,
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidValue(field: "logprobs", reason: "must be between 0 and 5")
+            )
+        }
+    }
+
+    func testLegacyCompletionsRejectsNonIntLogprobs() {
+        XCTAssertThrowsError(try ServerParsing.openAICompletionRequest(from: [
+            "prompt": "hi", "logprobs": true,
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidType(field: "logprobs", expected: "an integer")
+            )
+        }
+    }
+
+    func testLegacyCompletionsEchoStillRejected() {
+        // Phase 3, not this change - `echo` needs a prefix-cache bypass
+        // (§5.4) and remains out of scope.
+        XCTAssertThrowsError(try ServerParsing.openAICompletionRequest(from: [
+            "prompt": "hi", "echo": true,
+        ])) { error in
+            XCTAssertEqual(error as? ServerRequestError, .unsupportedField("echo"))
+        }
+    }
+
     func testChatRequestNormalizesToolResultTurns() throws {
         // assistant tool_calls + role:tool result must round-trip into the
         // [String:String] message path without a 400.
