@@ -1333,15 +1333,18 @@ public final class InferenceEngine: @unchecked Sendable {
         // attention layers. Force the plain serial loop for qwen3_5 / Ornith.
         let hasSSMCacheSpec = (cacheSpec ?? []).contains(.ssm)
         // A `logprobs` request needs the raw pre-filter logits at the exact
-        // step a token is chosen (docs/LOGPROBS_PLAN.md §5.1/§5.3); neither
-        // the draft-model spec path nor n-gram spec ever computes a
-        // log-softmax (they call `argMax` directly, bypassing `Sampler`), so
-        // both fall back to the plain decode loop when logprobs are wanted -
-        // same mechanism already used to decline spec for
-        // penalties/non-greedy/int8-KV/grammar requests above.
+        // step a token is chosen (docs/LOGPROBS_PLAN.md §5.1/§5.3). Phase 1
+        // fell back to the plain decode loop here because neither spec path
+        // computed a log-softmax at all. Phase 2 threads `wantLogprobs`
+        // through both `SpeculativeDecoder.step`/`ngramStep`, which derive
+        // logprobs from the verify step's own `targetLogits` (no extra
+        // forward pass) — so a logprobs request no longer needs to decline
+        // spec for that reason. It still declines for every OTHER existing
+        // reason below (penalties/non-greedy/int8-KV/grammar/SSM) exactly as
+        // before.
         let shouldSpec = wantsSpec && specDecoder != nil && !useInt8KV
             && !params.penaltiesActive && greedyRequest && grammarMask == nil
-            && !hasSSMCacheSpec && !wantLogprobs
+            && !hasSSMCacheSpec
         // N-gram (prompt-lookup) speculative decode shares every guard with the
         // draft path (greedy, fp16, no penalties, no grammar), needs no draft
         // model, and yields only when draft spec is NOT taken (a loaded draft
@@ -1350,7 +1353,6 @@ public final class InferenceEngine: @unchecked Sendable {
         let wantsNgram = useNgramSpeculative ?? autoUseNgram
         let shouldNgram = wantsNgram && !shouldSpec && !useInt8KV && !hasSSMCacheSpec
             && !params.penaltiesActive && greedyRequest && grammarMask == nil
-            && !wantLogprobs
         let ngramDecoder = shouldNgram ? SpeculativeDecoder.ngram(targetModel: loadedModel) : nil
         let ngramProposer = shouldNgram
             ? NgramProposer(config: NgramProposer.Config(), eosIds: stopIds) : nil
@@ -1779,7 +1781,14 @@ public final class InferenceEngine: @unchecked Sendable {
                 // §5.1/§5.3 - only the plain decode path computes this).
                 var pendingLogprobInfo: TokenLogprobInfo?
                 if shouldSpec || shouldNgram {
-                    nextToken = sampler.sample(prefillLogits)
+                    if wantLogprobs {
+                        let (tok, _, info) = sampler.sampleWithLogprobs(
+                            prefillLogits, topLogprobs: topLogprobs)
+                        nextToken = tok
+                        pendingLogprobInfo = info
+                    } else {
+                        nextToken = sampler.sample(prefillLogits)
+                    }
                     nextTokenArr = MLXArray(Int32(nextToken))
                 } else {
                     let prefillMask = grammarSession?.currentMask()
@@ -2069,7 +2078,8 @@ public final class InferenceEngine: @unchecked Sendable {
                         let firstText = capturedTokenizer.decodeForOutput(token: nextToken)
                         continuation.yield(TokenEvent(
                             tokenId: nextToken, text: firstText,
-                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime,
+                            logprob: pendingLogprobInfo))
                         generatedCount += 1
                     }
 
@@ -2077,10 +2087,12 @@ public final class InferenceEngine: @unchecked Sendable {
                         if genCancel.isCancelled { break }
                         // Speculative step: get multiple tokens at once.
                         // Spec path requires fp16 caches; shouldSpec already excludes int8.
-                        let accepted = specDec.step(
+                        let (accepted, acceptedLogprobs) = specDec.step(
                             lastToken: nextToken,
                             targetCaches: fp16Caches!,
-                            draftCaches: draftCaches
+                            draftCaches: draftCaches,
+                            wantLogprobs: wantLogprobs,
+                            topLogprobs: topLogprobs
                         )
 
                         // A stop token can appear before the end of an accepted
@@ -2090,7 +2102,8 @@ public final class InferenceEngine: @unchecked Sendable {
                         // non-stop bonus becomes the next lastToken and the outer
                         // loop emits content after `isEnd`.
                         var hitStop = false
-                        for token in accepted {
+                        for (idx, token) in accepted.enumerated() {
+                            let tokenLogprob = acceptedLogprobs?[idx]
                             if stopIds.contains(token) {
                                 publishStats(true)
                                 continuation.yield(TokenEvent(
@@ -2103,7 +2116,8 @@ public final class InferenceEngine: @unchecked Sendable {
                             let text = capturedTokenizer.decodeForOutput(token: token)
                             continuation.yield(TokenEvent(
                                 tokenId: token, text: text,
-                                elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                                elapsed: CFAbsoluteTimeGetCurrent() - startTime,
+                                logprob: tokenLogprob))
                             generatedCount += 1
 
                             if generatedCount >= maxTokens { break }
@@ -2138,23 +2152,27 @@ public final class InferenceEngine: @unchecked Sendable {
                         let firstText = capturedTokenizer.decodeForOutput(token: nextToken)
                         continuation.yield(TokenEvent(
                             tokenId: nextToken, text: firstText,
-                            elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                            elapsed: CFAbsoluteTimeGetCurrent() - startTime,
+                            logprob: pendingLogprobInfo))
                         generatedCount += 1
                     }
 
                     while generatedCount < maxTokens && !stopIds.contains(nextToken) {
                         if genCancel.isCancelled { break }
                         // ngramStep appends accepted tokens to the proposer itself.
-                        let accepted = ngramDec.ngramStep(
+                        let (accepted, acceptedLogprobs) = ngramDec.ngramStep(
                             lastToken: nextToken,
                             targetCaches: fp16Caches,
-                            proposer: proposer)
+                            proposer: proposer,
+                            wantLogprobs: wantLogprobs,
+                            topLogprobs: topLogprobs)
 
                         // Stop the whole generation at the first stop id in the
                         // accepted run (a verified EOS draft followed by a bonus),
                         // not just the inner loop — see the draft-spec path above.
                         var hitStop = false
-                        for token in accepted {
+                        for (idx, token) in accepted.enumerated() {
+                            let tokenLogprob = acceptedLogprobs?[idx]
                             if stopIds.contains(token) {
                                 publishStats(true)
                                 continuation.yield(TokenEvent(
@@ -2166,7 +2184,8 @@ public final class InferenceEngine: @unchecked Sendable {
                             let text = capturedTokenizer.decodeForOutput(token: token)
                             continuation.yield(TokenEvent(
                                 tokenId: token, text: text,
-                                elapsed: CFAbsoluteTimeGetCurrent() - startTime))
+                                elapsed: CFAbsoluteTimeGetCurrent() - startTime,
+                                logprob: tokenLogprob))
                             generatedCount += 1
                             if generatedCount >= maxTokens { break }
                         }
@@ -2188,9 +2207,20 @@ public final class InferenceEngine: @unchecked Sendable {
                     if ngramHandoff, generatedCount < maxTokens, !stopIds.contains(nextToken) {
                         let seed = MLXArray(Int32(nextToken)).reshaped(1, 1)
                         let logits = capturedForward(seed, caches)
-                        nextTokenArr = sampler.sampleArray(logits, mask: nil)
-                        asyncEval(nextTokenArr)
-                        nextToken = nextTokenArr.item(Int.self)
+                        if wantLogprobs {
+                            let (tok, tokArr, info) = sampler.sampleWithLogprobs(
+                                logits, topLogprobs: topLogprobs)
+                            nextTokenArr = tokArr
+                            nextToken = tok
+                            // `runStandardDecode`'s entry invariant: `pendingLogprobInfo`
+                            // holds the unemitted `nextToken`'s own logprob, consumed as
+                            // `yieldedLogprob` at the top of its first loop iteration.
+                            pendingLogprobInfo = info
+                        } else {
+                            nextTokenArr = sampler.sampleArray(logits, mask: nil)
+                            asyncEval(nextTokenArr)
+                            nextToken = nextTokenArr.item(Int.self)
+                        }
                         runStandardDecode()
                     }
                 } else {
@@ -2918,6 +2948,11 @@ extension InferenceEngine {
         let perRowMax: [Int]
         let conts: [AsyncStream<TokenEvent>.Continuation]
         let statsHolders: [StatsHolder]
+        /// docs/LOGPROBS_PLAN.md Phase 2, per-row (mirroring `BatchGenRequest`).
+        /// A row with `wantLogprobs[r] == false` never enters `sampleWithLogprobs`
+        /// — its slice of the per-step logits is sampled exactly as before.
+        let wantLogprobs: [Bool]
+        let topLogprobs: [Int]
     }
 
     /// Decode several ragged-length, **text-only** prompts for a plain-causal
@@ -2958,7 +2993,8 @@ extension InferenceEngine {
                 generate(messages: r.messages, params: r.params,
                          maxTokens: r.maxTokens, useSpeculative: r.useSpeculative,
                          usePrefixCache: r.usePrefixCache, contextLimit: r.contextLimit,
-                         promptTemplateOverride: r.promptTemplateOverride)
+                         promptTemplateOverride: r.promptTemplateOverride,
+                         wantLogprobs: r.wantLogprobs, topLogprobs: r.topLogprobs)
             }
         }
 
@@ -3020,7 +3056,9 @@ extension InferenceEngine {
                     ceiling: TokenBudget.batchedDerivedCeiling)
             },
             conts: conts,
-            statsHolders: statsHolders)
+            statsHolders: statsHolders,
+            wantLogprobs: requests.map { $0.wantLogprobs },
+            topLogprobs: requests.map { $0.topLogprobs })
 
         // The decode loop runs off the caller's (event-loop) context.
         let task = Task(priority: .userInitiated) { Self.runBatchedDecode(caps) }
@@ -3436,6 +3474,12 @@ extension InferenceEngine {
         perRowCaches.reserveCapacity(R)
         lengths.reserveCapacity(R)
         current.reserveCapacity(R)
+        // docs/LOGPROBS_PLAN.md Phase 2: the logprob info for `current[r]`
+        // (the token about to be emitted at the TOP of the decode loop below),
+        // carried one step ahead — the same "compute at sample time, attach at
+        // yield time" convention as the plain single-stream loop's
+        // `pendingLogprobInfo`. `nil` for a row that never asked for logprobs.
+        var pendingLogprobInfo: [TokenLogprobInfo?] = Array(repeating: nil, count: R)
         for (i, tokens) in c.promptRows.enumerated() {
             let caches: [KVCacheProtocol] = c.useQuantizedKV
                 ? makeQuantizedKVCaches(numLayers: c.numLayers)
@@ -3443,7 +3487,14 @@ extension InferenceEngine {
             let logits = c.prefillRow(tokens, caches, c.usePrefixCache[i])
             perRowCaches.append(caches)
             lengths.append(tokens.count)
-            current.append(c.samplers[i].sample(logits))
+            if c.wantLogprobs[i] {
+                let (tok, _, info) = c.samplers[i].sampleWithLogprobs(
+                    logits, topLogprobs: c.topLogprobs[i])
+                current.append(tok)
+                pendingLogprobInfo[i] = info
+            } else {
+                current.append(c.samplers[i].sample(logits))
+            }
         }
         let prefillDuration = CFAbsoluteTimeGetCurrent() - startTime
 
@@ -3481,7 +3532,8 @@ extension InferenceEngine {
                 return
             }
             let text = c.tokenizer.decodeForOutput(token: current[r])
-            c.conts[r].yield(TokenEvent(tokenId: current[r], text: text, elapsed: now))
+            c.conts[r].yield(TokenEvent(
+                tokenId: current[r], text: text, elapsed: now, logprob: pendingLogprobInfo[r]))
             generated[r] += 1
             if generated[r] >= c.perRowMax[r] {
                 c.conts[r].yield(TokenEvent(tokenId: -1, text: "", elapsed: now, isEnd: true))
@@ -3509,9 +3561,24 @@ extension InferenceEngine {
             MLX.eval(logits)
             for r in 0 ..< R {
                 let rowLogits = logits[r ..< (r + 1)]
+                // Only a row with `wantLogprobs[r]` pays for a log-softmax here
+                // — `rowLogits` is already this row's own slice, so no other
+                // row's data is ever touched by this branch.
                 if c.samplers[r].needsHistory {
                     if !done[r] { recent[r].append(current[r]) }
-                    current[r] = c.samplers[r].sample(rowLogits, recent: recent[r])
+                    if c.wantLogprobs[r] {
+                        let (tok, _, info) = c.samplers[r].sampleWithLogprobs(
+                            rowLogits, recent: recent[r], topLogprobs: c.topLogprobs[r])
+                        current[r] = tok
+                        pendingLogprobInfo[r] = info
+                    } else {
+                        current[r] = c.samplers[r].sample(rowLogits, recent: recent[r])
+                    }
+                } else if c.wantLogprobs[r] {
+                    let (tok, _, info) = c.samplers[r].sampleWithLogprobs(
+                        rowLogits, topLogprobs: c.topLogprobs[r])
+                    current[r] = tok
+                    pendingLogprobInfo[r] = info
                 } else {
                     current[r] = c.samplers[r].sample(rowLogits)
                 }

@@ -289,31 +289,14 @@ public final class Sampler: @unchecked Sendable {
         // are immune to that later mutation - no independent copy needed,
         // on the host or the GPU. `SamplerLogprobsTests` covers this
         // ordering directly (float32 and non-float32 logits, penalties
-        // active).
+        // active). `rawLogSoftmaxAndTopN` is the same logic, factored out
+        // (docs/LOGPROBS_PLAN.md Phase 2) so every argMax-only decode path
+        // that bypasses `Sampler` entirely (speculative verify, the
+        // continuous-batcher's fast paths, Stage-B batched decode) computes
+        // logprobs with the IDENTICAL math, not a parallel re-implementation.
         let raw1D = to1D(logits).asType(.float32)
-        let logSoftmax = raw1D - raw1D.logSumExp(keepDims: false)
-
-        let n = Swift.max(0, Swift.min(topLogprobs, logSoftmax.dim(0)))
-        var topIdx: MLXArray?
-        var topVals: MLXArray?
-        if n > 0 {
-            // Partial top-N selection instead of a full O(V log V) argSort
-            // over the whole vocabulary (V is 128k-262k for these models).
-            // `argPartition` on the negated distribution is O(V): it puts the
-            // N smallest-negated (i.e. largest logSoftmax) values into
-            // positions [0..<N] in UNDEFINED order, with everything after
-            // guaranteed >= the kth pivot. We then take just those N
-            // candidates and do a real (cheap, N <= 20) argSort on THEM to
-            // get the final descending order - so the expensive step is O(V)
-            // and the O(N log N) sort only ever touches N elements.
-            let negLogSoftmax = MLXArray(Float(0)) - logSoftmax
-            let partitioned = argPartition(negLogSoftmax, kth: n - 1, axis: -1)
-            let candIdx = partitioned[0 ..< n]
-            let candVals = take(logSoftmax, candIdx, axis: 0)
-            let order = argSort(MLXArray(Float(0)) - candVals, axis: -1)
-            topIdx = take(candIdx, order, axis: 0)
-            topVals = take(candVals, order, axis: 0)
-        }
+        let (logSoftmax, topIdx, topVals, n) = Sampler.rawLogSoftmaxAndTopN(
+            raw1D, topLogprobs: topLogprobs)
 
         // NOW run the normal sampling path - temperature/top-k/top-p/min-p/
         // penalties/grammar mask - on its own array. `applyPenalties` may
@@ -321,9 +304,11 @@ public final class Sampler: @unchecked Sendable {
         // log-softmax graph above has already captured what it needs.
         let forSampling = recent.isEmpty ? to1D(logits) : applyPenalties(to1D(logits), recent: recent)
         let chosenArr = sampleFrom(forSampling, mask: mask)
-        // Gather the chosen token's own raw logprob on the GPU (no host
-        // sync yet) so it evaluates in the SAME round trip as the top-N.
-        let chosenLogprobArr = take(logSoftmax, chosenArr, axis: 0)
+        // Gather the chosen token's own raw logprob from the ALREADY-BUILT
+        // `logSoftmax` graph node (not from `raw1D`/`logits` again) - safe
+        // regardless of `applyPenalties`'s later in-place mutation, same
+        // reasoning as above.
+        let chosenLogprobArr = Sampler.gatherChosenLogprob(logSoftmax, chosenIds: chosenArr)
 
         // ONE combined eval + host sync per step for everything this
         // function needs: the chosen token, its logprob, and the top-N.
@@ -333,14 +318,99 @@ public final class Sampler: @unchecked Sendable {
             eval(chosenArr, chosenLogprobArr)
         }
         let chosen = chosenArr.item(Int.self)
-        let chosenLogprob = chosenLogprobArr.item(Float.self)
-        var alternates: [TokenAltLogprob] = []
-        if let topIdx, let topVals {
-            let idxHost = topIdx.asArray(Int32.self)
-            let valHost = topVals.asArray(Float.self)
-            alternates = zip(idxHost, valHost).map { TokenAltLogprob(tokenId: Int($0), logprob: $1) }
+        let infos = Sampler.logprobInfos(
+            chosenLogprobs: chosenLogprobArr, topIdx: topIdx, topVals: topVals, n: n)
+        return (chosen, chosenArr, infos[0])
+    }
+
+    // MARK: - Shared argMax-path logprobs primitive (Phase 2)
+
+    /// Phase 1 of the raw-logprobs computation: the raw log-softmax + top-N
+    /// graph, built strictly from RAW logits with no notion yet of "the
+    /// chosen token" (docs/LOGPROBS_PLAN.md §4.1: before any penalty /
+    /// temperature / top-k / top-p / min-p / grammar-mask processing).
+    /// `sampleWithLogprobs` calls this BEFORE `applyPenalties` runs — see its
+    /// own doc comment for why the ORDERING (not a copy) is what protects it
+    /// from `applyPenalties`'s in-place scatter. Every argMax-only decode
+    /// path (speculative verify, continuous-batcher fast paths, Stage-B
+    /// batched decode) that never touches `applyPenalties` at all has no such
+    /// hazard and can call this at any point relative to its own `argMax`.
+    ///
+    /// Batched: pass `[N, vocab]` to compute N independent rows' log-softmax
+    /// + top-N in one shot (one GPU round trip for a whole batch step,
+    /// matching "one host sync per step" - `docs/LOGPROBS_PLAN.md` Phase 2's
+    /// batched requirement). A 1-D `[vocab]` input is treated as N=1.
+    ///
+    /// - Parameters:
+    ///   - logits: `[vocab]` or `[N, vocab]` raw logits.
+    ///   - topLogprobs: number of top alternates per row; a value `<= 0`, or
+    ///     `>= vocab` after clamping, still returns a valid (possibly empty)
+    ///     result — never a precondition failure.
+    /// - Returns: `logSoftmax` `[N, vocab]`, and (when the clamped `n > 0`)
+    ///   `topIdx`/`topVals` each `[N, n]`, highest logprob first per row —
+    ///   all lazy MLXArrays, not yet `eval`'d.
+    public static func rawLogSoftmaxAndTopN(
+        _ logits: MLXArray, topLogprobs: Int
+    ) -> (logSoftmax: MLXArray, topIdx: MLXArray?, topVals: MLXArray?, n: Int) {
+        let logits2D = logits.ndim <= 1 ? logits.reshaped(1, -1) : logits
+        let raw = logits2D.asType(.float32)
+        let logSoftmax = raw - raw.logSumExp(axis: -1, keepDims: true)
+        let vocab = logSoftmax.dim(-1)
+        let n = Swift.max(0, Swift.min(topLogprobs, vocab))
+        guard n > 0 else { return (logSoftmax, nil, nil, 0) }
+        // Same O(V) `argPartition` + O(N log N) `argSort`-on-the-candidates
+        // approach as the single-row path, batched over axis -1 so every row
+        // gets its own independent top-N in the same call.
+        let negLogSoftmax = MLXArray(Float(0)) - logSoftmax
+        let partitioned = argPartition(negLogSoftmax, kth: n - 1, axis: -1)
+        let candIdx = partitioned[0..., 0 ..< n]
+        let candVals = takeAlong(logSoftmax, candIdx, axis: -1)
+        let order = argSort(MLXArray(Float(0)) - candVals, axis: -1)
+        let topIdx = takeAlong(candIdx, order, axis: -1)
+        let topVals = takeAlong(candVals, order, axis: -1)
+        return (logSoftmax, topIdx, topVals, n)
+    }
+
+    /// Phase 2: gather each row's own chosen token's logprob out of an
+    /// already-built `logSoftmax` (from `rawLogSoftmaxAndTopN`). Safe to call
+    /// at any point afterward — it reads the already-constructed graph node,
+    /// never the original raw logits array again, so it cannot observe a
+    /// later in-place mutation of that input (e.g. `applyPenalties`'s
+    /// scatter in `sampleWithLogprobs`, or an argMax-path caller's own later
+    /// reuse of the same logits buffer).
+    ///
+    /// - Parameters:
+    ///   - logSoftmax: `[N, vocab]`, from `rawLogSoftmaxAndTopN`.
+    ///   - chosenIds: scalar / `[1]` / `[N]` int token ids, one per row (e.g.
+    ///     an `argMax` result — NOT re-derived here).
+    /// - Returns: `[N]` lazy chosen logprobs, not yet `eval`'d.
+    public static func gatherChosenLogprob(_ logSoftmax: MLXArray, chosenIds: MLXArray) -> MLXArray {
+        let chosen2D = chosenIds.asType(.int32).reshaped(-1, 1)
+        return takeAlong(logSoftmax, chosen2D, axis: -1).reshaped(-1)
+    }
+
+    /// Host-side materialization of `rawLogSoftmaxAndTopN` +
+    /// `gatherChosenLogprob`'s lazy outputs into one `TokenLogprobInfo` per
+    /// row, in row order. Caller MUST have already `eval()`'d
+    /// `chosenLogprobs` (and `topIdx`/`topVals` when `n > 0`) — this only
+    /// does host reads (`asArray`), no GPU work.
+    public static func logprobInfos(
+        chosenLogprobs: MLXArray, topIdx: MLXArray?, topVals: MLXArray?, n: Int
+    ) -> [TokenLogprobInfo] {
+        let chosenHost = chosenLogprobs.asArray(Float.self)
+        guard n > 0, let topIdx, let topVals else {
+            return chosenHost.map { TokenLogprobInfo(logprob: $0, topAlternates: []) }
         }
-        return (chosen, chosenArr, TokenLogprobInfo(logprob: chosenLogprob, topAlternates: alternates))
+        let idxHost = topIdx.asArray(Int32.self)
+        let valHost = topVals.asArray(Float.self)
+        return chosenHost.indices.map { i in
+            var alts: [TokenAltLogprob] = []
+            alts.reserveCapacity(n)
+            for j in 0 ..< n {
+                alts.append(TokenAltLogprob(tokenId: Int(idxHost[i * n + j]), logprob: valHost[i * n + j]))
+            }
+            return TokenLogprobInfo(logprob: chosenHost[i], topAlternates: alts)
+        }
     }
 
     /// Mirostat v2 (and a v1 approximation): keep the running surprise

@@ -21,6 +21,12 @@ public struct BatchGenRequest: Sendable {
     public let promptTemplateOverride: String?
     public let useSpeculative: Bool?
     public let usePrefixCache: Bool
+    /// docs/LOGPROBS_PLAN.md Phase 2: per-row opt-in for the batched/
+    /// continuous decode paths. `false`/`0` (the default) costs this row
+    /// nothing extra — no log-softmax is ever computed for a row that does
+    /// not set this, even when other rows sharing its epoch/cohort do.
+    public let wantLogprobs: Bool
+    public let topLogprobs: Int
 
     public init(
         messages: [[String: String]],
@@ -29,7 +35,9 @@ public struct BatchGenRequest: Sendable {
         contextLimit: Int? = nil,
         promptTemplateOverride: String? = nil,
         useSpeculative: Bool? = nil,
-        usePrefixCache: Bool = true
+        usePrefixCache: Bool = true,
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0
     ) {
         self.messages = messages
         self.params = params
@@ -38,6 +46,8 @@ public struct BatchGenRequest: Sendable {
         self.promptTemplateOverride = promptTemplateOverride
         self.useSpeculative = useSpeculative
         self.usePrefixCache = usePrefixCache
+        self.wantLogprobs = wantLogprobs
+        self.topLogprobs = topLogprobs
     }
 
     /// A copy with the token ceiling replaced by a resolved one. The batch entry
@@ -48,6 +58,7 @@ public struct BatchGenRequest: Sendable {
         BatchGenRequest(
             messages: messages, params: params, maxTokens: resolved,
             contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
-            useSpeculative: useSpeculative, usePrefixCache: usePrefixCache)
+            useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
+            wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
     }
 }

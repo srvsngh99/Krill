@@ -11,6 +11,36 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **`logprobs` / `top_logprobs` on the speculative and batched/continuous
+  decode paths (Phase 2)** — previously a `logprobs` request silently
+  disabled draft-model AND n-gram speculative decode and dropped out of the
+  batched/continuous pool onto the plain serial path (`docs/LOGPROBS_PLAN.md`
+  §7 Phase 2). Both paths now compute logprobs natively, at no cost to a
+  request/row that doesn't ask for them: `SpeculativeDecoder.step`/
+  `.ngramStep` derive per-token logprobs from the verify step's own
+  `targetLogits` (no extra forward pass; draft-model logits are never
+  reported); `ContinuousBatcher`'s all-greedy pipeline fast path, per-row
+  `Sampler` path, and n-gram-spec verify round, plus Stage-B's fixed-cohort
+  `runBatchedDecode`, gather logprobs only for the SUBSET of rows that set
+  `wantLogprobs` on `BatchGenRequest` (new field) — no log-softmax is ever
+  computed for a row that didn't ask. A shared `Sampler.rawLogSoftmaxAndTopN`/
+  `gatherChosenLogprob`/`logprobInfos` primitive (factored out of
+  `sampleWithLogprobs`) gives every argMax-only decode path the identical
+  log-softmax + `argPartition` top-N math the plain path already used, so
+  numbers agree across paths by construction. Verified against real
+  `llama-3.2-1b` and `qwen3-0.6b`: batched/n-gram-spec tokens match the plain
+  path exactly (llama-3.2-1b) with logprobs within the bf16/4-bit noise floor
+  already documented in `docs/LOGPROBS_PLAN.md`'s Phase-1 resolutions; a
+  mixed-row batch (some rows want logprobs, some don't) returns real entries
+  for the former and `logprobs: null` for the latter with byte-identical
+  text. No regression measured on the logprobs-off decode path for either
+  the n-gram-spec or batched paths (A/B against a `be00f91` baseline build).
+  `InferenceEngine.generateBatched`/`runBatchedDecode` (Stage B, the static
+  cohort — not reachable from the server today, only from tests) also gained
+  `wantLogprobs` support. See `docs/LOGPROBS_PLAN.md`'s new "Phase 2" section
+  for the full per-path table, numbers, and limits (draft-model spec has
+  synthetic-model unit coverage but no real-checkpoint run — no draft+target
+  pair is on disk in this environment).
 - **Qwen3.5-4B** (registered as `qwen3.5-4b`), joining Ornith-9B, Qwythos-9B,
   and Qwen3.8-27B on the native `.qwen35` hybrid GatedDeltaNet/full-attention
   runtime. Points straight at `mlx-community/Qwen3.5-4B-MLX-4bit` (no
