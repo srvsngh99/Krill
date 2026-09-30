@@ -67,9 +67,10 @@ reverse chronological order. Versioning follows
   direct decode-throughput A/B against `main` with logprobs never
   requested. A logprobs request disables speculative decode and opts out of
   the batched/continuous decode pool for this phase (falls back to the
-  plain decode path). Known limit: a `tool_calls` reply always reports
-  `"logprobs": null`. (Legacy `/v1/completions` and the Ollama
-  `/api/chat`/`/api/generate` dialects gained `logprobs` in the entry below.)
+  plain decode path). A `tool_calls` reply's `logprobs` behavior is covered
+  by the "Tool-call logprobs" entry further below. (Legacy `/v1/completions`
+  and the Ollama `/api/chat`/`/api/generate` dialects gained `logprobs` in
+  the entry below.)
 - **`logprobs` / `top_logprobs` on Ollama `/api/chat` + `/api/generate`, and
   legacy `logprobs` on `POST /v1/completions`** (2026-09-30 follow-up,
   closing the Phase 1 gap above — see `docs/LOGPROBS_PLAN.md`'s new
@@ -176,6 +177,30 @@ reverse chronological order. Versioning follows
   intermittently on CI for PR #319; reproduced locally at 2/60 runs
   (targeted) and 13/30 runs (whole `AgentSessionTests` suite, run alongside
   its siblings) before the fix, 0/60 and 0/30 after.
+- **Tool-call logprobs**: a `tool_calls` reply on `POST /v1/chat/completions`
+  sent a bare `"logprobs": null` when `logprobs: true` was requested -
+  Krill's own invention, not what real OpenAI does. Confirmed against the
+  OpenAI Python SDK's generated types (`ChoiceLogprobs.content` is
+  documented as covering `message.content` specifically, typed
+  `Optional[List[...]] = None` - nullable, not "the whole object goes
+  away" - with no field anywhere for tool-call argument tokens) and a live
+  user report on the OpenAI developer forum showing the real shape for a
+  function-call turn: `logprobs=ChoiceLogprobs(content=None)`, i.e. a
+  present object with null `content`. Fixed via a new
+  `toolChatLogprobsJSON` (`Sources/KrillServer/LogprobsFormatting.swift`),
+  used by `handleToolChat` (the single handler shared by `/v1/chat/
+  completions` and Ollama's `/api/chat`, both streaming and non-streaming):
+  a pure tool_calls turn now gets `{"content": null, "refusal": null}` on
+  the OpenAI dialect. Krill's own `message.content` is always null for a
+  tool_calls reply regardless of logprobs (any leftover pre-call text is
+  discarded, matching that same OpenAI content/tool_calls mutual-exclusion
+  behavior), so there is no "mixed" turn today to populate entries for; a
+  plain-content reply (tools offered, not used) is unaffected and still
+  gets real entries. The Ollama dialect is unaffected - it already omits
+  the `logprobs` key entirely for a tool_calls reply (Go `omitempty`),
+  which is Ollama's own idiomatic "nothing to report" and needs no change
+  to match. See docs/LOGPROBS_PLAN.md's "Tool-call logprobs (2026-09-30)"
+  section for the full sourcing and real-server verification.
 - **Streaming vs non-streaming whitespace mismatch**: the same greedy
   request produced different `content` on the streaming and non-streaming
   paths whenever the model's raw output carried leading or trailing

@@ -381,6 +381,34 @@ func logprobsChoiceJSON(content: [[String: Any]]) -> [String: Any] {
     ["content": content]
 }
 
+// MARK: - Tool-call logprobs, OpenAI dialect (2026-09-30 follow-up)
+//
+// See docs/LOGPROBS_PLAN.md's "Tool-call logprobs (2026-09-30)" section for
+// the full sourcing. Summary: `ChoiceLogprobs.content` in the OpenAI Python
+// SDK's generated types (`openai/types/chat/chat_completion.py`) is
+// documented as covering `message.content` specifically - there is no field
+// anywhere in `ChoiceLogprobs` for tool-call argument tokens - and is typed
+// `Optional[List[ChatCompletionTokenLogprob]] = None`, i.e. nullable, not a
+// signal that the whole `logprobs` object goes away. A live user report on
+// the OpenAI developer forum ("Can I use logprobs & function calling at the
+// same time?") confirms the real shape for a pure tool-call turn:
+// `logprobs=ChoiceLogprobs(content=None)` - a present object with a null
+// `content`, not a bare `logprobs: null`.
+
+/// `choices[].logprobs` for a `/v1/chat/completions` turn that went through
+/// the tool-chat path (`request.tools` non-empty). `hasToolCalls` is
+/// `!calls.isEmpty` - Krill's own `message.content` is always null for such
+/// a turn regardless of logprobs (any leftover pre-call text is discarded,
+/// matching OpenAI's own observed content/tool_calls mutual exclusivity), so
+/// there is currently no "mixed" turn to populate `content` for; `content`
+/// (the collected entries for a plain, non-tool-calling reply) is used only
+/// when `hasToolCalls` is false.
+func toolChatLogprobsJSON(wantLogprobs: Bool, hasToolCalls: Bool, content: [[String: Any]]) -> Any {
+    guard wantLogprobs else { return NSNull() }
+    if hasToolCalls { return ["content": NSNull(), "refusal": NSNull()] as [String: Any] }
+    return logprobsChoiceJSON(content: content)
+}
+
 // MARK: - Ollama `/api/chat` + `/api/generate` (2026-09-30 follow-up)
 //
 // Ollama's own wire shape (docs.ollama.com/api/chat, api/generate; confirmed
