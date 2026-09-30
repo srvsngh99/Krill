@@ -113,10 +113,27 @@ final class RemoteApprover: PermissionGate, @unchecked Sendable {
             cont.resume(returning: true)
             return
         }
+        lock.unlock()
+
+        // Emit `approval_request` BEFORE the request becomes observable via
+        // `pending()` / `resolve()`. Previously `request`/`continuation` were
+        // published under `lock` and the lock released BEFORE `onRequest`
+        // ran, so a caller that polled `pending()` (the summary endpoint, a
+        // test) could see the request pending and resolve it before this
+        // call's own `onRequest` notifier had actually run -- producing
+        // `approval_resolved` ahead of `approval_request` in the event log
+        // despite happening later in real time. Announcing first, and only
+        // then publishing the state that makes the request resolvable,
+        // makes the request event happen-before anything that could resolve
+        // it (see `RemoteQuestionAsker.ask()` for the identical fix on the
+        // question gate, where this exact reordering was proven to fix
+        // `AgentSessionTests.testSummaryReportsOriginEffectivePosturePhaseAndPendingQuestion`).
         let req = Request(id: id, toolName: toolName, argumentsJSON: argumentsJSON)
+        onRequest?(req)
+
+        lock.lock()
         request = req
         continuation = cont
-        let notify = onRequest
         let timeout = self.timeout
         timeoutTask = Task { [weak self] in
             let nanos = UInt64(max(0, timeout) * 1_000_000_000)
@@ -125,7 +142,6 @@ final class RemoteApprover: PermissionGate, @unchecked Sendable {
             _ = self?.resolve(id: id, allow: false)
         }
         lock.unlock()
-        notify?(req)
     }
 
     /// The request awaiting a decision, if any.
@@ -147,11 +163,15 @@ final class RemoteApprover: PermissionGate, @unchecked Sendable {
         request = nil
         let timer = timeoutTask
         timeoutTask = nil
-        let notify = onResolve
         lock.unlock()
         timer?.cancel()
+        // Record `approval_resolved` BEFORE resuming the parked
+        // continuation: resuming lets the run loop proceed and potentially
+        // issue its NEXT approval request immediately, whose own
+        // `approval_request` event must not be able to land ahead of this
+        // one's `approval_resolved` in the event log.
+        onResolve?(req, allow)
         cont.resume(returning: allow)
-        notify?(req, allow)
         return true
     }
 }
@@ -176,13 +196,25 @@ final class RemoteQuestionAsker: UserQuestionGate, @unchecked Sendable {
     func ask(_ question: UserQuestion) async -> UserAnswer {
         await withTaskCancellationHandler {
             await withCheckedContinuation { (cont: CheckedContinuation<UserAnswer, Never>) in
-                lock.lock()
+                // Emit `question_request` BEFORE the request becomes
+                // observable via `pending()` / `resolve()`. `request`/
+                // `continuation` used to be published under `lock`, with the
+                // lock released BEFORE `onRequest` ran -- so a caller polling
+                // `pending()` (the summary endpoint, or a test) could see the
+                // question pending and answer it before this task's own
+                // `onRequest` notifier had actually run, producing
+                // `question_answered` ahead of `question_request` in the
+                // event log despite happening later in real time.
+                // Announcing first, and only then publishing the state that
+                // makes the request resolvable, makes the request event
+                // happen-before anything that could resolve it.
                 let req = Request(id: UUID().uuidString, question: question)
+                onRequest?(req)
+
+                lock.lock()
                 request = req
                 continuation = cont
-                let notify = onRequest
                 lock.unlock()
-                notify?(req)
                 // `cancelPending()` can race before this task reaches the
                 // continuation body. Re-check after registration so that path
                 // cannot leave a parked continuation behind.
@@ -207,10 +239,14 @@ final class RemoteQuestionAsker: UserQuestionGate, @unchecked Sendable {
         if let id, id != req.id { lock.unlock(); return false }
         continuation = nil
         request = nil
-        let notify = onResolve
         lock.unlock()
+        // Record `question_answered` BEFORE resuming the parked
+        // continuation: resuming lets the run loop proceed and potentially
+        // ask its NEXT question immediately, whose own `question_request`
+        // event must not be able to land ahead of this one's
+        // `question_answered` in the event log.
+        onResolve?(req, answer)
         cont.resume(returning: answer)
-        notify?(req, answer)
         return true
     }
 
