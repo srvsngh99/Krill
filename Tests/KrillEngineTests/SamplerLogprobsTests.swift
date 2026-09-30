@@ -146,6 +146,58 @@ final class SamplerLogprobsTests: XCTestCase {
         }
     }
 
+    func testTopNPartialSelectionMatchesFullSortReferenceOnRandomLogits() {
+        // Task A (2026-09-30): `sampleWithLogprobs` switched its top-N
+        // selection from a full O(V log V) argSort to an O(V) argPartition
+        // + a small O(N log N) sort over just the N candidates. This test
+        // pins that the new path picks the SAME set of tokens, in the same
+        // descending order, as an independent full-sort reference - across
+        // several random vocabularies and several N values (including N
+        // equal to the whole vocab, the boundary case for argPartition's
+        // `kth`).
+        var rng = SystemRandomNumberGenerator()
+        for trial in 0 ..< 20 {
+            let v = 50 + (trial % 3) * 40 // vary vocab size a bit: 50, 90, 130
+            var logits = [Float](repeating: 0, count: v)
+            for i in 0 ..< v {
+                // Random, effectively-unique floats - ties are not the point
+                // of this test (argPartition's own docs say tie order among
+                // an exact tie is undefined), just that the CHOSEN top-N set
+                // and its descending order match a reference sort.
+                logits[i] = Float.random(in: -20 ... 20, using: &rng)
+            }
+            let expectedLogSoftmax = manualLogSoftmax(logits)
+            // Reference: full descending sort of (tokenId, logprob) pairs.
+            let referenceOrder = (0 ..< v).sorted { expectedLogSoftmax[$0] > expectedLogSoftmax[$1] }
+
+            for n in [0, 1, 5, 20, v] where n <= v {
+                let sampler = Sampler(params: .greedy)
+                let (_, _, info) = sampler.sampleWithLogprobs(MLXArray(logits), topLogprobs: n)
+                XCTAssertEqual(info.topAlternates.count, n, "trial \(trial) n=\(n) v=\(v)")
+                guard n > 0 else { continue }
+                let expectedTop = Array(referenceOrder.prefix(n))
+                XCTAssertEqual(
+                    Set(info.topAlternates.map(\.tokenId)), Set(expectedTop),
+                    "trial \(trial) n=\(n) v=\(v): top-N set must match the full-sort reference")
+                XCTAssertEqual(
+                    info.topAlternates.map(\.tokenId), expectedTop,
+                    "trial \(trial) n=\(n) v=\(v): top-N order must match the full-sort reference")
+                for alt in info.topAlternates {
+                    XCTAssertEqual(
+                        alt.logprob, expectedLogSoftmax[alt.tokenId], accuracy: 1e-4,
+                        "trial \(trial) n=\(n) v=\(v) token \(alt.tokenId)")
+                }
+                // Strictly descending (values are effectively-unique random
+                // floats, so no tie plateau is expected here).
+                for i in 1 ..< info.topAlternates.count {
+                    XCTAssertGreaterThan(
+                        info.topAlternates[i - 1].logprob, info.topAlternates[i].logprob,
+                        "trial \(trial) n=\(n) v=\(v)")
+                }
+            }
+        }
+    }
+
     func testGrammarMaskDoesNotAffectReportedRawLogprob() {
         // A grammar mask forbids a token for SAMPLING purposes only; the
         // reported logprob must reflect the unmasked raw distribution

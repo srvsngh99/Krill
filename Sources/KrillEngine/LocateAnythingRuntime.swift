@@ -37,6 +37,14 @@ public enum LocateAnythingRuntime {
     ///     for a text-only prompt.
     ///   - grid: pre-merge `(gridH, gridW)` of the image, or nil for text-only.
     ///   - onToken: invoked with each generated token id (before the stop check).
+    ///   - wantLogprobs: When true, every sampled token's raw-distribution
+    ///     logprob (and top-N alternates) is computed via `Sampler.
+    ///     sampleWithLogprobs` instead of the plain `sampleArray` path, and
+    ///     threaded to `onToken`'s second argument - same "raw pre-filter
+    ///     logits" semantics as the generic decode loop and `Qwen35VLRuntime`
+    ///     (docs/LOGPROBS_PLAN.md §4.1/§5.1).
+    ///   - topLogprobs: Number of raw top-N alternates to report (0...20),
+    ///     ignored when `wantLogprobs` is false.
     public static func generate(
         model: LocateAnythingForConditionalGeneration,
         promptTokens: [Int],
@@ -45,7 +53,9 @@ public enum LocateAnythingRuntime {
         maxTokens: Int,
         stopIds: Set<Int>,
         params: SamplingParams = .greedy,
-        onToken: ((Int) -> Void)? = nil
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0,
+        onToken: ((Int, TokenLogprobInfo?) -> Void)? = nil
     ) -> Output {
         let caches = makeKVCaches(numLayers: model.config.textConfig.numHiddenLayers)
         let sampler = Sampler(params: params)
@@ -73,28 +83,55 @@ public enum LocateAnythingRuntime {
         var generated: [Int] = []
         var recent: [Int] = sampler.needsHistory
             ? Array(promptTokens.suffix(512)) : []
-        var nextTokenArr: MLXArray = sampler.needsHistory
-            ? sampler.sampleArray(prefillLogits, recent: recent)
-            : sampler.sampleArray(prefillLogits)
+        var nextTokenArr: MLXArray
+        // `pendingLogprobInfo` mirrors the generic decode loop's convention
+        // (InferenceEngine.swift, `pendingLogprobInfo`) and `Qwen35VLRuntime`:
+        // the logprob for a token is computed at the moment IT is sampled
+        // (one iteration before it is yielded via `onToken`), then carried
+        // forward one step so it can be attached when that token is
+        // actually reported.
+        var pendingLogprobInfo: TokenLogprobInfo?
+        if wantLogprobs {
+            let (_, tokArr, info) = sampler.needsHistory
+                ? sampler.sampleWithLogprobs(prefillLogits, recent: recent, topLogprobs: topLogprobs)
+                : sampler.sampleWithLogprobs(prefillLogits, topLogprobs: topLogprobs)
+            nextTokenArr = tokArr
+            pendingLogprobInfo = info
+        } else {
+            nextTokenArr = sampler.needsHistory
+                ? sampler.sampleArray(prefillLogits, recent: recent)
+                : sampler.sampleArray(prefillLogits)
+        }
         MLX.asyncEval(nextTokenArr)
         var nextToken = nextTokenArr.item(Int.self)
         while generated.count < maxTokens {
             if stopIds.contains(nextToken) {
-                onToken?(nextToken)
+                onToken?(nextToken, pendingLogprobInfo)
                 generated.append(nextToken)
                 break
             }
             let tokenInput = nextTokenArr.reshaped(1, 1)
             let logits = model(tokenInput, caches: caches, lastTokenOnly: true)
             if sampler.needsHistory { recent.append(nextToken) }
-            let nextTokenArr2: MLXArray = sampler.needsHistory
-                ? sampler.sampleArray(logits, recent: recent)
-                : sampler.sampleArray(logits)
+            let nextTokenArr2: MLXArray
+            var stepLogprobInfo: TokenLogprobInfo?
+            if wantLogprobs {
+                let (_, tokArr, info) = sampler.needsHistory
+                    ? sampler.sampleWithLogprobs(logits, recent: recent, topLogprobs: topLogprobs)
+                    : sampler.sampleWithLogprobs(logits, topLogprobs: topLogprobs)
+                nextTokenArr2 = tokArr
+                stepLogprobInfo = info
+            } else {
+                nextTokenArr2 = sampler.needsHistory
+                    ? sampler.sampleArray(logits, recent: recent)
+                    : sampler.sampleArray(logits)
+            }
             MLX.asyncEval(nextTokenArr2)
-            onToken?(nextToken)
+            onToken?(nextToken, pendingLogprobInfo)
             generated.append(nextToken)
             nextTokenArr = nextTokenArr2
             nextToken = nextTokenArr.item(Int.self)
+            pendingLogprobInfo = stepLogprobInfo
         }
         let decodeSeconds = CFAbsoluteTimeGetCurrent() - decodeStart
 

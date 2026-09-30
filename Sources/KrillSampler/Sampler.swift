@@ -297,12 +297,22 @@ public final class Sampler: @unchecked Sendable {
         var topIdx: MLXArray?
         var topVals: MLXArray?
         if n > 0 {
-            // Descending sort via the negation trick used elsewhere in this
-            // file (topPFilter, mirostatSample); N <= 20 keeps the gather cheap.
-            let order = argSort(MLXArray(Float(0)) - logSoftmax, axis: -1)
-            let idx = order[0 ..< n]
-            topIdx = idx
-            topVals = take(logSoftmax, idx, axis: 0)
+            // Partial top-N selection instead of a full O(V log V) argSort
+            // over the whole vocabulary (V is 128k-262k for these models).
+            // `argPartition` on the negated distribution is O(V): it puts the
+            // N smallest-negated (i.e. largest logSoftmax) values into
+            // positions [0..<N] in UNDEFINED order, with everything after
+            // guaranteed >= the kth pivot. We then take just those N
+            // candidates and do a real (cheap, N <= 20) argSort on THEM to
+            // get the final descending order - so the expensive step is O(V)
+            // and the O(N log N) sort only ever touches N elements.
+            let negLogSoftmax = MLXArray(Float(0)) - logSoftmax
+            let partitioned = argPartition(negLogSoftmax, kth: n - 1, axis: -1)
+            let candIdx = partitioned[0 ..< n]
+            let candVals = take(logSoftmax, candIdx, axis: 0)
+            let order = argSort(MLXArray(Float(0)) - candVals, axis: -1)
+            topIdx = take(candIdx, order, axis: 0)
+            topVals = take(candVals, order, axis: 0)
         }
 
         // NOW run the normal sampling path - temperature/top-k/top-p/min-p/

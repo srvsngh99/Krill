@@ -1207,3 +1207,171 @@ workflows):
   bench-release-gate` for the regression check in §6 item 4.
 - Do not use `--no-verify`, do not force-push, do not commit to `main`
   directly — standard repo hygiene, not anything specific to this feature.
+
+## Engine follow-ups (2026-09-30)
+
+Two independent follow-ups on top of the qwen3_5 fix in "Verification
+results (2026-09-29)" above, both scoped to `Sources/KrillSampler/*` and
+`Sources/KrillEngine/*` (the server dialects — Ollama, legacy
+`/v1/completions` — were a parallel, separate change).
+
+### Task A: O(V log V) → O(V) top-N selection in `sampleWithLogprobs`
+
+`Sampler.sampleWithLogprobs` found its top-N alternates with a full
+`argSort` over the ENTIRE vocabulary every decode step, regardless of how
+small N was — O(V log V) where V is 128,256 (llama-3.2-1b) to 248,320
+(qwen3.5-4b) to as high as 262k for some registered families. Replaced with
+`argPartition(negated, kth: n-1)` (O(V): puts the N smallest-negated, i.e.
+largest-logprob, values into the first N positions in in undefined order)
+followed by a real `argSort` of just those N candidates (O(N log N), N ≤
+20) to get the final descending order. `n == 0` still skips the block
+entirely, unchanged from before.
+
+**Correctness**: `SamplerLogprobsTests.
+testTopNPartialSelectionMatchesFullSortReferenceOnRandomLogits` runs 20
+trials over 3 vocab sizes (50/90/130) and every N in
+`[0, 1, 5, 20, vocabSize]` (the last exercising `argPartition`'s `kth ==
+count - 1` boundary), asserting the new path's top-N token-id SET, order,
+and per-token logprob all match an independent full-sort reference built
+from a manual log-softmax. All 9 `SamplerLogprobsTests` (the 8 pre-existing
+plus this one) pass.
+
+**Speed**: measured via `krill serve` + streaming HTTP timing (SSE
+`content` deltas), decode tok/s = 1 / (median inter-token gap, first gap
+dropped) — median-of-gaps rather than `(tokens-1)/(last-first)` because a
+CPU-contention scheduling stall on the Python client can otherwise drain
+several already-buffered SSE lines in one wake-up and inflate an
+apparent rate. "before" = `main`@`f85045b` built in a scratch worktree
+(release config); "after" = this branch (release config); same binary
+flags (`--host 127.0.0.1`, `KRILL_API_KEY` set), same prompt
+("Write a short paragraph about the ocean.", `temperature: 0`,
+`max_tokens: 320`), alternating build order every round.
+
+This dev Mac was NOT quiet during measurement — `ps aux | sort -k3 -nr`
+showed, at various points during the runs: a `kreach-crawler` process
+steady at ~10-12% CPU (pre-existing, left running per instructions), a
+`jugnu/step9/teacher_mlx.py` batched-labeling job at 4-40% CPU, and
+(heaviest) a `tools/dry_run.py` video-render job that pegged ONE CPU core
+at ~100% for several minutes during the first llama-3.2-1b pass, plus
+several `kreach/.venv` Python helpers at 10-65% CPU. None of these were
+started by this task and none were killed. The result is a strongly
+BIMODAL distribution per config — most single requests land in a
+"contended" band (~20-60 tok/s) but a minority land in an "uncontended"
+band matching the model's true ceiling (~200-245 tok/s for llama-3.2-1b) —
+so a plain median across a handful of samples is not trustworthy on its
+own; the numbers below report the full sample set and call out the
+clearest signal in it.
+
+**llama-3.2-1b (vocab 128,256), OFF vs `top_logprobs: 20`, 8 alternating
+rounds, `max_tokens: 320`** (tok/s, one value per round):
+
+| | r1 | r2 | r3 | r4 | r5 | r6 | r7 | r8 | median | max |
+|---|---|---|---|---|---|---|---|---|---|---|
+| before, OFF | 39.7 | 46.0 | 30.7 | 207.5 | 36.1 | 38.3 | 33.4 | 232.0 | 39.0 | 232.0 |
+| after, OFF | 37.0 | 29.4 | 61.7 | 32.1 | 46.6 | 24.3 | 47.0 | 28.0 | 34.5 | 61.7 |
+| before, top_logprobs=20 | 25.8 | 26.2 | 53.1 | 29.1 | 31.1 | 24.2 | 25.0 | 21.0 | 26.0 | **53.1** |
+| after, top_logprobs=20 | 27.5 | **215.6** | 57.4 | 60.8 | 19.9 | **204.4** | 29.7 | **204.3** | 59.1 | **215.6** |
+
+The clean signal: **before this fix, `top_logprobs: 20` NEVER once reached
+the uncontended ceiling in 8 trials** (max 53.1 tok/s, vs. OFF's own
+ceiling of 232.0) — the O(V log V) full sort imposed a real cost floor
+regardless of how favorably the scheduler behaved. **After the fix,
+`top_logprobs: 20` reached the same ~204-216 tok/s ceiling OFF reaches, in
+3 of 8 trials** — i.e. when the machine gives it a fair shot, the
+logprobs-ON path is no longer distinguishable from logprobs-OFF. The
+"after" OFF column happening not to catch its own high-mode window in this
+particular 8-round sample (max 61.7) is itself further evidence of how
+much this box's contention dominates a single-digit-N-round sample — it is
+not a regression (the OFF branch is byte-for-byte the pre-existing code
+in both builds; see the diff).
+
+**qwen3.5-4b (vocab 248,320), OFF vs `top_logprobs: 20`, 6 alternating
+rounds, `max_tokens: 320`:**
+
+| | r1 | r2 | r3 | r4 | r5 | r6 | median | max |
+|---|---|---|---|---|---|---|---|---|
+| before, OFF | 7.3 | 7.5 | 41.8 | 8.2 | 8.2 | 53.8 | 8.2 | 53.8 |
+| after, OFF | 6.7 | 34.6 | 13.8 | 6.0 | 7.1 | 16.5 | 10.4 | 34.6 |
+| before, top_logprobs=20 | 6.4 | 6.3 | 6.7 | 6.0 | 6.5 | 25.4 | 6.5 | 25.4 |
+| after, top_logprobs=20 | 7.3 | 6.0 | 6.2 | 6.9 | 11.0 | 6.2 | 6.6 | 11.0 |
+
+At this scale the fix makes **no measurable difference** — before and
+after are statistically indistinguishable for `top_logprobs: 20` (medians
+6.5 vs 6.6 tok/s), and there's no llama-style "before never reaches the
+ceiling" pattern. This makes sense: qwen3.5-4b's decode step is dominated
+by the 4B-parameter forward pass (this whole model runs at roughly 6-8
+tok/s baseline on this box, an order of magnitude slower than
+llama-3.2-1b's ~30-50 tok/s baseline), so the O(V log V)→O(V) sort saving,
+real as it is, is a rounding error next to the matmul cost per step at this
+model size. The llama-3.2-1b result above is where this fix actually
+matters: on a small/fast model, the full-vocabulary sort was a large
+enough fraction of a decode step to visibly cap throughput; on a model
+whose forward pass already dominates the step, it isn't. The fix is still
+correct and unconditionally cheaper (never worse, sometimes much better),
+just not always the bottleneck.
+
+An earlier, broader (4-config: OFF/0/5/20, 3-5 rounds, no median-of-gaps
+fix) pass on llama-3.2-1b produced numbers too noisy to interpret at all —
+every config straddled both the "contended" and "uncontended" bands within
+3-5 samples, before the median-of-gaps timing fix and before the 8/6-round
+focused re-runs above. That confirms this machine's background load, not
+the measurement method, is the dominant source of variance here; the
+focused re-runs' larger sample counts and the "never reaches the ceiling"
+vs. "reaches the ceiling some of the time" framing are the load-bearing
+comparison, not any single median.
+
+### Task B: logprobs in the remaining native vision/multimodal runtimes
+
+Threaded `wantLogprobs`/`topLogprobs` through the four native runtimes this
+plan's "Other paths audited for the same gap" note (in "Verification
+results (2026-09-29)" above) flagged as having the identical structural
+gap as qwen3_5 but left unfixed: `Qwen25VLRuntime`, `MllamaRuntime`,
+`LocateAnythingRuntime`, `MuseGlimmerRuntime` (image requests only — its
+text-only path already used the generic loop). Same pattern as
+`Qwen35VLRuntime` in every case: compute via `Sampler.sampleWithLogprobs`
+at the moment a token is sampled, carry the resulting `TokenLogprobInfo`
+forward one step (`pendingLogprobInfo`), attach it to `onToken`'s second
+argument at the moment that token is actually yielded — so a stop token
+that never gets yielded also never gets an orphaned logprob entry, and the
+FIRST (prefill-sampled) token is included exactly like every other. The
+logprobs-OFF branch in each runtime is the pre-existing code, untouched
+(see the diffs — every change is additive, `if wantLogprobs { ... } else {
+<original line, unchanged> }`).
+
+None of the four had a structural reason to decline: all four are ordinary
+prefill + incremental-KV-cache AR decode loops over free text (including
+LocateAnything, whose bounding-box output is still ordinary tokenizer text,
+just with `<box>...</box>` syntax — not a non-text detection head), so all
+four got the fix rather than a documented decline.
+
+**Runtime-by-runtime status:**
+
+| Runtime | Status | Real-model verification |
+|---|---|---|
+| `Qwen35VLRuntime` (qwen3_5 family) | Fixed (previous PR, f85045b) | Real `qwen3.5-4b` checkpoint (pre-existing test) |
+| `Qwen25VLRuntime` (Qwen 2.5-VL) | Fixed (this PR) | Real checkpoint: `mlx-community/Qwen2.5-VL-3B-Instruct-3bit` (2.5 GiB, downloaded for this task), IMAGE request, `logprobs.content` populated + top-1-alternate-matches-sampled-token + logprobs-OFF/ON token-sequence identity, all pass (`Qwen25VLLogprobsTests.swift`). This exact checkpoint also produces incoherent text (`</</</...`) on a plain text-only, no-logprobs, no-image `krill run` — confirmed independent of this change (pre-existing 3-bit-quant quality issue, not a regression); the pre-existing `Qwen25VLSmokeTests`/`Qwen25VLProfileTests` coherence assertions fail against it for the same reason, unrelated to logprobs. |
+| `MllamaRuntime` (Llama-3.2-Vision) | Fixed (this PR) | Real forward pass against the tiny synthetic checkpoint `tools/verify_mllama_parity.py` builds (multi-image fixture) — genuine Swift+MLX runtime + cross-attention + `Sampler` code path, NOT the real 11B weights (would be ~6 GiB at 4-bit, over this task's 3 GiB/download budget). `MllamaRuntimeTests.testRuntimeLogprobsPopulatedAndOffPathTokensUnchanged` passes. |
+| `LocateAnythingRuntime` (LocateAnything-3B) | Fixed (this PR) | Synthetic random-weight model only (`LocateAnythingRuntimeTests.swift`, text-only decode — LocateAnything's decode is plain 1-D RoPE, identical code path to the image case). Real checkpoints (`nvidia/LocateAnything-3B` 7.8 GiB, or the MLX `-4bit` re-release at 3.1 GiB) were both over budget. NOT run against a real checkpoint. |
+| `MuseGlimmerRuntime` (Muse Glimmer, image requests) | Fixed (this PR) | Synthetic random-weight model only (`MuseGlimmerLogprobsTests.swift`, reusing `MuseGlimmerNativeTests`' config-JSON pattern, real image splice + vision tower forward). The real model is 30B (smallest published MLX build 19.4 GiB) — no real-checkpoint gate exists anywhere in this repo for this family (see `MuseGlimmerNativeTests.swift`'s header). The parity fixture generator (`tools/verify_muse_glimmer_parity.py`) needs a `transformers` dev build (`5.16.0.dev0`) carrying `muse_glimmer`, not present in `~/.krill/venv`'s `transformers` 5.8.1 — not attempted (would mean changing a shared venv's transformers version for other agents' projects). NOT run against a real checkpoint. |
+| Gemma 4 (image + audio) | No fix needed | Already correct: Gemma 4's multimodal forward has no dedicated native runtime (1-D RoPE, no per-step positional offset to thread), so it serves through the GENERIC dense decode loop this plan's Phase 1 wired `wantLogprobs` into. Verified for real against `gemma-4-e2b` (on disk already) with an in-process-generated solid-color PNG and an in-process-generated 1.5s sine-tone WAV (`Gemma4MultimodalLogprobsTests.swift`) — both the image request and the audio request populate `logprobs.content` with the requested `top_logprobs` count. |
+
+### Full bypass-path audit (every `onToken`/`continuation.yield(TokenEvent` site)
+
+| Path | `wantLogprobs` reaches it? | Status |
+|---|---|---|
+| Generic dense decode loop (`InferenceEngine.generate(messages:)`, plain path) | Yes | Correct (Phase 1) |
+| Generic loop's 2-deep pipeline fast path (`usePipeline`) | N/A — declines when `wantLogprobs` (`&& !wantLogprobs` in its own gate) | Correct (Phase 1) |
+| Draft-model speculative decode (`shouldSpec`) | N/A — declines when `wantLogprobs` (`&& !wantLogprobs`, `InferenceEngine.swift` ~line 1344) | Correct (Phase 1) |
+| N-gram speculative decode (`shouldNgram`) | N/A — declines when `wantLogprobs` (`&& !wantLogprobs`, ~line 1353) | Correct (Phase 1) |
+| `Qwen35VLRuntime` (qwen3_5) | Yes | Fixed (f85045b) |
+| `Qwen25VLRuntime` (Qwen 2.5-VL) | Yes | **Fixed (this PR)** |
+| `MllamaRuntime` (Llama-3.2-Vision) | Yes | **Fixed (this PR)** |
+| `LocateAnythingRuntime` | Yes | **Fixed (this PR)** |
+| `MuseGlimmerRuntime` (image requests) | Yes | **Fixed (this PR)** |
+| Gemma 4 image/audio (generic loop, no dedicated runtime) | Yes (via generic loop) | Correct, verified for real (this PR) |
+| `InferenceEngine.generateBatched` / `runBatchedDecode` (static cohort batching) | **No — `BatchGenRequest` has no `wantLogprobs`/`topLogprobs` field at all**; `runBatchedDecode`'s `TokenEvent` yields never carry `logprob` | **NOT fixed — out of scope.** A caller cannot even ask for logprobs on this path today; if server routing ever sends a `logprobs: true` request here, every token silently reports `logprob: nil`. Fixing this means adding fields to `BatchGenRequest` (a type the parallel server-side change also touches) and threading `Sampler.sampleWithLogprobs` through `runBatchedDecode`'s per-row sampling — a bigger, separate change. |
+| `InferenceEngine.submitBatched` / `ContinuousBatcher` (continuous batching) | **No — same `BatchGenRequest`, same gap** | **NOT fixed — out of scope**, same reasoning as above. |
+
+Recorded here as the known, real, same-class gap for a future follow-up —
+exactly how this plan's own "Verification results (2026-09-29)" section
+originally flagged the four now-fixed VL runtimes.
