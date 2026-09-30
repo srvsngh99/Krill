@@ -150,7 +150,7 @@ public final class InferenceEngine: @unchecked Sendable {
     /// `[chunk, vocab]` working set is `chunk`x bigger. 512 keeps that under
     /// ~550MB even at Gemma 4's 262144-entry vocab, on a machine that may
     /// already be under memory pressure from other jobs.
-    private static let echoLogprobsChunkSize = 512
+    public static let echoLogprobsChunkSize = 512
 
     /// Phase 3 (docs/LOGPROBS_PLAN.md §3.2/§5.4): raw per-position logprobs
     /// for EVERY prompt token, for legacy `/v1/completions` `echo` +
@@ -197,8 +197,17 @@ public final class InferenceEngine: @unchecked Sendable {
     ///   if any - is a REAL, meaningfully-conditioned value scored against
     ///   that BOS, not forced to `nil`; only a prompt with no preceding
     ///   context at all, BOS or otherwise, gets a `nil` first entry).
+    ///
+    /// - Parameter chunkSize: overrides `echoLogprobsChunkSize` (512). An
+    ///   internal knob for tests only (`EchoChunkingTests`) — production
+    ///   callers never pass it, so they get the real default. Exists so the
+    ///   chunk-boundary arithmetic (a chunk's last position scoring the
+    ///   FIRST token of the next chunk; the final chunk's one-fewer
+    ///   `scoreCount`; the running KV offset across chunks) can be exercised
+    ///   at small, deliberately-awkward chunk sizes against a real prompt
+    ///   without needing a multi-thousand-token real one.
     public func echoPromptLogprobs(
-        prompt: String, topLogprobs: Int
+        prompt: String, topLogprobs: Int, chunkSize: Int = InferenceEngine.echoLogprobsChunkSize
     ) -> (tokenIds: [Int], tokenStrings: [String], infos: [TokenLogprobInfo?])? {
         guard let loadedModel, let tokenizer else { return nil }
         let tokenIds = tokenizer.encode(prompt)
@@ -218,48 +227,9 @@ public final class InferenceEngine: @unchecked Sendable {
 
         let caches: [KVCacheProtocol] = makeKVCaches(
             spec: loadedModel.cacheSpec, numLayers: loadedModel.numLayers)
-        let forward = loadedModel.forward
-        let chunkSize = Self.echoLogprobsChunkSize
-        var infos: [TokenLogprobInfo?] = [nil]
-        let total = tokenIds.count
-        var start = 0
-        while start < total - 1 {
-            let end = Swift.min(start + chunkSize, total)
-            let chunkIds = Array(tokenIds[start ..< end])
-            let inputArray = MLXArray(chunkIds.map { Int32($0) }).reshaped(1, chunkIds.count)
-            let logits = forward(inputArray, caches)
-            MLX.eval(logits)
-            let chunkLen = chunkIds.count
-            let logits2D = logits.reshaped(chunkLen, -1)
-            let (logSoftmax, topIdx, topVals, n) = Sampler.rawLogSoftmaxAndTopN(
-                logits2D, topLogprobs: topLogprobs)
-            // Position p (local to this chunk) predicts the NEXT token,
-            // globally at `start + p + 1`. The very last prompt token overall
-            // has no "next" token within the PROMPT to score here - Server.swift
-            // stitches it to the first GENERATED token's own logprob instead
-            // (already computed by the normal decode path), so the final chunk
-            // scores one fewer position than it has tokens.
-            let scoreCount = (end < total) ? chunkLen : chunkLen - 1
-            if scoreCount > 0 {
-                let nextIds = Array(tokenIds[(start + 1) ... (start + scoreCount)])
-                let chosenIdsArr = MLXArray(nextIds.map { Int32($0) })
-                let scoredLogSoftmax = logSoftmax[0 ..< scoreCount, 0...]
-                let chosenLogprobArr = Sampler.gatherChosenLogprob(
-                    scoredLogSoftmax, chosenIds: chosenIdsArr)
-                let scoredTopIdx = topIdx?[0 ..< scoreCount, 0...]
-                let scoredTopVals = topVals?[0 ..< scoreCount, 0...]
-                if let scoredTopIdx, let scoredTopVals {
-                    eval(chosenLogprobArr, scoredTopIdx, scoredTopVals)
-                } else {
-                    eval(chosenLogprobArr)
-                }
-                let chunkInfos = Sampler.logprobInfos(
-                    chosenLogprobs: chosenLogprobArr, topIdx: scoredTopIdx,
-                    topVals: scoredTopVals, n: n)
-                infos.append(contentsOf: chunkInfos)
-            }
-            start = end
-        }
+        let infos = chunkedPromptLogprobs(
+            tokenIds: tokenIds, caches: caches, chunkSize: chunkSize,
+            topLogprobs: topLogprobs, forward: loadedModel.forward)
         return (dropLeadingBOS(tokenIds), dropLeadingBOS(tokenStrings), dropLeadingBOS(infos))
     }
 
