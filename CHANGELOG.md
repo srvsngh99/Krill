@@ -105,6 +105,46 @@ reverse chronological order. Versioning follows
 
 ### Fixed
 
+- **A raw HF/torch-format snapshot of a qwen3_5-VL-config'd checkpoint
+  (e.g. `huggingface-cli download Qwen/Qwen3.5-4B`, no `mlx_vlm.convert`
+  step) loaded via `krill serve`/`krill debug` without error and then
+  produced confident garbage** — incoherent text, wrong top-5 logits.
+  `Qwen/Qwen3.5-4B`'s config carries a `vision_config`, so
+  `ArchitectureDetection` routes it through `loadQwen35VL`
+  (`Sources/KrillCore/ModelLoader.swift`), which was built and verified
+  only against the already-`mlx_vlm.convert`-ed layout (e.g.
+  `mlx-community/Qwen3.5-4B-MLX-4bit`: `language_model.model.*`,
+  `vision_tower.*`, `language_model.lm_head.*`). A raw snapshot keys the
+  same tensors `model.language_model.*` and `model.visual.*` (HF's own
+  `Qwen3_5ForConditionalGeneration` state-dict layout) with a bare
+  top-level `lm_head.*` — none of which matched the module tree — and the
+  loader's lax `model.update(parameters:verify: [])` silently tolerated
+  every key failing to bind, leaving the whole model at its random Swift
+  initialization. Fixed by adding `qwen35VLKeyRewrite`, which renames the
+  raw prefixes to the mlx_vlm layout before the existing conv1d/RMSNorm
+  sanitize runs — mirrors mlx_vlm's own `sanitize_key`
+  (`mlx_vlm/models/qwen3_5/qwen3_5.py`) exactly, and is a no-op on an
+  already-mlx_vlm-format checkpoint (verified: the `qwen3.5-4b` 4-bit
+  alias's real output and `logprobs` are unchanged by this change).
+  Verified on the real raw `Qwen/Qwen3.5-4B` bf16 snapshot: coherent
+  multi-sentence output, and `tools/logprobs_parity.py` numeric parity
+  against `mlx_lm` (sampled-token max/median abs diff 7.49e-02/1.16e-03,
+  at 0.76x its own intrinsic noise floor — excellent agreement, same
+  pattern as the already-verified 4-bit alias). Also confirmed: the
+  prefix cache does not (and by design cannot) engage for this or any
+  other `.ssm`-cache-spec family (`InferenceEngine.swift`'s
+  `effectiveUsePrefixCache = usePrefixCache && !hasSSMCacheSpec`) — a
+  GatedDeltaNet layer's recurrent state is not a position-addressable KV
+  cache, so a partial-prefix hit would desync it from a restored
+  full-attention KV and produce garbage; this was already deliberate and
+  documented, re-verified for real by sending an identical long prompt
+  twice (no prefix-cache log line either way — Krill emits none for any
+  family — and the repeat-request speedup pattern was consistent with
+  ordinary warm-cache/kernel-reuse effects, not a KV-prefix hit, unlike a
+  prefix-cache-eligible dense model's repeat-request speedup measured for
+  comparison). See `docs/ADDING_MODELS.md`'s new "raw HF snapshot" gotcha
+  section and `docs/LOGPROBS_PLAN.md`'s "Real-model runtime checks
+  (2026-09-30)" for the full numbers.
 - **`logprobs.content` was always `[]` for every qwen3_5-family model**
   (`qwen3.5-4b`, Ornith-9B, Qwythos-9B, Qwen3.8-27B). Their config.json
   carries `vision_config`/`image_token_id` even for a purely-text
