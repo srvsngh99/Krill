@@ -1575,3 +1575,102 @@ signal as suggestive, not conclusive, on its own.
   logprobs-OFF spec/batched A/B above is the intended stand-in given this
   session's constraints); re-run it before a release if a stricter proof is
   wanted, per this plan's own §6 item 4 convention.
+
+## Tool-call logprobs (2026-09-30)
+
+**Question.** Phase 1 shipped `logprobs: null` on any `tool_calls` reply,
+unconditionally, even when the request asked for `logprobs: true`. Is that
+actually what OpenAI does, or is it a Krill invention that should instead
+populate real entries — and if the latter, entries for *which* tokens: the
+raw generated text (tool-call JSON included) as the model actually produced
+it, or only whatever ends up in `message.content`?
+
+**Sources consulted.**
+
+1. **OpenAI Python SDK generated types** (`~/.krill/venv/lib/python3.13/
+   site-packages/openai/types/chat/chat_completion.py` and
+   `chat_completion_token_logprob.py`, `# File generated from our OpenAPI
+   spec by Castiron` — i.e. these mirror the real API surface, not
+   hand-written docs):
+   ```python
+   class ChoiceLogprobs(BaseModel):
+       """Log probability information for the choice."""
+       content: Optional[List[ChatCompletionTokenLogprob]] = None
+       """A list of message content tokens with log probability information."""
+       refusal: Optional[List[ChatCompletionTokenLogprob]] = None
+       """A list of message refusal tokens with log probability information."""
+   ```
+   Two load-bearing facts: (a) `content` is explicitly documented as
+   covering **`message.content`** — there is no third field anywhere in
+   `ChoiceLogprobs` for tool-call *argument* tokens, and no evidence OpenAI
+   reports logprobs for them at all; (b) `content`'s type is `Optional[...]
+   = None` — it is *nullable*, not a signal that the surrounding `logprobs`
+   object itself disappears. `Choice.logprobs: Optional[ChoiceLogprobs] =
+   None` is the *only* place the whole object can be absent.
+2. **Live behavior report, OpenAI developer forum** ("Can I use logprobs &
+   function calling at the same time?"): a user passing `logprobs=True,
+   top_logprobs=5` alongside function/tool calling reports the real
+   response shape as `logprobs=ChoiceLogprobs(content=None)` — a *present*
+   `logprobs` object whose `content` is `null`, exactly matching the SDK
+   type above, not a bare `logprobs: null`. Multiple independent posts in
+   the same thread describe this as consistent, expected behavior, not a
+   bug report about a missing top-level object.
+3. **`openai/types/chat/chat_completion_message.py`** (checked for whether
+   `content` and `tool_calls` can be simultaneously non-null): community
+   reports (OpenAI community forum, "Function Call returning NULL
+   message[0].content") consistently describe `content` as `null` whenever
+   `tool_calls` is populated for OpenAI's own models — the two are
+   observed as mutually exclusive in practice, not merely nullable
+   independently.
+4. **vLLM** — attempted to check `vllm/entrypoints/openai/serving_chat.py`
+   directly (GitHub raw fetch and `gh api` both 404'd from this sandbox, no
+   working direct network path to github.com content endpoints); a
+   web-search pass over vLLM's issue tracker turned up several *known
+   compatibility bugs* around logprobs + tool-calling (e.g. "`logprobs` is
+   not compatible with the OpenAI spec", "`choices.logprobs.content` array
+   is always empty") but nothing authoritative on the specific null-vs-
+   object shape. Not used as a source for the decision below; noted here so
+   a future pass knows this avenue was tried and came up empty, rather than
+   silently skipped.
+
+**Decision.** For a **pure tool-call turn** (no visible content — see next
+paragraph for why that's the only case that exists in Krill today), match
+OpenAI's real, confirmed shape: `logprobs` is a real object with `content`
+and `refusal` both `null` — `{"content": null, "refusal": null}` — not the
+old bare `"logprobs": null`. The task brief's "mixed turn" hypothesis
+(visible content *precedes* the tool call, and gets real entries) does not
+apply to Krill as built: `handleToolChat`'s response construction
+(`Sources/KrillServer/Server.swift`) sets `message["content"] = NSNull()` /
+`""` **unconditionally** whenever `calls` is non-empty, discarding
+`cleaned` (any leftover text after tool-call-sentinel extraction) even when
+it is non-empty — matching finding #3 above (content/tool_calls mutual
+exclusion) rather than fighting it. So there is no live case today where a
+tool-call reply's `message.content` is non-null; if that ever changes
+(Krill starts surfacing pre-call commentary), `logprobsAgg?.entries` would
+need slicing to just the tokens preceding the tool-call sentinel — noted
+here for whoever makes that change, not implemented speculatively.
+
+**Implementation.** `toolChatLogprobsJSON(wantLogprobs:hasToolCalls:
+content:)` (`Sources/KrillServer/LogprobsFormatting.swift`) is the single
+pure function `handleToolChat` calls for the OpenAI dialect's `choices[0].
+logprobs`. Because `handleToolChat` is the *one* handler both `/v1/chat/
+completions` and Ollama's `/api/chat` route tool-bearing requests through,
+for both streaming and non-streaming (a streaming tool-call reply is
+assembled in full, then emitted as a single SSE/NDJSON chunk that copies
+whichever `logprobs` value the assembled response got), fixing this one
+call site covers all four combinations (OpenAI/Ollama × stream/non-stream)
+with no duplicated logic. The Ollama dialect is intentionally **not**
+changed: it already omits the `logprobs` key entirely for a `tool_calls`
+reply (Go `omitempty` convention, matching how it omits the key whenever
+there's "nothing to report" elsewhere), which is Ollama's own idiomatic
+equivalent of OpenAI's null-content object — there is no Ollama-side gap to
+close.
+
+**Unit tests.** `Tests/KrillServerTests/ServerFormattingTests.swift`:
+`testToolChatLogprobsJSONIsNullWhenNotRequested`,
+`testToolChatLogprobsJSONForPureToolCallTurnIsObjectWithNullContent`,
+`testToolChatLogprobsJSONForPlainReplyStillGetsRealEntries`.
+
+**Real-server verification (qwen3.5-4b, real tool definition, both
+dialects, stream + non-stream).** See the PR body for the exact requests
+and responses captured against a locally-running `krill serve` build.

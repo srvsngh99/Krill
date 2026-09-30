@@ -126,6 +126,34 @@ final class ServerFormattingTests: XCTestCase {
         XCTAssertEqual(content?.count, 0)
     }
 
+    // MARK: - Tool-call logprobs (2026-09-30)
+
+    func testToolChatLogprobsJSONIsNullWhenNotRequested() {
+        let result = toolChatLogprobsJSON(wantLogprobs: false, hasToolCalls: true, content: [])
+        XCTAssertTrue(result is NSNull)
+    }
+
+    func testToolChatLogprobsJSONForPureToolCallTurnIsObjectWithNullContent() {
+        // The real OpenAI shape for a tool_calls turn: a present `logprobs`
+        // object with `content`/`refusal` null - NOT a bare `logprobs: null`
+        // - per `openai/types/chat/chat_completion.py`'s `ChoiceLogprobs`
+        // and a live forum report of `ChoiceLogprobs(content=None)` on an
+        // actual function-call response. See docs/LOGPROBS_PLAN.md.
+        let result = toolChatLogprobsJSON(wantLogprobs: true, hasToolCalls: true, content: [])
+        let obj = result as? [String: Any]
+        XCTAssertNotNil(obj, "must be a real object, not a bare null")
+        XCTAssertTrue(obj?["content"] is NSNull)
+        XCTAssertTrue(obj?["refusal"] is NSNull)
+    }
+
+    func testToolChatLogprobsJSONForPlainReplyStillGetsRealEntries() throws {
+        let entry = logprobEntryJSON(token: "x", logprob: -0.1, bytes: [120])
+        let result = toolChatLogprobsJSON(wantLogprobs: true, hasToolCalls: false, content: [entry])
+        let obj = try XCTUnwrap(result as? [String: Any])
+        let content = obj["content"] as? [[String: Any]]
+        XCTAssertEqual(content?.count, 1)
+    }
+
     func testEscapeJSONRoundTripsQuotesSlashesAndControls() throws {
         let original = "quote=\" slash=\\ newline=\n return=\r tab=\t control=\u{0001} unicode=🐙"
         let document = "{\"value\":\"\(escapeJSON(original))\"}"

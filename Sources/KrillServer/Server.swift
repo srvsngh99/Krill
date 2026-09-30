@@ -1440,15 +1440,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     message["content"] = NSNull()
                     message["tool_calls"] = ToolCalling.openAIToolCalls(calls)
                 }
-                // Phase 1 (docs/LOGPROBS_PLAN.md §3.3): a tool_calls reply
-                // gets `logprobs: null` even if the request asked for it -
-                // the token-level entries collected above describe the raw
-                // (pre-tool-extraction) text, which is not what a tool_calls
-                // choice returns as content. A plain-content reply (tools
-                // were offered but not used) gets the real entries.
-                let choiceLogprobs: Any = (wantLogprobs && calls.isEmpty)
-                    ? logprobsChoiceJSON(content: logprobsAgg?.entries ?? [])
-                    : NSNull()
+                // Tool-call logprobs parity (2026-09-30) - see
+                // `toolChatLogprobsJSON`'s doc comment and docs/LOGPROBS_
+                // PLAN.md's "Tool-call logprobs (2026-09-30)" section for the
+                // full sourcing on why a tool_calls turn gets a real
+                // `{content: null, refusal: null}` logprobs object rather
+                // than a bare `logprobs: null`.
+                let choiceLogprobs = toolChatLogprobsJSON(
+                    wantLogprobs: wantLogprobs, hasToolCalls: !calls.isEmpty,
+                    content: logprobsAgg?.entries ?? [])
                 response = [
                     "id": "chatcmpl-\(UUID().uuidString.prefix(8))",
                     "object": "chat.completion",
@@ -1493,9 +1493,16 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 ]
                 // Same rule as the OpenAI dialect above: a tool_calls reply
                 // never gets entries (the raw pre-extraction text is not
-                // what `message.content` shows); a plain-content reply
-                // (tools offered, not used) does, omitted (Go `omitempty`)
-                // when empty.
+                // what `message.content` shows). Ollama's own convention for
+                // "nothing to report" is to OMIT the field entirely (Go
+                // `omitempty`) rather than send an explicit null object, so -
+                // unlike the OpenAI dialect, which now sends a real
+                // `{content: null, refusal: null}` object for a tool_calls
+                // turn to match real OpenAI's wire shape - the Ollama
+                // dialect's parity move is simply to keep omitting the key,
+                // which is already Ollama's own idiomatic "nothing here".
+                // A plain-content reply (tools offered, not used) still gets
+                // the real entries.
                 if wantLogprobs, calls.isEmpty, let logprobsAgg, !logprobsAgg.entries.isEmpty {
                     ollamaResponse["logprobs"] = ollamaLogprobsArrayJSON(entries: logprobsAgg.entries)
                 }

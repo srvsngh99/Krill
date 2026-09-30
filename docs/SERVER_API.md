@@ -338,9 +338,16 @@ Response (non-streaming): each `choices[]` entry gets `logprobs: {content:
 Streaming: each `chat.completion.chunk` carrying content gets the same
 `choices[0].logprobs` shape for that chunk's token(s); chunks with no token
 (the role/finish chunks) get `logprobs: null`. `logprobs` is `null` on any
-choice when the request did not ask for it, or when the reply is a
-`tool_calls` turn (a tool-call reply's token stream reflects the raw
-pre-extraction text, not the structured `tool_calls` the client sees).
+choice when the request did not ask for it. A `tool_calls` reply is
+different again: it gets a real `logprobs` OBJECT with `content`/`refusal`
+both `null` — `{"content": null, "refusal": null}` — not a bare `logprobs:
+null`, matching real OpenAI's own wire shape for a function-call turn
+(confirmed against the OpenAI Python SDK's `ChoiceLogprobs` type and a live
+user report; see `docs/LOGPROBS_PLAN.md`'s "Tool-call logprobs (2026-09-30)"
+section). This is because a tool-call reply's token stream reflects the raw
+pre-extraction text, not the structured `tool_calls` the client sees, and
+Krill's own `message.content` is always `null` for a `tool_calls` reply
+regardless of logprobs, so there is nothing to report entries for.
 `bytes` is the token's exact UTF-8 (or byte-fallback) bytes, independent of
 the display `token` string — the latter may show `U+FFFD` for a
 byte-fallback token that is not valid UTF-8 on its own; `bytes` never is.
@@ -365,8 +372,12 @@ or when this line/response carries no entries**, matching Go's
 convention from the OpenAI chat endpoint's always-present `logprobs: null`.
 Streaming (NDJSON): each line's `logprobs` covers only that line's new
 token(s), same per-chunk-not-cumulative convention as chat's SSE. A
-`tool_calls` reply omits `logprobs` entirely, the same rule as chat's
-`null`. `/api/generate` with a `system` override still works with
+`tool_calls` reply omits `logprobs` entirely — Ollama's own `omitempty`
+idiom for "nothing to report" here, unaffected by the OpenAI dialect's
+2026-09-30 tool-call logprobs change above (which sends a real
+`{content: null}` object instead of omitting the key, to match real
+OpenAI's shape — Ollama has no such convention to match, so it keeps
+omitting). `/api/generate` with a `system` override still works with
 `logprobs` on; `raw: true` remains unsupported (pre-existing, unrelated).
 
 ```bash
