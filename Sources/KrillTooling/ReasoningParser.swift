@@ -287,11 +287,58 @@ public final class StreamingReasoningFilter {
     private var state: State = .atemProbe
     private var buffer: String = ""
 
+    /// Whitespace-edge bookkeeping (2026-09-30 stream/non-stream whitespace
+    /// parity fix - see `docs/LOGPROBS_PLAN.md`). `ReasoningParser.strip(_:)`
+    /// trims the FINAL visible string's outer edges (leading AND trailing
+    /// whitespace) in one shot, once, after every reasoning span has already
+    /// been removed. A streaming caller cannot know whether a given
+    /// whitespace run sits at one of those edges until either (a) real
+    /// content is seen after it (it was interior, not an edge - emit it
+    /// verbatim) or (b) the stream truly ends (it WAS the trailing edge -
+    /// drop it). This is implemented as two thin wrapper stages around the
+    /// state machine above, which is otherwise UNCHANGED:
+    ///
+    ///   - `sawFirstVisibleByte` / dropping leading whitespace: active only
+    ///     until the very first non-whitespace byte of the OVERALL visible
+    ///     output is seen (once, for the whole stream - a reasoning block's
+    ///     own post-close leading whitespace is already handled by
+    ///     `.justExited` above, every time, so this only has more work to do
+    ///     for content that precedes any block, e.g. a plain non-reasoning
+    ///     model, or stray whitespace before an opening tag). Whitespace
+    ///     eaten here is dropped forever, matching the leading half of
+    ///     `strip(_:)`'s trim.
+    ///   - `heldTrailingWhitespace`: always active once the leading edge is
+    ///     past. Holds the trailing whitespace run of whatever the state
+    ///     machine is about to emit; released (prefixed onto) the next
+    ///     non-whitespace content the state machine emits, so genuinely
+    ///     interior whitespace reaches the caller byte-for-byte, just
+    ///     delayed by however many calls; dropped forever at `finish()` if
+    ///     still held then - matching the trailing half of `strip(_:)`'s
+    ///     trim.
+    ///
+    /// Both stages operate only on bytes the state machine has ALREADY
+    /// decided are visible (`consumeCore`'s return value) - they never see,
+    /// and cannot affect, bytes the state machine drops as reasoning.
+    /// `pendingUTF8Length` below folds `heldTrailingWhitespace` into its
+    /// count for exactly this reason: from `LogprobsAggregator`'s point of
+    /// view a held-back trailing-whitespace byte is indistinguishable from a
+    /// byte still sitting in the state machine's own `buffer` - both are
+    /// "fed but not yet finally resolved" - so no change to the aggregator's
+    /// own accounting is needed; it already tolerates a token's resolution
+    /// spanning more than one `consume`/`finish` call.
+    private var sawFirstVisibleByte = false
+    private var heldTrailingWhitespace = ""
+
     public init() {}
 
-    /// Number of UTF-8 bytes currently held in the internal buffer - fed via
-    /// `consume(_:)` but not yet resolved (emitted or discarded). Read-only
-    /// introspection; does not affect filtering behavior. Exposed for
+    /// Number of UTF-8 bytes currently held - fed via `consume(_:)` but not
+    /// yet FINALLY resolved (emitted to the caller, or permanently
+    /// discarded). Includes both the state machine's own `buffer` (mid-tag-
+    /// scan bytes) and `heldTrailingWhitespace` (bytes the state machine
+    /// already decided are visible, but which this filter is still holding
+    /// back in case they turn out to be trailing whitespace - see the
+    /// comment above `heldTrailingWhitespace`). Read-only introspection;
+    /// does not affect filtering behavior. Exposed for
     /// `KrillServer.LogprobsAggregator` (docs/LOGPROBS_PLAN.md finding #1),
     /// which needs to attribute per-token `logprobs.content[]` entries to
     /// this filter's emit/discard decisions without duplicating its state
@@ -302,11 +349,48 @@ public final class StreamingReasoningFilter {
     /// a Devanagari base+matra split across two fed chunks) can never throw
     /// the accounting off - UTF-8 byte counts are exactly additive under
     /// string concatenation, `Character` counts are not.
-    public var pendingUTF8Length: Int { buffer.utf8.count }
+    public var pendingUTF8Length: Int { buffer.utf8.count + heldTrailingWhitespace.utf8.count }
 
-    /// Feed the next streamed chunk. Returns the substring that is
-    /// safe to emit to the client now.
+    /// Feed the next streamed chunk. Returns the substring that is safe to
+    /// emit to the client now - after both the reasoning-block state machine
+    /// (`consumeCore`) and the whitespace-edge trimming above have resolved
+    /// it. See the comment above `heldTrailingWhitespace`.
     public func consume(_ chunk: String) -> String {
+        dropHeldLeadingWhitespace(from: releaseTrailingWhitespace(consumeCore(chunk)))
+    }
+
+    /// Drop a leading-whitespace prefix of `s` ONLY while no non-whitespace
+    /// byte has ever been emitted yet (see `sawFirstVisibleByte`). A no-op
+    /// once the overall stream's first real character has been seen.
+    private func dropHeldLeadingWhitespace(from s: String) -> String {
+        guard !sawFirstVisibleByte else { return s }
+        guard !s.isEmpty else { return s }
+        let rest = s.drop(while: { $0.isWhitespace })
+        if !rest.isEmpty { sawFirstVisibleByte = true }
+        return String(rest)
+    }
+
+    /// Hold back the trailing-whitespace run of `s` (appended to whatever is
+    /// already held), releasing everything up to but not including the new
+    /// trailing run. An empty `s` changes nothing (a no-op call must not
+    /// spuriously flush already-held whitespace).
+    private func releaseTrailingWhitespace(_ s: String) -> String {
+        guard !s.isEmpty else { return "" }
+        let combined = heldTrailingWhitespace + s
+        var cut = combined.endIndex
+        while cut > combined.startIndex {
+            let prev = combined.index(before: cut)
+            if combined[prev].isWhitespace { cut = prev } else { break }
+        }
+        heldTrailingWhitespace = String(combined[cut...])
+        return String(combined[..<cut])
+    }
+
+    /// The reasoning-block state machine, unchanged. Returns whatever text
+    /// the block-stripping logic considers visible right now, including any
+    /// whitespace adjacent to a stripped block - whitespace-edge trimming
+    /// happens one layer up, in `consume(_:)`/`finish()`.
+    private func consumeCore(_ chunk: String) -> String {
         var emit = ""
         buffer += chunk
 
@@ -437,10 +521,31 @@ public final class StreamingReasoningFilter {
         return emit
     }
 
-    /// Flush any text the filter is confident about at end-of-stream.
-    /// Reasoning content (including an unterminated reasoning block)
-    /// is discarded so a `max_tokens`-truncated stream does not leak.
+    /// Flush any text the filter is confident about at end-of-stream,
+    /// including whitespace-edge resolution (see the comment above
+    /// `heldTrailingWhitespace`): any still-held trailing whitespace, plus
+    /// whatever `finishCore()` itself flushes, is combined, then a leading-
+    /// whitespace-eat is applied (in case the ENTIRE stream turned out to be
+    /// whitespace-only up to this point), then any whitespace now at the
+    /// true end is dropped for good - this final drop is the one case where
+    /// trailing whitespace is not just delayed but permanently gone,
+    /// matching `ReasoningParser.strip(_:)`'s trim of the final string.
     public func finish() -> String {
+        let combined = heldTrailingWhitespace + finishCore()
+        heldTrailingWhitespace = ""
+        let afterLeading = dropHeldLeadingWhitespace(from: combined)
+        var cut = afterLeading.endIndex
+        while cut > afterLeading.startIndex {
+            let prev = afterLeading.index(before: cut)
+            if afterLeading[prev].isWhitespace { cut = prev } else { break }
+        }
+        return String(afterLeading[..<cut])
+    }
+
+    /// The reasoning-block state machine's end-of-stream flush, unchanged.
+    /// Reasoning content (including an unterminated reasoning block) is
+    /// discarded so a `max_tokens`-truncated stream does not leak.
+    private func finishCore() -> String {
         switch state {
         case .preamble, .afterBlock:
             let out = buffer

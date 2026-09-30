@@ -95,11 +95,19 @@ final class LogprobsAggregatorTests: XCTestCase {
         // (`<thinking>`, `<think>`, `<|channel>`, `<|think|>`), so the
         // filter HOLDS it until the next chunk disambiguates - this is
         // finding #1b's core scenario: neither token may be dropped.
+        // `t4`'s trailing "\n" is the answer's trailing whitespace (2026-09-
+        // 30 stream/non-stream parity fix): `ReasoningParser.strip(_:)`
+        // trims it on the non-streaming path, so the streaming path now
+        // holds it back and drops it for good at `finish()` too - see
+        // `StreamingReasoningFilter.heldTrailingWhitespace`. `t4` still gets
+        // its own entry (the held '<' token isn't the only one that must
+        // not be dropped - see below), just a partial one trimmed to its
+        // visible prefix, so entries stay byte-exact with `content`.
         let t1 = freshId(), t2 = freshId(), t3 = freshId(), t4 = freshId()
         let result = run([
             (t1, "if x "), (t2, "<"), (t3, " y"), (t4, ":\n  return \"<div>ok</div>\"\n"),
         ])
-        XCTAssertEqual(result.content, "if x < y:\n  return \"<div>ok</div>\"\n")
+        XCTAssertEqual(result.content, "if x < y:\n  return \"<div>ok</div>\"")
         XCTAssertEqual(result.entries.count, 4, "the held '<' token must not be dropped")
         assertBytesReproduceContent(result)
     }

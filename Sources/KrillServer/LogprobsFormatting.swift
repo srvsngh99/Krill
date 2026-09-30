@@ -122,6 +122,12 @@ final class LogprobsAggregator {
         /// exact without needing to ask the filter for its buffer directly.
         var text: String
         var utf8Length: Int { text.utf8.count }
+        /// This token's own decoded text exactly as fed to the filter
+        /// (`event.text`), kept UNCHANGED for the life of this `Pending`
+        /// (unlike `text` above, which is trimmed as the token resolves) -
+        /// needed to compute `visibleRange`-relative byte slices for a
+        /// partial entry (see `LogprobsAggregator.entryJSON`).
+        let fullText: String
         /// True for a structural/special token that must never get an
         /// entry regardless of where it falls (`InferenceEngine.
         /// isOutputSuppressedToken`). Still occupies a FIFO slot (its own
@@ -129,13 +135,37 @@ final class LogprobsAggregator {
         /// tiling invariant holds even in that case.
         let suppressed: Bool
         /// True once ANY portion of this token (across however many partial
-        /// resolutions it took) has overlapped the emit region. A token
-        /// whose bytes straddle an emit/discard boundary (vanishingly rare -
-        /// would need a single generated token literally spanning a
-        /// reasoning-tag boundary) is attributed as visible if it overlaps
-        /// the emit side AT ALL, rather than risk splitting one token's
-        /// logprob entry into two.
+        /// resolutions it took) has overlapped the emit region.
         var sawEmit: Bool = false
+        /// How many bytes have been trimmed off the FRONT of the token's
+        /// original text so far (across however many partial resolutions it
+        /// took) - lets `visibleRange` below be expressed in coordinates
+        /// relative to the token's own original bytes even though `text`
+        /// itself has already had the resolved prefix removed.
+        var consumedFromFront: Int = 0
+        /// Byte range, relative to the token's OWN original text, confirmed
+        /// to overlap the emit region so far (nil until the first overlap).
+        /// `StreamingReasoningFilter`'s whitespace-edge trimming
+        /// (2026-09-30 stream/non-stream parity fix) can now split a SINGLE
+        /// token's fate: e.g. a token whose text is `":\n  return \"x\"\n"`
+        /// has its trailing `"\n"` held back and finally dropped at
+        /// end-of-stream (matching `ReasoningParser.strip(_:)`'s trailing
+        /// trim) while the rest of the same token already reached the
+        /// client as visible `content`. Whitespace-edge trimming only ever
+        /// removes a PREFIX (leading-whitespace-eat) or a SUFFIX (trailing-
+        /// whitespace-hold) of what a token contributes - never a middle
+        /// span - so the visible portion is always contiguous and this
+        /// single range is enough to track it (widened, never fragmented,
+        /// as more of the token resolves). A straddling token gets a
+        /// PARTIAL entry (bytes trimmed to `visibleRange`, via
+        /// `partialEntryBytes`) instead of its full raw bytes, keeping
+        /// `bytes-concat == content` exact. The same mechanism also covers
+        /// the (vanishingly rare - would need a single generated token
+        /// literally spanning a reasoning-tag boundary) reasoning-boundary
+        /// straddle case, which used to always get a full-bytes entry when
+        /// it overlapped at all; it now gets a correctly-scoped partial one
+        /// instead, which is strictly more correct and untested either way.
+        var visibleRange: Range<Int>?
     }
     private var pending: [Pending] = []
 
@@ -155,6 +185,7 @@ final class LogprobsAggregator {
         guard enabled else { return filter.consume(event.text) }
         pending.append(Pending(
             tokenId: event.tokenId, info: event.logprob, text: event.text,
+            fullText: event.text,
             suppressed: eng.isOutputSuppressedToken(event.tokenId)))
         let beforeLen = filter.pendingUTF8Length
         let emitted = filter.consume(event.text)
@@ -252,27 +283,93 @@ final class LogprobsAggregator {
             let tokLen = pending[i].utf8Length
             let tokEnd = offset + tokLen
             if tokEnd <= consumedLen {
+                if tokLen > 0 {
+                    widenVisibleRange(
+                        &pending[i], streamRange: offset ..< tokEnd,
+                        callOffset: offset, emitRange: emitRange)
+                }
                 let overlapsEmit = tokLen > 0
                     ? (offset < emitRange.upperBound && tokEnd > emitRange.lowerBound)
                     : (offset >= emitRange.lowerBound && offset < emitRange.upperBound)
                 let visible = pending[i].sawEmit || overlapsEmit
                 if visible, !pending[i].suppressed, let info = pending[i].info {
-                    entries.append(logprobsContentEntry(tokenId: pending[i].tokenId, info: info, eng: eng))
+                    entries.append(entryJSON(for: pending[i], info: info))
                 }
                 offset = tokEnd
                 i += 1
             } else if offset < consumedLen {
                 let resolvedHere = consumedLen - offset
+                if tokLen > 0 {
+                    widenVisibleRange(
+                        &pending[i], streamRange: offset ..< consumedLen,
+                        callOffset: offset, emitRange: emitRange)
+                }
                 let overlapsEmit = offset < emitRange.upperBound && consumedLen > emitRange.lowerBound
                 pending[i].sawEmit = pending[i].sawEmit || overlapsEmit
                 let remaining = Array(pending[i].text.utf8).dropFirst(resolvedHere)
                 pending[i].text = String(decoding: remaining, as: UTF8.self)
+                pending[i].consumedFromFront += resolvedHere
                 break
             } else {
                 break
             }
         }
         pending.removeFirst(i)
+    }
+
+    /// Intersect `streamRange` (this call's resolved span for the token, in
+    /// FIFO-relative stream coordinates) with `emitRange`, convert the
+    /// overlap (if any) to coordinates relative to the token's OWN original
+    /// bytes (`callOffset` is where `streamRange` starts, `pending.
+    /// consumedFromFront` is how much of the token's front was already
+    /// resolved in earlier calls), and widen `pending.visibleRange` to
+    /// cover it. A no-op when there is no overlap this call.
+    private func widenVisibleRange(
+        _ pending: inout Pending, streamRange: Range<Int>,
+        callOffset: Int, emitRange: Range<Int>
+    ) {
+        let lo = max(streamRange.lowerBound, emitRange.lowerBound)
+        let hi = min(streamRange.upperBound, emitRange.upperBound)
+        guard lo < hi else { return }
+        let tokenLo = lo - callOffset + pending.consumedFromFront
+        let tokenHi = hi - callOffset + pending.consumedFromFront
+        if let existing = pending.visibleRange {
+            pending.visibleRange = min(existing.lowerBound, tokenLo) ..< max(existing.upperBound, tokenHi)
+        } else {
+            pending.visibleRange = tokenLo ..< tokenHi
+        }
+    }
+
+    /// Build this token's `logprobs.content[]` entry. When `visibleRange`
+    /// covers the token's full original length (the overwhelmingly common
+    /// case, and the only case before the 2026-09-30 whitespace-edge fix),
+    /// this is byte-for-byte `logprobsContentEntry`'s ordinary full-token
+    /// entry, using `eng.rawTokenBytes(for:)` exactly as before. Otherwise
+    /// (a token whose whitespace was partly trimmed as a leading/trailing
+    /// answer edge, or - vanishingly rare - straddling a reasoning-tag
+    /// boundary) the entry's `bytes`/`token` are trimmed to just the visible
+    /// slice, computed from the token's OWN decoded text (not
+    /// `rawTokenBytes`, which has no defined slicing correspondence to a
+    /// byte-fallback token's text) - see `Pending.visibleRange`.
+    private func entryJSON(for pending: Pending, info: TokenLogprobInfo) -> [String: Any] {
+        let fullUTF8 = Array(pending.fullText.utf8)
+        guard let range = pending.visibleRange, range != 0 ..< fullUTF8.count else {
+            return logprobsContentEntry(tokenId: pending.tokenId, info: info, eng: eng)
+        }
+        let bytes = Array(fullUTF8[range])
+        let token = String(decoding: bytes, as: UTF8.self)
+        // Alternates are hypothetical (never-sampled) tokens, unaffected by
+        // this token's own whitespace trimming - built exactly as
+        // `logprobsContentEntry` builds them, so `top_logprobs` keeps its
+        // usual shape (always an array for the OpenAI dialect) even on a
+        // partial entry.
+        let alternates: [[String: Any]] = info.topAlternates.map { alt in
+            let altBytes = eng.rawTokenBytes(for: alt.tokenId) ?? []
+            return logprobEntryJSON(
+                token: eng.lossyTokenString(bytes: altBytes),
+                logprob: alt.logprob, bytes: altBytes)
+        }
+        return logprobEntryJSON(token: token, logprob: info.logprob, bytes: bytes, topLogprobs: alternates)
     }
 }
 

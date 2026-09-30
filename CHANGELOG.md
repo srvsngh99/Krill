@@ -176,6 +176,42 @@ reverse chronological order. Versioning follows
   intermittently on CI for PR #319; reproduced locally at 2/60 runs
   (targeted) and 13/30 runs (whole `AgentSessionTests` suite, run alongside
   its siblings) before the fix, 0/60 and 0/30 after.
+- **Streaming vs non-streaming whitespace mismatch**: the same greedy
+  request produced different `content` on the streaming and non-streaming
+  paths whenever the model's raw output carried leading or trailing
+  whitespace (almost always - a trailing newline is extremely common, and
+  a `<think>...</think>` block is typically followed by a `\n\n` artifact
+  before the real answer). `ReasoningParser.strip(_:)` (non-streaming)
+  trims the final visible string's outer edges once, after every reasoning
+  span is removed; `StreamingReasoningFilter` (streaming) had no equivalent
+  - it only ate whitespace immediately after a stripped block, not at the
+  true start or end of the overall stream. Real providers do not trim
+  model output at all; Krill's own trim exists specifically to hide that
+  `\n\n` artifact, so the fix keeps `ReasoningParser.strip(_:)`'s existing
+  behavior (unchanged, all its tests still pass unmodified) and makes
+  `StreamingReasoningFilter` reproduce it exactly instead: a new leading-
+  whitespace-eat (active once, until the very first non-whitespace byte of
+  the overall stream) and a trailing-whitespace holdback (always active -
+  buffers a trailing run, releases it once real content follows, drops it
+  for good at `finish()`) wrap the existing tag-stripping state machine,
+  which is otherwise untouched. `StreamingReasoningFilter.pendingUTF8Length`
+  now folds the held-back bytes into its count, so `LogprobsAggregator`
+  (which depends on that count to attribute per-token `logprobs.content[]`
+  entries) needed no changes to its core accounting - a held-back byte just
+  looks like one more byte still sitting in the filter's own buffer. One
+  real gap this surfaced: a token whose trailing whitespace gets dropped
+  at end-of-stream while the rest of the SAME token already reached the
+  client as visible content used to still get a full-token entry (the
+  aggregator's existing "attribute the whole token as visible if it
+  overlaps the emit side at all" rule, previously only exercised by a
+  vanishingly-rare reasoning-tag-boundary split) - which broke the `bytes-
+  concat == content` invariant. Fixed by tracking each pending token's
+  `visibleRange` (the contiguous byte span of its own text confirmed
+  visible) and giving a straddling token a partial entry trimmed to that
+  range instead of its full raw bytes, keeping the invariant exact in both
+  the new whitespace case and the pre-existing reasoning-boundary case
+  (`Tests/KrillServerTests/LogprobsAggregatorTests.swift`'s
+  `testCodeWithAngleBrackets` covers this: a code token ending in `\n`).
 
 ## [0.24.0] - 2026-09-20
 
