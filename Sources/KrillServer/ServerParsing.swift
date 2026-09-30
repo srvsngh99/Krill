@@ -216,7 +216,8 @@ internal enum ServerParsing {
     /// description, parameters}}]`. Tolerant: bare `{name, description,
     /// parameters}` entries are also accepted.
     static func parseTools(from json: [String: Any]) throws -> [ServerToolSpec] {
-        guard let raw = json["tools"] else { return [] }
+        let raw = json["tools"]
+        guard !isAbsent(raw) else { return [] }
         guard let arr = raw as? [[String: Any]] else {
             throw ServerRequestError.invalidType(field: "tools", expected: "an array of tool objects")
         }
@@ -800,7 +801,7 @@ internal enum ServerParsing {
         defaultValue: Int?
     ) throws -> Int? {
         var found: (field: String, value: Int)?
-        for field in fields where json[field] != nil {
+        for field in fields where !isAbsent(json[field]) {
             // -1 means "derive the limit from the model's context" — Ollama's
             // `num_predict: -1`, and the same spelling Krill's own CLI accepts.
             // Honour it on EVERY token-limit field rather than only
@@ -834,15 +835,19 @@ internal enum ServerParsing {
     }
 
     private static func rejectUnsupportedFields(in json: [String: Any], fields: Set<String>) throws {
-        if let field = fields.sorted().first(where: { json[$0] != nil }) {
+        // An explicit `null` for an unsupported field (e.g. `"stop": null`)
+        // is not a request for that field's behavior - some client
+        // libraries serialize every unset Optional as `null` rather than
+        // omitting the key, so treating it as "present" here would 400 a
+        // client that never asked for anything unsupported.
+        if let field = fields.sorted().first(where: { !isAbsent(json[$0]) }) {
             throw ServerRequestError.unsupportedField(field)
         }
     }
 
     private static func optionsObject(from json: [String: Any]) throws -> [String: Any] {
-        guard let rawOptions = json["options"] else {
-            return [:]
-        }
+        let rawOptions = json["options"]
+        guard !isAbsent(rawOptions) else { return [:] }
         guard let options = rawOptions as? [String: Any] else {
             throw ServerRequestError.invalidType(field: "options", expected: "an object")
         }
@@ -860,7 +865,7 @@ internal enum ServerParsing {
     }
 
     private static func optionalString(_ rawValue: Any?, field: String) throws -> String? {
-        guard let rawValue else { return nil }
+        guard !isAbsent(rawValue) else { return nil }
         guard let value = rawValue as? String else {
             throw ServerRequestError.invalidType(field: field, expected: "a string")
         }
@@ -868,7 +873,7 @@ internal enum ServerParsing {
     }
 
     private static func boolValue(_ rawValue: Any?, field: String) throws -> Bool? {
-        guard let rawValue else { return nil }
+        guard !isAbsent(rawValue) else { return nil }
         if let value = rawValue as? Bool {
             return value
         }
@@ -887,7 +892,7 @@ internal enum ServerParsing {
     }
 
     private static func nonNegativeInt(_ rawValue: Any?, field: String, defaultValue: Int) throws -> Int {
-        guard rawValue != nil else { return defaultValue }
+        guard !isAbsent(rawValue) else { return defaultValue }
         let value = try intValue(rawValue, field: field)
         guard value >= 0 else {
             throw ServerRequestError.invalidValue(field: field, reason: "must be greater than or equal to 0")
@@ -917,7 +922,7 @@ internal enum ServerParsing {
     }
 
     private static func optionalUInt64(_ rawValue: Any?, field: String) throws -> UInt64? {
-        guard rawValue != nil else { return nil }
+        guard !isAbsent(rawValue) else { return nil }
         let value = try intValue(rawValue, field: field)
         guard value >= 0 else {
             throw ServerRequestError.invalidValue(field: field, reason: "must be greater than or equal to 0")
@@ -926,7 +931,7 @@ internal enum ServerParsing {
     }
 
     private static func nonNegativeFloat(_ rawValue: Any?, field: String, defaultValue: Float) throws -> Float {
-        guard rawValue != nil else { return defaultValue }
+        guard !isAbsent(rawValue) else { return defaultValue }
         let value = try floatValue(rawValue, field: field)
         guard value >= 0 else {
             throw ServerRequestError.invalidValue(field: field, reason: "must be greater than or equal to 0")
@@ -935,7 +940,7 @@ internal enum ServerParsing {
     }
 
     private static func positiveFloat(_ rawValue: Any?, field: String, defaultValue: Float) throws -> Float {
-        guard rawValue != nil else { return defaultValue }
+        guard !isAbsent(rawValue) else { return defaultValue }
         let value = try floatValue(rawValue, field: field)
         guard value > 0 else {
             throw ServerRequestError.invalidValue(field: field, reason: "must be greater than 0")
@@ -949,7 +954,7 @@ internal enum ServerParsing {
     /// documented `top_logprobs` range (docs.ollama.com/api/chat) - see
     /// docs/LOGPROBS_PLAN.md §3.1's open question, resolved here.
     private static func topLogprobsValue(_ rawValue: Any?, field: String) throws -> Int {
-        guard rawValue != nil else { return 0 }
+        guard !isAbsent(rawValue) else { return 0 }
         let value = try intValue(rawValue, field: field)
         guard value >= 0, value <= 20 else {
             throw ServerRequestError.invalidValue(field: field, reason: "must be between 0 and 20")
@@ -965,7 +970,7 @@ internal enum ServerParsing {
     /// an explicit `logprobs: 0`, which IS a request, just for zero
     /// alternates). docs/LOGPROBS_PLAN.md §3.2.
     private static func legacyCompletionsLogprobsValue(_ rawValue: Any?, field: String) throws -> Int? {
-        guard rawValue != nil else { return nil }
+        guard !isAbsent(rawValue) else { return nil }
         let value = try intValue(rawValue, field: field)
         guard value >= 0, value <= 5 else {
             throw ServerRequestError.invalidValue(field: field, reason: "must be between 0 and 5")
@@ -974,7 +979,7 @@ internal enum ServerParsing {
     }
 
     private static func topPValue(_ rawValue: Any?, field: String) throws -> Float {
-        guard rawValue != nil else { return 1.0 }
+        guard !isAbsent(rawValue) else { return 1.0 }
         let value = try floatValue(rawValue, field: field)
         guard value > 0, value <= 1 else {
             throw ServerRequestError.invalidValue(field: field, reason: "must be greater than 0 and less than or equal to 1")
@@ -1012,6 +1017,30 @@ internal enum ServerParsing {
 
     private static func isJSONBoolean(_ number: NSNumber) -> Bool {
         CFGetTypeID(number) == CFBooleanGetTypeID()
+    }
+
+    /// True when `rawValue` is either Swift's own absence of a value, OR the
+    /// JSON literal `null` (`JSONSerialization` decodes a JSON `null` into
+    /// `NSNull` - a real, non-nil object, so a plain `rawValue != nil` /
+    /// `guard let rawValue else` check does NOT catch it). Every OPTIONAL,
+    /// default-carrying field helper in this file (`boolValue`,
+    /// `optionalString`, `nonNegativeInt`, `nonNegativeFloat`,
+    /// `positiveFloat`, `optionalUInt64`, `topPValue`, `topLogprobsValue`,
+    /// `legacyCompletionsLogprobsValue`, `tokenLimit`'s per-field loop,
+    /// `optionsObject`, `parseTools`, `rejectUnsupportedFields`) treats an
+    /// explicit `null` exactly like an absent key - matching the OpenAI/
+    /// Ollama wire formats, where some client libraries serialize every
+    /// unset Optional field as a literal `null` rather than omitting the
+    /// key (review fix, 2026-09-30: `{"logprobs": null}` 400'd on every
+    /// endpoint before this). REQUIRED fields (`stringValue`, and the
+    /// `intValue`/`floatValue` primitives used directly with no wrapper)
+    /// deliberately do NOT call this - an explicit `null` for a value that
+    /// is required must still error, same as it always has (via
+    /// `invalidType` once the cast against `NSNull` fails, not
+    /// `missingField` - still a 400 either way).
+    private static func isAbsent(_ rawValue: Any?) -> Bool {
+        guard let rawValue else { return true }
+        return rawValue is NSNull
     }
 }
 

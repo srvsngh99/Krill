@@ -917,6 +917,155 @@ final class ServerTests: XCTestCase {
         }
     }
 
+    // MARK: - explicit JSON `null` == absent (review-fix, 2026-09-30)
+    //
+    // `JSONSerialization` decodes a JSON `null` as `NSNull` - a real,
+    // non-nil Swift object, NOT the same thing as the key being absent
+    // (`Any?` == `nil`). Every helper below that guarded with `rawValue !=
+    // nil` / `guard let rawValue else` was therefore blind to `NSNull`: an
+    // explicit `{"logprobs": null}` fell through to the type-cast attempt,
+    // which fails against `NSNull`, throwing `invalidType` - a 400 for a
+    // value the OpenAI/Ollama wire formats treat as "not specified, use the
+    // default", exactly the class of client-compatibility break this
+    // logprobs work exists to remove (some client libraries serialize every
+    // unset Optional field as an explicit `null` rather than omitting the
+    // key). Fixed by treating `NSNull` as absence in every OPTIONAL/
+    // default-carrying helper; REQUIRED fields (`prompt`, `messages`) still
+    // error on an explicit `null`, just as they did before.
+
+    func testOpenAIChatRequestNullLogprobsIsAbsent() throws {
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "logprobs": NSNull(),
+        ])
+        XCTAssertFalse(req.wantLogprobs)
+        XCTAssertEqual(req.topLogprobs, 0)
+    }
+
+    func testOpenAIChatRequestNullTopLogprobsIsZero() throws {
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "logprobs": true, "top_logprobs": NSNull(),
+        ])
+        XCTAssertTrue(req.wantLogprobs)
+        XCTAssertEqual(req.topLogprobs, 0)
+    }
+
+    func testOllamaChatRequestNullLogprobsIsAbsent() throws {
+        let req = try ServerParsing.ollamaChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "logprobs": NSNull(), "top_logprobs": NSNull(),
+        ])
+        XCTAssertFalse(req.wantLogprobs)
+        XCTAssertEqual(req.topLogprobs, 0)
+    }
+
+    func testOllamaGenerateRequestNullLogprobsIsAbsent() throws {
+        let req = try ServerParsing.ollamaGenerateRequest(from: [
+            "model": "m", "prompt": "hi", "stream": false,
+            "logprobs": NSNull(), "top_logprobs": NSNull(),
+        ])
+        XCTAssertFalse(req.wantLogprobs)
+        XCTAssertEqual(req.topLogprobs, 0)
+    }
+
+    func testLegacyCompletionsNullLogprobsIsAbsentNotZero() throws {
+        // Distinct from `logprobs: 0` (a real request for zero alternates) -
+        // `nil` (not requested) must still be what an explicit `null` maps to.
+        let req = try ServerParsing.openAICompletionRequest(from: [
+            "prompt": "hi", "logprobs": NSNull(),
+        ])
+        XCTAssertNil(req.logprobs)
+    }
+
+    func testOpenAIChatRequestNullStreamIsAbsent() throws {
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "stream": NSNull(),
+        ])
+        XCTAssertFalse(req.stream)
+    }
+
+    func testOpenAIChatRequestNullTemperatureTopPSeedAreAbsent() throws {
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "temperature": NSNull(), "top_p": NSNull(), "top_k": NSNull(),
+            "seed": NSNull(),
+        ])
+        XCTAssertEqual(req.sampling.temperature, 0.0, accuracy: 1e-6)
+        XCTAssertEqual(req.sampling.topP, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(req.sampling.topK, 0)
+        XCTAssertNil(req.sampling.seed)
+    }
+
+    func testOllamaSamplingOptionsNullFieldsAreAbsent() throws {
+        let opts = try ServerParsing.ollamaSamplingOptions(from: [
+            "temperature": NSNull(), "top_p": NSNull(), "repeat_penalty": NSNull(),
+        ])
+        XCTAssertEqual(opts.temperature, 0.0, accuracy: 1e-6)
+        XCTAssertEqual(opts.topP, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(opts.repetitionPenalty, 1.0, accuracy: 1e-6)
+    }
+
+    func testOpenAIChatRequestNullMaxTokensUsesDefault() throws {
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "max_tokens": NSNull(),
+        ])
+        XCTAssertEqual(req.maxTokens, TokenBudget.unlimited)
+    }
+
+    func testOllamaChatRequestNullStopFieldIsIgnoredNotRejected() throws {
+        // `stop` is in `unsupportedOpenAIChatFields` - an explicit `null`
+        // must not be treated as "the client asked for this behavior".
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "stop": NSNull(),
+        ])
+        XCTAssertEqual(req.requestedModel, "m")
+    }
+
+    func testOpenAIChatRequestNullOptionsFieldsStillRejectedIfNonNull() {
+        // Sanity: a REAL (non-null) unsupported field is still rejected -
+        // the null fix must not have disabled this check entirely.
+        XCTAssertThrowsError(try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "stop": ["\n"],
+        ])) { error in
+            XCTAssertEqual(error as? ServerRequestError, .unsupportedField("stop"))
+        }
+    }
+
+    func testOllamaChatRequestNullOptionsIsEmpty() throws {
+        let req = try ServerParsing.ollamaChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "options": NSNull(),
+        ])
+        XCTAssertEqual(req.sampling.temperature, 0.0, accuracy: 1e-6)
+    }
+
+    func testOpenAIChatRequestNullToolsIsEmpty() throws {
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": [["role": "user", "content": "hi"]],
+            "tools": NSNull(),
+        ])
+        XCTAssertTrue(req.tools.isEmpty)
+    }
+
+    func testOpenAIChatRequestNullMessagesStillErrors() {
+        // REQUIRED field: an explicit `null` must still error (unlike the
+        // optional fields above).
+        XCTAssertThrowsError(try ServerParsing.openAIChatRequest(from: [
+            "model": "m", "messages": NSNull(),
+        ]))
+    }
+
+    func testLegacyCompletionsNullPromptStillErrors() {
+        XCTAssertThrowsError(try ServerParsing.openAICompletionRequest(from: [
+            "prompt": NSNull(),
+        ]))
+    }
+
     func testChatRequestNormalizesToolResultTurns() throws {
         // assistant tool_calls + role:tool result must round-trip into the
         // [String:String] message path without a 400.
