@@ -15,7 +15,13 @@ for every qwen3_5-family model (qwen3.5-4b, Ornith-9B, Qwythos-9B,
 Qwen3.8-27B) because they route through a native VL decode runtime that
 never threaded `wantLogprobs` — see the "Verification results
 (2026-09-29)" subsection after §7's Resolutions for the root cause, the
-numeric parity re-run, and the no-slowdown re-check.
+numeric parity re-run, and the no-slowdown re-check. A 2026-09-30 follow-up
+(`feat/logprobs-ollama-completions`) closed this plan's remaining
+Phase-1-documented gap for `logprobs`/`top_logprobs`: Ollama `/api/chat` +
+`/api/generate`, and legacy `/v1/completions`'s `logprobs` (int, 0-5; NOT
+`echo`, still Phase 3) — see the "Ollama + legacy completions (2026-09-30)"
+section after §7's Verification results for the pinned wire formats and
+test evidence.
 Base branch: `main`
 Base commit: `db1a53f`
 Owner: unassigned
@@ -834,6 +840,284 @@ absent (verified above). The overhead is proportionally much larger on
 `llama-3.2-1b` because its per-step forward pass is tiny (1B params), so a
 fixed extra cost dominates; on `qwen3.5-4b`'s much heavier 4B hybrid-SSM
 forward pass the same fixed cost is nearly invisible.
+
+## Ollama + legacy completions (2026-09-30)
+
+Closes this plan's Phase-1 known gap ("Legacy `POST /v1/completions`...and
+the Ollama `/api/chat`/`/api/generate` dialects do not parse these fields
+yet") for the Ollama dialect and the legacy completions endpoint's
+`logprobs` (not `echo` — that stays Phase 3, §5.4, unchanged). Scope: server
++ parsing + formatting + tests + docs only, per the task brief for this
+follow-up; `Sources/KrillEngine`/`Sources/KrillSampler` were not touched
+(another agent's concurrent work), and none was needed — both surfaces
+reuse the exact same `InferenceEngine.generate(wantLogprobs:topLogprobs:)`
+plumbing and `LogprobsAggregator` Phase 1 already built.
+
+### Pinned wire formats (verified against primary sources before coding)
+
+**Ollama `/api/chat` + `/api/generate`** — `docs.ollama.com/api/chat`,
+`docs.ollama.com/api/generate` (WebFetch, 2026-09-30), cross-checked against
+the Go source `github.com/ollama/ollama/api/types.go` and the real `ollama`
+Python package (`pip install ollama`, version 0.6.3, installed trivially
+into `/Users/sourav/.krill/venv` — its `_types.py` matches the Go source
+exactly):
+
+- Request: `logprobs: bool`, `top_logprobs: int` (0-20) — **top-level
+  fields, NOT inside `options`** (confirmed by both the docs pages and the
+  Python client's `ChatRequest`/`GenerateRequest` field list; `options` only
+  holds sampling knobs). Ollama's docs don't state a default; Krill treats
+  absent as `false`/`0`, same as every other boolean/int field here.
+- Response, Go struct (`api/types.go`):
+  ```go
+  // ChatResponse / GenerateResponse
+  Logprobs []Logprob `json:"logprobs,omitempty"`
+
+  type TokenLogprob struct {
+      Token   string  `json:"token"`
+      Logprob float64 `json:"logprob"`
+      Bytes   []int   `json:"bytes,omitempty"`
+  }
+  type Logprob struct {
+      TokenLogprob
+      TopLogprobs []TokenLogprob `json:"top_logprobs,omitempty"`
+  }
+  ```
+  Three things this pins that the docs pages alone left ambiguous:
+  1. `logprobs` is a **top-level field of the response object** (a sibling
+     of `message`/`response`, `done`, etc.), not nested inside `message`.
+  2. **Every one of these fields is `omitempty`** — an empty `top_logprobs`
+     list is omitted per-entry, and the whole `logprobs` array is omitted
+     from the response/chunk when there's nothing to report. This is the
+     opposite of the OpenAI chat endpoint's convention (always-present
+     `logprobs: null`/`"content": []`), confirmed as deliberate by checking
+     three independent sources (docs, Go source, Python client) agreeing.
+  3. The Python client's own `TokenLogprob`/`Logprob` pydantic models
+     (`ollama/_types.py`) do NOT declare a `bytes` field at all — but
+     pydantic's default `extra="ignore"` means sending `bytes` anyway (to
+     match the real Go server) doesn't break the client; verified by an
+     actual round-trip (see Tests below) rather than assumed.
+  - Streaming placement: neither the docs nor the Go source say whether
+    `logprobs` is per-chunk or cumulative, or whether it appears on the
+    final `done: true` object. Krill's choice (documented, not guessed):
+    each NDJSON line's `logprobs` covers only the token(s) newly resolved
+    in that line (same per-chunk-not-cumulative convention as the chat SSE
+    path), and the final `done: true` line never carries `logprobs` (there
+    is nothing new to report there — any trailing held-token entries are
+    flushed onto their own preceding line first, mirroring the chat SSE
+    path's tail-chunk handling).
+
+**Legacy OpenAI `/v1/completions`** — the OpenAI Python SDK's own type
+stubs in `/Users/sourav/.krill/venv` (authoritative, matches the task
+brief's instruction to check them over the docs site):
+  - `openai/types/completion_create_params.py`: `logprobs: Optional[int]`,
+    doc comment: *"Include the log probabilities on the `logprobs` most
+    likely output tokens, as well the chosen tokens... The API will always
+    return the `logprob` of the sampled token, so there may be up to
+    `logprobs+1` elements in the response... **The maximum value for
+    `logprobs` is 5.**"* This resolves §3.2's still-open "0-5 vs 0-20"
+    question: it's **5**, a real and deliberate difference from chat's
+    `top_logprobs` (0-20), not a typo carried over from the newer endpoint.
+  - `openai/types/completion_choice.py`:
+    ```python
+    class Logprobs(BaseModel):
+        text_offset: Optional[List[int]] = None
+        token_logprobs: Optional[List[float]] = None
+        tokens: Optional[List[str]] = None
+        top_logprobs: Optional[List[Dict[str, float]]] = None
+
+    class CompletionChoice(BaseModel):
+        finish_reason: Literal["stop", "length", "content_filter"]
+        index: int
+        logprobs: Optional[Logprobs] = None
+        text: str
+    ```
+    This pins the one shape-level surprise: `top_logprobs` is a list of
+    **`{token: logprob}` STRING-KEYED DICTS**, one per generated-token
+    position — not chat's separate `{token, logprob, bytes}` object array.
+    The "`logprobs`+1" comment resolves this plan's open question about
+    whether the sampled token is folded into the same structure as the
+    alternates (yes, here — unlike chat, where it's a separate top-level
+    field of the `content[i]` entry either way).
+
+### Implementation (`Sources/KrillServer/` only)
+
+- `ServerParsing.swift`: `ServerCompletionRequest.logprobs: Int?` (nil =
+  not requested, distinct from an explicit `0`); new
+  `legacyCompletionsLogprobsValue` validator (0-5, `invalidType`/
+  `invalidValue` matching the existing pattern); removed `"logprobs"` from
+  `unsupportedOpenAICompletionFields` (`"echo"` stays rejected — Phase 3).
+  `ServerChatRequest.wantLogprobs`/`topLogprobs` (already existed for the
+  OpenAI dialect) are now also populated by `ollamaChatRequest`; new
+  `ServerGenerateRequest.wantLogprobs`/`topLogprobs`, populated by
+  `ollamaGenerateRequest`. Both Ollama parsers read the fields **top-level**
+  (never from `optionsObject(from:)`), and both apply the same
+  "`top_logprobs` silently ignored without `logprobs: true`" convention
+  Phase 1 established for the OpenAI dialect (a Krill-wide house rule now,
+  not restated per dialect in the docs).
+- `LogprobsFormatting.swift`: `ollamaLogprobEntryJSON` (strips an empty
+  `top_logprobs` key to match Go's `omitempty`) and `ollamaLogprobsArrayJSON`
+  (maps a `LogprobsAggregator`'s `entries` through it) for the Ollama shape;
+  `legacyCompletionLogprobsJSON` builds the flat `{tokens, token_logprobs,
+  top_logprobs, text_offset}` object from the same `entries` — all three
+  reuse the chat endpoint's `logprobsContentEntry`/`entries` machinery
+  unchanged, so reasoning-block exclusion, suppressed-token exclusion, and
+  `bytes` derivation (§4.2) are identical across every dialect by
+  construction, not by parallel re-implementation.
+- `Server.swift`:
+  - `handleCompletions` (`/v1/completions`): builds a `LogprobsAggregator`
+    only when `request.logprobs != nil` (same "pay nothing when off"
+    pattern as `handleNonStreamingCompletion`); the `logprobs` key is added
+    to the response ONLY in that case — never `NSNull()` — so a request
+    that never sets `logprobs` gets byte-for-byte the same response as
+    before this change existed. This endpoint has no streaming support at
+    all (`stream: true` already 400s at parse time, pre-existing and
+    unrelated to logprobs), so there is no streaming case to implement here.
+  - `handleOllamaChat` / `handleOllamaGenerate`: the streaming path's bare
+    `StreamingReasoningFilter` is replaced with a `LogprobsAggregator(...,
+    enabled: wantLogprobs)` — a pure passthrough to the same filter when
+    disabled, so the off-path emits byte-identical NDJSON lines via the
+    exact same fast manual-string-building code as before (the
+    JSONSerialization-based path only runs when `wantLogprobs` is true, a
+    genuinely new code path with no old behavior to match). The final
+    `done: true` line never carries `logprobs`; a resolved-but-empty-text
+    chunk (an empty-decode token) still gets its own line so its entries
+    aren't lost, mirroring the chat SSE tail-chunk rule. Non-streaming:
+    `response["logprobs"]` is set only when `!entries.isEmpty` (Go
+    `omitempty`, and incidentally also the simplest way to guarantee
+    byte-identity when off, since the key is never touched at all in that
+    case).
+  - `handleToolChat`: `wantLogprobs` is now `request.wantLogprobs` for
+    BOTH dialects (was `style == .openAI && request.wantLogprobs`). Ollama
+    tool-call replies **omit** `logprobs` entirely on a `tool_calls` turn
+    (the Go `omitempty` equivalent of chat's `logprobs: null`); a
+    plain-content reply (tools offered, not used) gets the real entries,
+    same rule as chat. The streaming tool-chat path needed no code change
+    for Ollama — it already re-serializes the whole assembled `response`
+    dict as one NDJSON line, so a `logprobs` key set on that dict rides
+    along automatically.
+  - `BatchScheduler.submit`'s existing `if wantLogprobs { return serial() }`
+    gate (Phase 1) applies here unchanged: Ollama/legacy-completions
+    requests route through the identical `runGenerate(...)` →
+    `engines.scheduler(for:)?.submit(wantLogprobs:topLogprobs:)` call every
+    other dialect uses, so a logprobs request on any of these three
+    endpoints was already routed to the plain decode path with no
+    endpoint-specific gating code needed — confirmed by reading
+    `BatchScheduler.swift` rather than assumed, and covered by the existing
+    (unmodified, still-passing) `BatchSchedulerTests.swift`.
+
+### Tests / verification (real numbers)
+
+**Unit** (`Tests/KrillServerTests/ServerTests.swift`,
+`ServerFormattingTests.swift`): parsing acceptance/range/type/ignored-when-
+disabled for both Ollama dialects and legacy completions (incl. confirming
+Ollama's fields are top-level, not read from `options`; `raw: true` and
+`echo: true` remain rejected exactly as before); golden-shape tests for
+`ollamaLogprobEntryJSON`/`ollamaLogprobsArrayJSON`/
+`legacyCompletionLogprobsJSON` including the `{}`-when-`logprobs:0` case and
+the "sampled token folded in, not duplicated when already a top alternate"
+case. `make test`: **1744 tests, 135 skipped, 0 failures** (includes
+`AgentSessionTests`, which this session's investigation confirmed carries a
+known ordering race under CPU contention per this repo's own memory notes —
+0 failures on this run, re-run alone if a future run shows flakes there).
+
+**Real server** (`krill serve` from this branch's release build, port
+57480, both `llama-3.2-1b` 4-bit and `qwen3.5-4b` 4-bit — the same
+qwen3_5-family model the 2026-09-29 fix targeted, confirming this follow-up
+composes cleanly with that fix), via a new reusable script,
+`tools/logprobs_ollama_completions_e2e_check.py`, plus ad hoc scripts for
+the tool-chat cases: for both models, greedy, a code-with-`<` prompt (the
+same reasoning-filter stress case Phase 1 used) —
+
+- `/v1/completions`: `tokens` joined == `text` exactly; all four parallel
+  arrays (`tokens`/`token_logprobs`/`top_logprobs`/`text_offset`) the same
+  length; `text_offset` a correct cumulative sum of each token's own
+  length; every position's `top_logprobs` dict contains the sampled token
+  at the same value as `token_logprobs[i]` and never exceeds `logprobs+1`
+  entries; a request without `logprobs` has NO `logprobs` key at all
+  (checked as key absence, not null). `logprobs: 0` end-to-end: verified
+  `top_logprobs` is `[{}]` (not omitted, not populated) with
+  `token_logprobs` still populated — llama-3.2-1b: 14 tokens; qwen3.5-4b:
+  15 tokens, both passed every check.
+- `/api/chat` and `/api/generate`, non-streaming AND streaming: `bytes`-
+  concat of every entry equals the UTF-8 bytes of the returned
+  `message.content`/`response` exactly; streamed content equals
+  non-streaming content; streamed entry count equals non-streaming entry
+  count; a request without `logprobs` has no `logprobs` key. `/api/generate`
+  with a `system` override + `logprobs: true` together: works (no
+  rejection, no crash). Both models, both endpoints, both stream modes: all
+  checks passed (llama-3.2-1b: 14 entries per endpoint; qwen3.5-4b: 15).
+- **Cross-endpoint numeric parity** (the test that actually proves these
+  three surfaces compute the SAME thing chat does, not just a
+  similarly-shaped one): for the identical single-turn prompt, the first
+  generated token's raw logprob from `/v1/completions`, `/api/chat`,
+  `/api/generate`, and `/v1/chat/completions` (reference) — **exact 0.0
+  nats difference**, all four, both models. (Getting this exact match
+  required running the `/v1/chat/completions` reference call LAST in the
+  script, after the other three had already warmed Krill's prefix cache
+  with the identical prompt — running it first/cold showed a ~7e-3 nat
+  diff, the SAME "full-prefill vs cache-hit-reforward" noise class this
+  plan's Resolutions section already documents for `mlx_lm`
+  full-sequence-vs-incremental runs, not a logprobs bug. Noted in the
+  script's own comments so a future reader doesn't mistake cache warmth
+  for correctness.)
+- **Tool-chat** (`/v1/chat/completions` and `/api/chat`, both streaming and
+  non-streaming, against `qwen3.5-4b`): `tool_choice: "required"` (OpenAI)
+  → `logprobs: null`, single SSE chunk; `tool_choice: "none"` (OpenAI) →
+  real entries. Ollama's `tool_choice` field is not parsed at all
+  (pre-existing, unrelated to logprobs — every Ollama tool request runs
+  `.auto`), so the equivalent check asserts the INVARIANT instead of
+  forcing a branch: whichever way the model goes, a `tool_calls` `done_
+  reason` OMITS `logprobs` entirely and a plain-content reply carries
+  populated entries — observed both ways across the two prompts tried, both
+  correct.
+- **OpenAI SDK round-trip**: `client.completions.create(model=...,
+  logprobs=5)` against `qwen3.5-4b` parses into the typed `Logprobs` object
+  with no SDK validation error (`tokens`, `token_logprobs`, `text_offset`,
+  and `top_logprobs: List[Dict[str, float]]` all present and correctly
+  typed); a request without `logprobs` gets `choices[0].logprobs is None`.
+  Streaming was not tested for this endpoint since Krill's `/v1/completions`
+  has no streaming support to test (pre-existing, see above) — the task's
+  "stream and non-stream" instruction does not apply here for a reason
+  unrelated to this change.
+- **`ollama` Python package**: trivially installable into
+  `/Users/sourav/.krill/venv` (`pip install ollama`, no extra deps beyond
+  what was already there) — not skipped. `ollama.Client(host=...).chat(
+  model=..., logprobs=True, top_logprobs=3)` and `.generate(...,
+  logprobs=True, top_logprobs=2)` against `qwen3.5-4b` both parse into
+  typed `Logprob`/`TokenLogprob` objects with no error; a request without
+  `logprobs` gets `response.logprobs is None`.
+- **Benchmark gate**: not re-run for this follow-up. The change adds no new
+  branch to the plain decode path's per-token hot loop (Ollama/legacy
+  completions reuse Phase 1's `LogprobsAggregator`/engine plumbing
+  unchanged); the only new code executes inside each endpoint's own
+  request-handling `Task`, gated the same `if wantLogprobs`/`if let
+  logprobsAgg` way Phase 1 already verified against the release-gate
+  benchmark for the chat endpoint. Re-run `make bench-release-gate` before
+  a release if a stricter proof is wanted.
+
+### Limits / not done
+
+- Legacy `/v1/completions` `echo` (prompt logprobs) — still Phase 3, needs
+  the prefix-cache bypass in §5.4, unrelated to this follow-up's scope.
+- Legacy `/v1/completions` streaming — does not exist in Krill at all
+  (`stream: true` already rejected before this change); not something this
+  follow-up could add without expanding scope well beyond "wire up
+  logprobs", so left alone and documented rather than silently worked
+  around.
+- Ollama `tool_choice` is not parsed at all (pre-existing gap, confirmed
+  while writing the tool-chat test above) — every Ollama tool request runs
+  under `.auto`. Not this follow-up's bug to fix; noted here since it
+  shaped how the tool-chat logprobs test had to be written (an invariant
+  check instead of a forced-branch assertion).
+- The four native VL/multimodal decode runtimes flagged as a known gap in
+  the 2026-09-29 verification section (Qwen 2.5-VL, Llama-3.2-Vision,
+  LocateAnything-3B, Muse Glimmer image requests) are unaffected by this
+  follow-up either way: they still return `logprobs.content: []`/no
+  `logprobs` key on EVERY endpoint (chat, Ollama, legacy completions) for
+  the same reason as before — their `generate...` functions never accept
+  `wantLogprobs` at all. Confirmed by re-reading, not re-tested against a
+  real checkpoint (no new regression risk introduced, since this follow-up
+  touches no engine code).
 
 ## 8. Registry: add Qwen3.5-4B (separate, small work item)
 

@@ -730,7 +730,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         contextLimit: Int? = nil,
         promptTemplateOverride: String? = nil,
         format: OutputFormat? = nil,
-        imagesData: [Data] = []
+        imagesData: [Data] = [],
+        wantLogprobs: Bool = false,
+        topLogprobs: Int = 0
     ) async -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
         var messages: [[String: String]] = []
         if let sys = systemPrompt {
@@ -742,7 +744,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
             imageData: imageData, audioData: audioData,
             contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
-            format: format, imagesData: imagesData)
+            format: format, imagesData: imagesData,
+            wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
     }
 
     /// Apply a created model's Modelfile `PARAMETER` overrides (WS-C) as
@@ -1369,14 +1372,14 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 imagesData: imagesData,
                 wantLogprobs: request.wantLogprobs, topLogprobs: request.topLogprobs)
 
-            // logprobs (Phase 1, OpenAI dialect only - docs/LOGPROBS_PLAN.md
-            // §3.3's tool-call note): collected the same way as the no-tools
-            // path, alongside (not instead of) the whole-string
-            // `ReasoningParser.strip` this handler already uses for
-            // tool-call extraction below - `full` (used for tool-call
-            // parsing) is untouched; the aggregator's own filtered text is
-            // used only to decide which tokens' entries survive.
-            let wantLogprobs = style == .openAI && request.wantLogprobs
+            // logprobs (docs/LOGPROBS_PLAN.md §3.3's tool-call note, extended
+            // to the Ollama dialect in the 2026-09-30 follow-up): collected
+            // the same way as the no-tools path, alongside (not instead of)
+            // the whole-string `ReasoningParser.strip` this handler already
+            // uses for tool-call extraction below - `full` (used for
+            // tool-call parsing) is untouched; the aggregator's own filtered
+            // text is used only to decide which tokens' entries survive.
+            let wantLogprobs = request.wantLogprobs
             let logprobsAgg = wantLogprobs ? LogprobsAggregator(engine: eng, enabled: true) : nil
             var full = ""
             for await event in tokenStream {
@@ -1476,7 +1479,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 if !calls.isEmpty {
                     message["tool_calls"] = ToolCalling.ollamaToolCalls(calls)
                 }
-                response = [
+                var ollamaResponse: [String: Any] = [
                     "model": modelName,
                     "message": message,
                     "done": true,
@@ -1488,6 +1491,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "prompt_eval_count": stats?.promptTokens ?? 0,
                     "eval_count": stats?.generatedTokens ?? 0,
                 ]
+                // Same rule as the OpenAI dialect above: a tool_calls reply
+                // never gets entries (the raw pre-extraction text is not
+                // what `message.content` shows); a plain-content reply
+                // (tools offered, not used) does, omitted (Go `omitempty`)
+                // when empty.
+                if wantLogprobs, calls.isEmpty, let logprobsAgg, !logprobsAgg.entries.isEmpty {
+                    ollamaResponse["logprobs"] = ollamaLogprobsArrayJSON(entries: logprobsAgg.entries)
+                }
+                response = ollamaResponse
             }
 
             if !wantStream {
@@ -1854,6 +1866,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         nonisolated(unsafe) let ctx = context
         let eng = engine
 
+        let wantLogprobs = request.logprobs != nil
+        let topLogprobs = request.logprobs ?? 0
+
         Task {
             // WS-E: /v1/completions is engine-touching too - serialize it.
             guard await self.enterQueueOr503(ctx, eventLoop, retaining: eng) else { return }
@@ -1862,26 +1877,53 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 prompt: request.prompt,
                 params: request.sampling.samplingParams,
                 maxTokens: request.maxTokens,
-                promptTemplateOverride: modelTemplateOverride())
+                promptTemplateOverride: modelTemplateOverride(),
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
 
+            // logprobs (2026-09-30 follow-up, docs/LOGPROBS_PLAN.md §3.2):
+            // built the same way as `handleNonStreamingCompletion` - the
+            // aggregator is only constructed (and only pays the incremental
+            // reasoning-filter cost) on the logprobs path, so a request that
+            // never sets `logprobs` is byte-for-byte unchanged from before
+            // this field existed (same whole-string accumulate-then-strip as
+            // always).
+            let logprobsAgg = wantLogprobs ? LogprobsAggregator(engine: eng, enabled: true) : nil
             var fullText = ""
             for await event in tokenStream {
                 if event.isEnd { break }
-                fullText += event.text
+                if let logprobsAgg {
+                    fullText += logprobsAgg.consume(event)
+                } else {
+                    fullText += event.text
+                }
             }
-            // /v1/completions has no thinking field; just drop the block.
+            if let logprobsAgg { fullText += logprobsAgg.finish() }
+            // /v1/completions has no thinking field; just drop the block. On
+            // the logprobs path `fullText` is already reasoning-free (the
+            // aggregator filtered it token-by-token so its entries line up
+            // with the returned text), so this is then a no-op pass-through,
+            // same pattern as `handleNonStreamingCompletion`.
             fullText = ReasoningParser.strip(fullText).visible
 
             let stats = getStats()
+            var choice: [String: Any] = [
+                "text": fullText,
+                "index": 0,
+                "finish_reason": stats?.hitTokenLimit == true ? "length" : "stop"
+            ]
+            // The `logprobs` key is added ONLY when the request asked for it
+            // (`request.logprobs != nil`) - unlike the chat endpoint's
+            // always-present `logprobs: null`, a request that never sets
+            // `logprobs` here must get the EXACT SAME response bytes as
+            // before this field existed (no new key at all).
+            if let logprobsAgg {
+                choice["logprobs"] = legacyCompletionLogprobsJSON(entries: logprobsAgg.entries)
+            }
             let response: [String: Any] = [
                 "id": "cmpl-\(UUID().uuidString.prefix(8))",
                 "object": "text_completion",
                 "created": Int(Date().timeIntervalSince1970),
-                "choices": [[
-                    "text": fullText,
-                    "index": 0,
-                    "finish_reason": stats?.hitTokenLimit == true ? "length" : "stop"
-                ]],
+                "choices": [choice],
                 "usage": [
                     "prompt_tokens": stats?.promptTokens ?? 0,
                     "completion_tokens": stats?.generatedTokens ?? 0,
@@ -2039,6 +2081,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let requestStart = CFAbsoluteTimeGetCurrent()
         let wantStream = request.stream
+        let wantLogprobs = request.wantLogprobs
+        let topLogprobs = request.topLogprobs
 
         let genMessages = StructuredOutput.injectFormatSystem(
             into: applyModelSystemOverride(request.messages),
@@ -2075,12 +2119,17 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 contextLimit: ocCtx,
                 promptTemplateOverride: modelTemplateOverride(),
                 format: StructuredOutput.engineFormat(for: respFormat),
-                imagesData: imagesData)
+                imagesData: imagesData,
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
 
             if request.stream {
                 var firstTokenTime: Double?
                 var generatedCount = 0
-                let reasoningFilter = StreamingReasoningFilter()
+                // `LogprobsAggregator` is a pure passthrough (identical to a
+                // bare `StreamingReasoningFilter`) when `wantLogprobs` is
+                // false, so the off-path below is byte-for-byte unchanged -
+                // docs/LOGPROBS_PLAN.md's "2026-09-30 follow-up" section.
+                let logprobsAgg = LogprobsAggregator(engine: eng, enabled: wantLogprobs)
                 for await event in tokenStream {
                     if !event.isEnd && firstTokenTime == nil {
                         firstTokenTime = CFAbsoluteTimeGetCurrent()
@@ -2088,13 +2137,28 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     if !event.isEnd { generatedCount += 1 }
 
                     if event.isEnd {
-                        let tail = reasoningFilter.finish()
-                        if !tail.isEmpty {
-                            let escaped = escapeJSON(tail)
-                            let line = "{\"model\":\"\(modelName)\",\"message\":{\"role\":\"assistant\",\"content\":\"\(escaped)\"},\"done\":false}\n"
-                            var tbuf = ByteBufferAllocator().buffer(capacity: line.utf8.count)
-                            tbuf.writeString(line)
-                            self.writeOnLoop(ctx, .body(.byteBuffer(tbuf)), flush: true)
+                        let tailEntryCountBefore = logprobsAgg.entries.count
+                        let tail = logprobsAgg.finish()
+                        let tailEntries = wantLogprobs
+                            ? Array(logprobsAgg.entries[tailEntryCountBefore...]) : []
+                        if !tail.isEmpty || !tailEntries.isEmpty {
+                            if wantLogprobs {
+                                var chunk: [String: Any] = [
+                                    "model": modelName,
+                                    "message": ["role": "assistant", "content": tail],
+                                    "done": false,
+                                ]
+                                if !tailEntries.isEmpty {
+                                    chunk["logprobs"] = ollamaLogprobsArrayJSON(entries: tailEntries)
+                                }
+                                self.writeNDJSON(ctx, chunk)
+                            } else {
+                                let escaped = escapeJSON(tail)
+                                let line = "{\"model\":\"\(modelName)\",\"message\":{\"role\":\"assistant\",\"content\":\"\(escaped)\"},\"done\":false}\n"
+                                var tbuf = ByteBufferAllocator().buffer(capacity: line.utf8.count)
+                                tbuf.writeString(line)
+                                self.writeOnLoop(ctx, .body(.byteBuffer(tbuf)), flush: true)
+                            }
                         }
                         let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
                         let stats = getStats()
@@ -2122,26 +2186,53 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         break
                     }
 
-                    let emit = reasoningFilter.consume(event.text)
-                    if emit.isEmpty { continue }
-                    // Fast path: build JSON string directly instead of JSONSerialization
-                    let escaped = escapeJSON(emit)
-                    let line = "{\"model\":\"\(modelName)\",\"message\":{\"role\":\"assistant\",\"content\":\"\(escaped)\"},\"done\":false}\n"
-                    var buf = ByteBufferAllocator().buffer(capacity: line.utf8.count)
-                    buf.writeString(line)
-                    // Fix 4: dispatch writes onto the event loop.
-                    self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
+                    let entryCountBefore = logprobsAgg.entries.count
+                    let emit = logprobsAgg.consume(event)
+                    let newEntries = wantLogprobs
+                        ? Array(logprobsAgg.entries[entryCountBefore...]) : []
+                    if emit.isEmpty && newEntries.isEmpty { continue }
+                    if wantLogprobs {
+                        var chunk: [String: Any] = [
+                            "model": modelName,
+                            "message": ["role": "assistant", "content": emit],
+                            "done": false,
+                        ]
+                        if !newEntries.isEmpty {
+                            chunk["logprobs"] = ollamaLogprobsArrayJSON(entries: newEntries)
+                        }
+                        self.writeNDJSON(ctx, chunk)
+                    } else {
+                        // Fast path: build JSON string directly instead of JSONSerialization
+                        let escaped = escapeJSON(emit)
+                        let line = "{\"model\":\"\(modelName)\",\"message\":{\"role\":\"assistant\",\"content\":\"\(escaped)\"},\"done\":false}\n"
+                        var buf = ByteBufferAllocator().buffer(capacity: line.utf8.count)
+                        buf.writeString(line)
+                        // Fix 4: dispatch writes onto the event loop.
+                        self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
+                    }
                 }
                 self.writeOnLoop(ctx, .end(nil), flush: true)
             } else {
+                // logprobsAgg is built (and driven) ONLY on the logprobs
+                // path - the plain path below is untouched from before this
+                // feature existed, so a request that doesn't ask for
+                // logprobs never pays for or risks the incremental filter.
+                let logprobsAgg = wantLogprobs ? LogprobsAggregator(engine: eng, enabled: true) : nil
                 var fullContent = ""
                 for await event in tokenStream {
                     if event.isEnd { break }
-                    fullContent += event.text
+                    if let logprobsAgg {
+                        fullContent += logprobsAgg.consume(event)
+                    } else {
+                        fullContent += event.text
+                    }
                 }
+                if let logprobsAgg { fullContent += logprobsAgg.finish() }
                 // Strip <think>/<thinking> before structured-output
                 // coercion so Qwen 3 (which opens a reasoning block
-                // by default) does not poison schema validation.
+                // by default) does not poison schema validation. On the
+                // logprobs path `fullContent` is already reasoning-free, so
+                // this is then a no-op pass-through.
                 fullContent = ReasoningParser.strip(fullContent).visible
                 fullContent = StructuredOutput.coerce(fullContent, format: respFormat)
 
@@ -2149,7 +2240,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 let stats = getStats()
                 let prefillNs = Int64((stats?.prefillTime ?? 0) * 1_000_000_000)
                 let decodeNs = Int64((stats?.decodeTime ?? 0) * 1_000_000_000)
-                let response: [String: Any] = [
+                var response: [String: Any] = [
                     "model": modelName,
                     "message": ["role": "assistant", "content": fullContent],
                     "done": true,
@@ -2163,6 +2254,13 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "eval_count": stats?.generatedTokens ?? 0,
                     "eval_duration": decodeNs,
                 ]
+                // Go's `omitempty`: the key is present only when there is at
+                // least one entry (matches the real Ollama server, and keeps
+                // a logprobs-off/zero-token response byte-for-byte the same
+                // as before this field existed).
+                if let logprobsAgg, !logprobsAgg.entries.isEmpty {
+                    response["logprobs"] = ollamaLogprobsArrayJSON(entries: logprobsAgg.entries)
+                }
                 self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
             }
         }
@@ -2241,6 +2339,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let requestStart = CFAbsoluteTimeGetCurrent()
         let wantStream = request.stream
+        let wantLogprobs = request.wantLogprobs
+        let topLogprobs = request.topLogprobs
 
         let respFormat = request.responseFormat
         let genSystem: String? = respFormat.map { fmt in
@@ -2277,12 +2377,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 contextLimit: ogCtx,
                 promptTemplateOverride: modelTemplateOverride(),
                 format: StructuredOutput.engineFormat(for: respFormat),
-                imagesData: imagesData)
+                imagesData: imagesData,
+                wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
 
             if request.stream {
                 var firstTokenTime: Double?
                 var generatedCount = 0
-                let reasoningFilter = StreamingReasoningFilter()
+                // Pure passthrough when `wantLogprobs` is false - see the
+                // matching comment in `handleOllamaChat`.
+                let logprobsAgg = LogprobsAggregator(engine: eng, enabled: wantLogprobs)
                 for await event in tokenStream {
                     if !event.isEnd && firstTokenTime == nil {
                         firstTokenTime = CFAbsoluteTimeGetCurrent()
@@ -2290,13 +2393,28 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     if !event.isEnd { generatedCount += 1 }
 
                     if event.isEnd {
-                        let tail = reasoningFilter.finish()
-                        if !tail.isEmpty {
-                            let escaped = escapeJSON(tail)
-                            let line = "{\"model\":\"\(modelName)\",\"response\":\"\(escaped)\",\"done\":false}\n"
-                            var tbuf = ByteBufferAllocator().buffer(capacity: line.utf8.count)
-                            tbuf.writeString(line)
-                            self.writeOnLoop(ctx, .body(.byteBuffer(tbuf)), flush: true)
+                        let tailEntryCountBefore = logprobsAgg.entries.count
+                        let tail = logprobsAgg.finish()
+                        let tailEntries = wantLogprobs
+                            ? Array(logprobsAgg.entries[tailEntryCountBefore...]) : []
+                        if !tail.isEmpty || !tailEntries.isEmpty {
+                            if wantLogprobs {
+                                var chunk: [String: Any] = [
+                                    "model": modelName,
+                                    "response": tail,
+                                    "done": false,
+                                ]
+                                if !tailEntries.isEmpty {
+                                    chunk["logprobs"] = ollamaLogprobsArrayJSON(entries: tailEntries)
+                                }
+                                self.writeNDJSON(ctx, chunk)
+                            } else {
+                                let escaped = escapeJSON(tail)
+                                let line = "{\"model\":\"\(modelName)\",\"response\":\"\(escaped)\",\"done\":false}\n"
+                                var tbuf = ByteBufferAllocator().buffer(capacity: line.utf8.count)
+                                tbuf.writeString(line)
+                                self.writeOnLoop(ctx, .body(.byteBuffer(tbuf)), flush: true)
+                            }
                         }
                         // Final chunk with Ollama-compatible timing fields
                         let totalNs = Int64((CFAbsoluteTimeGetCurrent() - requestStart) * 1_000_000_000)
@@ -2325,24 +2443,46 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         break
                     }
 
-                    let emit = reasoningFilter.consume(event.text)
-                    if emit.isEmpty { continue }
-                    // Fast path: build JSON string directly instead of JSONSerialization
-                    let escaped = escapeJSON(emit)
-                    let line = "{\"model\":\"\(modelName)\",\"response\":\"\(escaped)\",\"done\":false}\n"
-                    var buf = ByteBufferAllocator().buffer(capacity: line.utf8.count)
-                    buf.writeString(line)
-                    self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
+                    let entryCountBefore = logprobsAgg.entries.count
+                    let emit = logprobsAgg.consume(event)
+                    let newEntries = wantLogprobs
+                        ? Array(logprobsAgg.entries[entryCountBefore...]) : []
+                    if emit.isEmpty && newEntries.isEmpty { continue }
+                    if wantLogprobs {
+                        var chunk: [String: Any] = [
+                            "model": modelName,
+                            "response": emit,
+                            "done": false,
+                        ]
+                        if !newEntries.isEmpty {
+                            chunk["logprobs"] = ollamaLogprobsArrayJSON(entries: newEntries)
+                        }
+                        self.writeNDJSON(ctx, chunk)
+                    } else {
+                        // Fast path: build JSON string directly instead of JSONSerialization
+                        let escaped = escapeJSON(emit)
+                        let line = "{\"model\":\"\(modelName)\",\"response\":\"\(escaped)\",\"done\":false}\n"
+                        var buf = ByteBufferAllocator().buffer(capacity: line.utf8.count)
+                        buf.writeString(line)
+                        self.writeOnLoop(ctx, .body(.byteBuffer(buf)), flush: true)
+                    }
                 }
                 self.writeOnLoop(ctx, .end(nil), flush: true)
             } else {
+                let logprobsAgg = wantLogprobs ? LogprobsAggregator(engine: eng, enabled: true) : nil
                 var fullResponse = ""
                 for await event in tokenStream {
                     if event.isEnd { break }
-                    fullResponse += event.text
+                    if let logprobsAgg {
+                        fullResponse += logprobsAgg.consume(event)
+                    } else {
+                        fullResponse += event.text
+                    }
                 }
+                if let logprobsAgg { fullResponse += logprobsAgg.finish() }
                 // Strip <think>/<thinking> before structured-output
-                // coercion (mirrors the /api/chat path).
+                // coercion (mirrors the /api/chat path). Already
+                // reasoning-free on the logprobs path, so a no-op there.
                 fullResponse = ReasoningParser.strip(fullResponse).visible
                 fullResponse = StructuredOutput.coerce(fullResponse, format: respFormat)
 
@@ -2350,7 +2490,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 let stats = getStats()
                 let prefillNs = Int64((stats?.prefillTime ?? 0) * 1_000_000_000)
                 let decodeNs = Int64((stats?.decodeTime ?? 0) * 1_000_000_000)
-                let response: [String: Any] = [
+                var response: [String: Any] = [
                     "model": modelName,
                     "response": fullResponse,
                     "done": true,
@@ -2364,6 +2504,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     "eval_count": stats?.generatedTokens ?? 0,
                     "eval_duration": decodeNs,
                 ]
+                if let logprobsAgg, !logprobsAgg.entries.isEmpty {
+                    response["logprobs"] = ollamaLogprobsArrayJSON(entries: logprobsAgg.entries)
+                }
                 self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok, body: response)
             }
         }

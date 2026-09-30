@@ -283,3 +283,112 @@ final class LogprobsAggregator {
 func logprobsChoiceJSON(content: [[String: Any]]) -> [String: Any] {
     ["content": content]
 }
+
+// MARK: - Ollama `/api/chat` + `/api/generate` (2026-09-30 follow-up)
+//
+// Ollama's own wire shape (docs.ollama.com/api/chat, api/generate; confirmed
+// against the Go source `api/types.go`) copies OpenAI's per-token
+// `{token, logprob, bytes, top_logprobs}` shape almost exactly - close
+// enough that `logprobsContentEntry` above is reused as-is for the per-token
+// object. The one real difference: every Ollama field uses Go's
+// `json:"...,omitempty"` tag, so an EMPTY `top_logprobs` list is OMITTED
+// from a Logprob object (Go: `TopLogprobs []TokenLogprob
+// json:"top_logprobs,omitempty"`), never sent as `[]` the way OpenAI's chat
+// endpoint always does (that shape is a required, non-optional list per the
+// OpenAI SDK's own response model - see the Resolutions section of
+// docs/LOGPROBS_PLAN.md). This function strips that key when empty so the
+// two dialects' conventions do not bleed into each other.
+
+/// Convert one `logprobsContentEntry(...)`-shaped dictionary into Ollama's
+/// own convention: drop `top_logprobs` entirely when it is an empty array
+/// (Go `omitempty`), instead of keeping it as `[]`.
+func ollamaLogprobEntryJSON(_ entry: [String: Any]) -> [String: Any] {
+    var e = entry
+    if let alts = e["top_logprobs"] as? [[String: Any]], alts.isEmpty {
+        e.removeValue(forKey: "top_logprobs")
+    }
+    return e
+}
+
+/// The full top-level `logprobs` array for one Ollama response object
+/// (`ChatResponse.Logprobs` / `GenerateResponse.Logprobs`), built from a
+/// `LogprobsAggregator`'s `entries`. Ollama's `logprobs` field is itself
+/// `omitempty` - callers only set this key on the response/chunk when the
+/// result is non-empty, otherwise the key must be left out entirely (this
+/// function does not decide that - it just formats the array).
+func ollamaLogprobsArrayJSON(entries: [[String: Any]]) -> [[String: Any]] {
+    entries.map(ollamaLogprobEntryJSON)
+}
+
+// MARK: - Legacy OpenAI `/v1/completions` (2026-09-30 follow-up)
+//
+// The legacy completions endpoint predates the chat endpoint's
+// `content[]`-array shape and uses an older, flatter, four-parallel-arrays
+// response (confirmed against the OpenAI Python SDK's
+// `openai/types/completion_choice.py`: `Logprobs.{tokens, token_logprobs,
+// top_logprobs, text_offset}`, all `Optional`) - a materially different wire
+// shape from chat's, not just a renaming. `top_logprobs` here is a list of
+// STRING-KEYED DICTS (`token -> logprob`), one dict per generated-token
+// position, NOT chat's separate `{token, logprob, bytes}` object array.
+
+/// Build the legacy `/v1/completions` `choices[].logprobs` object from a
+/// `LogprobsAggregator`'s per-token `content[]`-shaped `entries` (the same
+/// entries chat/Ollama use - reused here, then reshaped). docs/LOGPROBS_
+/// PLAN.md §3.2.
+///
+/// - `tokens[i]` / `token_logprobs[i]`: the sampled token's own decoded
+///   string and raw logprob, in generation order - always present for every
+///   entry, matching "the API will always return the logprob of the sampled
+///   token" (`completion_create_params.py`'s doc comment for `logprobs`).
+/// - `top_logprobs[i]`: a `{token: logprob}` dict of the position's top-N
+///   alternates (N = the request's `logprobs` value). Per that same doc
+///   comment ("there may be up to `logprobs+1` elements"), the sampled
+///   token is folded into this SAME dict when it is not already one of the
+///   alternates - so the dict has at most `logprobs+1` entries, never fewer
+///   than the true top-N found. When the request's `logprobs` was `0`
+///   (sampled-token-only, no alternates requested), `entries[i]` carries no
+///   alternates at all and this dict is `{}` for that position - the
+///   sampled token's own logprob is NOT duplicated into an otherwise-empty
+///   dict, since `logprobs: 0` explicitly asked for none.
+/// - `text_offset[i]`: the character offset (Unicode scalar count, matching
+///   Python's code-point-based string indexing that the real API's
+///   `text_offset` is defined against) of `tokens[i]`'s first character
+///   within the returned completion TEXT (not prompt+completion - this
+///   endpoint has no `echo` support yet, Phase 3, so there is no prompt
+///   prefix to offset past).
+func legacyCompletionLogprobsJSON(entries: [[String: Any]]) -> [String: Any] {
+    var tokens: [String] = []
+    var tokenLogprobs: [Any] = []
+    var topLogprobsList: [[String: Any]] = []
+    var textOffset: [Int] = []
+    var offset = 0
+    for entry in entries {
+        let token = entry["token"] as? String ?? ""
+        let logprob = entry["logprob"] ?? 0
+        tokens.append(token)
+        tokenLogprobs.append(logprob)
+        textOffset.append(offset)
+        offset += token.unicodeScalars.count
+
+        var dict: [String: Any] = [:]
+        let alternates = entry["top_logprobs"] as? [[String: Any]] ?? []
+        for alt in alternates {
+            guard let altToken = alt["token"] as? String else { continue }
+            dict[altToken] = alt["logprob"] ?? 0
+        }
+        // "Up to logprobs+1 elements": fold the sampled token in when it
+        // wasn't already one of the alternates - but ONLY when alternates
+        // were actually requested (`alternates` non-empty). A `logprobs: 0`
+        // request must get `{}`, not `{token: logprob}` for every position.
+        if !alternates.isEmpty, dict[token] == nil {
+            dict[token] = logprob
+        }
+        topLogprobsList.append(dict)
+    }
+    return [
+        "tokens": tokens,
+        "token_logprobs": tokenLogprobs,
+        "top_logprobs": topLogprobsList,
+        "text_offset": textOffset,
+    ]
+}

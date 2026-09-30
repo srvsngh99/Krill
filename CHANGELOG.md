@@ -40,6 +40,37 @@ reverse chronological order. Versioning follows
   plain decode path). Known Phase 1 limits: legacy `/v1/completions` and
   the Ollama `/api/chat`/`/api/generate` dialects don't parse `logprobs`
   yet; a `tool_calls` reply always reports `"logprobs": null`.
+- **`logprobs` / `top_logprobs` on Ollama `/api/chat` + `/api/generate`, and
+  legacy `logprobs` on `POST /v1/completions`** (2026-09-30 follow-up,
+  closing the Phase 1 gap above — see `docs/LOGPROBS_PLAN.md`'s new
+  "Ollama + legacy completions" section). Wire shapes are dialect-exact, not
+  a copy of the chat endpoint's: Ollama's top-level `logprobs: [{token,
+  logprob, bytes, top_logprobs}]` array (per `docs.ollama.com` + the
+  `ollama` Go source, `top_logprobs` and the whole array omitted — not
+  null — when empty, matching Go's `omitempty`), and the legacy completions
+  endpoint's older flat `{tokens, token_logprobs, top_logprobs, text_offset}`
+  shape (`top_logprobs` as `token -> logprob` dicts, per the OpenAI Python
+  SDK's `completion_choice.py`) with its own, smaller `logprobs` range
+  (0-5, not chat's 0-20 — confirmed against the SDK's
+  `completion_create_params.py`). Both reuse the same `LogprobsAggregator`
+  as chat, so reasoning-block/suppressed-token exclusion and byte-fallback
+  handling are identical everywhere. A request that never sets `logprobs`
+  gets byte-for-byte the same response as before this change (Ollama: no
+  key at all; legacy completions: no key at all — unlike chat's
+  always-present `logprobs: null`, since neither dialect's own convention
+  nor the "no regression" requirement here calls for one). Tool-call
+  replies: Ollama omits `logprobs` entirely on a `tool_calls` turn (same
+  rule as chat's `null`). Verified against a real `krill serve` (both
+  `llama-3.2-1b` and `qwen3.5-4b`) with the OpenAI Python SDK
+  (`client.completions.create(logprobs=5)`) and the real `ollama` Python
+  package (`ollama.Client(...).chat(logprobs=True)` /
+  `.generate(logprobs=True)`), including an exact (0.0 nats) cross-endpoint
+  parity check: the same prompt's first-token logprob agrees identically
+  across `/v1/completions`, `/api/chat`, `/api/generate`, and
+  `/v1/chat/completions` (same engine, same plain decode path). Legacy
+  `/v1/completions` streaming and `echo` (prompt logprobs) remain out of
+  scope — the endpoint has no streaming support at all in Krill today
+  (pre-existing, unrelated to logprobs), and `echo` is still Phase 3.
 
 ### Fixed
 
