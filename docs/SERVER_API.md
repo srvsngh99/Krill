@@ -453,6 +453,51 @@ curl http://127.0.0.1:57455/v1/completions -d '{
 }'
 ```
 
+## Thinking
+
+Thinking (the reasoning channel some checkpoints expose, e.g. Qwen3/
+qwen3.5) can only be set server-wide at start time via `KRILL_ENABLE_THINKING`
+— a single request can override that default either way, on
+`/v1/chat/completions` and both Ollama dialects:
+
+- OpenAI dialect (the vLLM/SGLang convention): `chat_template_kwargs:
+  {"enable_thinking": true|false}`.
+- Ollama dialect (`docs.ollama.com/api/chat`): top-level `think: true|false`
+  on `/api/chat` and `/api/generate`. Ollama's own schema also allows a
+  model-defined STRING level for models that expose more than on/off — Krill
+  has no such per-model mapping to invent, so a string `think` is rejected
+  with a 400, not guessed at.
+
+An explicit `null` (either field, or the whole `chat_template_kwargs`
+object) means "use the server default" — the same convention every optional
+field has followed since PR #321. Krill does not surface the raw `<think>`
+trace in ANY response today (the reasoning filter always strips it before
+the client sees it), so `think: true` does not add an Ollama
+`message.thinking` field — that is existing, unrelated behavior this
+feature does not change, not a gap in the `think` implementation.
+
+`reasoning_effort` (OpenAI's top-level field, chat endpoint only) is also
+accepted, but ONLY the three levels Krill's `KRILL_REASONING_EFFORT` env var
+already maps (`xhigh`/`medium`/`low`, on Qwen3.8-class checkpoints that
+expose the template variable) — an unrecognized value, including OpenAI's
+own `"high"`/`"minimal"` (which Krill has no mapping for), is silently
+ignored rather than erroring or guessed at, exactly like an unrecognized
+`KRILL_REASONING_EFFORT` env value is today.
+
+```bash
+curl http://127.0.0.1:57455/v1/chat/completions -d '{
+  "model": "qwen3.5-4b",
+  "messages": [{"role": "user", "content": "Hello"}],
+  "chat_template_kwargs": {"enable_thinking": false}
+}'
+
+curl http://127.0.0.1:57455/api/chat -d '{
+  "model": "qwen3.5-4b",
+  "messages": [{"role": "user", "content": "Hello"}],
+  "think": true
+}'
+```
+
 ## Model Lifecycle (keep-alive)
 
 Requests accept `keep_alive`: a duration string (`"5m"`, `"1h30m"`), an

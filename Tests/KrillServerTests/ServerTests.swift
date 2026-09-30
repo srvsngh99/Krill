@@ -976,6 +976,132 @@ final class ServerTests: XCTestCase {
         }
     }
 
+    // MARK: - per-request thinking switch (enable_thinking / think / reasoning_effort)
+
+    func testOpenAIChatRequestParsesChatTemplateKwargsEnableThinking() throws {
+        let onReq = try ServerParsing.openAIChatRequest(from: [
+            "messages": [["role": "user", "content": "hi"]],
+            "chat_template_kwargs": ["enable_thinking": true],
+        ])
+        XCTAssertEqual(onReq.enableThinking, true)
+
+        let offReq = try ServerParsing.openAIChatRequest(from: [
+            "messages": [["role": "user", "content": "hi"]],
+            "chat_template_kwargs": ["enable_thinking": false],
+        ])
+        XCTAssertEqual(offReq.enableThinking, false)
+    }
+
+    func testOpenAIChatRequestEnableThinkingDefaultsNil() throws {
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "messages": [["role": "user", "content": "hi"]],
+        ])
+        XCTAssertNil(req.enableThinking)
+    }
+
+    func testOpenAIChatRequestExplicitNullChatTemplateKwargsMeansDefault() throws {
+        // Whole object null, and just the inner key null - both mean "use
+        // the default", the same convention every other optional field has
+        // followed since #321.
+        let wholeNull = try ServerParsing.openAIChatRequest(from: [
+            "messages": [["role": "user", "content": "hi"]],
+            "chat_template_kwargs": NSNull(),
+        ])
+        XCTAssertNil(wholeNull.enableThinking)
+
+        let innerNull = try ServerParsing.openAIChatRequest(from: [
+            "messages": [["role": "user", "content": "hi"]],
+            "chat_template_kwargs": ["enable_thinking": NSNull()],
+        ])
+        XCTAssertNil(innerNull.enableThinking)
+    }
+
+    func testOpenAIChatRequestRejectsNonObjectChatTemplateKwargs() {
+        XCTAssertThrowsError(try ServerParsing.openAIChatRequest(from: [
+            "messages": [["role": "user", "content": "hi"]],
+            "chat_template_kwargs": "oops",
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidType(field: "chat_template_kwargs", expected: "an object")
+            )
+        }
+    }
+
+    func testOpenAIChatRequestRejectsNonBoolEnableThinking() {
+        XCTAssertThrowsError(try ServerParsing.openAIChatRequest(from: [
+            "messages": [["role": "user", "content": "hi"]],
+            "chat_template_kwargs": ["enable_thinking": "yes"],
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidType(
+                    field: "chat_template_kwargs.enable_thinking", expected: "a boolean")
+            )
+        }
+    }
+
+    func testOpenAIChatRequestParsesReasoningEffortPassthrough() throws {
+        let req = try ServerParsing.openAIChatRequest(from: [
+            "messages": [["role": "user", "content": "hi"]],
+            "reasoning_effort": "low",
+        ])
+        XCTAssertEqual(req.reasoningEffort, "low")
+    }
+
+    func testOpenAIChatRequestRejectsNonStringReasoningEffort() {
+        XCTAssertThrowsError(try ServerParsing.openAIChatRequest(from: [
+            "messages": [["role": "user", "content": "hi"]],
+            "reasoning_effort": 5,
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidType(field: "reasoning_effort", expected: "a string")
+            )
+        }
+    }
+
+    func testOllamaChatRequestParsesThink() throws {
+        let onReq = try ServerParsing.ollamaChatRequest(from: [
+            "messages": [["role": "user", "content": "hi"]], "think": true,
+        ])
+        XCTAssertEqual(onReq.enableThinking, true)
+
+        let offReq = try ServerParsing.ollamaChatRequest(from: [
+            "messages": [["role": "user", "content": "hi"]], "think": false,
+        ])
+        XCTAssertEqual(offReq.enableThinking, false)
+
+        let absent = try ServerParsing.ollamaChatRequest(from: [
+            "messages": [["role": "user", "content": "hi"]],
+        ])
+        XCTAssertNil(absent.enableThinking)
+    }
+
+    func testOllamaChatRequestRejectsStringThink() {
+        // Ollama's own schema allows a model-defined STRING level; Krill has
+        // no such per-model mapping to invent, so a string is rejected
+        // rather than silently guessed at.
+        XCTAssertThrowsError(try ServerParsing.ollamaChatRequest(from: [
+            "messages": [["role": "user", "content": "hi"]], "think": "low",
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerRequestError,
+                .invalidType(field: "think", expected: "a boolean")
+            )
+        }
+    }
+
+    func testOllamaGenerateRequestParsesThink() throws {
+        let onReq = try ServerParsing.ollamaGenerateRequest(from: [
+            "prompt": "hi", "think": true,
+        ])
+        XCTAssertEqual(onReq.enableThinking, true)
+
+        let absent = try ServerParsing.ollamaGenerateRequest(from: ["prompt": "hi"])
+        XCTAssertNil(absent.enableThinking)
+    }
+
     // MARK: - explicit JSON `null` == absent (review-fix, 2026-09-30)
     //
     // `JSONSerialization` decodes a JSON `null` as `NSNull` - a real,
