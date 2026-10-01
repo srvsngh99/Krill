@@ -217,6 +217,8 @@ print(client.chat.completions.create(
 
 OpenAI-family SDKs (openai, langchain-openai, llama-index) use `…/v1`; the Anthropic SDK takes the bare host (it appends its own `/v1/messages`). Request shapes and more SDKs: [`docs/SERVER_API.md`](docs/SERVER_API.md), [`docs/CONNECT_CODING_AGENTS.md`](docs/CONNECT_CODING_AGENTS.md).
 
+Every text endpoint (OpenAI chat/completions, Ollama) supports `logprobs` + `top_logprobs`, `/v1/completions` adds `echo` for prompt-token logprobs, and thinking models accept a per-request switch (`chat_template_kwargs.enable_thinking`, or Ollama's `think`) instead of only the server-wide default — details in [`docs/SERVER_API.md`](docs/SERVER_API.md).
+
 ## The agent on your phone
 
 `krill serve` also serves a full agent UI at **`/ui`** — no app store, no extra

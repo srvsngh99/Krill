@@ -127,12 +127,13 @@ reverse chronological order. Versioning follows
   harnesses) that sets them by default. Zero cost when not requested: the
   extra log-softmax only runs on the `if wantLogprobs` path, verified by a
   direct decode-throughput A/B against `main` with logprobs never
-  requested. A logprobs request disables speculative decode and opts out of
-  the batched/continuous decode pool for this phase (falls back to the
-  plain decode path). A `tool_calls` reply's `logprobs` behavior is covered
-  by the "Tool-call logprobs" entry further below. (Legacy `/v1/completions`
-  and the Ollama `/api/chat`/`/api/generate` dialects gained `logprobs` in
-  the entry below.)
+  requested. This phase's `logprobs` request disabled speculative decode and
+  opted out of the batched/continuous decode pool (fell back to the plain
+  decode path) — both paths gained native logprobs support in the Phase 2
+  entry below, with no fallback. A `tool_calls` reply's `logprobs` behavior
+  is covered by the "Tool-call logprobs" entry further below. (Legacy
+  `/v1/completions` and the Ollama `/api/chat`/`/api/generate` dialects
+  gained `logprobs` in the entry below.)
 - **`logprobs` / `top_logprobs` on Ollama `/api/chat` + `/api/generate`, and
   legacy `logprobs` on `POST /v1/completions`** (2026-09-30 follow-up,
   closing the Phase 1 gap above — see `docs/LOGPROBS_PLAN.md`'s new
@@ -161,9 +162,10 @@ reverse chronological order. Versioning follows
   parity check: the same prompt's first-token logprob agrees identically
   across `/v1/completions`, `/api/chat`, `/api/generate`, and
   `/v1/chat/completions` (same engine, same plain decode path). Legacy
-  `/v1/completions` streaming and `echo` (prompt logprobs) remain out of
-  scope — the endpoint has no streaming support at all in Krill today
-  (pre-existing, unrelated to logprobs), and `echo` is still Phase 3.
+  `/v1/completions` streaming remains out of scope — the endpoint has no
+  streaming support at all in Krill today (pre-existing, unrelated to
+  logprobs). `echo` (prompt logprobs) was out of scope for this entry;
+  it shipped in the `echo` entry above.
 
 ### Fixed
 

@@ -352,10 +352,12 @@ regardless of logprobs, so there is nothing to report entries for.
 the display `token` string — the latter may show `U+FFFD` for a
 byte-fallback token that is not valid UTF-8 on its own; `bytes` never is.
 
-Only the plain (non-speculative, non-batched) decode path computes
-logprobs — a `logprobs` request transparently falls back to that path (same
-mechanism used to decline speculative decode for non-greedy/penalized
-requests).
+Every decode path computes logprobs natively: the plain single-request
+path, draft-model and n-gram speculative decode, and the batched/continuous
+decode paths all compute them from their own already-available logits with
+no extra forward pass and no fallback to the plain path (see
+`docs/LOGPROBS_PLAN.md`'s "Phase 2 — spec + batched logprobs" section for
+the per-path implementation).
 
 ### Ollama `/api/chat` and `/api/generate`
 
@@ -420,7 +422,7 @@ curl http://127.0.0.1:57455/v1/completions -d '{
 }'
 ```
 
-#### `echo` (Phase 3)
+#### `echo`
 
 `echo: true` prepends the prompt text to `choices[0].text`; combined with
 `logprobs`, every PROMPT token also gets scored, not just generated ones.
