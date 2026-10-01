@@ -60,3 +60,4 @@ Status: proposed | adopted | superseded by NNNN. Date: YYYY-MM-DD. Owner: <name>
 | [0002](0002-web-search-backends.md) | Web search backends (keyless DuckDuckGo default + BYOK Brave/Tavily; private Kreach behind a build flag) | adopted | 2026-06-28 |
 | [0003](0003-memory-store.md) | Persistent memory (opt-in; text + semantic flavours; native Swift, no ChromaDB; text-as-truth + rebuildable vector cache; BYOM) | proposed | 2026-06-28 |
 | [0004](0004-interactive-questions-and-adaptive-mode.md) | Interactive questions, plan promotion, and the adaptive posture (one `UserQuestionGate` seam, two read-only tools; guarded `PermissionBox.promote`; `"auto"` unchanged) | proposed | 2026-08-23 |
+| [0005](0005-logprobs-semantics.md) | Logprobs semantics (raw pre-sampling log-softmax; visible-tokens-only; bytes from the raw piece; zero cost by default; tool-call turns report none; echo bypasses the prefix cache) | adopted | 2026-09-30 |

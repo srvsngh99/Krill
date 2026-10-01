@@ -1,47 +1,45 @@
 # Logprobs Support Plan (OpenAI/Ollama `logprobs` + `top_logprobs`)
 
 Created: 2026-09-28
-Status: Phase 1 implemented on `feat/logprobs-phase1` (chat `logprobs` +
-`top_logprobs`, non-streaming + streaming, plain decode path; spec/batch
-fallback). Phases 2-3 (this doc's §7) not started. See §4/§7 for the
-settled decisions and open-question resolutions recorded during
-implementation. A code-review pass on the PR found and fixed a critical
-under-reporting bug in the logprobs aggregator, an unnecessary host round
-trip in the sampler, and two harness bugs in the parity script (see the
-end of §4/§7's resolutions) — see the PR description for the full list and
-final numbers. A 2026-09-29 follow-up fix (`fix/logprobs-qwen35`) closed a
-real Phase-1 gap found in production use: `logprobs.content` was always `[]`
-for every qwen3_5-family model (qwen3.5-4b, Ornith-9B, Qwythos-9B,
-Qwen3.8-27B) because they route through a native VL decode runtime that
-never threaded `wantLogprobs` — see the "Verification results
-(2026-09-29)" subsection after §7's Resolutions for the root cause, the
-numeric parity re-run, and the no-slowdown re-check. A 2026-09-30 follow-up
-(`feat/logprobs-ollama-completions`) closed this plan's remaining
-Phase-1-documented gap for `logprobs`/`top_logprobs`: Ollama `/api/chat` +
-`/api/generate`, and legacy `/v1/completions`'s `logprobs` (int, 0-5; NOT
-`echo`, still Phase 3) — see the "Ollama + legacy completions (2026-09-30)"
-section after §7's Verification results for the pinned wire formats and
-test evidence. Phase 2 (`feat/logprobs-phase2-spec-batched`, 2026-09-30) is
-now implemented: draft-model + n-gram speculative decode, and the
-batched/continuous decode paths, all compute logprobs natively instead of
-falling back to plain serial decode — see the "Phase 2 — spec + batched
-logprobs (2026-09-30)" section at the end of this doc for the per-path
-table, numbers, and limits. Phase 3 (`echo`/prompt logprobs on legacy
-`/v1/completions`, `feat/logprobs-echo-and-thinking-switch`, 2026-09-30) is
-now implemented — see the "Phase 3 — echo (2026-09-30)" section at the very
-end of this doc for the design (raw-prompt-tokens, no-chat-template scoring;
-BOS-stripping for the `tokens`-joined-equals-`text` invariant;
-prefix-cache-bypass mechanics) and the numeric parity results. **Every phase
-of this plan is now implemented.**
+Status: **Every phase in this plan is implemented and merged to `main`.**
+- PRs: Phase 1 chat logprobs (#319); Qwen3.5 VL runtime fix (#320); Ollama +
+  legacy completions + null-as-absent (#321); top-N speed fix + the 4 vision
+  runtimes (#322); CHANGELOG fix (#323); Phase 2 spec/batched native logprobs
+  (#324); tool-call logprobs + AgentSessions race fix + stream/non-stream
+  whitespace parity (#325); raw HF Qwen3.5 snapshot key rewrite +
+  LocateAnything real-model check (#326); `echo` on `/v1/completions` +
+  per-request thinking switch (#327).
+- Dated verification sections, in file order: "Verification results
+  (2026-09-29)", "Ollama + legacy completions (2026-09-30)", "Real-model
+  runtime checks (2026-09-30)", "Phase 2 — spec + batched logprobs
+  (2026-09-30)", "Phase 3 — echo (2026-09-30)".
+- Still unverified against real weights/hardware: Muse Glimmer logprobs
+  (synthetic-only — its smallest published MLX build is 19.4 GiB vs. this
+  machine's 24 GiB); draft-model speculative-decode logprobs
+  (synthetic-only — no draft+target pair on disk); a real >512-token `echo`
+  run vs. `mlx_lm` (memory-blocked; a synthetic chunk-boundary test exists
+  instead, see "Phase 3 — echo"'s Tests); and a clean, quiet-machine re-run
+  of the Phase 2 speed A/B (prior runs shared the box with other agents'
+  work).
+- §4 (semantics) and §7 (phasing, open questions, resolutions) record how
+  each design question was settled; see also
+  `docs/decisions/0005-logprobs-semantics.md`.
+
 Base branch: `main`
-Base commit: `db1a53f`
-Owner: unassigned
+Base commit: `5bd3745`
+Owner: unassigned — all phases shipped; see the PRs above for who did what.
 
 ## 1. Problem
 
+*(Resolved: the gap described below is closed — every surface listed now
+supports `logprobs`/`top_logprobs`/`echo`. Kept as the original problem
+statement that motivated this plan; see the Status header above for current
+state.)*
+
 Krill's server is an OpenAI/Ollama-compatible API surface (`docs/ARCHITECTURE.md`
-§"Serving and agent surfaces"), but today it actively **rejects** the
-`logprobs` family of parameters instead of ignoring or supporting them:
+§"Serving and agent surfaces"), but at the time this plan was written it
+actively **rejected** the `logprobs` family of parameters instead of
+ignoring or supporting them:
 
 - `POST /v1/chat/completions` 400s on `logprobs` and `top_logprobs`
   (`Sources/KrillServer/ServerParsing.swift:142-147`,
@@ -406,6 +404,10 @@ unaffected without being touched.
 | Prefix cache | **No change needed for phase 1/2** (generated-token logprobs don't touch cached *prompt* KV, only the live forward). Relevant only for `echo` — see §5.4. | — |
 | Compiled decode | **Not applicable.** `docs/COMPILED_DECODE_PROBE.md` records this as investigated and closed — "the production decode path stays on the uncompiled growing `KVCache`." No production compiled-decode path exists to integrate with. | — |
 
+*(Resolved: the "Later-phase behavior" column above shipped — see "Phase 2
+— spec + batched logprobs (2026-09-30)" for the actual implementation and
+per-path status.)*
+
 ### 5.4 Prefix cache and `echo` (prompt logprobs)
 
 `echo`/prompt-logprobs needs a logprob for **every prompt token**, which
@@ -520,23 +522,38 @@ prompt (not just generated) tokens.
   source (the OpenAI Python SDK's own type stubs, which pin the literal
   range, would be authoritative and fast to check) should resolve it before
   the range-validation code is written.
+  **(Resolved: 0-20 for chat/Ollama, confirmed against the OpenAI Python
+  SDK type stubs; see "Resolutions" below.)**
 - Confirm OpenAI's exact documented pre/post-temperature logprobs semantics
   (§4.1) rather than relying on this plan's inference from behavior —
   `developers.openai.com/cookbook/examples/using_logprobs` is a good
   starting point and did load successfully during this research.
+  **(Resolved in practice: Krill ships raw pre-sampling log-softmax as the
+  default and only mode, matching vLLM's own default — see §4.1's
+  recommendation and `docs/decisions/0005-logprobs-semantics.md`. OpenAI's
+  own exact wording was never independently re-confirmed via WebFetch.)**
 - Reasoning-model logprobs (§3.3, §4.3): should suppressed/thinking tokens
   ever be reported, even behind a Krill-specific extension flag? Not
   standard OpenAI behavior to copy from directly since reasoning-model
   logprobs handling is inconsistent industry-wide; punt to "no" unless a
   concrete consumer asks.
+  **(Resolved: no entries for reasoning/special/suppressed tokens — a token
+  gets a `content[]` entry iff it reaches the visible answer; see
+  "Resolutions" below.)**
 - Legacy `/v1/completions` response field names (§3.2) — this plan did not
   manage to pull a clean current reference for the older flat
   `token_logprobs`/`text_offset` shape; confirm against the OpenAI API
   reference or a working client library before implementing phase 3.
+  **(Resolved: pinned against the OpenAI Python SDK's `CompletionChoice`/
+  `Logprobs` type stubs; see "Ollama + legacy completions (2026-09-30)"
+  §"Pinned wire formats".)**
 - Whether `top_logprobs` entries should include the sampled token even when
   it falls outside the model's actual top-N (§3.1) — verify against a real
   OpenAI response if the team has API access, since documentation is thin on
   this specific edge case.
+  **(Resolved: yes — `content[i]` is always the sampled token with its own
+  raw logprob regardless of top-N membership; `top_logprobs` is always the
+  true top-N independent of the sampled token; see "Resolutions" below.)**
 
 ### Resolutions (recorded during Phase 1 implementation, 2026-09-28)
 
