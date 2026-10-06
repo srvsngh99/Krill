@@ -11,6 +11,21 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **EmbeddingGemma 2 image embeddings + multimodal request plumbing** —
+  `/v1/embeddings` and `/api/embed` accept content-part items
+  (`{"content":[{"type":"text",...},{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}]}`;
+  `input_image` also accepted; data URLs / base64 only, no fetching) so an image,
+  or an image interleaved with text, becomes one vector. Strict-bound vision
+  tower (`vision_tower.*` + `embed_vision.*`, loaded lazily on the first image so
+  text-only use is unchanged), HF-exact image preprocessing (aspect-preserving
+  patch budget, antialiased bicubic, 1/255, no normalisation), a sequence builder
+  that scatters soft tokens into the real `<boi><image>xN<eoi>` layout, and a
+  `forward(inputsEmbeds:)` backbone entry. fp32 cosine >= 0.9994 to
+  sentence-transformers on 8 images + 6 mixed inputs (PNG >= 0.99998; JPEG is
+  limited by Apple-vs-libjpeg chroma upsampling). Audio and video parts are
+  recognised and answer `400 not yet supported`; media to a text-only model is
+  `400`; plain-string requests are unchanged. See
+  [`docs/EMBEDDINGGEMMA2.md`](docs/EMBEDDINGGEMMA2.md).
 - **EmbeddingGemma 2 (`embeddinggemma-2`) native text embeddings** — Swift +
   MLX loader/forward for `google/embeddinggemma-2` (`embedding_gemma2`; its own
   bidirectional encoder, not Gemma 4 run non-causally), strict weight binding

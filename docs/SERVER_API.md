@@ -253,6 +253,27 @@ re-normalised). `task` and `dimensions` are honoured by `embeddinggemma-2`
 `dimensions` and answer `400` to `task`. See
 [EMBEDDINGGEMMA2.md](EMBEDDINGGEMMA2.md).
 
+**Multimodal input (`embeddinggemma-2` only).** On `/v1/embeddings` and
+`/api/embed`, `input` may also hold content-part items; one item is one vector
+and part order is token order:
+
+```json
+{"model": "embeddinggemma-2",
+ "input": ["plain text still works",
+           {"content": [{"type": "text", "text": "a red bicycle"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]}]}
+```
+
+Part types: `text`; `image_url` (`image_url.url` or a bare string) and
+`input_image` (`image_url` or raw base64 in `data`). Media must be a `data:`
+URL or base64 (no remote fetch: `http(s)://` / `file:` is `400`); the whole
+body is limited to 10 MB. `input_audio` / `video_url` are recognised and answer
+`400 ... not yet supported`. Media sent to a text-only model, a malformed part,
+or an input longer than the 8,192-token context (never truncated) is `400`.
+`usage.prompt_tokens` / `prompt_eval_count` count every token including soft
+tokens. `/api/embeddings` (legacy) stays text-only. Details and numbers:
+[EMBEDDINGGEMMA2.md](EMBEDDINGGEMMA2.md).
+
 Requesting embeddings against a non-embedding (chat) model returns `400`;
 an uninstalled model returns `404` with a `krill pull` hint.
 
