@@ -163,7 +163,7 @@ final class EmbeddingGemma2VideoTests: XCTestCase {
     }
 
     func testGarbageAndAudioOnlyFilesAreClientErrors() throws {
-        XCTAssertThrowsError(try EG2VideoSource(data: Data())) 
+        XCTAssertThrowsError(try EG2VideoSource(data: Data()))
         XCTAssertThrowsError(try EG2VideoSource(data: Data("definitely not a video".utf8))) {
             guard case EG2VideoError.undecodable = $0 else { return XCTFail("\($0)") }
         }
