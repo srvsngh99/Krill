@@ -352,10 +352,16 @@ public enum EG2ImagePreprocessor {
     /// any pixel work.
     public static func softTokens(for img: EG2RGBImage,
                                   maxSoftTokens: Int = imageSoftTokens) throws -> Int {
+        try softTokens(width: img.width, height: img.height, maxSoftTokens: maxSoftTokens)
+    }
+
+    /// Same, from the pixel size alone (a video's frame size is known before any decode).
+    public static func softTokens(width: Int, height: Int,
+                                  maxSoftTokens: Int = imageSoftTokens) throws -> Int {
         guard supportedSoftTokenBudgets.contains(maxSoftTokens) else {
             throw EG2ImageError.unsupportedSoftTokenBudget(maxSoftTokens)
         }
-        let t = try targetSize(height: img.height, width: img.width, patchSize: patchSize,
+        let t = try targetSize(height: height, width: width, patchSize: patchSize,
                                maxPatches: maxSoftTokens * poolingKernel * poolingKernel,
                                poolingKernel: poolingKernel)
         return (t.height / patchSize) * (t.width / patchSize) / (poolingKernel * poolingKernel)

@@ -125,7 +125,9 @@ public enum EG2SequenceError: Error, CustomStringConvertible, Equatable {
         case .reservedLiteral(let l):
             return "text contains the reserved placeholder '\(l)'; send media as separate content parts"
         case .tooLong(let n, let limit):
-            return "input is \(n) tokens (media included) which exceeds the \(limit)-token context"
+            return "input is \(n) tokens (media included) which exceeds the \(limit)-token context; "
+                + "an item can hold about \(limit / 25) s of audio (25 tokens per second, each clip up to 30 s), "
+                + "up to 32 video frames at up to 142 tokens each, or about 29 images at up to 282 tokens each"
         case .softTokenMismatch(let m, let e, let g):
             return "\(m) features have \(g) soft tokens but the prompt reserved \(e)"
         case .emptyInput:

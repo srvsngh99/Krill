@@ -14,17 +14,19 @@ import Foundation
 //
 // Extending to a new modality (see docs/EMBEDDINGGEMMA2.md "Extension guide"):
 //   1. add a case to `EmbeddingPart`;
-//   2. replace its entry in `EmbeddingInputParser.notYetSupported` with a
-//      `case` in `parsePart`;
-//   3. handle the case in `EmbeddingEngine.prepareMedia`.
+//   2. add a `case` in `parsePart`;
+//   3. handle the case in `EmbeddingEngine.embedMediaItem`.
 
 /// One piece of an embedding input.
 public enum EmbeddingPart: Equatable, Sendable {
     case text(String)
     /// Raw encoded image bytes (PNG/JPEG/...), already base64-decoded.
     case image(Data)
-    // case audio(Data, format: String)   // Milestone 2b
-    // case video(Data)                   // Milestone 2c
+    /// Raw encoded audio bytes (wav/mp3/m4a/flac/...), base64-decoded, plus the
+    /// client's format hint (`"wav"`, `"mp3"`, ... or "" when unknown).
+    case audio(Data, format: String)
+    /// Raw encoded video bytes (mp4 / mov / m4v), base64-decoded, plus the format hint.
+    case video(Data, format: String)
 }
 
 /// One embedding input: an ordered list of parts. A plain string is a single
@@ -52,19 +54,8 @@ public struct EmbeddingInputError: Error, Equatable, CustomStringConvertible {
 }
 
 public enum EmbeddingInputParser {
-    /// Part `type`s that are recognised but not implemented yet: a clear 400
-    /// rather than "unknown type". Move an entry into `parsePart` when its
-    /// tower lands.
-    static let notYetSupported: [String: String] = [
-        "input_audio": "audio input is not yet supported (image and text only)",
-        "audio_url": "audio input is not yet supported (image and text only)",
-        "video_url": "video input is not yet supported (image and text only)",
-        "input_video": "video input is not yet supported (image and text only)",
-        "video": "video input is not yet supported (image and text only)",
-    ]
-
     static let shapeHelp = "'input' must be a string, an array of strings, or an array of strings and "
-        + "{\"content\":[{\"type\":\"text\"|\"image_url\"|\"input_image\",...}]} items"
+        + "{\"content\":[{\"type\":\"text\"|\"image_url\"|\"input_image\"|\"input_audio\"|\"video_url\",...}]} items"
 
     /// Parse the `input` field of an embeddings request.
     public static func parse(_ raw: Any?) throws -> [EmbeddingInput] {
@@ -132,10 +123,56 @@ public enum EmbeddingInputParser {
                     "\(path): '\(type)' part needs \(type == "image_url" ? "image_url.url" : "image_url or data") (a data: URL or base64)")
             }
             return .image(try decodeMedia(r, kind: "image", at: path))
+        case "input_audio", "audio_url":
+            // OpenAI shape: {"type":"input_audio","input_audio":{"data":"<base64>","format":"wav"}}.
+            // Also accepted: `data` may be a data: URL, `input_audio` may be a bare
+            // base64 string, and `audio_url` carries {"url": "data:audio/...;base64,..."}.
+            var ref: String? = nil
+            var format = ""
+            if let o = d["input_audio"] as? [String: Any] {
+                ref = (o["data"] as? String) ?? (o["url"] as? String)
+                format = (o["format"] as? String) ?? ""
+            } else if let s = d["input_audio"] as? String { ref = s }
+            else if let o = d["audio_url"] as? [String: Any] { ref = o["url"] as? String }
+            else if let s = d["audio_url"] as? String { ref = s }
+            else if let s = d["data"] as? String { ref = s }
+            if format.isEmpty, let f = d["format"] as? String { format = f }
+            guard let r = ref, !r.isEmpty else {
+                throw EmbeddingInputError(
+                    "\(path): '\(type)' part needs input_audio.data (base64 or a data: URL) and input_audio.format")
+            }
+            if format.isEmpty, r.lowercased().hasPrefix("data:audio/"),
+               let semi = r.firstIndex(of: ";") {
+                format = String(r[r.index(r.startIndex, offsetBy: 11) ..< semi])
+            }
+            return .audio(try decodeMedia(r, kind: "audio", at: path), format: format)
+        case "video_url", "input_video", "video":
+            // {"type":"video_url","video_url":{"url":"data:video/mp4;base64,..."}} (the
+            // OpenAI-compatible shape; `video_url` may also be a bare string), or
+            // {"type":"input_video","input_video":{"data":"<base64>","format":"mp4"}} /
+            // {"type":"input_video","data":"<base64>"}.
+            var ref: String? = nil
+            var format = ""
+            if let o = d["video_url"] as? [String: Any] { ref = o["url"] as? String }
+            else if let s = d["video_url"] as? String { ref = s }
+            else if let o = d["input_video"] as? [String: Any] {
+                ref = (o["data"] as? String) ?? (o["url"] as? String)
+                format = (o["format"] as? String) ?? ""
+            } else if let s = d["input_video"] as? String { ref = s }
+            else if let s = d["video"] as? String { ref = s }
+            else if let s = d["data"] as? String { ref = s }
+            if format.isEmpty, let f = d["format"] as? String { format = f }
+            guard let r = ref, !r.isEmpty else {
+                throw EmbeddingInputError(
+                    "\(path): '\(type)' part needs video_url.url (a data: URL) or input_video.data (base64)")
+            }
+            if format.isEmpty, r.lowercased().hasPrefix("data:video/"), let semi = r.firstIndex(of: ";") {
+                format = String(r[r.index(r.startIndex, offsetBy: 11) ..< semi])
+            }
+            return .video(try decodeMedia(r, kind: "video", at: path), format: format)
         default:
-            if let m = notYetSupported[type] { throw EmbeddingInputError("\(path): \(m)") }
             throw EmbeddingInputError(
-                "\(path): unknown part type '\(type)'; supported: text, image_url, input_image")
+                "\(path): unknown part type '\(type)'; supported: text, image_url, input_image, input_audio, video_url")
         }
     }
 

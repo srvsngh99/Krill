@@ -265,11 +265,17 @@ and part order is token order:
 ```
 
 Part types: `text`; `image_url` (`image_url.url` or a bare string) and
-`input_image` (`image_url` or raw base64 in `data`). Media must be a `data:`
-URL or base64 (no remote fetch: `http(s)://` / `file:` is `400`); the whole
-body is limited to 10 MB. `input_audio` / `video_url` are recognised and answer
-`400 ... not yet supported`. Media sent to a text-only model, a malformed part,
-or an input longer than the 8,192-token context (never truncated) is `400`.
+`input_image` (`image_url` or raw base64 in `data`); `input_audio`
+(`{"type":"input_audio","input_audio":{"data":"<base64>","format":"wav"}}`,
+OpenAI shape; formats wav / mp3 / m4a / flac / aiff / caf / ogg(Opus), up to 30 s
+per clip, resampled to 16 kHz mono) and `audio_url` (data URL); `video_url`
+(`{"type":"video_url","video_url":{"url":"data:video/mp4;base64,..."}}`, or
+`input_video` with base64 `data`; mp4 / mov / m4v, 1 frame per second, at most 32
+frames, audio track ignored). Media must be a `data:` URL or base64 (no remote
+fetch: `http(s)://` / `file:` is `400`); the whole body is limited to 10 MB
+(`413`). Media sent to a text-only model, a malformed or undecodable part, audio
+over 30 s, or an input longer than the 8,192-token context (never truncated; the
+message says how long an input can be) is `400`.
 `usage.prompt_tokens` / `prompt_eval_count` count every token including soft
 tokens. `/api/embeddings` (legacy) stays text-only. Details and numbers:
 [EMBEDDINGGEMMA2.md](EMBEDDINGGEMMA2.md).

@@ -66,3 +66,23 @@ Mixed cases: `text_then_image`, `image_then_text`, `text_image_text`, `two_image
 * JPEG decoding differs between Apple ImageIO and libjpeg (chroma upsampling): about 0.2-0.4/255 mean abs,
   up to 40-66 levels on 3-6% of pixels at chroma edges. That costs ~0.0002-0.0006 cosine on the JPEG
   fixtures; PNG fixtures match to 0.99998-1.0000.
+
+## Milestone 2b additions (audio / video decoders, mixed audio / video)
+
+Extra media (synthetic, ffmpeg): `audio/a3_44k_stereo.flac` (a3 at 44.1 kHz stereo, tests resampling + downmix),
+`audio/a8.mp3` (LAME tag: delay 576, padding 956), `audio/a8.m4a` (AAC), `audio/a8_m4a_ffmpeg16k.wav` (the m4a
+decoded by ffmpeg, 94,208 samples: proves the m4a token-count gap is the decoder), `video/v_ntsc.mp4`
+(480x270, 30000/1001 fps, 4.004 s), `video/v_audio.mp4` (256x192, 12 fps, WITH an audio track; the reference ignores it).
+
+| file | content |
+|---|---|
+| `reference_audio_extra.json` | flac / mp3 / m4a. Non-16 kHz-PCM files were decoded + resampled to 16 kHz mono float32 by ffmpeg (swr) and passed to ST as arrays: that is the "reference decoder" |
+| `reference_video_extra.json` | v_ntsc, v_audio (paths, torchcodec) |
+| `reference_mixed_av.json` | `text_then_audio`, `audio_then_text_searchquery`, `document_task_text_audio`, `text_video_text`, `document_task_video_text`, `text_audio_image` (ST "message" modality: audio -> `<|audio|>`, video -> `<|video|>`) |
+| `reference_video_frames.json` | 12 reference frames (torchcodec, exact seek) of 4 videos as 12x16 block means: pins the decoder's pixels without shipping frames |
+
+Facts measured with these files: audio is NOT capped at 280 tokens (see above); an MP3's LAME/Xing delay + padding
+are trimmed by ffmpeg but not by AVAudioFile; ffmpeg keeps the AAC priming (94,208 samples) where AVFoundation applies
+the edit list (93,520); a video's frame indices come from `int(i * fps)` with `num_sampled = max(1, int(duration))`
+and a `np.linspace(.., dtype=int)` cut to 32; AVFoundation's BGRA frames differ from torchcodec's by 2.9/255 mean
+(chroma upsampling) while its 4:2:0 planes converted with nearest chroma + BT.601 differ by 0.19/255 (max 1).

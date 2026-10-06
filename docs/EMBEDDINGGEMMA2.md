@@ -1,9 +1,9 @@
 # EmbeddingGemma 2 (`google/embeddinggemma-2`)
 
 Krill serves EmbeddingGemma 2 natively (Swift + MLX) on its three embeddings
-endpoints. **Text (Milestone 1) and images, alone or interleaved with text
-(Milestone 2a), are supported.** Audio and video are Milestones 2b / 2c (design
-and an extension guide at the end of this file).
+endpoints. **Text (Milestone 1), images (2a), audio and video (2b), alone or
+interleaved with text, are all supported.** The design record and the notes on
+what it got wrong are at the end of this file.
 
 ```
 krill pull embeddinggemma-2        # 1.49 GB, Apache-2.0, not gated
@@ -24,7 +24,8 @@ curl localhost:57455/v1/embeddings -H 'Content-Type: application/json' \
 | Compute dtype | **float32 (default)** or bfloat16. **float16 is refused**: it is unsafe for this model. |
 | Languages checked | English, French, code, Hindi, Kannada, Sanskrit (Devanagari) |
 | Images | yes, see "Images and mixed input" (vision tower loaded lazily on the first image) |
-| Not served | audio / video inputs (tensors skipped at load; the request parts answer `400 not yet supported`) |
+| Audio | yes, up to 30 s per clip, see "Audio and video" (audio tower loaded lazily on the first audio part) |
+| Video | yes, 1 fps, at most 32 frames, see "Audio and video" (shares the vision tower; no audio track, no timestamps) |
 
 ### It is not "Gemma 4 run bidirectionally"
 
@@ -126,7 +127,7 @@ curl localhost:57455/v1/embeddings -H 'Content-Type: application/json' \
 |---|---|
 | text | `{"type":"text","text":"..."}` |
 | image | `{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}` (`image_url` may also be a bare string), or `{"type":"input_image","image_url":"data:..."}` / `{"type":"input_image","data":"<base64>"}` |
-| audio, video | `input_audio`, `video_url` and friends are recognised and answer `400 ... not yet supported` |
+| audio, video | `input_audio`, `video_url`: see "Audio and video" below |
 
 Rules (all enforced and tested):
 
@@ -243,6 +244,228 @@ before/after-the-tower comparison within this table is like-for-like.
 5. **Lazy:** the tower loads on the first request that carries an image;
    text-only requests never touch it.
 
+## Audio and video (Milestone 2b)
+
+Audio and video use the same request shape as images (content-part items on
+`/v1/embeddings` and `/api/embed`; one item is one vector; part order is token
+order; data URLs or base64 only, no fetching; whole body <= 10 MB):
+
+```bash
+# an audio clip (small clips fit on the command line; use -d @file for anything near 1 MB)
+AUD=$(base64 < question.wav | tr -d '\n')
+curl localhost:57455/v1/embeddings -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $KRILL_API_KEY" -d '{
+  "model": "embeddinggemma-2",
+  "task": "SearchQuery",
+  "input": [
+    {"content": [{"type": "input_audio", "input_audio": {"data": "'"$AUD"'", "format": "wav"}}]},
+    {"content": [{"type": "text", "text": "spoken query: "},
+                 {"type": "input_audio", "input_audio": {"data": "'"$AUD"'", "format": "wav"}}]}
+  ]}'
+
+# a video clip (mp4 / mov / m4v); build big bodies in a file
+VID=$(base64 < clip.mp4 | tr -d '\n')
+printf '{"model":"embeddinggemma-2","dimensions":512,"input":[{"content":[{"type":"text","text":"a cooking video: "},{"type":"video_url","video_url":{"url":"data:video/mp4;base64,%s"}}]}]}' "$VID" > body.json
+curl localhost:57455/v1/embeddings -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $KRILL_API_KEY" -d @body.json
+```
+
+| Part | Shape |
+|---|---|
+| audio | `{"type":"input_audio","input_audio":{"data":"<base64 or data: URL>","format":"wav"}}` (OpenAI shape; `format` is a hint: `wav`, `mp3`, `m4a`, `flac`, `aiff`, `caf`, `ogg`; when absent the bytes are sniffed). Also `{"type":"audio_url","audio_url":{"url":"data:audio/...;base64,..."}}` |
+| video | `{"type":"video_url","video_url":{"url":"data:video/mp4;base64,..."}}` (`video_url` may be a bare string); also `{"type":"input_video","input_video":{"data":"<base64>","format":"mp4"}}` or `{"type":"input_video","data":"<base64>"}` |
+
+Rules and limits (all enforced and tested):
+
+- **Audio is at most 30 s per clip** (480,000 samples at 16 kHz). The reference
+  feature extractor silently truncates longer audio at 30 s; Krill answers `400`
+  with the limit instead. Shorter than 0.1 s is `400`. A 30 s clip is 750 soft
+  tokens (25 per second); the 280 cap in the old design note does not exist on
+  the model path.
+- **Video: 1 frame per second, at most 32 frames**, chosen exactly like the
+  reference (see "How it works"); each frame is up to 140 soft tokens + 2 markers
+  (130 for 320x240, 120 for 480x270). The audio track of a video is ignored (the
+  reference never reads it); no timestamp tokens (`add_timestamps` is false in the
+  checkpoint's processor config, so the layout has none either).
+- **The 8,192-token context is never exceeded silently**: an item over it (any
+  mix of text, images, audio, video) is `400`, and the message says how long an
+  input can be ("... about 327 s of audio (25 tokens per second, each clip up to
+  30 s), up to 32 video frames at up to 142 tokens each, or about 29 images ...").
+  The 10 MB body cap answers `413`. Because of the body cap, 8,192 tokens of raw
+  16 kHz PCM16 WAV (about 13 MB) cannot be sent in one request; compressed audio
+  (mp3 / m4a / flac) or video can.
+- **Task prefix**: applied only to items that contain text, as a string prefix in
+  front of the first text; audio-only and video-only items get none (same rule as
+  images).
+- Undecodable bytes are `400` (`audio could not be decoded ...` / `video could
+  not be decoded ...`); remote and `file:` URLs are `400`; media sent to a
+  text-only embedding model is `400`.
+- Each tower is loaded **lazily and separately**: the audio tower on the first
+  audio part, the vision tower (shared by images and video) on the first image
+  or video part. Text-only requests touch neither (asserted by tests and by the
+  memory numbers below).
+
+**Formats that decode.** Audio goes through `AVAudioFile` (CoreAudio), then is
+mixed to mono (channel average) and resampled to 16 kHz with `AVAudioConverter`
+when needed. Checked with ffmpeg-made files: WAV (PCM 8 / 16 / 24-bit, float32,
+mu-law, IMA ADPCM; 8 / 16 / 44.1 / 48 kHz, mono and stereo), MP3 (the LAME/Xing
+encoder-delay and padding are trimmed so the length matches ffmpeg), AAC in
+M4A / MP4 and raw ADTS `.aac`, ALAC, FLAC, AIFF, CAF and Ogg Opus. **Not
+decoded:** WebM / Matroska containers, and anything CoreAudio does not know
+(Vorbis, WMA, AMR). Video goes through `AVAssetReader`: `mp4`, `mov`, `m4v` with
+H.264 / HEVC (anything VideoToolbox decodes); not WebM / MKV / AVI. Rotation
+metadata is not applied (the reference does not either).
+
+### How audio works (verified against transformers 5.19 and sentence-transformers' own token ids)
+
+1. **Features** (`EG2AudioPreprocessor`; shares the Gemma 4 chat path's
+   `AudioPreprocessor.features`, which matches `Gemma4AudioFeatureExtractor`
+   exactly: 16 kHz mono, pad to a multiple of 128 samples, semicausal left pad of
+   160, 320-sample periodic-Hann frames at hop 160, rfft 512, |.|, HTK mel
+   0-8000 Hz x 128 (no norm), `log(mel + 1e-3)`, padded frames zeroed).
+2. **Soft tokens** = `replace_audio_token`: the per-frame validity mask (frame i
+   is real iff its last sample is) sub-sampled by the two stride-2 convs, i.e.
+   every 4th frame. Pinned by tests to 52 / 146 / 583 tokens for the three WAV
+   fixtures (about 25 per second, no cap).
+3. **Tower** (`EG2AudioTower` = `audio_tower.*` + `embed_audio.*`): Krill's
+   `AudioEncoder` (the USM conformer used for Gemma 4 chat audio) runs this
+   checkpoint's tower unchanged: 12 layers, d 1024, 8 heads, chunked local
+   attention, clipped linears (the scalars ARE in the checkpoint here), `output_proj`
+   1024 -> 1536 **with bias**; then only the valid frames, scale-free RMSNorm and a
+   1536 -> 512 linear.
+4. **Strict binding** (`loadEG2AudioTower`): every one of the 752 `audio_tower.*` /
+   `embed_audio.*` tensors must bind and every parameter must be covered with the
+   right shape, otherwise the load throws (nothing is defaulted: the config says
+   `use_clipped_linears: true` and a config that said false is refused).
+   **Weight layout gotcha:** this HF checkpoint stores the two conv kinds in
+   PyTorch layout (`subsample_conv_projection.*.conv.weight` `[out,in,kH,kW]`,
+   `lconv1d.depthwise_conv1d.weight` `[C,1,K]`), unlike the channel-last mlx-vlm
+   weights the Gemma 4 loader sees (`[out,kH,kW,in]`, `[C,K,1]`; the Gemma 4
+   loader comments say "no transpose"). The loader converts each, and only when the
+   transposed shape is exactly the module's; a test runs the same tiny tower from
+   both layouts.
+5. **Sequence**: `<bos> ... <boa> <audio>xN <eoa> ... <eos>`, soft tokens replace the
+   placeholder rows, then the same backbone and mean pool as everything else.
+
+### How video works
+
+1. **Frame sampling** (`EG2VideoSampler`, a port of
+   `EmbeddingGemma2VideoProcessor.sample_frames`): `step = native_fps / 1`,
+   `num_sampled = max(1, int(duration))`,
+   `indices = [min(total - 1, int(i * step)) ...]`; when there are more than 32,
+   `np.linspace(0, n - 1, 32, dtype=int)` of them. Tests pin 14 (frames, fps,
+   duration) cases to values produced by the reference code and numpy (3 s at 10
+   fps -> `[0, 10, 20]`; 40 s at 10 fps -> 32 frames ending at 390; 29.97 fps x
+   4.004 s -> `[0, 29, 59, 89]`; 0.5 fps, 59.94 fps and 5-minute clips included).
+2. **Decode** (`EG2VideoSource`): the file is written to a temp dir (removed when
+   the request ends), the container is read for fps / duration / size and the
+   compressed samples are counted (no decode) so the prompt can be sized and an
+   over-long item rejected before any pixel work; then `AVAssetReader` decodes
+   sequentially and only the sampled frames are kept, each resized and patchified
+   as soon as it is decoded.
+3. **Per frame**: the 140-token budget (`EG2ImagePreprocessor.prepare(.., 140)`, 1,260
+   patches), the SAME vision tower and `embed_vision` as images, one `[n, 512]` array
+   per frame.
+4. **Sequence**: one `<boi> <|video|>xN <eoi>` block per frame, concatenated, no
+   timestamps, mean pooled with everything else (a 32-frame clip is 4,226 tokens, so
+   the sliding window of 512 is exercised).
+
+### Decoder differences found (and what was done)
+
+- **Video pixels** were the one real gap. AVFoundation's own BGRA output upsamples
+  chroma smoothly, the reference decoder (torchcodec / ffmpeg / swscale) replicates
+  it: that alone gave mean 2.9 / 255 pixel error (5% of pixels off by > 8) and
+  cosines of 0.9934-0.9986. Asking AVFoundation for the decoder's 8-bit 4:2:0 planes
+  and converting them the swscale way (nearest chroma, the stream's matrix with
+  BT.601 when untagged, the stream's range) measures mean 0.19 / 255, max 1, against
+  torchcodec frames, and every video case is >= 0.99948. A weight-free test compares
+  12 frames of 4 fixtures with the reference decoder's frames (12x16 block means,
+  `reference_video_frames.json`); 10-bit, 4:2:2 and 4:4:4 sources are converted by
+  VideoToolbox to 8-bit 4:2:0 first (not measured).
+- **MP3**: AVAudioFile does not honour the LAME/Xing delay / padding tag that ffmpeg
+  does (it left 1,532 extra samples = 3 extra soft tokens on a 5.8 s clip, cosine
+  0.9989 -> below the gate). Krill now trims the tag's delay and padding (AVFoundation
+  already removes the 529-sample decoder delay; proven by cross-correlating the two
+  decoders, lag = the tag's delay). Without a tag nothing is trimmed, like ffmpeg.
+- **M4A (AAC)**: AVFoundation applies the edit list (93,520 samples); ffmpeg, which
+  made the reference, returned 94,208, so the clip is 1 soft token shorter than the
+  reference's. The vector passes the gate (0.99952) but its token count and ids
+  differ by that one token; **feeding the ffmpeg-decoded samples reaches the
+  reference's ids and 0.99987** (`a8_m4a_ffmpeg16k.wav`), proving the cause is the
+  decoder, not the model path. In this one case AVFoundation is arguably the more
+  correct decoder.
+- **FLAC 44.1 kHz stereo**: same 33,315 samples as ffmpeg; the resamplers differ
+  (`AVAudioConverter` vs swr), 0.99957.
+- The audio cosines are a uniform ~0.9997-0.9999, not 0.999999 like text: all of
+  it is below the 1e-3 gate and the same in fp32 and bf16, so it is neither the dtype
+  nor the tokens. I did not chase it further; the likely sources are the float32 mel
+  (DFT as a matmul vs numpy's float64 FFT, then `log`) and the sound-alike
+  resampler, but this is **not verified**.
+
+### Audio and video parity (fp32 sentence-transformers reference, cosine)
+
+Reference: sentence-transformers 6.1 / transformers 5.19, fp32, CPU, one input per
+call (audio as 16 kHz float arrays, ffmpeg-decoded where the file is not 16 kHz mono
+PCM; video as mp4 paths through torchcodec). Gate: fp32 cosine >= 0.999; bf16
+gated at >= 0.99. The sequence ids equal the ids sentence-transformers fed the model
+for every case except `a8.m4a` (see above), and `usage.prompt_tokens` equals its
+`n_tokens`.
+
+| Input | fp32 | bf16 |
+|---|---|---|
+| audio a3.wav (2.1 s, 52 tokens) | 0.99970342 | 0.99964802 |
+| audio a8.wav (5.8 s, 146) | 0.99990566 | 0.99988864 |
+| audio a20.wav (23.3 s, 583) | 0.99976995 | 0.99975483 |
+| audio 44.1 kHz stereo FLAC (a3) | 0.99957053 | 0.99965542 |
+| audio MP3 (a8) | 0.99988533 | 0.99987294 |
+| audio M4A / AAC (a8; ids differ by 1 token, see above) | 0.99951660 | 0.99949544 |
+| mixed: text then audio | 0.99973738 | 0.99971141 |
+| mixed: audio then text, `SearchQuery` | 0.99990973 | 0.99988684 |
+| mixed: text then audio, `Document` | 0.99974860 | 0.99974093 |
+| mixed: text, audio, image | 0.99990054 | 0.99988709 |
+| video v3 (3 s, 3 frames, 390 soft tokens) | 0.99948133 | 0.99942534 |
+| video v40 (40 s -> 32 frames, 4,160 soft, 4,226 tokens) | 0.99983380 | 0.99983823 |
+| video v_ntsc (29.97 fps, 480x270, 4 frames, 120/frame) | 0.99981755 | 0.99977050 |
+| video with an audio track (v_audio, 2 frames) | 0.99954901 | 0.99951622 |
+| mixed: text, video, text | 0.99968090 | 0.99960508 |
+| mixed: video then text, `Document` | 0.99980937 | 0.99979126 |
+| **worst audio / mixed** | **0.99951660** | **0.99949544** |
+| **worst video / mixed** | **0.99948133** | **0.99942534** |
+
+The same vectors come back over HTTP (`/v1/embeddings`, data URLs / base64) at
+the same cosines (worst 0.99957 audio, 0.99948 video, fp32; 0.99965 / 0.99943 bf16).
+
+### Audio and video speed and memory
+
+Measured over HTTP on loopback with the `make release` binary (shared Mac, fresh
+server per run, `KRILL_EMBED_LOG_MEM=1`). Audio is decoded, featurised and run
+at roughly 8-18 ms per second of audio; a video frame costs ~0.15-0.2 s (the vision
+tower is not optimised, and a 32-frame clip is one 4,226-token backbone pass).
+
+| | fp32 (default) | bf16 |
+|---|---|---|
+| text-only MLX peak / RSS after first request | 1551 MB / 702 MB | 524 MB / 696 MB |
+| text single query p50 (before any tower) | 14.2 ms | 13.1 ms |
+| first audio request incl. lazy audio-tower load | 0.97 s | 0.21 s |
+| audio 2.1 s / 5.8 s / 23.3 s, median of 3 | 37 / 62 / 186 ms | 39 / 62 / 173 ms |
+| per audio second (2.1 s / 5.8 s / 23.3 s clip) | 18 / 11 / 8 ms | 19 / 11 / 7 ms |
+| MLX peak after audio work (audio tower resident) | 2783 MB | 1713 MB |
+| first video request incl. lazy vision-tower load | 0.75 s | 0.61 s |
+| video 3 frames (398 tokens) | 539 ms | 507 ms |
+| video 4 frames, 480x270 (490 tokens) | 645 ms | 601 ms |
+| video 32 frames (4,226 tokens) | 6.1-6.2 s | 6.4 s |
+| MLX peak after video work, fresh process (vision tower only) | 3427 MB | not run separately |
+| MLX peak, both towers resident after the 32-frame clip | 4593 MB | 2339 MB |
+
+The text-only profile is unchanged: before any media request the peak and RSS are
+the Milestone-1 numbers above (1551 MB fp32 / 524 MB bf16), neither tower is loaded
+(`isAudioTowerLoaded` / `isVisionTowerLoaded` are false after text requests, tested
+with weights), and an audio request does not load the vision tower or the reverse.
+The audio tower adds ~1.2 GB MLX peak (fp32; its weights are ~1.2 GB of the 3 GB
+fp32 total, 300M params) and the vision tower ~0.9 GB before a video runs; the peak
+is a high-water mark, so the 32-frame figures include that clip's activations.
+RSS does not see MLX memory and moves around because the OS reclaims pages.
+
 ## Measured numbers
 
 All numbers below are from real runs on this Mac (Apple Silicon, shared with
@@ -291,15 +514,30 @@ page cache; a cold read of 1.49 GB from disk will be slower. Peak memory is
 
 ---
 
-# Milestone 2 design: image (DONE in 2a), audio, video
+# Milestone 2 design record: image (done in 2a), audio and video (done in 2b)
 
-> **Status.** Image was implemented and measured in Milestone 2a; the sections
-> below are kept as the design record. What turned out wrong or incomplete in this
+> **Status.** Image (2a) and audio + video (2b) are implemented and measured (see
+> "Images and mixed input" and "Audio and video" above); the sections below are kept
+> as the design record. What turned out wrong or incomplete in this
 > design is listed here; the rest of the image section held up.
 >
 > - *"Audio capped at 280 soft tokens (min 280)"* is **wrong** for the real model path: the
 >   reference does not cap (a 23.3 s clip gave 583 `<audio>` tokens; 25 tokens per second);
->   `audio_seq_length: 280` is only used by a serving-framework helper.
+>   `audio_seq_length: 280` is only used by a serving-framework helper. What does limit
+>   audio is the feature extractor's `max_length=480000` (30 s), which TRUNCATES silently;
+>   Krill answers `400` for a longer clip instead. The "audio up to 11.2 s" figure in the
+>   request-format section is therefore also wrong (it is 30 s).
+> - *"Audio conv weights match Krill's `AudioEncoder`, structure and keys"*: structure and
+>   keys yes (752 tensors, `output_proj` bias included), but the HF checkpoint stores the
+>   conv weights in **PyTorch layout** (`[out,in,kH,kW]`, depthwise `[C,1,K]`) where the
+>   Gemma 4 loader's weights are channel-last; the shapes quoted in the Audio section below
+>   are the PyTorch ones, and the loader transposes them (strict on the result).
+> - *Video: "decode with AVAssetImageGenerator"*: not used. Frames are decoded sequentially
+>   with `AVAssetReader`; asking AVFoundation for BGRA costs ~0.005 cosine against the
+>   torchcodec reference (chroma upsampling), so the decoder's 4:2:0 planes are converted
+>   the swscale way instead. The 140-token budget, 1 fps, 32-frame uniform cap and "no
+>   timestamps" held up; a 320x240 frame is 130 soft tokens.
+> - *Video "Keys: none of its own"*: right; it shares `vision_tower` / `embed_vision`.
 > - *Gap 1 (clip scalars)*: confirmed, solved by defaulting exactly those scalars when
 >   `use_clipped_linears` is false (counted, strict otherwise).
 > - *Gap 2 (preprocessor)*: confirmed; additionally the resize is torchvision's
@@ -403,8 +641,8 @@ Layout from `processing_embedding_gemma2.py`:
   / 480,000-sample cap: needs the 280 cap and the HF count formula
   (`(n + 160 - 321)/160 + 1` mel frames, then two stride-2 k3 p1 convs, min 280).
   Also the audio marker ids (`boa/eoa`) and the same `embed_audio` +
-  scatter-merge plumbing as image. Decide behaviour for audio > 11.2 s (truncate
-  or window-and-mean); not checked what the HF extractor does.
+  scatter-merge plumbing as image. (Resolved in 2b: the reference truncates at 30 s, Krill refuses; was: decide behaviour for audio > 11.2 s (truncate
+  or window-and-mean); not checked what the HF extractor does.)
 - **Cost:** audio tower 300M params, ~0.6 GB bf16.
 
 ## Video
@@ -451,17 +689,17 @@ Rules: `data:` URLs or base64 only (no network fetch); `task` prefix applies to 
 text of each item only, placed first; `usage.prompt_tokens` counts all tokens
 including soft tokens; unsupported media type -> `400`; a request with media sent
 to a build/model without the towers -> `400` (not a silent text-only result);
-size limits: image up to the 2520-patch budget, audio up to 11.2 s (decision
+size limits: image up to the 2520-patch budget, audio up to 30 s (was 11.2 s; decision
 above), video up to 32 frames. `/api/embed` takes the same item shapes; the legacy
 `/api/embeddings` stays text-only.
 
 ## Milestone 2 work order
 
-1. Reference vectors per modality (done, 2a); 2. `forward(inputsEmbeds:)` and sequence
-   builder (done, 2a); 3. image preprocessor + vision loader, parity >= 0.999 (done, 2a);
-   4. audio parity (no 280 cap, see above); 5. video frame sampler; 6. request parsing
-   + docs (done for images; audio/video parts answer 400 until their tower lands). Load the towers lazily so text-only users keep the
-   0.8 s / 1.5 GB profile.
+All done: reference vectors per modality (2a, 2b), `forward(inputsEmbeds:)` and the
+sequence builder (2a), image preprocessor + vision loader (2a), strict audio tower +
+feature extractor + `input_audio` parts (2b), video frame sampler + decoder +
+`video_url` parts (2b), all gated at fp32 cosine >= 0.999 and measured. The towers load
+lazily and separately so text-only users keep the 0.8 s / 1.5 GB profile.
 
 ---
 
@@ -469,9 +707,9 @@ above), video up to 32 frames. `/api/embed` takes the same item shapes; the lega
 
 Milestone 2a deliberately built the shared plumbing so a new modality is a tower,
 a preprocessor and a request part type. Nothing else changes. What already exists
-and what each next agent adds:
+(audio and video, added in 2b, used all of it; where they landed is listed below):
 
-**Already there (do not duplicate)**
+**Shared plumbing (do not duplicate)**
 
 | Piece | Where |
 |---|---|
@@ -480,41 +718,23 @@ and what each next agent adds:
 | Scatter into the text embeddings + count checks | `EmbeddingGemma2Model.mergedEmbeddings(_:features:)` where `features[.audio]` / `features[.video]` is one `[softTokens, 512]` array per block, in order (video: one array per frame, or one per video if you split by `blocks`: the builder emits one span per frame, so supply one `[n, 512]` per frame) |
 | Backbone on merged embeddings, mean pool over every position | `EmbeddingGemma2Model.forward(inputsEmbeds:lengths:)`, `pooled(inputsEmbeds:lengths:)` |
 | Lazy tower slot, 400 mapping, MRL / task handling, token accounting | `EmbeddingEngine.embedMediaItem` / `ensureVisionTower` in `Sources/KrillEngine/EmbeddingEngine.swift` |
-| Request parsing with `input_audio` / `video_url` already recognised (they answer `400 not yet supported`) | `EmbeddingInputParser.notYetSupported` and `parsePart` in `Sources/KrillEngine/EmbeddingInputs.swift` |
+| Request parsing (`input_audio` / `audio_url` / `video_url` / `input_video` now parsed) | `parsePart` in `Sources/KrillEngine/EmbeddingInputs.swift` |
 | Strict loader pattern, clip-scalar rule | `loadEG2VisionTower` in `Sources/KrillCore/EmbeddingGemma2Vision.swift` |
 | Reference vectors, ids and media for audio and video | `Tests/KrillEngineTests/Fixtures/eg2_mm/` (`reference_audio.json`, `reference_video.json`, `audio/`, `video/`, README) |
 
-**Audio (2b) adds**
+**Where audio and video landed (2b)**
 
-1. `Sources/KrillCore/EmbeddingGemma2Audio.swift`: `EG2AudioTower` (`audio_tower.*` +
-   `embed_audio.*`, keys equal to the checkpoint's, 752 tensors; the clipped linears
-   DO have scalars here, `use_clipped_linears: true`), a strict `loadEG2AudioTower`
-   mirroring `loadEG2VisionTower`, and a feature extractor/preprocessor
-   (16 kHz mono, 128 mel, frame 320, hop 160, fft 512; see `processor_config.json`).
-   Soft tokens per clip: `(n + 160 - 321)/160 + 1` mel frames, then two stride-2
-   k3 p1 convs. **The reference does not cap at 280** (measured: 23.3 s -> 583
-   tokens), only the 8,192 context limits it.
-2. `EmbeddingPart.audio(Data, format: String)` (the commented case in
-   `EmbeddingInputs.swift`), a `case "input_audio"` in `parsePart` (remove its
-   `notYetSupported` entry), a decoder for wav (and whatever else you accept) to
-   float32 mono 16 kHz.
-3. In `embedMediaItem`: a `.audio` case that sizes the block
-   (`EG2MediaBlock(.audio, softTokensPerBlock: n)`), an `ensureAudioTower()`
-   twin of `ensureVisionTower()` (lazy, own lock), and `features[.audio] = [...]`.
-4. Parity against `reference_audio.json` (fp32 >= 0.999).
+| Piece | Where |
+|---|---|
+| Audio tower, strict loader (incl. the PyTorch conv-layout conversion), feature extractor, soft-token count, AVFoundation decoder | `Sources/KrillCore/EmbeddingGemma2Audio.swift` (`EG2AudioTower`, `loadEG2AudioTower`, `EG2AudioPreprocessor`) |
+| Frame sampler, AVAssetReader decoder, swscale-matched YUV conversion | `Sources/KrillCore/EmbeddingGemma2Video.swift` (`EG2VideoSampler`, `EG2VideoSource`) |
+| Request parts `input_audio` / `audio_url`, `video_url` / `input_video` | `EmbeddingPart.audio` / `.video`, `parsePart` in `Sources/KrillEngine/EmbeddingInputs.swift` |
+| Lazy `ensureAudioTower()`, sizing before any tower work, 400 mapping | `embedMediaItem` in `Sources/KrillEngine/EmbeddingEngine.swift` |
+| Weight-free tests | `Tests/KrillCoreTests/EmbeddingGemma2AudioTests.swift`, `EmbeddingGemma2VideoTests.swift`, `Tests/KrillEngineTests/EmbeddingInputsTests.swift` |
+| Parity tests (skip without `KRILL_EG2_DIR`) | `Tests/KrillEngineTests/EmbeddingGemma2AudioParityTests.swift`, `EmbeddingGemma2VideoParityTests.swift` |
+| Reference vectors, ids, frame thumbnails, media | `Tests/KrillEngineTests/Fixtures/eg2_mm/` (README: how each was made) |
 
-**Video (2c) adds**
-
-1. Frame extraction (AVFoundation 1 fps, uniform down-sample to at most 32 frames;
-   accept a pre-decoded frame list as the portable input) producing `EG2RGBImage`s.
-2. Per frame `EG2ImagePreprocessor.prepare(rgb, maxSoftTokens: EG2ImagePreprocessor.videoFrameSoftTokens)`
-   (140-token budget, already supported and tested) and the SAME `EG2VisionTower.softTokens`
-   (video has no tower of its own: `vision_tower` + `embed_vision`, placeholder id
-   `video`). Layout `EG2MediaBlock(.video, softTokensPerBlock: n, blocks: frames)`;
-   `features[.video]` = one `[n, 512]` array per frame.
-3. `EmbeddingPart.video(Data)`, `parsePart` case for `video_url` / `input_video`.
-4. Parity against `reference_video.json` (3 s -> 3 frames, 40 s -> 32 frames; 130 soft
-   tokens per 320x240 frame). A 32-frame clip is about 4.2k tokens, so the sliding
-   window (512) is exercised.
-
-Also update `docs/SERVER_API.md`, this file's request table and `CHANGELOG.md`.
+Not done / not verified: bf16 audio / video floors are measured on the fixtures only;
+10-bit / 4:2:2 video and rotated phone video were not tested; Ogg Vorbis, WebM and
+Matroska do not decode; timestamps (`add_timestamps: true`) are not offered; audio
+longer than 30 s is refused rather than windowed.

@@ -11,6 +11,23 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **EmbeddingGemma 2 audio + video embeddings** — `input_audio` (OpenAI shape,
+  base64; wav / mp3 / m4a / flac / aiff / caf / ogg-Opus via AVFoundation, resampled
+  to 16 kHz mono, up to 30 s) and `video_url` / `input_video` (base64 mp4 / mov /
+  m4v; 1 fps, at most 32 frames, the reference's frame-index rule, 140 soft tokens
+  per frame, audio track ignored) content parts on `/v1/embeddings` and
+  `/api/embed`, alone or interleaved with text and images. Strict-bound audio tower
+  (752 tensors; the HF checkpoint's PyTorch conv layout is converted, shape-checked)
+  on Krill's existing USM `AudioEncoder`, loaded lazily and separately from the
+  shared vision tower, so text-only use is unchanged (peak 1551 MB fp32). The 280
+  audio-token cap in the old design note does not exist on the model path (25 tokens
+  per second, no cap). Decoder parity work: video frames are converted from
+  AVFoundation's 4:2:0 planes the swscale way (AVFoundation's BGRA cost ~0.005
+  cosine), MP3 encoder delay / padding trimmed like ffmpeg. fp32 cosine >= 0.9995
+  to sentence-transformers on 10 audio / mixed and 6 video / mixed inputs (bf16
+  >= 0.9994); an item over the 8,192-token context, audio over 30 s, or a body over
+  10 MB is refused (`400` / `413`), never truncated. See
+  [`docs/EMBEDDINGGEMMA2.md`](docs/EMBEDDINGGEMMA2.md).
 - **EmbeddingGemma 2 image embeddings + multimodal request plumbing** —
   `/v1/embeddings` and `/api/embed` accept content-part items
   (`{"content":[{"type":"text",...},{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}]}`;
@@ -22,8 +39,7 @@ reverse chronological order. Versioning follows
   that scatters soft tokens into the real `<boi><image>xN<eoi>` layout, and a
   `forward(inputsEmbeds:)` backbone entry. fp32 cosine >= 0.9994 to
   sentence-transformers on 8 images + 6 mixed inputs (PNG >= 0.99998; JPEG is
-  limited by Apple-vs-libjpeg chroma upsampling). Audio and video parts are
-  recognised and answer `400 not yet supported`; media to a text-only model is
+  limited by Apple-vs-libjpeg chroma upsampling). Media to a text-only model is
   `400`; plain-string requests are unchanged. See
   [`docs/EMBEDDINGGEMMA2.md`](docs/EMBEDDINGGEMMA2.md).
 - **EmbeddingGemma 2 (`embeddinggemma-2`) native text embeddings** — Swift +

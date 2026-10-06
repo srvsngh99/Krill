@@ -30,6 +30,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
     /// EmbeddingGemma 2 modality towers are loaded LAZILY, on the first request
     /// that carries media, so text-only use keeps the text-only footprint.
     private var visionTower: EG2VisionTower?
+    private var audioTower: EG2AudioTower?
     private var eg2Dtype: DType = .float32
     private var eg2Tokens = EG2ModalityTokens.checkpointDefaults
     private let towerLock = NSLock()
@@ -69,6 +70,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
             self.appendEOS = appendEOS
             self.eosTokenId = eosTokenId
             self.visionTower = nil
+            self.audioTower = nil
         }
     }
 
@@ -433,6 +435,8 @@ public final class EmbeddingEngine: @unchecked Sendable {
                                 dimensions: Int?) throws -> ([Float], Int) {
         var segments: [EG2Segment] = []
         var decoded: [EG2RGBImage] = []
+        var pendingWaves: [[Float]] = []
+        var pendingVideos: [(src: EG2VideoSource, indices: [Int])] = []
         for part in item.parts {
             switch part {
             case .text(let t):
@@ -446,6 +450,29 @@ public final class EmbeddingEngine: @unchecked Sendable {
                         .image, softTokensPerBlock: try EG2ImagePreprocessor.softTokens(for: rgb))))
                     decoded.append(rgb)
                 } catch { throw EmbeddingError.invalidOption("image: \(error)") }
+            case .audio(let data, let format):
+                // Decode and count first (cheap); mel + tower only run once the whole
+                // prompt is known to fit.
+                do {
+                    let wave = try EG2AudioPreprocessor.decode(data, formatHint: format)
+                    let n = try EG2AudioPreprocessor.softTokens(forWaveform: wave)
+                    segments.append(.media(EG2MediaBlock(.audio, softTokensPerBlock: n)))
+                    pendingWaves.append(wave)
+                } catch { throw EmbeddingError.invalidOption("audio: \(error)") }
+            case .video(let data, let format):
+                // Container read + frame count only (no decode); the sampled frames are
+                // decoded after the whole prompt is known to fit.
+                do {
+                    let src = try EG2VideoSource(data: data, formatHint: format)
+                    let idx = EG2VideoSampler.frameIndices(
+                        totalFrames: src.info.totalFrames, fps: src.info.fps, duration: src.info.duration)
+                    guard !idx.isEmpty else { throw EG2VideoError.noFrames }
+                    let n = try EG2ImagePreprocessor.softTokens(
+                        width: src.info.width, height: src.info.height,
+                        maxSoftTokens: EG2ImagePreprocessor.videoFrameSoftTokens)
+                    segments.append(.media(EG2MediaBlock(.video, softTokensPerBlock: n, blocks: idx.count)))
+                    pendingVideos.append((src, idx))
+                } catch { throw EmbeddingError.invalidOption("video: \(error)") }
             }
         }
         let seq: EG2Sequence
@@ -453,11 +480,35 @@ public final class EmbeddingEngine: @unchecked Sendable {
         catch { throw EmbeddingError.invalidOption("\(error)") }
 
         var features: [EG2Modality: [MLXArray]] = [:]
-        if !decoded.isEmpty {
-            let tower = try ensureVisionTower()
+        if !decoded.isEmpty || !pendingVideos.isEmpty {
+            let tower = try ensureVisionTower()  // images and video share one tower
+            if !decoded.isEmpty {
+                do {
+                    features[.image] = try decoded.map { tower.softTokens(try EG2ImagePreprocessor.prepare($0)) }
+                } catch { throw EmbeddingError.invalidOption("image: \(error)") }
+            }
+            if !pendingVideos.isEmpty {
+                do {
+                    // One `[n, hidden]` array per frame, in order (the builder emits one span per frame).
+                    var perFrame: [MLXArray] = []
+                    for v in pendingVideos {
+                        // Each sampled frame is resized + patchified as it is decoded.
+                        let patches = try v.src.frames(at: v.indices) {
+                            try EG2ImagePreprocessor.prepare($0, maxSoftTokens: EG2ImagePreprocessor.videoFrameSoftTokens)
+                        }
+                        perFrame += patches.map { tower.softTokens($0) }
+                    }
+                    features[.video] = perFrame
+                } catch { throw EmbeddingError.invalidOption("video: \(error)") }
+            }
+        }
+        if !pendingWaves.isEmpty {
+            let tower = try ensureAudioTower()
             do {
-                features[.image] = try decoded.map { tower.softTokens(try EG2ImagePreprocessor.prepare($0)) }
-            } catch { throw EmbeddingError.invalidOption("image: \(error)") }
+                features[.audio] = try pendingWaves.map {
+                    try tower.softTokens(try EG2AudioPreprocessor.prepare(waveform: $0))
+                }
+            } catch { throw EmbeddingError.invalidOption("audio: \(error)") }
         }
         let embeds: MLXArray
         do { embeds = try model.mergedEmbeddings(seq, features: features) }
@@ -485,6 +536,24 @@ public final class EmbeddingEngine: @unchecked Sendable {
             throw EmbeddingError.invalidOption("this checkpoint has no vision tower; images are not supported")
         }
     }
+
+    /// Load the audio tower on first use (strict binding), separately from vision.
+    private func ensureAudioTower() throws -> EG2AudioTower {
+        towerLock.lock(); defer { towerLock.unlock() }
+        if let t = audioTower { return t }
+        lock.lock(); let dir = loadedDir; let dtype = eg2Dtype; lock.unlock()
+        guard let dir else { throw EmbeddingError.notLoaded }
+        do {
+            let t = try loadEG2AudioTower(directory: dir, dtype: dtype).tower
+            audioTower = t
+            return t
+        } catch EG2AudioLoadError.noAudioTower {
+            throw EmbeddingError.invalidOption("this checkpoint has no audio tower; audio is not supported")
+        }
+    }
+
+    /// True once the lazily loaded audio tower is resident (tests / diagnostics).
+    public var isAudioTowerLoaded: Bool { towerLock.lock(); defer { towerLock.unlock() }; return audioTower != nil }
 
     /// True once the lazily loaded vision tower is resident (tests / diagnostics).
     public var isVisionTowerLoaded: Bool { towerLock.lock(); defer { towerLock.unlock() }; return visionTower != nil }
