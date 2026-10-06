@@ -152,6 +152,9 @@ final class EmbeddingGemma2AudioTests: XCTestCase {
         XCTAssertEqual(EG2AudioPreprocessor.sniffExtension(Data("RIFF\0\0\0\0WAVE".utf8)), "wav")
         XCTAssertEqual(EG2AudioPreprocessor.sniffExtension(Data("fLaC....".utf8)), "flac")
         XCTAssertEqual(EG2AudioPreprocessor.sniffExtension(Data("ID3\u{3}".utf8)), "mp3")
+        XCTAssertEqual(EG2AudioPreprocessor.sniffExtension(Data("OggS\0".utf8)), "ogg")
+        XCTAssertEqual(EG2AudioPreprocessor.sniffExtension(Data([0xFF, 0xFB, 0x90, 0x00])), "mp3")
+        XCTAssertEqual(EG2AudioPreprocessor.sniffExtension(Data([0xFF, 0xF1, 0x50, 0x80])), "aac")
     }
 
     // MARK: Tiny tower, strict binding

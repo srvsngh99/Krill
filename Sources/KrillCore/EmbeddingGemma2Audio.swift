@@ -35,7 +35,7 @@ public enum EG2AudioError: Error, CustomStringConvertible, Equatable {
     public var description: String {
         switch self {
         case .undecodable(let why):
-            return "audio could not be decoded (\(why)); supported: wav, mp3, m4a/aac, flac, aiff, caf"
+            return "audio could not be decoded (\(why)); supported: wav, mp3, m4a/aac, flac, aiff, caf, ogg (Opus)"
         case .tooShort(let n):
             return "audio is too short (\(n) samples at 16 kHz); the minimum is \(EG2AudioPreprocessor.minSamples) samples (about 0.1 s)"
         case .tooLong(let s, let m):
@@ -250,7 +250,11 @@ public enum EG2AudioPreprocessor {
         if tag(0, "fLaC") { return "flac" }
         if tag(0, "FORM") { return "aiff" }
         if tag(0, "caff") { return "caf" }
-        if tag(0, "ID3") || (b.count >= 2 && b[0] == 0xFF && (b[1] & 0xE0) == 0xE0) { return "mp3" }
+        if tag(0, "OggS") { return "ogg" }
+        if tag(0, "ID3") { return "mp3" }
+        if b.count >= 2, b[0] == 0xFF, (b[1] & 0xE0) == 0xE0 {
+            return (b[1] >> 1) & 3 == 0 ? "aac" : "mp3"  // layer bits 00 = ADTS AAC, else MPEG audio
+        }
         if tag(4, "ftyp") { return "m4a" }
         return "audio"
     }
