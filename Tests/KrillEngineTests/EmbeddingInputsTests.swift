@@ -52,7 +52,7 @@ final class EmbeddingInputsTests: XCTestCase {
         """
         let item = try EmbeddingInputParser.parse(json(body))[0]
         let kinds = item.parts.map { p -> String in
-            switch p { case .text(let t): return "t:" + t; case .image: return "img" }
+            switch p { case .text(let t): return "t:" + t; case .image: return "img"; case .audio(_, let f): return "aud:" + f }
         }
         XCTAssertEqual(kinds, ["img", "t:x", "img", "t:y"])
     }
@@ -101,9 +101,8 @@ final class EmbeddingInputsTests: XCTestCase {
         }
     }
 
-    func testAudioAndVideoPartsAreRecognisedButNotYetSupported() {
+    func testVideoPartsAreRecognisedButNotYetSupported() {
         for (type, body) in [
-            ("input_audio", #"{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}"#),
             ("video_url", #"{"type":"video_url","video_url":{"url":"data:video/mp4;base64,AAAA"}}"#),
             ("input_video", #"{"type":"input_video","data":"AAAA"}"#),
         ] {
@@ -113,6 +112,41 @@ final class EmbeddingInputsTests: XCTestCase {
         }
         XCTAssertThrowsError(try EmbeddingInputParser.parse(json(#"[{"content":[{"type":"hologram"}]}]"#))) {
             XCTAssertTrue("\($0)".contains("unknown part type"), "\($0)")
+        }
+    }
+
+    func testAudioParts() throws {
+        // OpenAI shape, with the format hint kept; order is preserved around text.
+        let r = try EmbeddingInputParser.parse(json("""
+        [{"content":[{"type":"text","text":"say: "},
+                     {"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}},
+                     {"type":"input_audio","input_audio":{"data":"data:audio/mpeg;base64,SUQz"}},
+                     {"type":"audio_url","audio_url":{"url":"data:audio/x-flac;base64,ZkxhQw=="}}]}]
+        """))
+        XCTAssertEqual(r.count, 1)
+        guard r[0].parts.count == 4, case .audio(let d0, let f0) = r[0].parts[1],
+              case .audio(let d1, let f1) = r[0].parts[2], case .audio(let d2, let f2) = r[0].parts[3]
+        else { return XCTFail("\(r[0].parts)") }
+        XCTAssertEqual(d0, Data("RIFF".utf8)); XCTAssertEqual(f0, "wav")
+        XCTAssertEqual(d1, Data("ID3".utf8)); XCTAssertEqual(f1, "mpeg", "format taken from the data: URL mime")
+        XCTAssertEqual(d2, Data("fLaC".utf8)); XCTAssertEqual(f2, "x-flac")
+        XCTAssertTrue(r[0].hasMedia)
+    }
+
+    func testMalformedAudioPartsAreClientErrors() {
+        for part in [
+            #"{"type":"input_audio"}"#,
+            #"{"type":"input_audio","input_audio":{"format":"wav"}}"#,
+            #"{"type":"input_audio","input_audio":{"data":"","format":"wav"}}"#,
+            #"{"type":"input_audio","input_audio":{"data":"!!!!","format":"wav"}}"#,
+            #"{"type":"input_audio","input_audio":{"data":"https://example.com/a.wav","format":"wav"}}"#,
+            #"{"type":"input_audio","input_audio":{"data":"file:///tmp/a.wav","format":"wav"}}"#,
+            #"{"type":"input_audio","input_audio":{"data":"/tmp/a.wav","format":"wav"}}"#,
+            #"{"type":"audio_url","audio_url":{"url":"data:image/png;base64,AAAA"}}"#,
+        ] {
+            XCTAssertThrowsError(try EmbeddingInputParser.parse(json("[{\"content\":[\(part)]}]")), part) {
+                XCTAssertTrue($0 is EmbeddingInputError, part)
+            }
         }
     }
 
