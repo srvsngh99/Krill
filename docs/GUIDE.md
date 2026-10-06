@@ -439,6 +439,7 @@ Ollama `"format": {"lark":"…"}`. Reference: [`docs/SERVER_API.md`](SERVER_API.
 Pull a dedicated encoder first (independent of any loaded chat model):
 ```bash
 krill pull all-minilm        # also: bge-small-en, bge-base-en, E5 / BERT families
+krill pull embeddinggemma-2   # Google EmbeddingGemma 2 (text, 768/512/256/128-dim, 8K ctx)
 krill serve
 ```
 

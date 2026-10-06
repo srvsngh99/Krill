@@ -283,6 +283,10 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         // encoder, loaded via the engine's GTE path. Still a `.bert`-family
         // embedder at the registry level so the embeddings gate admits it.
         if archLower.contains("newmodel") { return .bert }
+        // EmbeddingGemma 2 (`EmbeddingGemma2Model`): a bidirectional Gemma-4
+        // derived embedder. Its arch contains "gemma", so it must be claimed
+        // BEFORE the gemma arms below or it would route to a causal chat family.
+        if archLower.contains("embeddinggemma") { return .bert }
         // Encoder-free unified Gemma 4 (12B) before the generic gemma4 arm:
         // its arch is `Gemma4UnifiedForConditionalGeneration`, which also
         // contains "gemma4", so the specific check must come first.
@@ -368,6 +372,8 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
         // "NewModel"/"ModernBertModel" architectures; this covers config.json
         // that declares only model_type).
         case "new", "modernbert": return .bert
+        // EmbeddingGemma 2: dedicated embedder (see `detect`).
+        case "embedding_gemma2": return .bert
         default: return nil
         }
     }

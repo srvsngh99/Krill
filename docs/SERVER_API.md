@@ -245,6 +245,14 @@ OpenAI shape. Body: `{"model": "all-minilm", "input": "text" | [...]}`.
 Returns `{"object":"list","data":[{"object":"embedding","index":0,
 "embedding":[...]}],"model","usage"}`.
 
+Optional fields on all three endpoints: `instruction` (literal prefix),
+`task` (named prefix from the model's sentence-transformers prompt table,
+e.g. `SearchQuery` / `Document`) and `dimensions` (Matryoshka truncation, then
+re-normalised). `task` and `dimensions` are honoured by `embeddinggemma-2`
+(`dimensions` 768/512/256/128, anything else `400`); other models ignore
+`dimensions` and answer `400` to `task`. See
+[EMBEDDINGGEMMA2.md](EMBEDDINGGEMMA2.md).
+
 Requesting embeddings against a non-embedding (chat) model returns `400`;
 an uninstalled model returns `404` with a `krill pull` hint.
 

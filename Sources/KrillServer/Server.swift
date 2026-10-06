@@ -2762,16 +2762,21 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             ])
             return
         }
-        // Optional `instruction` prefix prepended to every input. Instruction
-        // tuned decoder embedders (e5-mistral, gte-Qwen2, SFR, bge-gemma2) need
-        // their query-side task prompt (e.g. "Instruct: ...\nQuery: ") to
-        // separate well; callers pass it for queries and omit it for documents.
-        let inputs: [String]
-        if let instruction = json["instruction"] as? String, !instruction.isEmpty {
-            inputs = rawInputs.map { instruction + $0 }
-        } else {
-            inputs = rawInputs
+        // Optional `instruction` (literal prefix), `task` (named prompt from the
+        // model's sentence-transformers table) and `dimensions` (Matryoshka
+        // truncation). Instruction-tuned decoder embedders (e5-mistral,
+        // gte-Qwen2, SFR, bge-gemma2) need their query-side prompt (e.g.
+        // "Instruct: ...\nQuery: "); callers pass it for queries and omit it for
+        // documents. The engine applies the prefix and validates against the
+        // loaded model.
+        let options: EmbeddingRequestOptions
+        do {
+            options = try EmbeddingRequestOptions.parse(json)
+        } catch {
+            sendJSON(context: context, status: .badRequest, body: ["error": "\(error)"])
+            return
         }
+        let inputs = rawInputs
         guard let manifest = registry.getModel(name) else {
             sendJSON(context: context, status: .notFound, body: [
                 "error": "embedding model '\(name)' not found. Install with: krill pull \(name)"
@@ -2801,7 +2806,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             defer { self.leaveQueue() }
             do {
                 try await embed.load(directory: dir)
-                let result = try embed.embed(inputs)
+                let result = try embed.embed(inputs, options: options)
                 let totalNs = Int64((CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
                 let response: [String: Any]
                 switch style {
@@ -2829,6 +2834,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
                 self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
                                     status: .ok, body: response)
+            } catch let e as EmbeddingError {
+                if case .invalidOption(let m) = e {
+                    self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
+                                        status: .badRequest, body: ["error": m])
+                } else {
+                    self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
+                                        status: .internalServerError,
+                                        body: ["error": "embedding failed: \(e)"])
+                }
             } catch {
                 let msg = String(describing: error).prefix(300)
                 self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
