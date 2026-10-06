@@ -80,6 +80,26 @@ final class ModelCapabilitiesTests: XCTestCase {
         }
     }
 
+    // MARK: - EmbeddingGemma 2
+
+    func testEmbeddingGemma2RoutesToEmbeddingFamily() {
+        let cfg: [String: Any] = [
+            "architectures": ["EmbeddingGemma2Model"], "model_type": "embedding_gemma2",
+        ]
+        XCTAssertEqual(ModelFamily.detect(from: cfg), .bert,
+                       "must not route to the causal .gemma/.gemma4 families")
+        XCTAssertEqual(ModelFamily.detect(from: ["model_type": "embedding_gemma2"]), .bert)
+        XCTAssertEqual(ModelCapabilities.capabilities(for: .bert), [.embeddings])
+    }
+
+    func testEmbeddingGemma2AliasResolves() {
+        let hit = AliasMap.allAliases.first { $0.shortName == "embeddinggemma-2" }
+        XCTAssertNotNil(hit)
+        XCTAssertEqual(hit?.model.repo, "google/embeddinggemma-2")
+        XCTAssertEqual(hit?.model.family, .bert)
+        XCTAssertEqual(hit?.model.context, 8192)
+    }
+
     // MARK: - Ollama tag mapping
 
     func testOllamaTagMappingIsStableAndDistinct() {

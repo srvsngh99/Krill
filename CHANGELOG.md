@@ -11,6 +11,17 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **EmbeddingGemma 2 (`embeddinggemma-2`) native text embeddings** — Swift +
+  MLX loader/forward for `google/embeddinggemma-2` (`embedding_gemma2`; its own
+  bidirectional encoder, not Gemma 4 run non-causally), strict weight binding
+  (every text tensor must bind; vision/audio tensors are skipped and counted),
+  mean pool + 512->768 projection + L2, float32 default / bfloat16, float16
+  refused, NaN guard. Adds a code-point BPE tokenizer (swift-transformers'
+  grapheme-cluster seeding broke Hindi/Kannada/Sanskrit), and optional
+  `task` / `dimensions` request fields on `/v1/embeddings`, `/api/embed` and
+  `/api/embeddings`. fp32 cosine >= 0.9999998 to sentence-transformers on 21
+  strings x 9 prompt modes (bf16 >= 0.99986). Image/audio/video are a later
+  milestone; design in [`docs/EMBEDDINGGEMMA2.md`](docs/EMBEDDINGGEMMA2.md).
 - **Per-request thinking switch (`chat_template_kwargs.enable_thinking` /
   Ollama `think`)** — thinking could previously only be turned on/off for
   the whole server at start time (`KRILL_ENABLE_THINKING`). A single request

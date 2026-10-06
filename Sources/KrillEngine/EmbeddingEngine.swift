@@ -11,6 +11,10 @@ import KrillTokenizer
 public final class EmbeddingEngine: @unchecked Sendable {
     private var model: (any SentenceEmbeddingEncoder)?
     private var tokenizer: KrillTokenizer?
+    /// Code-point BPE used by EmbeddingGemma 2 (swift-transformers' BPE seeds
+    /// merges with grapheme clusters, which breaks Indic scripts; see
+    /// `CodePointBPETokenizer`). Set only for that model.
+    private var cpTokenizer: CodePointBPETokenizer?
     private var loadedDir: URL?
     private var maxTokens: Int = 512
     private var pooling = EmbeddingPooling.fromEnv()
@@ -18,6 +22,10 @@ public final class EmbeddingEngine: @unchecked Sendable {
     /// final position has attended over the whole input; BERT encoders do not.
     private var appendEOS = false
     private var eosTokenId = 0
+    /// sentence-transformers `prompts` table of the loaded model (task -> prefix).
+    private var prompts: EmbeddingPromptTable?
+    /// Matryoshka dimensions the loaded model supports (nil = not an MRL model).
+    private var mrlDimensions: [Int]?
     private let lock = NSLock()
 
     public init() {}
@@ -38,12 +46,17 @@ public final class EmbeddingEngine: @unchecked Sendable {
         return body()
     }
 
-    private func install(model: any SentenceEmbeddingEncoder, tokenizer: KrillTokenizer,
+    private func install(model: any SentenceEmbeddingEncoder, tokenizer: KrillTokenizer?,
+                         cpTokenizer: CodePointBPETokenizer? = nil,
                          directory: URL, maxTokens: Int,
-                         pooling: EmbeddingPooling, appendEOS: Bool, eosTokenId: Int) {
+                         pooling: EmbeddingPooling, appendEOS: Bool, eosTokenId: Int,
+                         prompts: EmbeddingPromptTable?, mrlDimensions: [Int]?) {
         withLock {
+            self.prompts = prompts
+            self.mrlDimensions = mrlDimensions
             self.model = model
             self.tokenizer = tokenizer
+            self.cpTokenizer = cpTokenizer
             self.loadedDir = directory
             self.maxTokens = maxTokens
             self.pooling = pooling
@@ -59,14 +72,31 @@ public final class EmbeddingEngine: @unchecked Sendable {
         let configURL = directory.appendingPathComponent("config.json")
         let data = try Data(contentsOf: configURL)
         let mt = Self.modelType(from: data) ?? ""
-        let tok = try await KrillTokenizer(from: directory)
+        // EmbeddingGemma 2 uses its own code-point BPE; skip the (slow, 32 MB)
+        // swift-transformers load for it.
+        let tok: KrillTokenizer? = mt == "embedding_gemma2"
+            ? nil : try await KrillTokenizer(from: directory)
+        var cpTok: CodePointBPETokenizer? = nil
 
         let model: any SentenceEmbeddingEncoder
         let maxTokens: Int
         let pooling: EmbeddingPooling
         var appendEOS = false
+        var mrl: [Int]? = nil
 
-        if mt == "nomic_bert",
+        if mt == "embedding_gemma2" {
+            // EmbeddingGemma 2 (text path): bidirectional Gemma-4-derived encoder
+            // with a 512->768 projection, mean pooling, MRL dims. Strict-bound
+            // (see loadEmbeddingGemma2); vision/audio tensors are skipped.
+            // float32 compute by default; float16 is unsafe for this model.
+            let dtype: DType = Self.envDtype() ?? .float32
+            cpTok = try CodePointBPETokenizer(directory: directory)
+            let loaded = try loadEmbeddingGemma2(directory: directory, dtype: dtype)
+            model = loaded.model
+            maxTokens = EmbeddingGemma2Config.maxContext
+            pooling = .mean
+            mrl = EmbeddingGemma2Config.mrlDimensions
+        } else if mt == "nomic_bert",
            let v2 = try? JSONDecoder().decode(NomicBertV2Config.self, from: data), v2.isMoE {
             // nomic-embed-text-v2-moe: same `nomic_bert` model_type as v1.5 but a
             // top-2 mixture of experts on every 2nd layer (XLM-R vocab). Detected
@@ -202,9 +232,21 @@ public final class EmbeddingEngine: @unchecked Sendable {
             pooling = Self.envPooling() ?? .mean
         }
 
-        install(model: model, tokenizer: tok, directory: directory,
+        install(model: model, tokenizer: tok, cpTokenizer: cpTok, directory: directory,
                 maxTokens: maxTokens, pooling: pooling,
-                appendEOS: appendEOS, eosTokenId: tok.eosTokenId)
+                appendEOS: appendEOS, eosTokenId: tok?.eosTokenId ?? cpTok?.eosId ?? 0,
+                prompts: EmbeddingPromptTable.load(directory: directory),
+                mrlDimensions: mrl)
+    }
+
+    /// `KRILL_EMBED_DTYPE=float32|bfloat16` for EmbeddingGemma 2. float16 is
+    /// deliberately not accepted (NaN / silent degradation).
+    private static func envDtype() -> DType? {
+        switch ProcessInfo.processInfo.environment["KRILL_EMBED_DTYPE"]?.lowercased() {
+        case "float32", "fp32", "f32": return .float32
+        case "bfloat16", "bf16": return .bfloat16
+        default: return nil
+        }
     }
 
     /// Peek the `model_type` field from a raw config.json to select the encoder
@@ -239,28 +281,60 @@ public final class EmbeddingEngine: @unchecked Sendable {
         public let promptTokens: Int
     }
 
-    /// Embed a batch of texts. Each text is encoded and run independently
-    /// (batch=1) so no padding mask is needed - keeps the forward exact.
-    public func embed(_ texts: [String]) throws -> EmbedResult {
+    /// Embed a batch of texts. Generic encoders run each text independently
+    /// (batch=1) so no padding mask is needed and the forward stays exact.
+    /// EmbeddingGemma 2 batches by length with a key-padding mask.
+    ///
+    /// `options.task` / `options.instruction` prefix every text;
+    /// `options.dimensions` truncates (MRL models) and re-normalises. Invalid
+    /// combinations throw `EmbeddingError.invalidOption` (a client error).
+    public func embed(_ texts: [String],
+                      options: EmbeddingRequestOptions = EmbeddingRequestOptions()) throws -> EmbedResult {
         lock.lock()
         let model = self.model
         let tokenizer = self.tokenizer
+        let cpTokenizer = self.cpTokenizer
         let cap = self.maxTokens
         let pooling = self.pooling
         let appendEOS = self.appendEOS
         let eos = self.eosTokenId
+        let prompts = self.prompts
+        let mrl = self.mrlDimensions
         lock.unlock()
 
-        guard let model, let tokenizer else {
-            throw EmbeddingError.notLoaded
+        guard let model else { throw EmbeddingError.notLoaded }
+
+        // Resolve the prefix (task table or literal instruction).
+        var prefix = options.instruction ?? ""
+        if let task = options.task {
+            guard let table = prompts else {
+                throw EmbeddingError.invalidOption(
+                    "this model defines no task prompts; use 'instruction' for a literal prefix")
+            }
+            guard let p = table.prefix(for: task) else {
+                throw EmbeddingError.invalidOption(
+                    "unknown task '\(task)'; valid tasks: \(table.taskNames.joined(separator: ", "))")
+            }
+            prefix = p
+        }
+        if let d = options.dimensions, let mrl, !mrl.contains(d) {
+            throw EmbeddingError.invalidOption(
+                "unsupported 'dimensions' \(d); this model supports \(mrl.map(String.init).joined(separator: ", "))")
         }
 
         var vectors: [[Float]] = []
-        vectors.reserveCapacity(texts.count)
         var totalTokens = 0
 
+        if let eg = model as? EmbeddingGemma2Model {
+            guard let cpTokenizer else { throw EmbeddingError.notLoaded }
+            return try embedGemma2(eg, tokenizer: cpTokenizer, texts: texts.map { prefix + $0 },
+                                   cap: cap, dimensions: options.dimensions)
+        }
+        guard let tokenizer else { throw EmbeddingError.notLoaded }
+
+        vectors.reserveCapacity(texts.count)
         for text in texts {
-            var ids = tokenizer.encode(text)
+            var ids = tokenizer.encode(prefix + text)
             if ids.isEmpty { ids = [tokenizer.bosTokenId] }
             if appendEOS {
                 // Last-token decoder embedders pool the EOS position. Normalize
@@ -281,8 +355,64 @@ public final class EmbeddingEngine: @unchecked Sendable {
                 poolSentenceEmbedding(hidden, pooling: pooling, normalize: true))
         }
 
+        // Non-MRL models: `dimensions` is ignored, exactly as before this field
+        // was supported (existing models' behaviour must not change).
         return EmbedResult(vectors: vectors, promptTokens: totalTokens)
     }
+
+    /// Padded-batch EmbeddingGemma 2 path. Texts are sorted by length and run
+    /// in chunks bounded by a padded-token budget; results return in input
+    /// order. Every vector is NaN/Inf-guarded.
+    private func embedGemma2(_ model: EmbeddingGemma2Model, tokenizer: CodePointBPETokenizer,
+                             texts: [String], cap: Int, dimensions: Int?) throws -> EmbedResult {
+        var encoded: [[Int32]] = texts.map { t in
+            var ids = tokenizer.encode(t)
+            // Truncate keeping the trailing <eos>, like HF `truncation=True`.
+            if ids.count > cap, let eos = tokenizer.eosId { ids = Array(ids.prefix(cap - 1)) + [eos] }
+            else if ids.count > cap { ids = Array(ids.prefix(cap)) }
+            return ids.map { Int32($0) }
+        }
+        let total = encoded.reduce(0) { $0 + $1.count }
+        let order = encoded.indices.sorted { encoded[$0].count < encoded[$1].count }
+        var out = [[Float]](repeating: [], count: texts.count)
+
+        var i = 0
+        while i < order.count {
+            // Grow the chunk while (count * longest) stays within the budget.
+            var j = i
+            while j < order.count, (j - i + 1) <= Self.gemma2MaxBatch,
+                  (j - i + 1) * encoded[order[j]].count <= Self.gemma2PaddedTokenBudget || j == i {
+                j += 1
+            }
+            let idx = Array(order[i ..< j])
+            let T = idx.map { encoded[$0].count }.max() ?? 1
+            var flat = [Int32](); flat.reserveCapacity(idx.count * T)
+            for k in idx { flat += encoded[k] + [Int32](repeating: 0, count: T - encoded[k].count) }
+            let tokens = MLXArray(flat).reshaped(idx.count, T)
+            let pooled = model.pooled(tokens, lengths: idx.map { encoded[$0].count })
+            pooled.eval()
+            let rows = pooled.asArray(Float.self)
+            let w = model.config.embeddingDim
+            for (r, k) in idx.enumerated() {
+                let full = Array(rows[(r * w) ..< ((r + 1) * w)])
+                guard full.allSatisfy({ $0.isFinite }) else { throw EmbeddingError.nonFinite }
+                let v = EmbeddingMath.l2Normalize(full)
+                out[k] = dimensions.map { EmbeddingMath.truncate(v, to: $0) } ?? v
+            }
+            i = j
+        }
+        encoded.removeAll()
+        if ProcessInfo.processInfo.environment["KRILL_EMBED_LOG_MEM"] != nil {
+            // MLX unified-memory high-water mark (RSS does not see it).
+            let mb = Double(Memory.peakMemory) / 1_048_576
+            FileHandle.standardError.write(Data(String(
+                format: "EmbeddingGemma2: mlx peak memory %.0f MB\n", mb).utf8))
+        }
+        return EmbedResult(vectors: out, promptTokens: total)
+    }
+
+    private static let gemma2MaxBatch = 32
+    private static let gemma2PaddedTokenBudget = 8192
 
     // MARK: - Decoder-LLM embedder detection
 
@@ -344,6 +474,10 @@ public final class EmbeddingEngine: @unchecked Sendable {
 public enum EmbeddingError: Error, CustomStringConvertible {
     case notLoaded
     case unsupported(String)
+    /// A request option the loaded model cannot honour (HTTP 400).
+    case invalidOption(String)
+    /// The forward produced NaN/Inf (HTTP 500; never returned as a vector).
+    case nonFinite
 
     public var description: String {
         switch self {
@@ -351,6 +485,10 @@ public enum EmbeddingError: Error, CustomStringConvertible {
             return "No embedding model loaded"
         case .unsupported(let mt):
             return "Model type '\(mt)' is not a supported embedder"
+        case .invalidOption(let m):
+            return m
+        case .nonFinite:
+            return "embedding produced non-finite values (NaN/Inf); refusing to return a degraded vector"
         }
     }
 }

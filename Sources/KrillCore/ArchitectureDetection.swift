@@ -306,6 +306,19 @@ let architectureRules: [ArchitectureRule] = [
         matches: { arch, mt in arch.contains("mistral") || mt == "mistral" },
         action: .load { try loadMistral(configData: $0, directory: $1) }),
 
+    // EmbeddingGemma 2 is an embedding model (bidirectional encoder, no
+    // lm_head): loading it as a causal Gemma would "work" and emit garbage.
+    // It is served by `EmbeddingEngine`, so reject it from the chat loader.
+    // MUST precede `gemma` (its arch contains "gemma").
+    ArchitectureRule(
+        id: "embedding_gemma2",
+        matches: { arch, mt in arch.contains("embeddinggemma") || mt == "embedding_gemma2" },
+        action: .reject { arch, mt in
+            .specializedModelUnsupported(
+                "EmbeddingGemma 2 is an embedding model, not a chat model. Use "
+                + "POST /v1/embeddings (or /api/embed). Detected arch=\(arch), model_type=\(mt).")
+        }),
+
     ArchitectureRule(
         id: "gemma",
         matches: { arch, mt in arch.contains("gemma") || mt.hasPrefix("gemma") },

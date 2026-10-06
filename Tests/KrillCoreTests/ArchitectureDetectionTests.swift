@@ -162,6 +162,15 @@ final class ArchitectureDetectionTests: XCTestCase {
         XCTAssertEqual(id(modelType: "qwen3_moe"), "qwen3_moe")
     }
 
+    /// EmbeddingGemma 2's arch contains "gemma": it must be claimed by its own
+    /// (rejecting) rule before the causal `gemma` rule, never loaded as a chat LM.
+    func testEmbeddingGemma2IsNotACausalGemma() {
+        XCTAssertEqual(id(arch: "EmbeddingGemma2Model", modelType: "embedding_gemma2"), "embedding_gemma2")
+        XCTAssertEqual(id(modelType: "embedding_gemma2"), "embedding_gemma2")
+        XCTAssertEqual(id(arch: "GemmaForCausalLM"), "gemma")
+        XCTAssertEqual(id(arch: "Gemma4ForCausalLM"), "gemma4")
+    }
+
     /// Every rule id in the table is reachable except via its own matcher,
     /// and the table ends with the catch-all `fallback`.
     func testTableIsOrderedAndFallbackIsLast() {
