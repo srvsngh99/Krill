@@ -436,6 +436,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
         var segments: [EG2Segment] = []
         var decoded: [EG2RGBImage] = []
         var pendingWaves: [[Float]] = []
+        var pendingVideos: [(src: EG2VideoSource, indices: [Int])] = []
         for part in item.parts {
             switch part {
             case .text(let t):
@@ -458,6 +459,20 @@ public final class EmbeddingEngine: @unchecked Sendable {
                     segments.append(.media(EG2MediaBlock(.audio, softTokensPerBlock: n)))
                     pendingWaves.append(wave)
                 } catch { throw EmbeddingError.invalidOption("audio: \(error)") }
+            case .video(let data, let format):
+                // Container read + frame count only (no decode); the sampled frames are
+                // decoded after the whole prompt is known to fit.
+                do {
+                    let src = try EG2VideoSource(data: data, formatHint: format)
+                    let idx = EG2VideoSampler.frameIndices(
+                        totalFrames: src.info.totalFrames, fps: src.info.fps, duration: src.info.duration)
+                    guard !idx.isEmpty else { throw EG2VideoError.noFrames }
+                    let n = try EG2ImagePreprocessor.softTokens(
+                        width: src.info.width, height: src.info.height,
+                        maxSoftTokens: EG2ImagePreprocessor.videoFrameSoftTokens)
+                    segments.append(.media(EG2MediaBlock(.video, softTokensPerBlock: n, blocks: idx.count)))
+                    pendingVideos.append((src, idx))
+                } catch { throw EmbeddingError.invalidOption("video: \(error)") }
             }
         }
         let seq: EG2Sequence
@@ -465,11 +480,27 @@ public final class EmbeddingEngine: @unchecked Sendable {
         catch { throw EmbeddingError.invalidOption("\(error)") }
 
         var features: [EG2Modality: [MLXArray]] = [:]
-        if !decoded.isEmpty {
-            let tower = try ensureVisionTower()
-            do {
-                features[.image] = try decoded.map { tower.softTokens(try EG2ImagePreprocessor.prepare($0)) }
-            } catch { throw EmbeddingError.invalidOption("image: \(error)") }
+        if !decoded.isEmpty || !pendingVideos.isEmpty {
+            let tower = try ensureVisionTower()  // images and video share one tower
+            if !decoded.isEmpty {
+                do {
+                    features[.image] = try decoded.map { tower.softTokens(try EG2ImagePreprocessor.prepare($0)) }
+                } catch { throw EmbeddingError.invalidOption("image: \(error)") }
+            }
+            if !pendingVideos.isEmpty {
+                do {
+                    // One `[n, hidden]` array per frame, in order (the builder emits one span per frame).
+                    var perFrame: [MLXArray] = []
+                    for v in pendingVideos {
+                        // Each sampled frame is resized + patchified as it is decoded.
+                        let patches = try v.src.frames(at: v.indices) {
+                            try EG2ImagePreprocessor.prepare($0, maxSoftTokens: EG2ImagePreprocessor.videoFrameSoftTokens)
+                        }
+                        perFrame += patches.map { tower.softTokens($0) }
+                    }
+                    features[.video] = perFrame
+                } catch { throw EmbeddingError.invalidOption("video: \(error)") }
+            }
         }
         if !pendingWaves.isEmpty {
             let tower = try ensureAudioTower()

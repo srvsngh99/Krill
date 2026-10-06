@@ -52,7 +52,7 @@ final class EmbeddingInputsTests: XCTestCase {
         """
         let item = try EmbeddingInputParser.parse(json(body))[0]
         let kinds = item.parts.map { p -> String in
-            switch p { case .text(let t): return "t:" + t; case .image: return "img"; case .audio(_, let f): return "aud:" + f }
+            switch p { case .text(let t): return "t:" + t; case .image: return "img"; case .audio(_, let f): return "aud:" + f; case .video(_, let f): return "vid:" + f }
         }
         XCTAssertEqual(kinds, ["img", "t:x", "img", "t:y"])
     }
@@ -101,13 +101,38 @@ final class EmbeddingInputsTests: XCTestCase {
         }
     }
 
-    func testVideoPartsAreRecognisedButNotYetSupported() {
-        for (type, body) in [
-            ("video_url", #"{"type":"video_url","video_url":{"url":"data:video/mp4;base64,AAAA"}}"#),
-            ("input_video", #"{"type":"input_video","data":"AAAA"}"#),
+    func testVideoParts() throws {
+        // Payloads decode to "ftyp" / "moov" / "mdat" markers, the format is kept from the
+        // data: URL mime or the explicit field; order is preserved around text.
+        let r = try EmbeddingInputParser.parse(json("""
+        [{"content":[{"type":"text","text":"clip: "},
+                     {"type":"video_url","video_url":{"url":"data:video/mp4;base64,ZnR5cA=="}},
+                     {"type":"video_url","video_url":"data:video/quicktime;base64,bW9vdg=="},
+                     {"type":"input_video","input_video":{"data":"bWRhdA==","format":"mov"}},
+                     {"type":"input_video","data":"ZnR5cA=="}]}]
+        """))
+        guard r[0].parts.count == 5, case .video(let d0, let f0) = r[0].parts[1],
+              case .video(let d1, let f1) = r[0].parts[2], case .video(let d2, let f2) = r[0].parts[3],
+              case .video(_, let f3) = r[0].parts[4] else { return XCTFail("\(r[0].parts)") }
+        XCTAssertEqual(d0, Data("ftyp".utf8)); XCTAssertEqual(f0, "mp4")
+        XCTAssertEqual(d1, Data("moov".utf8)); XCTAssertEqual(f1, "quicktime")
+        XCTAssertEqual(d2, Data("mdat".utf8)); XCTAssertEqual(f2, "mov")
+        XCTAssertEqual(f3, "")
+        XCTAssertTrue(r[0].hasMedia)
+    }
+
+    func testMalformedVideoPartsAreClientErrors() {
+        for part in [
+            #"{"type":"video_url"}"#,
+            #"{"type":"video_url","video_url":{"url":""}}"#,
+            #"{"type":"video_url","video_url":{"url":"https://example.com/a.mp4"}}"#,
+            #"{"type":"video_url","video_url":{"url":"file:///tmp/a.mp4"}}"#,
+            #"{"type":"video_url","video_url":{"url":"data:video/mp4,rawbytes"}}"#,
+            #"{"type":"video_url","video_url":{"url":"data:image/png;base64,AAAA"}}"#,
+            #"{"type":"input_video","data":"!!!!"}"#,
         ] {
-            XCTAssertThrowsError(try EmbeddingInputParser.parse(json("[{\"content\":[\(body)]}]")), type) {
-                XCTAssertTrue("\($0)".contains("not yet supported"), "\($0)")
+            XCTAssertThrowsError(try EmbeddingInputParser.parse(json("[{\"content\":[\(part)]}]")), part) {
+                XCTAssertTrue($0 is EmbeddingInputError, part)
             }
         }
         XCTAssertThrowsError(try EmbeddingInputParser.parse(json(#"[{"content":[{"type":"hologram"}]}]"#))) {
