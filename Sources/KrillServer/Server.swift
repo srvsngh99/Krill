@@ -2727,20 +2727,19 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         case ollamaLegacy // POST /api/embeddings (single "prompt")
     }
 
-    /// Extract the input texts for an embeddings request across the three
-    /// shapes (`input` string|[string] for OpenAI/Ollama-batch; `prompt`
-    /// string for the Ollama legacy endpoint).
-    private func embedInputs(_ json: [String: Any], style: EmbedStyle) -> [String]? {
+    /// Extract the inputs of an embeddings request across the three shapes
+    /// (`input` string | [string | content-part item] for OpenAI/Ollama-batch;
+    /// `prompt` string for the Ollama legacy endpoint, text only). Plain strings
+    /// parse exactly as before; content parts (images) are described in
+    /// `EmbeddingInputParser`. Returns nil for the classic "missing input" case.
+    private func embedInputs(_ json: [String: Any], style: EmbedStyle) throws -> [EmbeddingInput]? {
         if style == .ollamaLegacy {
-            if let p = json["prompt"] as? String { return [p] }
+            if let p = json["prompt"] as? String { return [EmbeddingInput(text: p)] }
             return nil
         }
-        if let s = json["input"] as? String { return [s] }
-        if let arr = json["input"] as? [Any] {
-            let strs = arr.compactMap { $0 as? String }
-            return strs.count == arr.count ? strs : nil
-        }
-        return nil
+        guard let raw = json["input"], !(raw is NSNull) else { return nil }
+        if let arr = raw as? [Any], arr.isEmpty { return nil }
+        return try EmbeddingInputParser.parse(raw)
     }
 
     private func handleEmbeddings(context: ChannelHandlerContext,
@@ -2754,12 +2753,19 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                      body: ["error": "Missing 'model' field"])
             return
         }
-        guard let rawInputs = embedInputs(json, style: style), !rawInputs.isEmpty else {
-            sendJSON(context: context, status: .badRequest, body: [
-                "error": style == .ollamaLegacy
-                    ? "Missing 'prompt' (string)"
-                    : "Missing 'input' (string or array of strings)"
-            ])
+        let rawInputs: [EmbeddingInput]
+        do {
+            guard let parsed = try embedInputs(json, style: style), !parsed.isEmpty else {
+                sendJSON(context: context, status: .badRequest, body: [
+                    "error": style == .ollamaLegacy
+                        ? "Missing 'prompt' (string)"
+                        : "Missing 'input' (string or array of strings or content-part items)"
+                ])
+                return
+            }
+            rawInputs = parsed
+        } catch {
+            sendJSON(context: context, status: .badRequest, body: ["error": "\(error)"])
             return
         }
         // Optional `instruction` (literal prefix), `task` (named prompt from the
@@ -2806,7 +2812,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             defer { self.leaveQueue() }
             do {
                 try await embed.load(directory: dir)
-                let result = try embed.embed(inputs, options: options)
+                let result = try embed.embed(inputs: inputs, options: options)
                 let totalNs = Int64((CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
                 let response: [String: Any]
                 switch style {

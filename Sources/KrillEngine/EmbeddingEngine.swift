@@ -27,6 +27,12 @@ public final class EmbeddingEngine: @unchecked Sendable {
     /// Matryoshka dimensions the loaded model supports (nil = not an MRL model).
     private var mrlDimensions: [Int]?
     private let lock = NSLock()
+    /// EmbeddingGemma 2 modality towers are loaded LAZILY, on the first request
+    /// that carries media, so text-only use keeps the text-only footprint.
+    private var visionTower: EG2VisionTower?
+    private var eg2Dtype: DType = .float32
+    private var eg2Tokens = EG2ModalityTokens.checkpointDefaults
+    private let towerLock = NSLock()
 
     public init() {}
 
@@ -62,6 +68,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
             self.pooling = pooling
             self.appendEOS = appendEOS
             self.eosTokenId = eosTokenId
+            self.visionTower = nil
         }
     }
 
@@ -92,6 +99,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
             let dtype: DType = Self.envDtype() ?? .float32
             cpTok = try CodePointBPETokenizer(directory: directory)
             let loaded = try loadEmbeddingGemma2(directory: directory, dtype: dtype)
+            withLock { eg2Dtype = dtype; eg2Tokens = loaded.model.config.modalityTokens }
             model = loaded.model
             maxTokens = EmbeddingGemma2Config.maxContext
             pooling = .mean
@@ -304,23 +312,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
 
         guard let model else { throw EmbeddingError.notLoaded }
 
-        // Resolve the prefix (task table or literal instruction).
-        var prefix = options.instruction ?? ""
-        if let task = options.task {
-            guard let table = prompts else {
-                throw EmbeddingError.invalidOption(
-                    "this model defines no task prompts; use 'instruction' for a literal prefix")
-            }
-            guard let p = table.prefix(for: task) else {
-                throw EmbeddingError.invalidOption(
-                    "unknown task '\(task)'; valid tasks: \(table.taskNames.joined(separator: ", "))")
-            }
-            prefix = p
-        }
-        if let d = options.dimensions, let mrl, !mrl.contains(d) {
-            throw EmbeddingError.invalidOption(
-                "unsupported 'dimensions' \(d); this model supports \(mrl.map(String.init).joined(separator: ", "))")
-        }
+        let prefix = try Self.resolvePrefix(options, prompts: prompts, mrl: mrl)
 
         var vectors: [[Float]] = []
         var totalTokens = 0
@@ -358,6 +350,152 @@ public final class EmbeddingEngine: @unchecked Sendable {
         // Non-MRL models: `dimensions` is ignored, exactly as before this field
         // was supported (existing models' behaviour must not change).
         return EmbedResult(vectors: vectors, promptTokens: totalTokens)
+    }
+
+    /// Resolve the prefix (task table or literal instruction) and validate
+    /// `dimensions` against the loaded model.
+    private static func resolvePrefix(_ options: EmbeddingRequestOptions,
+                                      prompts: EmbeddingPromptTable?, mrl: [Int]?) throws -> String {
+        var prefix = options.instruction ?? ""
+        if let task = options.task {
+            guard let table = prompts else {
+                throw EmbeddingError.invalidOption(
+                    "this model defines no task prompts; use 'instruction' for a literal prefix")
+            }
+            guard let p = table.prefix(for: task) else {
+                throw EmbeddingError.invalidOption(
+                    "unknown task '\(task)'; valid tasks: \(table.taskNames.joined(separator: ", "))")
+            }
+            prefix = p
+        }
+        if let d = options.dimensions, let mrl, !mrl.contains(d) {
+            throw EmbeddingError.invalidOption(
+                "unsupported 'dimensions' \(d); this model supports \(mrl.map(String.init).joined(separator: ", "))")
+        }
+        return prefix
+    }
+
+    /// Embed inputs that may carry media parts (see `EmbeddingInput`). All-text
+    /// input takes EXACTLY the pre-existing `embed(_:options:)` path for every
+    /// model. Media is accepted only by EmbeddingGemma 2 (others: HTTP 400).
+    ///
+    /// Text-only items inside a mixed request are batched like before (and keep
+    /// the 8,192-token truncation); items with media run one at a time, are
+    /// never truncated (an input over the context is a 400), and the task prefix
+    /// applies to their text only, placed first. `promptTokens` counts every
+    /// token including soft tokens and markers.
+    public func embed(inputs: [EmbeddingInput],
+                      options: EmbeddingRequestOptions = EmbeddingRequestOptions()) throws -> EmbedResult {
+        if inputs.allSatisfy({ !$0.hasMedia }) {
+            return try embed(inputs.map { $0.joinedText }, options: options)
+        }
+        lock.lock()
+        let model = self.model
+        let cpTokenizer = self.cpTokenizer
+        let prompts = self.prompts
+        let mrl = self.mrlDimensions
+        let tokens = self.eg2Tokens
+        lock.unlock()
+        guard let model else { throw EmbeddingError.notLoaded }
+        guard let eg = model as? EmbeddingGemma2Model, let cp = cpTokenizer else {
+            throw EmbeddingError.invalidOption(
+                "this model accepts text input only; send images to a multimodal embedder such as embeddinggemma-2")
+        }
+        let prefix = try Self.resolvePrefix(options, prompts: prompts, mrl: mrl)
+        let builder = EG2SequenceBuilder(tokenizer: cp, tokens: tokens)
+
+        var out = [[Float]](repeating: [], count: inputs.count)
+        var total = 0
+        // 1. text-only items: batched exactly like the text path.
+        let textIdx = inputs.indices.filter { !inputs[$0].hasMedia }
+        if !textIdx.isEmpty {
+            let r = try embedGemma2(eg, tokenizer: cp,
+                                    texts: textIdx.map { prefix + inputs[$0].joinedText },
+                                    cap: EmbeddingGemma2Config.maxContext, dimensions: options.dimensions)
+            for (k, i) in textIdx.enumerated() { out[i] = r.vectors[k] }
+            total += r.promptTokens
+        }
+        // 2. media items, one at a time.
+        for i in inputs.indices where inputs[i].hasMedia {
+            let (vec, n) = try embedMediaItem(inputs[i], model: eg, builder: builder,
+                                              prefix: prefix, dimensions: options.dimensions)
+            out[i] = vec
+            total += n
+        }
+        logPeakMemory()
+        return EmbedResult(vectors: out, promptTokens: total)
+    }
+
+    /// One media item: preprocess every part, build the token sequence, run the
+    /// towers, scatter their soft tokens, run the backbone, mean-pool.
+    private func embedMediaItem(_ item: EmbeddingInput, model: EmbeddingGemma2Model,
+                                builder: EG2SequenceBuilder, prefix: String,
+                                dimensions: Int?) throws -> ([Float], Int) {
+        var segments: [EG2Segment] = []
+        var decoded: [EG2RGBImage] = []
+        for part in item.parts {
+            switch part {
+            case .text(let t):
+                segments.append(.text(t))
+            case .image(let data):
+                // Decode and size first (cheap); the pixel work only starts once the
+                // whole prompt is known to fit the context.
+                do {
+                    let rgb = try EG2ImagePreprocessor.decode(data)
+                    segments.append(.media(EG2MediaBlock(
+                        .image, softTokensPerBlock: try EG2ImagePreprocessor.softTokens(for: rgb))))
+                    decoded.append(rgb)
+                } catch { throw EmbeddingError.invalidOption("image: \(error)") }
+            }
+        }
+        let seq: EG2Sequence
+        do { seq = try builder.build(segments, prefix: prefix) }
+        catch { throw EmbeddingError.invalidOption("\(error)") }
+
+        var features: [EG2Modality: [MLXArray]] = [:]
+        if !decoded.isEmpty {
+            let tower = try ensureVisionTower()
+            do {
+                features[.image] = try decoded.map { tower.softTokens(try EG2ImagePreprocessor.prepare($0)) }
+            } catch { throw EmbeddingError.invalidOption("image: \(error)") }
+        }
+        let embeds: MLXArray
+        do { embeds = try model.mergedEmbeddings(seq, features: features) }
+        catch { throw EmbeddingError.invalidOption("\(error)") }
+        let pooled = model.pooled(inputsEmbeds: embeds, lengths: [seq.count])
+        pooled.eval()
+        let full = pooled.asArray(Float.self)
+        guard full.allSatisfy({ $0.isFinite }) else { throw EmbeddingError.nonFinite }
+        let v = EmbeddingMath.l2Normalize(full)
+        return (dimensions.map { EmbeddingMath.truncate(v, to: $0) } ?? v, seq.count)
+    }
+
+    /// Load the vision tower on first use (strict binding). Throws a client
+    /// error when the checkpoint has no vision tensors.
+    private func ensureVisionTower() throws -> EG2VisionTower {
+        towerLock.lock(); defer { towerLock.unlock() }
+        if let t = visionTower { return t }
+        lock.lock(); let dir = loadedDir; let dtype = eg2Dtype; lock.unlock()
+        guard let dir else { throw EmbeddingError.notLoaded }
+        do {
+            let t = try loadEG2VisionTower(directory: dir, dtype: dtype).tower
+            visionTower = t
+            return t
+        } catch EG2VisionLoadError.noVisionTower {
+            throw EmbeddingError.invalidOption("this checkpoint has no vision tower; images are not supported")
+        }
+    }
+
+    /// True once the lazily loaded vision tower is resident (tests / diagnostics).
+    public var isVisionTowerLoaded: Bool { towerLock.lock(); defer { towerLock.unlock() }; return visionTower != nil }
+
+    private func logPeakMemory() {
+        if ProcessInfo.processInfo.environment["KRILL_EMBED_LOG_MEM"] != nil {
+            // MLX unified-memory high-water mark (RSS does not see it).
+            let mb = Double(Memory.peakMemory) / 1_048_576
+            FileHandle.standardError.write(Data(String(
+                format: "EmbeddingGemma2: mlx peak memory %.0f MB\n", mb).utf8))
+        }
     }
 
     /// Padded-batch EmbeddingGemma 2 path. Texts are sorted by length and run
@@ -402,12 +540,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
             i = j
         }
         encoded.removeAll()
-        if ProcessInfo.processInfo.environment["KRILL_EMBED_LOG_MEM"] != nil {
-            // MLX unified-memory high-water mark (RSS does not see it).
-            let mb = Double(Memory.peakMemory) / 1_048_576
-            FileHandle.standardError.write(Data(String(
-                format: "EmbeddingGemma2: mlx peak memory %.0f MB\n", mb).utf8))
-        }
+        logPeakMemory()
         return EmbedResult(vectors: out, promptTokens: total)
     }
 

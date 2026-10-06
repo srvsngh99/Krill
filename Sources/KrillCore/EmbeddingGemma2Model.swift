@@ -49,6 +49,9 @@ public struct EmbeddingGemma2Config: Decodable, Sendable {
     public let rmsNormEps: Float
     public let ropeThetaSliding: Float
     public let ropeThetaFull: Float
+    /// Modality marker / placeholder ids from the top-level config.json
+    /// (`boi_token_id`, `image_token_id`, ...). Used by `EG2SequenceBuilder`.
+    public let modalityTokens: EG2ModalityTokens
 
     /// Context length of the model (the card: 8,192 tokens). The text
     /// config's `max_position_embeddings` (262144) is a training-time
@@ -65,7 +68,12 @@ public struct EmbeddingGemma2Config: Decodable, Sendable {
         enum CodingKeys: String, CodingKey {
             case headDim = "head_dim", numKeyValueHeads = "num_key_value_heads" }
     }
-    private enum Root: String, CodingKey { case textConfig = "text_config" }
+    private enum Root: String, CodingKey {
+        case textConfig = "text_config"
+        case boi = "boi_token_id", eoi = "eoi_token_id", image = "image_token_id"
+        case boa = "boa_token_id", eoa = "eoa_token_index", audio = "audio_token_id"
+        case video = "video_token_id"
+    }
     private enum Text: String, CodingKey {
         case hiddenSize = "hidden_size", intermediateSize = "intermediate_size"
         case numLayers = "num_hidden_layers", numHeads = "num_attention_heads"
@@ -78,6 +86,15 @@ public struct EmbeddingGemma2Config: Decodable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let root = try decoder.container(keyedBy: Root.self)
+        let d = EG2ModalityTokens.checkpointDefaults
+        modalityTokens = EG2ModalityTokens(
+            boi: try root.decodeIfPresent(Int.self, forKey: .boi) ?? d.boi,
+            eoi: try root.decodeIfPresent(Int.self, forKey: .eoi) ?? d.eoi,
+            image: try root.decodeIfPresent(Int.self, forKey: .image) ?? d.image,
+            boa: try root.decodeIfPresent(Int.self, forKey: .boa) ?? d.boa,
+            eoa: try root.decodeIfPresent(Int.self, forKey: .eoa) ?? d.eoa,
+            audio: try root.decodeIfPresent(Int.self, forKey: .audio) ?? d.audio,
+            video: try root.decodeIfPresent(Int.self, forKey: .video) ?? d.video)
         let c = try root.nestedContainer(keyedBy: Text.self, forKey: .textConfig)
         hiddenSize = try c.decode(Int.self, forKey: .hiddenSize)
         intermediateSize = try c.decode(Int.self, forKey: .intermediateSize)
@@ -296,14 +313,29 @@ public final class EmbeddingGemma2Model: Module, SentenceEmbeddingEncoder {
         computeDtype = dtype
     }
 
+    /// Text-token embeddings `[B, T, hidden]` in the compute dtype: table lookup
+    /// times sqrt(hidden). sqrt(512) rounds to 22.625 in bf16; the reference
+    /// casts the scale to the weight dtype, so do the same in both modes.
+    /// Modality soft tokens are NOT scaled; `EG2SequenceBuilder` scatters them
+    /// in after this (see `forward(inputsEmbeds:lengths:)`).
+    public func embedText(_ tokens: MLXArray) -> MLXArray {
+        let scale = MLXArray(Float(config.hiddenSize).squareRoot()).asType(computeDtype)
+        return embedTokens(tokens) * scale
+    }
+
     /// Token ids `[B, T]` (right-padded) plus real lengths -> per-token
     /// projected states `[B, T, embeddingDim]` in the compute dtype.
     func forward(_ tokens: MLXArray, lengths: [Int]) -> MLXArray {
-        let B = tokens.dim(0), T = tokens.dim(1)
-        // sqrt(512) rounds to 22.625 in bf16; the reference casts the scale to
-        // the weight dtype, so do the same in both modes.
-        let scale = MLXArray(Float(config.hiddenSize).squareRoot()).asType(computeDtype)
-        var h = embedTokens(tokens) * scale
+        forward(inputsEmbeds: embedText(tokens), lengths: lengths)
+    }
+
+    /// The backbone on ALREADY-EMBEDDED inputs `[B, T, hidden]` (right-padded,
+    /// compute dtype): text embeddings with any modality soft tokens scattered
+    /// in. Per-layer inputs (PLE) are computed here, i.e. AFTER the merge, as in
+    /// the reference (`language_model(inputs_embeds=...)`).
+    public func forward(inputsEmbeds: MLXArray, lengths: [Int]) -> MLXArray {
+        let B = inputsEmbeds.dim(0), T = inputsEmbeds.dim(1)
+        var h = inputsEmbeds
         let perLayer = ple(h)  // [B, T, L, pleDim]
 
         // Key-padding mask (only when the batch is actually padded) combined
@@ -344,8 +376,21 @@ public final class EmbeddingGemma2Model: Module, SentenceEmbeddingEncoder {
     /// Mean-pooled (un-normalised) float32 sentence vectors `[B, embeddingDim]`
     /// for right-padded `tokens [B, T]` with real `lengths`.
     public func pooled(_ tokens: MLXArray, lengths: [Int]) -> MLXArray {
-        let states = forward(tokens, lengths: lengths).asType(.float32)
-        let T = tokens.dim(1)
+        meanPool(forward(tokens, lengths: lengths), lengths: lengths)
+    }
+
+    /// Same, for already-embedded inputs `[B, T, hidden]` (modality soft tokens
+    /// merged in). The mean covers EXACTLY the first `lengths[b]` positions of
+    /// row b: every real token, soft tokens and the `<boi>/<eoi>/<boa>/<eoa>`
+    /// markers included (the reference pools with `include_prompt: true` over the
+    /// full attention mask), so a task prefix is pooled too.
+    public func pooled(inputsEmbeds: MLXArray, lengths: [Int]) -> MLXArray {
+        meanPool(forward(inputsEmbeds: inputsEmbeds, lengths: lengths), lengths: lengths)
+    }
+
+    private func meanPool(_ hidden: MLXArray, lengths: [Int]) -> MLXArray {
+        let states = hidden.asType(.float32)
+        let T = hidden.dim(1)
         let pos = MLXArray(0 ..< Int32(T)).reshaped(1, T)
         let len = MLXArray(lengths.map { Int32($0) }).reshaped(lengths.count, 1)
         let m = (pos .< len).asType(.float32).reshaped(lengths.count, T, 1)
