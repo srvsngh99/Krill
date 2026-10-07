@@ -346,13 +346,13 @@ let line = "{\"model\":\"\(name)\",\"response\":\"\(escaped)\",\"done\":false}\n
 
 ---
 
-## 19. float16 Gives NaN or Degraded Embeddings for EmbeddingGemma 2
+## 19. float16 Is Unsafe for EmbeddingGemma 2
 
-**Bug**: Running EmbeddingGemma 2 in float16 overflows or silently degrades the vectors.
+**Bug**: Google's model card warns that EmbeddingGemma 2's activations exceed float16's range, so fp16 can return NaN or silently degraded vectors. (One sentence-transformers fp16 check here returned no NaN, so the failure is input-dependent, not guaranteed.)
 
-**Root cause**: float16 is unsafe for this model (see the comments in `EmbeddingGemma2Model.swift` and `EmbeddingEngine.swift`).
+**Root cause**: activation range beyond float16's dynamic range (model card); see the comments in `EmbeddingGemma2Model.swift` and `EmbeddingEngine.swift`.
 
-**Fix**: Compute dtype is float32 (default) or bfloat16 only. `KRILL_EMBED_DTYPE` accepts only those two, `setComputeDtype` rejects anything else, and NaN / Inf output is never returned: the request fails with `500`.
+**Fix**: Compute dtype is float32 (default) or bfloat16 only. `KRILL_EMBED_DTYPE` honours only those two (any other value, float16 included, is ignored and fp32 is used), `setComputeDtype` rejects anything else, and NaN / Inf output is never returned: the request fails with `500`.
 
 **How to avoid**: Other embedders here handle fp16 differently (an fp32 upcast of `embed_tokens` for the Mistral-backbone ones, for example), so do not copy a dtype choice between embedding models without checking parity.
 
