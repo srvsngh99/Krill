@@ -158,7 +158,7 @@ Full methodology and gates: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md), [`docs/B
 
 ## Models
 
-**39 chat & multimodal models** ship as one-word `krill pull` shortcuts (plus ~19 embedding / reranker models), spanning ~15 architecture families. Switch between installed models **live in a chat** with `/model` — the conversation carries over — or import any `mlx-community` repo and it joins the picker.
+**39 chat & multimodal models** ship as one-word `krill pull` shortcuts (plus 21 embedding / reranker shortcuts, 19 distinct models), spanning ~15 architecture families. Switch between installed models **live in a chat** with `/model` — the conversation carries over — or import any `mlx-community` repo and it joins the picker.
 
 ```bash
 krill pull gemma-4-e2b       # Gemma 4 — text + image + audio, all native (also: -e4b, -12b flagship)
@@ -175,7 +175,7 @@ krill pull unlimited-ocr     # native document/image OCR (DeepSeek-OCR)
 krill pull mlx-community/Meta-Llama-3.1-8B-Instruct-4bit   # …or any mlx-community repo
 ```
 
-Native text also runs Phi, GLM-4, Mixtral, OLMoE, and DeepSeek-V2/V3, plus a ~15-family embedding/reranker stack. Vision serving adds LLaVA-1.5, Llama-3.2-Vision (mllama, multi-image), and Qwen2.5-VL.
+Native text also runs Phi, GLM-4, Mixtral, OLMoE, and DeepSeek-V2/V3, plus an 11-architecture embedding/reranker stack. `krill pull embeddinggemma-2` adds multimodal embeddings: text, image, audio and video, alone or mixed in one vector, on `/v1/embeddings` and `/api/embed` ([details](docs/EMBEDDINGGEMMA2.md)). Vision serving adds LLaVA-1.5, Llama-3.2-Vision (mllama, multi-image), and Qwen2.5-VL.
 
 **Formats:** not anything-goes — Krill is MLX-native. It runs **MLX-format** checkpoints (safetensors) in 4-bit, 8-bit, `nvfp4` (mixed-precision 4-bit-float), or bf16/fp16 — **GGUF is not supported**. Any `mlx-community` model of a supported architecture loads as-is; convert other Hugging Face checkpoints with `krill quantize <hf-path>`.
 

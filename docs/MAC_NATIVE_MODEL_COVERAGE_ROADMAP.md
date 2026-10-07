@@ -38,7 +38,8 @@ Production-native or close:
 ```text
 Dense text LLMs: selected Llama, Qwen, Mistral, Gemma, Phi, GLM,
                  DeepSeek distills via Llama/Qwen architecture
-Embeddings:      selected BERT/MiniLM/BGE style encoders
+Embeddings:      selected BERT/MiniLM/BGE style encoders; EmbeddingGemma 2
+                 (text + image + audio + video, native Swift+MLX)
 Vision:          Gemma 4 image; Qwen 2.5-VL image (native Swift+MLX
                  vision tower + 3D mRoPE, WS5)
 Audio:           Gemma 4 audio (native Swift+MLX USM path)

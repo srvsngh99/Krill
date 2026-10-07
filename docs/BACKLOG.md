@@ -462,3 +462,35 @@ actually succeeds and a real prompt produces coherent output - "loads
 clean, tests green, silently wrong" is exactly the failure mode PR #315
 was bisected against, and an untested checkpoint is exposed to it by
 definition.
+
+---
+
+## EmbeddingGemma 2: open follow-ups (PRs #329-#331)
+
+**Status:** text, image, audio and video embeddings are DONE and measured (see
+`docs/EMBEDDINGGEMMA2.md`). The items below were consciously left open:
+
+- **Image and video preprocessing is slow and serial.** About 0.4 s per image
+  and about 0.15-0.2 s per video frame, one item at a time. A large share is the
+  CPU resize and patchify, which has not been optimised (the vision tower itself
+  runs only the real patches). A 32-frame clip takes 6.1-6.4 s.
+- **Audio parity is ~0.9997-0.9999, cause unknown.** Uniform across cases and the
+  same in fp32 and bf16, so it is not the dtype or the tokens. Not chased. The
+  suspects are the float32 mel (DFT as a matmul vs numpy's float64 FFT, then
+  `log`) and the resampler (`AVAudioConverter` vs swr). Neither is verified.
+- **Audio over 30 s is refused, not windowed.** The reference truncates silently
+  at 30 s; Krill answers `400`. Windowing (and how to combine windows) is not
+  designed.
+- **Untested inputs.** Ogg Vorbis (CoreAudio does not decode it) and WebM / MKV
+  (not decoded), 10-bit / 4:2:2 / 4:4:4 video (VideoToolbox converts to 8-bit
+  4:2:0 first; not measured), rotated phone video (rotation metadata is not
+  applied, like the reference), and HEIC / WebP / CMYK / 16-bit images (HEIC and
+  WebP are listed as decodable; the 16-bit and CMYK paths use a CoreGraphics
+  fallback; none were measured).
+- **EXIF orientation is not applied** to images (like PIL `Image.open`), so a
+  rotated photo embeds as stored.
+- **Alpha un-premultiply is approximate.** Premultiplied sources are divided back
+  by alpha in integer arithmetic (`EmbeddingGemma2Vision.swift`) to approximate
+  the straight RGB the reference sees. The one partial-alpha fixture measured
+  0.99998877 fp32; no other alpha case was measured.
+- **Timestamps (`add_timestamps: true`) are not offered** for video.
