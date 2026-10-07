@@ -248,6 +248,118 @@ let line = "{\"model\":\"\(name)\",\"response\":\"\(escaped)\",\"done\":false}\n
 
 ---
 
+## 12. BPE Tokenizer: Grapheme Clusters Break Indic Text
+
+**Bug**: EmbeddingGemma 2 embeddings of Hindi, Kannada and Sanskrit text had cosine 0.73-0.92 to the reference. English, French and code were fine (1.0), so the model looked correct.
+
+**Root cause**: swift-transformers' BPE seeds its merges from Swift `Character`s, which are grapheme clusters. For Devanagari and Kannada a cluster is not a vocabulary entry, so the text fell into per-byte `<0xHH>` fallback: 2-3x too many tokens, and the wrong ones. HF `tokenizers` seeds from Unicode scalars.
+
+**Fix**: `CodePointBPETokenizer` seeds from Unicode scalars. It supports only the Gemma `tokenizer.json` shape (Replace `" "->"▁"` normalizer, byte-fallback BPE, `<bos> A <eos>` template) and rejects anything else at load. A test pins its ids to HF `tokenizers` for 20 strings.
+
+**How to avoid**: Test a new tokenizer with non-Latin scripts, not just English. Compare token ids against the HF tokenizer, not only the final vector.
+
+**Files**: `Sources/KrillTokenizer/CodePointBPETokenizer.swift`, `docs/EMBEDDINGGEMMA2.md`
+
+---
+
+## 13. JPEG Decode: Apple ImageIO vs libjpeg Chroma Upsampling
+
+**Bug**: EmbeddingGemma 2 image embeddings of JPEGs matched the reference at 0.9994-0.9998, while PNGs matched at >= 0.99996.
+
+**Root cause**: Apple ImageIO and libjpeg (PIL) upsample chroma differently: mean 0.2-0.4 of 255, up to 40-66 levels on 3-6% of pixels at chroma edges. The model and resize were not the cause: feeding the PIL-decoded pixels of the same JPEGs to the server as PNG gave 0.999996 / 0.999995 / 0.999987 in fp32.
+
+**Fix**: None. It is a property of the platform decoder and stays above the 0.999 gate. Real photos are smoother than the synthetic edges in the fixtures, so the gap should be smaller in practice.
+
+**How to avoid**: When one input type is worse than the rest, decode with the reference's decoder and feed the pixels back in as a lossless format. That separates decoder error from model error.
+
+**Files**: `Sources/KrillCore/EmbeddingGemma2Vision.swift`
+
+---
+
+## 14. Video Frames: AVFoundation BGRA vs torchcodec / swscale
+
+**Bug**: EmbeddingGemma 2 video cosines were 0.9934-0.9986, below the other modalities.
+
+**Root cause**: AVFoundation's own BGRA output upsamples chroma smoothly. The reference decoder (torchcodec / ffmpeg / swscale) replicates it. That alone gave mean 2.9 / 255 pixel error, with 5% of pixels off by more than 8.
+
+**Fix**: Ask AVFoundation for the decoder's 8-bit 4:2:0 planes and convert them the swscale way: nearest chroma, the stream's matrix (BT.601 when untagged) and the stream's range. This measures mean 0.19 / 255, max 1, against torchcodec frames, and every video case is >= 0.99948. A weight-free test compares 12 frames of 4 fixtures with the reference decoder's frames.
+
+**How to avoid**: Compare decoded pixels with the reference decoder before comparing embeddings. 10-bit, 4:2:2 and 4:4:4 sources are converted by VideoToolbox to 8-bit 4:2:0 first and were not measured.
+
+**Files**: `Sources/KrillCore/EmbeddingGemma2Video.swift`
+
+---
+
+## 15. MP3 Decode: AVAudioFile Ignores the LAME Delay and Padding
+
+**Bug**: An MP3 clip came out 1,532 samples (3 soft tokens) longer than the reference's, with cosine 0.9989, below the 0.999 gate.
+
+**Root cause**: `AVAudioFile` removes the decoder delay (529 samples) but does not honour the encoder delay and padding in the LAME/Xing tag, which ffmpeg does.
+
+**Fix**: Read the delay and padding from the first frame's Xing/Info tag and trim them. Without a tag nothing is trimmed, like ffmpeg. Checked by cross-correlating the two decoders: the lag equals the tag's delay.
+
+**How to avoid**: Compare the decoded sample count with the reference decoder for every container format. A length difference changes the soft-token count, not just the values.
+
+**Files**: `Sources/KrillCore/EmbeddingGemma2Audio.swift`
+
+---
+
+## 16. AAC Decode: AVFoundation Applies the Edit List, ffmpeg Keeps the Priming
+
+**Bug**: An M4A (AAC) clip was 1 soft token shorter than the reference's (93,520 samples vs 94,208), so the token ids differ from the reference.
+
+**Root cause**: AVFoundation applies the container's edit list; ffmpeg, which made the reference, keeps the priming samples.
+
+**Fix**: None, by choice. The vector passes the gate (0.99952). Feeding the ffmpeg-decoded samples reaches the reference's ids and 0.99987, which shows the cause is the decoder and not the model path. In this one case AVFoundation is arguably the more correct decoder.
+
+**How to avoid**: Do not read a token-count mismatch as a model bug until you have fed the reference's decoded samples through the same path.
+
+**Files**: `Sources/KrillCore/EmbeddingGemma2Audio.swift`, `docs/EMBEDDINGGEMMA2.md`
+
+---
+
+## 17. Audio Conv Weights: PyTorch Layout vs Krill's Channel-Last Loader
+
+**Bug**: Risk of a silent mis-load. The Gemma 4 audio loader assumes channel-last conv weights ("no transpose"), but the EmbeddingGemma 2 checkpoint stores them differently.
+
+**Root cause**: The HF checkpoint keeps `subsample_conv_projection.*.conv.weight` as `[out,in,kH,kW]` and `lconv1d.depthwise_conv1d.weight` as `[C,1,K]` (PyTorch layout). The mlx-vlm weights the Gemma 4 loader sees are `[out,kH,kW,in]` and `[C,K,1]`.
+
+**Fix**: `loadEG2AudioTower` converts each conv weight, and only when the transposed shape is exactly the module's. Binding is strict (all 752 tensors, nothing defaulted). A test runs the same tiny tower from both layouts.
+
+**How to avoid**: Check the layout of every conv weight when reusing a module for a new checkpoint source. Keep the strict verify; `verify: []` would hide this.
+
+**Files**: `Sources/KrillCore/EmbeddingGemma2Audio.swift`
+
+---
+
+## 18. Audio Length: The 280-Token Cap Does Not Exist
+
+**Bug**: The design note said audio is capped at 280 soft tokens (about 11.2 s). The real model path has no such cap.
+
+**Root cause**: `audio_seq_length: 280` in the processor config is only used by a serving-framework helper. The reference gives about 25 soft tokens per second (a 23.3 s clip gave 583). What limits audio is the feature extractor's `max_length=480000` (30 s), which silently truncates longer audio.
+
+**Fix**: Krill uses the real token count and answers `400` for a clip over 30 s (480,000 samples at 16 kHz) instead of silently truncating. Clips under 0.1 s are also `400`.
+
+**How to avoid**: Count tokens from a real reference run, not from a config constant. Pin the counts in a test (52 / 146 / 583 for the three WAV fixtures).
+
+**Files**: `Sources/KrillCore/EmbeddingGemma2Audio.swift`, `docs/EMBEDDINGGEMMA2.md`
+
+---
+
+## 19. float16 Is Unsafe for EmbeddingGemma 2
+
+**Bug**: Google's model card warns that EmbeddingGemma 2's activations exceed float16's range, so fp16 can return NaN or silently degraded vectors. (One sentence-transformers fp16 check here returned no NaN, so the failure is input-dependent, not guaranteed.)
+
+**Root cause**: activation range beyond float16's dynamic range (model card); see the comments in `EmbeddingGemma2Model.swift` and `EmbeddingEngine.swift`.
+
+**Fix**: Compute dtype is float32 (default) or bfloat16 only. `KRILL_EMBED_DTYPE` honours only those two (any other value, float16 included, is ignored and fp32 is used), `setComputeDtype` rejects anything else, and NaN / Inf output is never returned: the request fails with `500`.
+
+**How to avoid**: Other embedders here handle fp16 differently (an fp32 upcast of `embed_tokens` for the Mistral-backbone ones, for example), so do not copy a dtype choice between embedding models without checking parity.
+
+**Files**: `Sources/KrillCore/EmbeddingGemma2Model.swift`, `Sources/KrillEngine/EmbeddingEngine.swift`
+
+---
+
 ## General Debugging Strategy for Model Output Issues
 
 When a model produces gibberish:

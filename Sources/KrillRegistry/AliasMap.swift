@@ -388,9 +388,9 @@ private let aliases: [String: ResolvedModel] = [
         name: "bge-base-en", family: .bert, params: "109M", quant: "fp32", context: 512),
 
     // EmbeddingGemma 2 (Google, Apache-2.0): Gemma-4-derived bidirectional
-    // embedder; native text path (768/512/256/128 MRL dims, 8K context). The
-    // checkpoint also holds vision + audio towers (not served yet). See
-    // docs/EMBEDDINGGEMMA2.md. 1.49 GB bf16; computed in fp32 by default.
+    // embedder; text, image, audio and video inputs (768/512/256/128 MRL dims,
+    // 8K context). The vision and audio towers load lazily on first media
+    // input. See docs/EMBEDDINGGEMMA2.md. 1.49 GB bf16; computed in fp32 by default.
     "embeddinggemma-2": ResolvedModel(
         repo: "google/embeddinggemma-2",
         name: "embeddinggemma-2", family: .bert, params: "740M", quant: "bf16", context: 8192),

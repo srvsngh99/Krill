@@ -72,6 +72,16 @@ accept image / audio read through `capabilities`. The server's chat
 token IDs) are low-level model-mechanics decisions, so the family check
 is still the right primitive there.
 
+## Embedding models and media
+
+Embedding checkpoints register as `ModelFamily.bert`, whose only capability is
+`embeddings`. EmbeddingGemma 2 (`embeddinggemma-2`, `embedding_gemma2`) is
+claimed by `ModelFamily.detect` before the `gemma` arms so it never routes to a
+chat family. Its image, audio and video input on `/v1/embeddings` and
+`/api/embed` is not a `Capability`: `visionInput` and `audioInput` describe the
+chat path and stay unset for `.bert`. Media sent to a text-only embedding model
+is `400`. See [EMBEDDINGGEMMA2.md](EMBEDDINGGEMMA2.md).
+
 ## The `ModelAdapter` runtime contract
 
 `ModelAdapter` (`Sources/KrillRegistry/ModelAdapter.swift`) is the single

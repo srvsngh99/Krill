@@ -110,6 +110,50 @@ and the loaded checkpoint can remove capabilities when the necessary tower or
 sub-configuration is absent. The server gates media before generation using
 that effective capability set.
 
+## Embedding path
+
+`EmbeddingEngine` (`KrillEngine`) serves `/v1/embeddings`, `/api/embed` and
+`/api/embeddings` for the encoder families and the cross-encoder rerankers. It is
+separate from the generation path: no KV cache, no sampler, no chat template.
+Most models take plain strings and run a pooled forward pass.
+
+EmbeddingGemma 2 (`embeddinggemma-2`) adds multimodal input on top of the same
+engine:
+
+```text
+input item (string, or {"content": [parts]})
+        │  EmbeddingInputParser: text / image / audio / video parts
+        ▼
+ task prefix + token ids       <- sentence-transformers prompt table (`task`)
+        │
+        ├── image  -> EG2ImagePreprocessor -> EG2VisionTower  ─┐
+        ├── video  -> EG2VideoSampler/Source (1 fps, ≤32 frames)│ soft tokens
+        │            -> same vision tower, one block per frame  ├─ [n, 512]
+        └── audio  -> EG2AudioPreprocessor -> EG2AudioTower   ─┘
+        ▼
+ EG2SequenceBuilder: <bos> text <boi><image>xN<eoi> ... <eos>
+        │  soft tokens scattered over the placeholder rows
+        ▼
+ text backbone (bidirectional) -> mean pool -> 512->768 -> L2
+        ▼
+ optional MRL truncation to `dimensions`, re-normalised
+```
+
+- One input item is one vector; part order is token order, so an image with its
+  caption is one joint embedding. Plain strings keep the unchanged text path.
+- The vision tower (shared by images and video) and the audio tower are loaded
+  lazily and separately, on the first request that carries that modality.
+  Text-only requests never load either.
+- Request options: `task` selects a prompt prefix, `dimensions` picks a Matryoshka
+  size (768/512/256/128 here; other models ignore it).
+- Media must arrive as data URLs or base64 inside the request body (10 MB cap); the
+  server fetches nothing. An item over the 8,192-token context, or audio over 30 s,
+  is refused with `400` rather than truncated.
+- EmbeddingGemma 2 tokenises with `CodePointBPETokenizer` (`KrillTokenizer`); the
+  other embedding models use the library tokenizer.
+
+Details, parity numbers and limits: [`EMBEDDINGGEMMA2.md`](EMBEDDINGGEMMA2.md).
+
 ## Serving and agent surfaces
 
 The server defaults to `127.0.0.1:57455`. Its OpenAI Chat/Completions/Responses,
