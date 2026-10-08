@@ -27,7 +27,7 @@ struct CreateCommand: AsyncParsableCommand {
             print("Error: \(error)")
             throw ExitCode.failure
         }
-        let registry = Registry()
+        let registry = Registry.configured()
         do {
             let m = try registry.createModel(name: name, from: modelfile)
             if let w = modelfile.adapterWarning { print("warning: \(w)") }

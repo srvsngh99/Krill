@@ -66,12 +66,7 @@ struct LaunchCommand: AsyncParsableCommand {
         let apiKey = ServerSecurity.normalizedAPIKey(cfg.serverAPIKey)
         let agentAPIKey = apiKey ?? "krill-local"
         let baseURL = "http://\(h):\(p)"
-        let registry: Registry = {
-            if let md = cfg.modelsDir, !md.isEmpty {
-                return Registry(modelsDir: URL(fileURLWithPath: md))
-            }
-            return Registry()
-        }()
+        let registry = Registry.configured(cfg)
 
         // Pick the model: explicit flag, else first installed.
         guard let modelName = model ?? registry.listModels().first?.name else {

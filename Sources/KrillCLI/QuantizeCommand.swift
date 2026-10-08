@@ -69,7 +69,7 @@ struct QuantizeCommand: AsyncParsableCommand {
         }
 
         let outputName = name ?? inferName(from: source, bits: bits)
-        let registry = Registry()
+        let registry = Registry.configured()
         let register = self.outputDir == nil
         let outputDir = self.outputDir.map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? registry.modelPath(outputName)

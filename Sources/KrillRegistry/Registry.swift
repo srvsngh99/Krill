@@ -39,6 +39,16 @@ public final class Registry: Sendable {
         self.blobsDir = self.modelsDir.appendingPathComponent("blobs")
     }
 
+    /// The registry every command should use: honours the configured models
+    /// dir (`KRILL_MODELS_DIR` env > config.toml `models_dir`), else the default
+    /// `~/.krill/models`.
+    public static func configured(_ config: KrillConfig = KrillConfig.load()) -> Registry {
+        if let md = config.modelsDir, !md.isEmpty {
+            return Registry(modelsDir: URL(fileURLWithPath: md))
+        }
+        return Registry()
+    }
+
     /// Default base directory: ~/.krill
     public static func defaultBaseDir() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser

@@ -86,12 +86,7 @@ struct ServeCommand: AsyncParsableCommand {
         } else if !ServerSecurity.isLoopbackHost(host) {
             print("WARNING: serving without authentication on non-loopback host '\(host)'.")
         }
-        let registry: Registry
-        if let md = config.modelsDir, !md.isEmpty {
-            registry = Registry(modelsDir: URL(fileURLWithPath: md))
-        } else {
-            registry = Registry()
-        }
+        let registry = Registry.configured(config)
 
         // One PrefixCache shared by every resident engine (decision: shared
         // by default; its keys already namespace by model id, so models never

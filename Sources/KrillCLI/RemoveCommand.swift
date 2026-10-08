@@ -12,7 +12,7 @@ struct RemoveCommand: ParsableCommand {
     var model: String
 
     func run() throws {
-        let registry = Registry()
+        let registry = Registry.configured()
 
         guard registry.hasModel(model) else {
             print("Error: model '\(model)' not found")

@@ -15,7 +15,7 @@ struct PullCommand: AsyncParsableCommand {
     var force: Bool = false
 
     func run() async throws {
-        let registry = Registry()
+        let registry = Registry.configured()
         let catalog = ModelCatalogStore(baseDir: registry.baseDir)
 
         guard let resolved = AliasMap.resolve(model, catalog: catalog) else {

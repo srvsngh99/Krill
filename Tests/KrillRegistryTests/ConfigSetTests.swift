@@ -168,3 +168,23 @@ final class ConfigSetTests: XCTestCase {
     }
 
 }
+
+final class ConfiguredRegistryTests: XCTestCase {
+    func testConfiguredRegistryRootsAtModelsDir() {
+        var cfg = KrillConfig()
+        cfg.modelsDir = "/tmp/krill-test-x/models"
+        let r = Registry.configured(cfg)
+        XCTAssertEqual(r.modelsDir.path, "/tmp/krill-test-x/models")
+        XCTAssertEqual(r.manifestsDir.path, "/tmp/krill-test-x/models/manifests")
+        XCTAssertEqual(r.blobsDir.path, "/tmp/krill-test-x/models/blobs")
+        XCTAssertEqual(r.baseDir.path, "/tmp/krill-test-x")
+    }
+
+    func testConfiguredRegistryReadsKrillModelsDirEnv() {
+        setenv("KRILL_MODELS_DIR", "/tmp/krill-test-env/models", 1)
+        defer { unsetenv("KRILL_MODELS_DIR") }
+        let r = Registry.configured()
+        XCTAssertEqual(r.manifestsDir.path, "/tmp/krill-test-env/models/manifests")
+        XCTAssertEqual(r.blobsDir.path, "/tmp/krill-test-env/models/blobs")
+    }
+}

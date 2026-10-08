@@ -49,7 +49,7 @@ struct PerplexityCommand: AsyncParsableCommand {
     var limit: Int = 0
 
     func run() async throws {
-        let registry = Registry()
+        let registry = Registry.configured()
         let modelDir = registry.hasModel(model)
             ? registry.modelPath(model)
             : URL(fileURLWithPath: model)

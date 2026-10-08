@@ -30,7 +30,7 @@ struct BenchCommand: AsyncParsableCommand {
 
     func run() async throws {
         let modelDir: URL
-        let registry = Registry()
+        let registry = Registry.configured()
         if registry.hasModel(model) {
             modelDir = registry.modelPath(model)
         } else {
