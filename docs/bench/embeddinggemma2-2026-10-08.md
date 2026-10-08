@@ -5,6 +5,8 @@ card publishes no per-quant quality numbers; every Krill build below has measure
 quality, speed and size. Recipes and `krill quantize` commands are in
 [`docs/EMBEDDINGGEMMA2.md`](../EMBEDDINGGEMMA2.md) ("Quantized builds").
 
+The published builds are collected, with Google's original, in the [Hugging Face collection](https://huggingface.co/collections/srv-sngh/embeddinggemma-2-mlx-quantization-ladder-6ac7b2592bbdabdd74dc5ba7).
+
 **Summary**
 
 - Nine of twelve builds pass the publish gate (below): mixed-mxfp8, 8bit, 6bit, 6bit-dyn,
