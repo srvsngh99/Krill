@@ -24,7 +24,7 @@ reverse chronological order. Versioning follows
   `--output-dir` (write a release folder without registering it), and copies the
   sentence-transformers files. Recipes, the variant table and the commands are in
   [`docs/EMBEDDINGGEMMA2.md`](docs/EMBEDDINGGEMMA2.md#quantized-builds-mxfp8-nvfp4).
-  The HF repos `srv-sngh/embeddinggemma-2-mlx-mxfp8` / `-nvfp4` must exist before
+  The HF repos `srv-sngh/embeddinggemma-2-mlx-mixed-mxfp8` / `-nvfp4` must exist before
   the release.
 - **EmbeddingGemma 2 audio + video embeddings** — `input_audio` (OpenAI shape,
   base64; wav / mp3 / m4a / flac / aiff / caf / ogg-Opus via AVFoundation, resampled

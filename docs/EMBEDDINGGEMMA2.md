@@ -624,7 +624,7 @@ precision. Run from the bf16 repo folder:
 # mxfp8: text layers dense, vision attention + patch embedder dense, rest mxfp8
 krill quantize <bf16-dir> --mode mxfp8 --dtype bf16 \
   --skip language_model.layers --skip self_attn --skip patch_embedder \
-  --output-dir embeddinggemma-2-mlx-mxfp8
+  --output-dir embeddinggemma-2-mlx-mixed-mxfp8
 
 # nvfp4: every linear and the embedding table (group 16)
 krill quantize <bf16-dir> --mode nvfp4 --dtype bf16 \

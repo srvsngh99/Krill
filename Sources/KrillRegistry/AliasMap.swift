@@ -398,7 +398,7 @@ private let aliases: [String: ResolvedModel] = [
     // docs/EMBEDDINGGEMMA2.md): mxfp8 keeps the text layers and the vision
     // attention dense (~1.01 GB); nvfp4 quantizes every linear (~0.44 GB).
     "embeddinggemma-2-mxfp8": ResolvedModel(
-        repo: "srv-sngh/embeddinggemma-2-mlx-mxfp8",
+        repo: "srv-sngh/embeddinggemma-2-mlx-mixed-mxfp8",
         name: "embeddinggemma-2-mxfp8", family: .bert, params: "740M", quant: "mxfp8", context: 8192),
     "embeddinggemma-2-nvfp4": ResolvedModel(
         repo: "srv-sngh/embeddinggemma-2-mlx-nvfp4",

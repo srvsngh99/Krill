@@ -17,7 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| 2026-10-08 | #333 | EmbeddingGemma 2 mxfp8 and nvfp4 builds, `krill quantize --skip/--output-dir`, aliases `embeddinggemma-2-mxfp8` / `-nvfp4` | The two HF repos (`srv-sngh/embeddinggemma-2-mlx-mxfp8`, `-nvfp4`) must be created and uploaded BEFORE the release, or `krill pull` of the new aliases 404s. |
+| 2026-10-08 | #333 | EmbeddingGemma 2 mxfp8 and nvfp4 builds, `krill quantize --skip/--output-dir`, aliases `embeddinggemma-2-mxfp8` / `-nvfp4` | The two HF repos (`srv-sngh/embeddinggemma-2-mlx-mixed-mxfp8`, `-nvfp4`) must be created and uploaded BEFORE the release, or `krill pull` of the new aliases 404s. |
 | 2026-10-08 | #332 | Repo-wide docs synced for EmbeddingGemma 2 | Docs only. |
 | 2026-10-08 | #331 | EmbeddingGemma 2 audio + video embeddings | Needs the `google/embeddinggemma-2` weights to exercise. |
 | 2026-10-07 | #330 | EmbeddingGemma 2 image embeddings + multimodal request plumbing | New content-part parsing on `/v1/embeddings` and `/api/embed`. |
