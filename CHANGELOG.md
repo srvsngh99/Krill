@@ -11,6 +11,23 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **EmbeddingGemma 2 quantization ladder, with a measured quality gate** — seven new
+  builds next to `embeddinggemma-2-mxfp8` / `-nvfp4`: `-8bit` (0.81 GB), `-6bit` (0.62),
+  `-6bit-dyn`, `-5bit` (0.53), `-4bit-g32` (0.49), `-4bit-dyn` (0.47) and `-4bit-dyn-text`
+  (0.51), against 1.49 GB bf16. Each was measured for cosine to the Google fp32
+  reference (text, image, mixed, audio, video), ranking agreement, SciFact, Hindi and Kannada
+  retrieval, Flickr image-text and Clotho audio-text Recall, then speed and memory on a
+  protocol with 3 repetitions. A proposed publish gate (8-bit class: at most 1.0 nDCG point lost;
+  4/5-bit class: at most 3.0 and text cosine mean >= 0.97) passes nine builds and fails plain
+  `4bit` (g64), `mxfp4` and `3bit`, which are not published. "Dynamic" builds keep the
+  sensitivity-chosen text tensors (projection, attention, per-layer input, last layers) at
+  8-bit: `4bit-dyn` loses 0.6 SciFact points where plain 4-bit loses 3.9, for +31 MB. The same
+  tests were run on Google sentence-transformers (MPS), Ollama's own `embeddinggemma-2` and
+  Unsloth's text GGUFs (via llama.cpp, since Ollama 0.40.0 cannot import them), at matched
+  sizes. `krill quantize` now accepts 2/3/4/5/6/8-bit affine (unsupported widths are refused)
+  and `re:` regex patterns for `--skip` / `--protect`. Numbers, tables and commands:
+  [`docs/bench/embeddinggemma2-2026-10-08.md`](docs/bench/embeddinggemma2-2026-10-08.md) and
+  [`docs/EMBEDDINGGEMMA2.md`](docs/EMBEDDINGGEMMA2.md). The old single-run timings are superseded.
 - **EmbeddingGemma 2 quantized builds** — `embeddinggemma-2-mxfp8` (1.01 GB vs
   1.49 GB bf16; cosine to the sentence-transformers fp32 reference mean >= 0.996
   and min >= 0.992 on text, image, mixed, audio and video; text layers, vision

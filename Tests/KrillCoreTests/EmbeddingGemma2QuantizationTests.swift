@@ -267,4 +267,70 @@ final class EmbeddingGemma2QuantizationTests: XCTestCase {
             XCTAssertTrue("\(e)".contains("every layer"), "\(e)")
         }
     }
+
+    // MARK: the affine ladder (3 / 5 / 6 bit) and regex patterns
+
+    private func quantizeSynthetic(
+        bits: Int, group: Int = 32, mode: String = "affine", protect: [String] = [],
+        protectBits: Int = 8, skip: [String] = []
+    ) throws -> (model: EmbeddingGemma2Model, out: URL, n: Int) {
+        let m = try denseModel()
+        let src = try write(denseArrays(m), config: cfgJSON)
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("eg2q-out-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: src) }
+        let n = try CheckpointQuantizer.quantize(
+            sourceDir: src, outputDir: out, bits: bits, groupSize: group, mode: mode, dtype: "bf16",
+            protect: protect, protectBits: protectBits, protectGroupSize: group, skip: skip)
+        return (m, out, n)
+    }
+
+    func testAffine3_5_6BitCheckpointsLoadStrictAndTrackBits() throws {
+        var last: Float = 0
+        for bits in [3, 5, 6, 8] {
+            let (m, out, n) = try quantizeSynthetic(bits: bits)
+            defer { try? FileManager.default.removeItem(at: out) }
+            let cfg = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: out.appendingPathComponent("config.json"))) as! [String: Any]
+            XCTAssertEqual((cfg["quantization"] as? [String: Any])?["bits"] as? Int, bits)
+            let (loaded, report) = try loadEmbeddingGemma2(directory: out, dtype: .float32)
+            XCTAssertEqual(report.quantizedTotal, n)
+            let c = cosine(m.pooled(tokens, lengths: [5]), loaded.pooled(tokens, lengths: [5]))
+            XCTAssertGreaterThan(c, bits == 3 ? 0.5 : 0.9, "bits \(bits)")
+            XCTAssertGreaterThanOrEqual(c + 0.02, last, "more bits must not be worse (\(bits))")
+            last = c
+        }
+    }
+
+    func testUnsupportedAffineBitsAreRefused() throws {
+        for bits in [1, 7, 9] {
+            XCTAssertThrowsError(try quantizeSynthetic(bits: bits)) { e in
+                XCTAssertTrue("\(e)".contains("2, 3, 4, 5, 6 or 8"), "\(e)")
+            }
+        }
+    }
+
+    func testRegexProtectTargetsOneLayerAndStillLoads() throws {
+        // 4-bit base, layer 1 of the text tower at 8-bit: a per-module override on that layer only.
+        let (m, out, _) = try quantizeSynthetic(bits: 4, protect: ["re:^language_model\\.layers\\.1\\."])
+        defer { try? FileManager.default.removeItem(at: out) }
+        let cfg = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: out.appendingPathComponent("config.json"))) as! [String: Any]
+        let q = cfg["quantization"] as! [String: Any]
+        let overrides = q.keys.filter { $0.hasPrefix("language_model.") }
+        XCTAssertFalse(overrides.isEmpty)
+        XCTAssertTrue(overrides.allSatisfy { $0.hasPrefix("language_model.layers.1.") }, "\(overrides)")
+        XCTAssertEqual((q[overrides[0]] as? [String: Any])?["bits"] as? Int, 8)
+        let (loaded, _) = try loadEmbeddingGemma2(directory: out, dtype: .float32)
+        XCTAssertGreaterThan(cosine(m.pooled(tokens, lengths: [5]), loaded.pooled(tokens, lengths: [5])), 0.9)
+    }
+
+    func testRegexSkipAnchoredToTheTextTowerKeepsItDense() throws {
+        // `re:` anchors tell the text projection from any other `*embedding_projection`.
+        let (_, out, _) = try quantizeSynthetic(bits: 6, skip: ["re:^language_model\\.embedding_projection$"])
+        defer { try? FileManager.default.removeItem(at: out) }
+        let keys = Set(try loadArrays(url: out.appendingPathComponent("model.safetensors")).keys)
+        XCTAssertFalse(keys.contains("language_model.embedding_projection.scales"))
+        XCTAssertTrue(keys.contains("language_model.embed_tokens.scales"))
+        _ = try loadEmbeddingGemma2(directory: out, dtype: .float32)
+    }
 }

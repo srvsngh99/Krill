@@ -403,6 +403,30 @@ private let aliases: [String: ResolvedModel] = [
     "embeddinggemma-2-nvfp4": ResolvedModel(
         repo: "srv-sngh/embeddinggemma-2-mlx-nvfp4",
         name: "embeddinggemma-2-nvfp4", family: .bert, params: "740M", quant: "nvfp4", context: 8192),
+    // The affine ladder (`krill quantize --bits N`, measured gate in
+    // docs/bench/embeddinggemma2-2026-10-08.md). "dyn" builds keep the measured
+    // most sensitive tensors at 8-bit.
+    "embeddinggemma-2-8bit": ResolvedModel(
+        repo: "srv-sngh/embeddinggemma-2-mlx-8bit",
+        name: "embeddinggemma-2-8bit", family: .bert, params: "740M", quant: "8bit", context: 8192),
+    "embeddinggemma-2-6bit": ResolvedModel(
+        repo: "srv-sngh/embeddinggemma-2-mlx-6bit",
+        name: "embeddinggemma-2-6bit", family: .bert, params: "740M", quant: "6bit", context: 8192),
+    "embeddinggemma-2-6bit-dyn": ResolvedModel(
+        repo: "srv-sngh/embeddinggemma-2-mlx-6bit-dyn",
+        name: "embeddinggemma-2-6bit-dyn", family: .bert, params: "740M", quant: "6bit-dyn", context: 8192),
+    "embeddinggemma-2-5bit": ResolvedModel(
+        repo: "srv-sngh/embeddinggemma-2-mlx-5bit",
+        name: "embeddinggemma-2-5bit", family: .bert, params: "740M", quant: "5bit", context: 8192),
+    "embeddinggemma-2-4bit-g32": ResolvedModel(
+        repo: "srv-sngh/embeddinggemma-2-mlx-4bit-g32",
+        name: "embeddinggemma-2-4bit-g32", family: .bert, params: "740M", quant: "4bit-g32", context: 8192),
+    "embeddinggemma-2-4bit-dyn": ResolvedModel(
+        repo: "srv-sngh/embeddinggemma-2-mlx-4bit-dyn",
+        name: "embeddinggemma-2-4bit-dyn", family: .bert, params: "740M", quant: "4bit-dyn", context: 8192),
+    "embeddinggemma-2-4bit-dyn-text": ResolvedModel(
+        repo: "srv-sngh/embeddinggemma-2-mlx-4bit-dyn-text",
+        name: "embeddinggemma-2-4bit-dyn-text", family: .bert, params: "740M", quant: "4bit-dyn-text", context: 8192),
 
     // MPNet encoder: relative-attention-bias backbone (not vanilla BERT),
     // routed to MPNetEmbeddingModel by model_type. 768-dim, mean pooling.

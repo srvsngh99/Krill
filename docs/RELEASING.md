@@ -17,6 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
+| 2026-10-08 | (this PR) | EmbeddingGemma 2 quantization ladder: aliases `embeddinggemma-2-8bit`, `-6bit`, `-6bit-dyn`, `-5bit`, `-4bit-g32`, `-4bit-dyn`, `-4bit-dyn-text`; `krill quantize` 2/3/4/5/6/8-bit + `re:` patterns; bench doc | The seven HF repos `srv-sngh/embeddinggemma-2-mlx-<name>` must be created and uploaded (from `<scratch>/eg2/ladder/PUBLISH.json`) BEFORE the release, or `krill pull` of the new aliases 404s. |
 | 2026-10-08 | #333 | EmbeddingGemma 2 mxfp8 and nvfp4 builds, `krill quantize --skip/--output-dir`, aliases `embeddinggemma-2-mxfp8` / `-nvfp4` | The two HF repos (`srv-sngh/embeddinggemma-2-mlx-mixed-mxfp8`, `-nvfp4`) must be created and uploaded BEFORE the release, or `krill pull` of the new aliases 404s. |
 | 2026-10-08 | #332 | Repo-wide docs synced for EmbeddingGemma 2 | Docs only. |
 | 2026-10-08 | #331 | EmbeddingGemma 2 audio + video embeddings | Needs the `google/embeddinggemma-2` weights to exercise. |

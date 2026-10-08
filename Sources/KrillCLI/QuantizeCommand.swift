@@ -12,10 +12,10 @@ struct QuantizeCommand: AsyncParsableCommand {
     @Argument(help: "Source model: a local directory, or a HuggingFace repo id already in the local HF cache (e.g. 'mlx-community/GLM-4-9B-0414-bf16').")
     var source: String
 
-    @Option(name: .long, help: "Quantization bits (4 or 8)")
+    @Option(name: .long, help: "Affine quantization bits: 2, 3, 4, 5, 6 or 8 (float modes fix their own: nvfp4/mxfp4 4, mxfp8 8)")
     var bits: Int = 4
 
-    @Option(name: .long, help: "Quantization group size")
+    @Option(name: .long, help: "Affine group size: 32, 64 or 128 (float modes fix their own)")
     var groupSize: Int = 64
 
     @Option(name: .long, help: "Quantization mode: affine (default), nvfp4, mxfp4, mxfp8")
@@ -27,7 +27,7 @@ struct QuantizeCommand: AsyncParsableCommand {
     @Option(name: .long, help: "A 4-bit build of this model (local dir or HF repo id) to learn the per-module quantized set from. Required for MoE / vision / Gemma; reproduces that build's coverage exactly.")
     var reference: String?
 
-    @Option(name: .long, parsing: .singleValue, help: "Module-path substring to quantize at the protect precision (repeatable), e.g. --protect down_proj --protect o_proj.")
+    @Option(name: .long, parsing: .singleValue, help: "Module-path substring to quantize at the protect precision (repeatable), e.g. --protect down_proj --protect o_proj. A `re:` prefix makes it a regex, e.g. --protect 're:^language_model\\.layers\\.\\d+\\.mlp\\.'.")
     var protect: [String] = []
 
     @Option(name: .long, help: "Protect precision bits (default 8)")
@@ -42,7 +42,7 @@ struct QuantizeCommand: AsyncParsableCommand {
     @Flag(name: .long, inversion: .prefixedNo, help: "Auto-protect the vision/audio projectors at the protect precision in reference mode (default on).")
     var protectVision: Bool = true
 
-    @Option(name: .long, parsing: .singleValue, help: "Module-path substring to keep at FULL precision (repeatable), e.g. --skip embed_tokens. Wins over --protect.")
+    @Option(name: .long, parsing: .singleValue, help: "Module-path substring (or `re:` regex) to keep at FULL precision (repeatable), e.g. --skip embed_tokens. Wins over --protect.")
     var skip: [String] = []
 
     @Option(name: .long, help: "Output name for the quantized model in registry")
