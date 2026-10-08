@@ -519,6 +519,8 @@ page cache; a cold read of 1.49 GB from disk will be slower. Peak memory is
 The full measured ladder (quality, speed, memory, size, and a comparison with Unsloth's
 GGUFs and Ollama) is in [`docs/bench/embeddinggemma2-2026-10-08.md`](bench/embeddinggemma2-2026-10-08.md).
 Every build below is a complete folder (safetensors with a `quantization` block in
+
+All of these builds, alongside Google's original `google/embeddinggemma-2`, are collected on Hugging Face in the [EmbeddingGemma 2 MLX quantization ladder](https://huggingface.co/collections/srv-sngh/embeddinggemma-2-mlx-quantization-ladder-6ac7b2592bbdabdd74dc5ba7).
 `config.json`, tokenizer, processor and the sentence-transformers files) that loads with
 the same strict binder as the bf16 repo.
 
