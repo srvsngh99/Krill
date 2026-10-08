@@ -104,6 +104,13 @@ final class ModelCapabilitiesTests: XCTestCase {
         for (name, quant, repo) in [
             ("embeddinggemma-2-mxfp8", "mxfp8", "srv-sngh/embeddinggemma-2-mlx-mixed-mxfp8"),
             ("embeddinggemma-2-nvfp4", "nvfp4", "srv-sngh/embeddinggemma-2-mlx-nvfp4"),
+            ("embeddinggemma-2-8bit", "8bit", "srv-sngh/embeddinggemma-2-mlx-8bit"),
+            ("embeddinggemma-2-6bit", "6bit", "srv-sngh/embeddinggemma-2-mlx-6bit"),
+            ("embeddinggemma-2-6bit-dyn", "6bit-dyn", "srv-sngh/embeddinggemma-2-mlx-6bit-dyn"),
+            ("embeddinggemma-2-5bit", "5bit", "srv-sngh/embeddinggemma-2-mlx-5bit"),
+            ("embeddinggemma-2-4bit-g32", "4bit-g32", "srv-sngh/embeddinggemma-2-mlx-4bit-g32"),
+            ("embeddinggemma-2-4bit-dyn", "4bit-dyn", "srv-sngh/embeddinggemma-2-mlx-4bit-dyn"),
+            ("embeddinggemma-2-4bit-dyn-text", "4bit-dyn-text", "srv-sngh/embeddinggemma-2-mlx-4bit-dyn-text"),
         ] {
             let hit = AliasMap.allAliases.first { $0.shortName == name }
             XCTAssertNotNil(hit, name)

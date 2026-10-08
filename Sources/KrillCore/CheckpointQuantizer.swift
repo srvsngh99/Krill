@@ -55,11 +55,14 @@ public enum CheckpointQuantizer {
         case nonDivisibleWeight(name: String, dim: Int, groupSize: Int)
         case expertGroupUnsupported(group: Int)
         case skipSplitsLayers(module: String)
+        case unsupportedBits(Int)
 
         public var description: String {
             switch self {
             case .missingConfig(let u): return "no config.json in \(u.path)"
             case .invalidConfig(let u): return "could not parse config.json in \(u.path)"
+            case .unsupportedBits(let b):
+                return "affine quantization supports 2, 3, 4, 5, 6 or 8 bits, not \(b)"
             case .skipSplitsLayers(let m):
                 return "--skip keeps '\(m)' full precision but quantizes the same module in other "
                     + "layers; the loader swaps leaves per module type, so a skip must hit the "
@@ -121,6 +124,26 @@ public enum CheckpointQuantizer {
         case "mxfp4": return (4, 32)
         case "mxfp8": return (8, 32)
         default: return (bits, groupSize)
+        }
+    }
+
+    /// `--skip` / `--protect` patterns. A plain pattern is a substring of the module
+    /// path (`down_proj`); a pattern starting with `re:` is a regular expression
+    /// searched in it (`re:^language_model\.layers\.\d+\.mlp\.down_proj$`), which is how
+    /// the text-tower copy of a name is told apart from the vision / audio copy.
+    struct ModulePatterns {
+        private let substrings: [String]
+        private let regexes: [NSRegularExpression]
+        init(_ patterns: [String]) {
+            substrings = patterns.filter { !$0.hasPrefix("re:") }
+            regexes = patterns.filter { $0.hasPrefix("re:") }.compactMap {
+                try? NSRegularExpression(pattern: String($0.dropFirst(3)))
+            }
+        }
+        func matches(_ module: String) -> Bool {
+            if substrings.contains(where: { module.contains($0) }) { return true }
+            let range = NSRange(module.startIndex..., in: module)
+            return regexes.contains { $0.firstMatch(in: module, range: range) != nil }
         }
     }
 
@@ -202,6 +225,11 @@ public enum CheckpointQuantizer {
         let storeDType = storageDType(dtype)
         let (topBits, topGroup) = effectiveParams(mode: mode, bits: bits, groupSize: groupSize)
         let topMode = mode.lowercased()
+        let affineBits: Set<Int> = [2, 3, 4, 5, 6, 8]
+        if topMode == "affine", !affineBits.contains(topBits) { throw QuantizeError.unsupportedBits(topBits) }
+        if protectMode.lowercased() == "affine", !protectList.isEmpty, !affineBits.contains(protectBits) {
+            throw QuantizeError.unsupportedBits(protectBits)
+        }
         if topBits != bits || topGroup != groupSize {
             log("mode \(mode) requires \(topBits)-bit / group \(topGroup); overriding the passed bits/group")
         }
@@ -212,6 +240,8 @@ public enum CheckpointQuantizer {
         // protect precision on an expert - a `--protect down_proj` that matched the
         // stacked `switch_mlp.down_proj` expert would otherwise emit an unloadable
         // checkpoint.
+        let protectMatcher = ModulePatterns(protectList)
+        let skipMatcher = ModulePatterns(skip)
         func perModule(_ module: String, ndim: Int) -> PerModule {
             if ndim == 3 {
                 // Stacked experts are born-quantized in the MoE runtime
@@ -223,7 +253,7 @@ public enum CheckpointQuantizer {
                 // where the experts cannot be a float format anyway.
                 return PerModule(bits: topBits, groupSize: topGroup, mode: "affine")
             }
-            if protectList.contains(where: { module.contains($0) }) {
+            if protectMatcher.matches(module) {
                 // Normalize the protect format the same way the top level is: the
                 // float formats only support one (bits, groupSize) each, so
                 // `--protect-mode mxfp8` works without the caller also passing
@@ -238,7 +268,7 @@ public enum CheckpointQuantizer {
         // Does this `.weight` get quantized? Reference mode: membership in the set.
         // Dense mode: a 2-D weight (Linear/Embedding leaf the loader would quantize).
         func shouldQuantize(module: String, ndim: Int) -> Bool {
-            if skip.contains(where: { module.contains($0) }) { return false }
+            if skipMatcher.matches(module) { return false }
             if let quantSet { return quantSet.contains(module) }
             return ndim == 2
         }

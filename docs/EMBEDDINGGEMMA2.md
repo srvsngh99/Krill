@@ -7,7 +7,7 @@ what it got wrong are at the end of this file.
 
 ```
 krill pull embeddinggemma-2        # 1.49 GB, Apache-2.0, not gated
-# smaller: embeddinggemma-2-mxfp8 (1.01 GB) / embeddinggemma-2-nvfp4 (0.44 GB), see "Quantized builds"
+# smaller builds, 1.01 GB down to 0.44 GB (8bit, 6bit, 5bit, 4bit-dyn, nvfp4, ...): see "Quantized builds"
 krill serve
 curl localhost:57455/v1/embeddings -H 'Content-Type: application/json' \
   -d '{"model":"embeddinggemma-2","input":"What causes the northern lights?","task":"SearchQuery"}'
@@ -514,21 +514,107 @@ page cache; a cold read of 1.49 GB from disk will be slower. Peak memory is
 `Memory.peakMemory` after the 32 x ~1k-token batch (RSS does not see MLX memory).
 
 
-## Quantized builds (mxfp8, nvfp4)
+## Quantized builds (the ladder)
+
+The full measured ladder (quality, speed, memory, size, and a comparison with Unsloth's
+GGUFs and Ollama) is in [`docs/bench/embeddinggemma2-2026-10-08.md`](bench/embeddinggemma2-2026-10-08.md).
+Every build below is a complete folder (safetensors with a `quantization` block in
+`config.json`, tokenizer, processor and the sentence-transformers files) that loads with
+the same strict binder as the bf16 repo.
 
 ```
-krill pull embeddinggemma-2-mxfp8   # 1.01 GB, parity mean >= 0.995 per modality
-krill pull embeddinggemma-2-nvfp4   # 0.44 GB, parity mean >= 0.98 per modality
+krill pull embeddinggemma-2-8bit          # 0.81 GB, affine 8-bit, group 64
+krill pull embeddinggemma-2-6bit          # 0.62 GB
+krill pull embeddinggemma-2-5bit          # 0.53 GB
+krill pull embeddinggemma-2-4bit-dyn      # 0.47 GB, 4-bit with the sensitive text tensors at 8-bit
+krill pull embeddinggemma-2-4bit-dyn-text # 0.51 GB, 4-bit with every text layer at 8-bit
+krill pull embeddinggemma-2-4bit-g32      # 0.49 GB
+krill pull embeddinggemma-2-mxfp8         # 1.01 GB, text layers + vision/audio attention dense
+krill pull embeddinggemma-2-nvfp4         # 0.44 GB
+krill pull embeddinggemma-2-6bit-dyn      # 0.66 GB (passes the gate, no measurable gain over 6bit)
 ```
 
-Both are complete folders (safetensors with a `quantization` block in
-`config.json`, tokenizer, processor and the sentence-transformers files) that
-load with the same strict binder as the bf16 repo. A module is quantized exactly
-when `<module>.scales` exists in the checkpoint; its mode, bits and group come
+| Build (alias `embeddinggemma-2-<name>`) | Bits | MB | Text cos mean | SciFact nDCG@10 (bf16: 86.92) | Hindi (bf16: 72.78) | Gate |
+|---|---|---|---|---|---|---|
+| `mxfp8` | 8 (mxfp8 mixed) | 1007 | 0.9977 | 86.80 | 72.58 | pass |
+| `8bit` | 8 | 806 | 0.9999 | 86.95 | 72.81 | pass |
+| `6bit` | 6 | 624 | 0.9988 | 86.98 | 72.81 | pass |
+| `6bit-dyn` | 6 / 8 text | 657 | 0.9998 | 86.70 | 72.74 | pass |
+| `5bit` | 5 | 533 | 0.9953 | 86.51 | 72.59 | pass |
+| `4bit-dyn-text` | 4 / 8 text layers | 507 | 0.9980 | 85.32 | 72.38 | pass |
+| `4bit-dyn` | 4 / 8 attn+ple+proj+last2 | 473 | 0.9927 | 86.30 | 72.03 | pass |
+| `4bit-g32` | 4 (g32) | 488 | 0.9849 | 83.93 | 72.04 | pass |
+| `nvfp4` | 4 (nvfp4) | 442 | 0.9809 | 84.43 | 72.44 | pass |
+| `4bit` | 4 (g64) | 442 | 0.9806 | 83.03 | 71.42 | not published |
+| `mxfp4` | 4 (mxfp4) | 419 | 0.9732 | 82.71 | 71.31 | not published |
+| `3bit` | 3 | 351 | 0.9234 | 75.62 | 70.26 | not published |
+
+The **publish gate is Claude's proposal**, not a decision of the maintainer: against bf16, the 8-bit class (mxfp8, 8bit,
+6bit, 6bit-dyn) may lose at most 1.0 nDCG point on SciFact and on Hindi and 1.0 point of image Recall@1; the 4/5-bit class at most 3.0
+points on each and needs text fidelity mean >= 0.97. Plain `4bit` (g64), `mxfp4` and `3bit` fail it and are not published
+(`krill quantize` still builds them). The pass/fail decision uses small test sets (300 SciFact queries); read it as "no measurable
+loss", not "equal".
+
+A module is quantized exactly when `<module>.scales` exists in the checkpoint; its mode, bits and group come
 from `config.quantization` (with per-path overrides), and a checkpoint and
 config that disagree fail the load instead of producing plausible garbage. The
-vision tower, the audio tower and the text model all load quantized leaves.
+vision tower, the audio tower and the text model all load quantized leaves, at any
+affine width (2, 3, 4, 5, 6, 8 bits) or `mxfp4` / `nvfp4` / `mxfp8`.
 Compute is still fp32 by default (`KRILL_EMBED_DTYPE`).
+
+### Dynamic builds: what is kept at 8-bit
+
+`krill quantize --protect` quantizes matching modules at the protect precision (`--protect-bits`, default 8) and
+`--skip` keeps them dense. Both take a module-path substring, or a regex when the pattern starts with `re:`
+(needed to tell the text tower's `mlp.down_proj` from the vision tower's, which a substring cannot). The set was
+chosen from a per-class sensitivity sweep (protect one class at 8-bit on top of a plain 4-bit build, measure the
+fixture fidelity through the server; the tables are in the bench doc):
+
+- the text tower is the only sensitive part at 4 bit; the 134M-parameter embedding table, vision, audio and the multimodal
+  projectors gain nothing measurable from 8-bit and stay at 4-bit;
+- best value per MB: the text projection (0.2 MB), the last two text layers, `ple_block`, `o_proj`, the global-attention layers;
+- `4bit-dyn` protects the text projection, text `self_attn`, text `ple_block` and the last two layers (+31 MB);
+  `4bit-dyn-text` protects the whole text stack (+65 MB); `6bit-dyn` is the same for 6 bit and is not worth it.
+
+### Commands for every build
+
+Run from the bf16 repo folder (`<bf16-dir>`); `--output-dir` writes a folder and does not register anything:
+
+```
+krill quantize <bf16-dir> --bits 8 --group-size 64 --dtype bf16 --output-dir embeddinggemma-2-mlx-8bit
+krill quantize <bf16-dir> --bits 6 --group-size 64 --dtype bf16 --output-dir embeddinggemma-2-mlx-6bit
+krill quantize <bf16-dir> --bits 5 --group-size 64 --dtype bf16 --output-dir embeddinggemma-2-mlx-5bit
+krill quantize <bf16-dir> --bits 4 --group-size 32 --dtype bf16 --output-dir embeddinggemma-2-mlx-4bit-g32
+krill quantize <bf16-dir> --mode nvfp4 --dtype bf16 --output-dir embeddinggemma-2-mlx-nvfp4
+krill quantize <bf16-dir> --mode mxfp8 --dtype bf16 \
+  --skip language_model.layers --skip self_attn --skip patch_embedder \
+  --output-dir embeddinggemma-2-mlx-mixed-mxfp8
+
+# dynamic 4-bit: sensitive text tensors at 8-bit
+krill quantize <bf16-dir> --bits 4 --group-size 64 --dtype bf16 --protect-bits 8 --protect-group-size 64 \
+  --protect 're:^language_model\.embedding_projection$' \
+  --protect 're:^language_model\.layers\.\d+\.self_attn\.' \
+  --protect 're:^language_model\.layers\.\d+\.ple_block\.' \
+  --protect 're:^language_model\.layers\.2[23]\.' \
+  --output-dir embeddinggemma-2-mlx-4bit-dyn
+
+# dynamic 4-bit, every text layer at 8-bit
+krill quantize <bf16-dir> --bits 4 --group-size 64 --dtype bf16 --protect-bits 8 --protect-group-size 64 \
+  --protect 're:^language_model\.embedding_projection$' --protect 're:^language_model\.layers\.' \
+  --output-dir embeddinggemma-2-mlx-4bit-dyn-text
+
+# dynamic 6-bit (no measurable gain over 6bit)
+krill quantize <bf16-dir> --bits 6 --group-size 64 --dtype bf16 --protect-bits 8 --protect-group-size 64 \
+  --protect 're:^language_model\.embedding_projection$' --protect 're:^language_model\.layers\.' \
+  --output-dir embeddinggemma-2-mlx-6bit-dyn
+```
+
+Built but not published (they fail the gate): `--bits 4 --group-size 64` (3.9 SciFact points lost), `--mode mxfp4`,
+`--bits 3`.
+
+### The experiment history (mxfp8 and nvfp4 recipes)
+
+The two float-format recipes came from the 17-row experiment below.
 
 ### What is quantized, and why (measured)
 
@@ -599,22 +685,15 @@ top-1 neighbour 21/21 both; nvfp4 Spearman 0.973 / 0.968, top-1 20/21 raw and
 18/21 `Document`. nvfp4 is a retrieval-grade compromise, not a drop-in: expect
 some neighbour reordering among near ties.
 
-### Size, speed and memory (release build, HTTP, fp32 compute)
+### Size, speed and memory
 
-| | bf16 | mxfp8 | nvfp4 |
-|---|---|---|---|
-| `model.safetensors` | 1,489 MB | 1,007 MB | 442 MB |
-| single query p50 | 12.2 ms | 11.5 ms | 10.7 ms |
-| batch of 32 short docs p50 | 74.1 ms | 74.9 ms | 76.0 ms |
-| one image p50 | 349 ms | 360 ms | 359 ms |
-| peak MLX memory (text + image tower) | 2,818 MB | 2,146 MB | 1,480 MB |
+> **Superseded.** The earlier single-run timings in this section (bf16 / mxfp8 / nvfp4, measured on a loaded, shared
+> Mac) have been replaced by a gated protocol (load, free memory, thermal and AC checks before every repetition; 3 repetitions with ranges; re-measured until spreads are <= 10%) and all contenders in
+> [`docs/bench/embeddinggemma2-2026-10-08.md`](bench/embeddinggemma2-2026-10-08.md). The conclusion held: quantization saves
+> disk and memory and changes time little (single-query p50 8.8-10.5 ms and 34-39 docs/s at batch 32 x ~256 tokens across the Krill ladder), because compute is fp32 and the model is small. Sizes below are the
+> `model.safetensors` file: bf16 1,489 MB, mxfp8 1,007 MB, nvfp4 442 MB.
 
-Quantization saves disk and memory, not time: the model is small and compute
-is fp32, so dequantize-on-the-fly is a wash (latencies are within noise of bf16,
-single-query and image are within about 3%). Measured on a shared Mac, 12 to 30
-runs after 3 warm-ups.
-
-### Rebuilding them
+### Rebuilding the first two builds
 
 `--output-dir` writes a complete folder (it does not register the model or touch
 `~/.krill`); `--skip` keeps modules whose path contains the substring at full
