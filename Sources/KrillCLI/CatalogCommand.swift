@@ -40,7 +40,7 @@ struct CatalogList: ParsableCommand {
     )
 
     func run() throws {
-        let store = ModelCatalogStore(baseDir: Registry().baseDir)
+        let store = ModelCatalogStore(baseDir: Registry.configured().baseDir)
 
         let builtIn = AliasMap.allAliases
         print("Built-in aliases (\(builtIn.count)):")
@@ -87,7 +87,7 @@ struct CatalogRefresh: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        let store = ModelCatalogStore(baseDir: Registry().baseDir)
+        let store = ModelCatalogStore(baseDir: Registry.configured().baseDir)
         print("Fetching catalog from \(remoteURL.absoluteString)...")
         do {
             let catalog = try await store.fetch(from: remoteURL)
@@ -116,7 +116,7 @@ struct CatalogPath: ParsableCommand {
     )
 
     func run() throws {
-        let store = ModelCatalogStore(baseDir: Registry().baseDir)
+        let store = ModelCatalogStore(baseDir: Registry.configured().baseDir)
         print(store.catalogURL.path)
         if let age = store.cacheAge() {
             print("cached \(formatAge(age)) ago")

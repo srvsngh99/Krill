@@ -86,7 +86,7 @@ struct CodeCommand: AsyncParsableCommand {
     var denyTools: [String] = []
 
     func run() async throws {
-        let registry = Registry()
+        let registry = Registry.configured()
         let config = KrillConfig.load()
 
         guard !(listModels && provider == .local) else {

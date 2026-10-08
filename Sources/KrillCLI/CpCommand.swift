@@ -15,7 +15,7 @@ struct CpCommand: ParsableCommand {
     var destination: String
 
     func run() throws {
-        let registry = Registry()
+        let registry = Registry.configured()
         guard Registry.isValidModelName(source),
               Registry.isValidModelName(destination) else {
             print("Error: invalid model name (no path separators, '..', or leading '.')")

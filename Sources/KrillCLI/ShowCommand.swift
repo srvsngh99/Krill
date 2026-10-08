@@ -21,7 +21,7 @@ struct ShowCommand: ParsableCommand {
     var system = false
 
     func run() throws {
-        let registry = Registry()
+        let registry = Registry.configured()
         guard let m = registry.getModel(name) else {
             print("Error: model '\(name)' not found")
             throw ExitCode.failure

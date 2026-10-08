@@ -75,10 +75,7 @@ struct UICommand: AsyncParsableCommand {
             return
         }
 
-        let registry: Registry = {
-            if let md = cfg.modelsDir, !md.isEmpty { return Registry(modelsDir: URL(fileURLWithPath: md)) }
-            return Registry()
-        }()
+        let registry = Registry.configured(cfg)
         let modelName = resolveModel(cfg, registry: registry)
 
         if install {

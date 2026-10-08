@@ -65,7 +65,7 @@ struct RunCommand: AsyncParsableCommand {
     var draftModel: String?
 
     func run() async throws {
-        let registry = Registry()
+        let registry = Registry.configured()
 
         // Bridge the decode-pipeline toggle to the env the engine reads, unless an
         // explicit env value is already set (env wins over config.toml). Default is

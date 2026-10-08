@@ -9,7 +9,7 @@ struct ListCommand: ParsableCommand {
     )
 
     func run() throws {
-        let registry = Registry()
+        let registry = Registry.configured()
         let models = registry.listModels()
 
         if models.isEmpty {
