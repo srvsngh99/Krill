@@ -11,6 +11,21 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **EmbeddingGemma 2 quantized builds** — `embeddinggemma-2-mxfp8` (1.01 GB vs
+  1.49 GB bf16; cosine to the sentence-transformers fp32 reference mean >= 0.996
+  and min >= 0.992 on text, image, mixed, audio and video; text layers, vision
+  attention and audio attention stay dense) and `embeddinggemma-2-nvfp4` (0.44 GB,
+  every linear quantized; mean >= 0.98, min >= 0.95, text neighbour agreement
+  18-20 of 21), with peak MLX memory 2.1 GB / 1.5 GB vs 2.8 GB. The text, vision
+  and audio loaders now read per-module quantization from the checkpoint
+  (`.scales`) and `config.json`, cross-checked so a mismatched config fails the
+  load. `krill quantize` accepts `embedding_gemma2`, gained `--skip` (keep
+  modules at full precision; refuses a skip that splits a layer array) and
+  `--output-dir` (write a release folder without registering it), and copies the
+  sentence-transformers files. Recipes, the variant table and the commands are in
+  [`docs/EMBEDDINGGEMMA2.md`](docs/EMBEDDINGGEMMA2.md#quantized-builds-mxfp8-nvfp4).
+  The HF repos `srv-sngh/embeddinggemma-2-mlx-mixed-mxfp8` / `-nvfp4` must exist before
+  the release.
 - **EmbeddingGemma 2 audio + video embeddings** — `input_audio` (OpenAI shape,
   base64; wav / mp3 / m4a / flac / aiff / caf / ogg-Opus via AVFoundation, resampled
   to 16 kHz mono, up to 30 s) and `video_url` / `input_video` (base64 mp4 / mov /

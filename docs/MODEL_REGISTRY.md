@@ -82,6 +82,13 @@ chat family. Its image, audio and video input on `/v1/embeddings` and
 chat path and stay unset for `.bert`. Media sent to a text-only embedding model
 is `400`. See [EMBEDDINGGEMMA2.md](EMBEDDINGGEMMA2.md).
 
+Quantized EmbeddingGemma 2 builds are separate aliases that resolve to
+`srv-sngh` repos and share the `.bert` family: `embeddinggemma-2-mxfp8`
+(quant `mxfp8`, ~1.01 GB) and `embeddinggemma-2-nvfp4` (quant `nvfp4`,
+~0.44 GB). Whether a tensor is quantized is read from the checkpoint
+(`<module>.scales`) and `config.json`'s `quantization` block, not from the
+alias.
+
 ## The `ModelAdapter` runtime contract
 
 `ModelAdapter` (`Sources/KrillRegistry/ModelAdapter.swift`) is the single

@@ -394,6 +394,15 @@ private let aliases: [String: ResolvedModel] = [
     "embeddinggemma-2": ResolvedModel(
         repo: "google/embeddinggemma-2",
         name: "embeddinggemma-2", family: .bert, params: "740M", quant: "bf16", context: 8192),
+    // Quantized EmbeddingGemma 2 builds (`krill quantize`, recipes in
+    // docs/EMBEDDINGGEMMA2.md): mxfp8 keeps the text layers and the vision
+    // attention dense (~1.01 GB); nvfp4 quantizes every linear (~0.44 GB).
+    "embeddinggemma-2-mxfp8": ResolvedModel(
+        repo: "srv-sngh/embeddinggemma-2-mlx-mixed-mxfp8",
+        name: "embeddinggemma-2-mxfp8", family: .bert, params: "740M", quant: "mxfp8", context: 8192),
+    "embeddinggemma-2-nvfp4": ResolvedModel(
+        repo: "srv-sngh/embeddinggemma-2-mlx-nvfp4",
+        name: "embeddinggemma-2-nvfp4", family: .bert, params: "740M", quant: "nvfp4", context: 8192),
 
     // MPNet encoder: relative-attention-bias backbone (not vanilla BERT),
     // routed to MPNetEmbeddingModel by model_type. 768-dim, mean pooling.

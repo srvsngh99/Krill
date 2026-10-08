@@ -333,7 +333,10 @@ final class AudioAttention: Module {
         let maxSpanP1 = pos.count
 
         var sinEmb = timingSignal(pos, queries.dtype)               // [S, hidden]
-        sinEmb = relativeKProj(sinEmb.asType(relativeKProj.weight.dtype))
+        // A quantized projection's `weight` is packed uint32: feed it the query dtype.
+        let projDtype = relativeKProj.weight.dtype.isFloatingPoint
+            ? relativeKProj.weight.dtype : queries.dtype
+        sinEmb = relativeKProj(sinEmb.asType(projDtype))
         sinEmb = sinEmb.reshaped([maxSpanP1, numHeads, headDim]).asType(queries.dtype)
 
         let qp = queries.transposed(0, 3, 1, 2, 4)                  // [B,N,U,W,H]

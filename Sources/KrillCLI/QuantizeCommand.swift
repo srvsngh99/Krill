@@ -42,8 +42,14 @@ struct QuantizeCommand: AsyncParsableCommand {
     @Flag(name: .long, inversion: .prefixedNo, help: "Auto-protect the vision/audio projectors at the protect precision in reference mode (default on).")
     var protectVision: Bool = true
 
+    @Option(name: .long, parsing: .singleValue, help: "Module-path substring to keep at FULL precision (repeatable), e.g. --skip embed_tokens. Wins over --protect.")
+    var skip: [String] = []
+
     @Option(name: .long, help: "Output name for the quantized model in registry")
     var name: String?
+
+    @Option(name: .long, help: "Write the quantized checkpoint to this directory and do NOT register it (for building a release folder to upload).")
+    var outputDir: String?
 
     func run() async throws {
         guard let sourceDir = resolveSource(source) else {
@@ -64,7 +70,9 @@ struct QuantizeCommand: AsyncParsableCommand {
 
         let outputName = name ?? inferName(from: source, bits: bits)
         let registry = Registry()
-        let outputDir = registry.modelPath(outputName)
+        let register = self.outputDir == nil
+        let outputDir = self.outputDir.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? registry.modelPath(outputName)
 
         print("Quantizing \(sourceDir.lastPathComponent)")
         print("  Bits: \(bits), Group size: \(groupSize), Mode: \(mode)")
@@ -80,13 +88,22 @@ struct QuantizeCommand: AsyncParsableCommand {
                 protect: protect,
                 protectBits: protectBits, protectGroupSize: protectGroupSize,
                 protectMode: protectMode, autoProtectVision: protectVision,
+                skip: skip,
                 log: { print("  \($0)") })
             print("  wrote \(n) quantized tensors")
         } catch {
             print("Error: quantization failed: \(error)")
             // Don't leave a half-written model registered.
-            try? FileManager.default.removeItem(at: outputDir)
+            if register { try? FileManager.default.removeItem(at: outputDir) }
             throw ExitCode.failure
+        }
+
+        if !register {
+            let sizeMB = Double(directorySize(outputDir)) / 1_048_576
+            print()
+            print("Done! Wrote \(outputDir.path) (not registered).")
+            print(String(format: "  Size: %.0f MB", sizeMB))
+            return
         }
 
         // Register the manifest (size, family from the emitted config.json).

@@ -430,7 +430,7 @@ public final class EG2VisionTower: Module {
     }
 
     public func setComputeDtype(_ dtype: DType) {
-        update(parameters: parameters().mapValues { $0.asType(dtype) })
+        eg2CastFloatParameters(self, to: dtype)
         computeDtype = dtype
     }
 
@@ -447,8 +447,8 @@ public final class EG2VisionTower: Module {
         let k = enc.poolingKernelSize
         let x = MLXArray(patches, [1, P, patches.count / P])
         // Patch embedding: 2 * (x - 0.5) -> Linear.
-        let wdtype = enc.patchEmbedder.inputProj.weight.dtype
-        var h = enc.patchEmbedder.inputProj((2 * (x - 0.5)).asType(wdtype))
+        // Compute dtype, not `weight.dtype`: a quantized weight is packed uint32.
+        var h = enc.patchEmbedder.inputProj((2 * (x - 0.5)).asType(computeDtype))
         // Factored 2-D position table: x-table[x] + y-table[y].
         var xs = [Int32](), ys = [Int32]()
         xs.reserveCapacity(P); ys.reserveCapacity(P)
@@ -527,6 +527,12 @@ public func loadEG2VisionTower(
             flat.append((k, v)); defaulted += 1
         }
     }
+    // Quantized checkpoint: swap in the quantized leaves the file ships (and
+    // cross-check them against config.json) before the strict bind.
+    let quant = try eg2QuantizationConfig(configData: cfgData)
+    let qmods = try eg2QuantizedModules(in: all.keys)
+    try eg2ValidateQuantization(modules: qmods, config: quant)
+    eg2ApplyQuantization(to: tower, prefix: "", modules: qmods, config: quant)
     try tower.update(
         parameters: ModuleParameters.unflattened(flat),
         verify: [.allModelKeysSet, .shapeMismatch, .noUnusedKeys])

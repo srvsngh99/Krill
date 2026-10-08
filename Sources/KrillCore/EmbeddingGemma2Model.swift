@@ -309,7 +309,7 @@ public final class EmbeddingGemma2Model: Module, SentenceEmbeddingEncoder {
     public func setComputeDtype(_ dtype: DType) {
         precondition(dtype == .float32 || dtype == .bfloat16,
                      "EmbeddingGemma2 supports only float32/bfloat16 compute")
-        update(parameters: parameters().mapValues { $0.asType(dtype) })
+        eg2CastFloatParameters(self, to: dtype)
         computeDtype = dtype
     }
 
@@ -430,10 +430,16 @@ public struct EmbeddingGemma2LoadReport: Sendable, CustomStringConvertible {
     public let boundText: Int
     public let skippedVision: Int
     public let skippedAudio: Int
+    /// Text modules bound as quantized (0 for a dense checkpoint).
+    public let quantizedText: Int
+    /// Quantized modules in the whole checkpoint, towers included.
+    public let quantizedTotal: Int
     public var skipped: Int { skippedVision + skippedAudio }
     public var description: String {
         "EmbeddingGemma2: bound \(boundText) text tensors (strict: every one consumed, none missing); "
         + "skipped \(skipped) multimodal tensors (\(skippedVision) vision, \(skippedAudio) audio)"
+        + (quantizedTotal > 0
+            ? "; quantized: \(quantizedText) text modules (\(quantizedTotal) in the checkpoint)" : "")
     }
 }
 
@@ -484,6 +490,16 @@ public func loadEmbeddingGemma2(
 
     let all = try loadWeightArrays(from: directory)
     let parts = try partitionEmbeddingGemma2Keys(all.keys)
+
+    // Quantized checkpoint: the whole file is cross-checked against config.json
+    // here (towers included, even though they load lazily), then the text
+    // model's quantized leaves are swapped in before binding.
+    let quant = try eg2QuantizationConfig(configData: cfgData)
+    let quantModules = try eg2QuantizedModules(in: all.keys)
+    try eg2ValidateQuantization(modules: quantModules, config: quant)
+    let textQuant = eg2ApplyQuantization(
+        to: model, prefix: "language_model.", modules: quantModules, config: quant)
+
     var text: [(String, MLXArray)] = []
     text.reserveCapacity(parts.text.count)
     for (full, stripped) in parts.text { text.append((stripped, all[full]!)) }
@@ -495,7 +511,8 @@ public func loadEmbeddingGemma2(
     eval(model)
 
     let report = EmbeddingGemma2LoadReport(
-        boundText: text.count, skippedVision: parts.vision, skippedAudio: parts.audio)
+        boundText: text.count, skippedVision: parts.vision, skippedAudio: parts.audio,
+        quantizedText: textQuant, quantizedTotal: quantModules.count)
     FileHandle.standardError.write(Data((report.description + "\n").utf8))
     return (model, report)
 }
