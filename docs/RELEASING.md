@@ -17,7 +17,16 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| _(empty - cleared at v0.24.0)_ | | | |
+| 2026-10-08 | this PR | EmbeddingGemma 2 mxfp8 and nvfp4 builds, `krill quantize --skip/--output-dir`, aliases `embeddinggemma-2-mxfp8` / `-nvfp4` | The two HF repos (`srv-sngh/embeddinggemma-2-mlx-mxfp8`, `-nvfp4`) must be created and uploaded BEFORE the release, or `krill pull` of the new aliases 404s. |
+| 2026-10-08 | #332 | Repo-wide docs synced for EmbeddingGemma 2 | Docs only. |
+| 2026-10-08 | #331 | EmbeddingGemma 2 audio + video embeddings | Needs the `google/embeddinggemma-2` weights to exercise. |
+| 2026-10-07 | #330 | EmbeddingGemma 2 image embeddings + multimodal request plumbing | New content-part parsing on `/v1/embeddings` and `/api/embed`. |
+| 2026-10-07 | #329 | Native EmbeddingGemma 2 text embeddings | New `embeddinggemma-2` alias. |
+| 2026-09-30 - 10-01 | 9f21f76..59f8f10 | Logprobs: `logprobs`/`top_logprobs` on chat completions, Ollama `/api/chat` + `/api/generate`, legacy `/v1/completions` (incl. `echo`), speculative + batched decode, all native VL runtimes; tool-call replies report real logprobs; streaming content whitespace-identical to non-streaming | Largest user-visible change since v0.24.0; ADR in docs. |
+| 2026-09-30 | fe8ae07 | Per-request thinking switch (`enable_thinking` / `think`) | New request field. |
+| 2026-09-28 | a21660d, 7f8a506 | Qwen3.5-4B alias + tied-embedding support in the `.qwen35` runtime | |
+| 2026-09-30 | 9f70a66, 1b97484, de5b59b | Fixes: raw HF Qwen3.5-VL snapshot keys rewritten to the mlx_vlm layout; question/approval event-ordering race in AgentSessions; explicit JSON `null` treated as absent for optional request fields | |
+| 2026-09-20 | db1a53f (#317) | Docs: corrected new-family checklist, 1-bit Bonsai backlog | Docs only. |
 
 ### Known-open, NOT yet merged
 

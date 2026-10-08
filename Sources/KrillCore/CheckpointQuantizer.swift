@@ -30,6 +30,12 @@ import MLX
 ///    quantized affine at the config's TOP-LEVEL group (the MoE runtime
 ///    reconstructs them affine from the top-level group and reads no override).
 ///
+/// `embedding_gemma2` (text + SigLIP vision + audio conformer, strict-bound by
+/// its own loader) is the one multimodal family the dense pass accepts without a
+/// reference: every 2-D `.weight` is a Linear/Embedding leaf and the convs are
+/// 3-D/4-D, so the rule is exact. Use `skip` to keep chosen tensors full
+/// precision.
+///
 /// IMPORTANT vs the loader: Krill's loader reconstructs quantized layers with
 /// mlx-swift `quantize(model:)`, which only turns `Linear`/`Embedding` leaves into
 /// quantized leaves; `strictVerify` then crashes on any extra/missing `.scales`.
@@ -48,11 +54,16 @@ public enum CheckpointQuantizer {
         case noReferenceScales(URL)
         case nonDivisibleWeight(name: String, dim: Int, groupSize: Int)
         case expertGroupUnsupported(group: Int)
+        case skipSplitsLayers(module: String)
 
         public var description: String {
             switch self {
             case .missingConfig(let u): return "no config.json in \(u.path)"
             case .invalidConfig(let u): return "could not parse config.json in \(u.path)"
+            case .skipSplitsLayers(let m):
+                return "--skip keeps '\(m)' full precision but quantizes the same module in other "
+                    + "layers; the loader swaps leaves per module type, so a skip must hit the "
+                    + "module in every layer (or none). Use a substring without a layer index."
             case .unsupportedFamily(let why):
                 return "native quantize supports dense text models without a reference: \(why). "
                     + "Pass --reference <a 4-bit build of this model> to learn the per-module "
@@ -128,6 +139,10 @@ public enum CheckpointQuantizer {
     ///   - protectBits/protectGroupSize/protectMode: the protect precision.
     ///   - autoProtectVision: in reference mode, also protect the known vision/
     ///     audio projector modules (the color-fidelity fix). No-op if absent.
+    ///   - skip: module-path substrings that stay FULL precision (stored at
+    ///     `dtype`) even though the dense pass would quantize them. Skip wins
+    ///     over `protect`. Lets a dense checkpoint keep chosen tensors
+    ///     (e.g. an embedding table) unquantized.
     @discardableResult
     public static func quantize(
         sourceDir: URL, outputDir: URL,
@@ -136,6 +151,7 @@ public enum CheckpointQuantizer {
         protect: [String] = [],
         protectBits: Int = 8, protectGroupSize: Int = 64, protectMode: String = "affine",
         autoProtectVision: Bool = true,
+        skip: [String] = [],
         log: (String) -> Void = { _ in }
     ) throws -> Int {
         let fm = FileManager.default
@@ -160,7 +176,9 @@ public enum CheckpointQuantizer {
             log("learned \(mods.count) quantized modules from reference \(referenceDir.lastPathComponent)")
             quantSet = mods
         } else {
-            try assertSupportedDense(config)
+            if (config["model_type"] as? String) != "embedding_gemma2" {
+                try assertSupportedDense(config)
+            }
             quantSet = nil
         }
 
@@ -220,8 +238,24 @@ public enum CheckpointQuantizer {
         // Does this `.weight` get quantized? Reference mode: membership in the set.
         // Dense mode: a 2-D weight (Linear/Embedding leaf the loader would quantize).
         func shouldQuantize(module: String, ndim: Int) -> Bool {
+            if skip.contains(where: { module.contains($0) }) { return false }
             if let quantSet { return quantSet.contains(module) }
             return ndim == 2
+        }
+
+        // A skip that hits some layers' copy of a module but not others would
+        // crash the loader (mlx-swift cannot swap leaves inside only some
+        // elements of a layer array), so refuse it here.
+        if !skip.isEmpty {
+            var seen: [String: Bool] = [:]
+            for (name, w) in weights where name.hasSuffix(".weight") {
+                let module = String(name.dropLast(".weight".count))
+                let key = module.replacingOccurrences(
+                    of: "\\.[0-9]+(?=\\.|$)", with: ".#", options: .regularExpression)
+                let q = shouldQuantize(module: module, ndim: w.ndim)
+                if let prev = seen[key], prev != q { throw QuantizeError.skipSplitsLayers(module: key) }
+                seen[key] = q
+            }
         }
 
         // 4. Quantize the selected `*.weight` tensors; pass the rest through.
@@ -373,6 +407,10 @@ public enum CheckpointQuantizer {
             "tokenizer.model", "chat_template.jinja", "merges.txt", "vocab.json",
             "added_tokens.json", "generation_config.json", "preprocessor_config.json",
             "processor_config.json",
+            // sentence-transformers pipeline (EmbeddingGemma 2 reads the prompt
+            // table from config_sentence_transformers.json).
+            "config_sentence_transformers.json", "modules.json",
+            "sentence_bert_config.json", "1_Pooling/config.json", "2_Normalize/config.json",
         ]
         for name in names {
             let src = sourceDir.appendingPathComponent(name)
@@ -381,6 +419,7 @@ public enum CheckpointQuantizer {
             // link verbatim would dangle. Resolve to the real file and copy that.
             let realSrc = src.resolvingSymlinksInPath()
             let dst = outputDir.appendingPathComponent(name)
+            try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? fm.removeItem(at: dst)
             try fm.copyItem(at: realSrc, to: dst)
         }

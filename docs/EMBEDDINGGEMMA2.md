@@ -7,6 +7,7 @@ what it got wrong are at the end of this file.
 
 ```
 krill pull embeddinggemma-2        # 1.49 GB, Apache-2.0, not gated
+# smaller: embeddinggemma-2-mxfp8 (1.01 GB) / embeddinggemma-2-nvfp4 (0.44 GB), see "Quantized builds"
 krill serve
 curl localhost:57455/v1/embeddings -H 'Content-Type: application/json' \
   -d '{"model":"embeddinggemma-2","input":"What causes the northern lights?","task":"SearchQuery"}'
@@ -511,6 +512,138 @@ differences as noise.
 Load time is the first-request wall time with the checkpoint already in the
 page cache; a cold read of 1.49 GB from disk will be slower. Peak memory is
 `Memory.peakMemory` after the 32 x ~1k-token batch (RSS does not see MLX memory).
+
+
+## Quantized builds (mxfp8, nvfp4)
+
+```
+krill pull embeddinggemma-2-mxfp8   # 1.01 GB, parity mean >= 0.995 per modality
+krill pull embeddinggemma-2-nvfp4   # 0.44 GB, parity mean >= 0.98 per modality
+```
+
+Both are complete folders (safetensors with a `quantization` block in
+`config.json`, tokenizer, processor and the sentence-transformers files) that
+load with the same strict binder as the bf16 repo. A module is quantized exactly
+when `<module>.scales` exists in the checkpoint; its mode, bits and group come
+from `config.quantization` (with per-path overrides), and a checkpoint and
+config that disagree fail the load instead of producing plausible garbage. The
+vision tower, the audio tower and the text model all load quantized leaves.
+Compute is still fp32 by default (`KRILL_EMBED_DTYPE`).
+
+### What is quantized, and why (measured)
+
+Naive "quantize every 2-D weight" costs about 0.008 of cosine on every modality
+(mxfp8: mean 0.992, worst text 0.974) because the error is spread over every
+layer rather than concentrated in a few tensors, so the recipe is found by
+keeping the most sensitive tensors dense. Every row below is the whole fixture
+set (text 42 vectors = 21 strings raw + `Document`; image 8, mixed 12, audio 6,
+video 4) through the release build over HTTP, cosine to the sentence-transformers
+fp32 reference, `min / mean`. Text ranking: pairwise-similarity Spearman vs
+Krill fp32 (raw / `Document`) and top-1 neighbour agreement (of 21).
+
+| Variant (mxfp8 unless noted; "dense" = kept bf16; `--skip` substring match, so a bare name also hits the vision/audio tower copy) | text | image | mixed | audio | video | Spearman raw / Doc | top-1 raw / Doc | size |
+|---|---|---|---|---|---|---|---|---|
+| everything quantized (468 tensors) | .974 / .992 | .981 / .991 | .991 / .992 | .988 / .992 | .992 / .993 | .972 / .990 | 20 / 19 | 783 MB |
+| dense `embed_tokens` | .978 / .993 | .980 / .992 | .991 / .992 | .989 / .992 | .992 / .993 | .975 / .990 | 20 / 19 | 913 MB |
+| + dense `embedding_projection` | .979 / .994 | .982 / .993 | .992 / .994 | .990 / .994 | .993 / .995 | .977 / .992 | 20 / 19 | 915 MB |
+| + dense PLE (per-layer input) | .983 / .995 | .983 / .994 | .993 / .995 | .991 / .994 | .993 / .994 | .981 / .993 | 20 / 19 | 933 MB |
+| dense every `mlp` (text and vision) | .986 / .995 | .992 / .995 | .994 / .995 | .993 / .994 | .995 / .996 | .990 / .991 | 21 / 21 | 967 MB |
+| dense `down_proj`, `o_proj`, projectors, patch/conv | .982 / .996 | .989 / .996 | .993 / .996 | .992 / .995 | .995 / .996 | .985 / .993 | 20 / 21 | - |
+| dense whole vision tower | .974 / .992 | .995 / .995 | .991 / .993 | .988 / .992 | .992 / .993 | .972 / .990 | 20 / 19 | - |
+| dense all text layers | .994 / .998 | .984 / .994 | .993 / .996 | .996 / .996 | .996 / .996 | .998 / .997 | 21 / 21 | - |
+| dense text layers + whole vision tower | .994 / .998 | .997 / .998 | .997 / .998 | .996 / .996 | .998 / .998 | - | 21 / 21 | 1,056 MB |
+| dense text layers + vision `down_proj`, `o_proj`, patch | .994 / .998 | .989 / .995 | .994 / .997 | .996 / .996 | .995 / .996 | - | 21 / 21 | 955 MB |
+| **dense text layers + vision `self_attn` + patch embedder (shipped)** | **.994 / .998** | **.992 / .996** | **.996 / .997** | **.996 / .997** | **.996 / .997** | **.998 / .997** | **21 / 21** | **1,007 MB** |
+| nvfp4, everything quantized (**shipped**) | .952 / .981 | .970 / .983 | .972 / .982 | .984 / .985 | .981 / .981 | .973 / .968 | 20 / 18 | 442 MB |
+| nvfp4, dense `embed_tokens` | .936 / .981 | .970 / .983 | .973 / .982 | .984 / .985 | .981 / .981 | .976 / .971 | 20 / 18 | 635 MB |
+| nvfp4, dense `embed_tokens` + `embedding_projection` | .942 / .985 | .974 / .986 | .976 / .985 | .987 / .989 | .983 / .985 | .981 / .973 | 20 / 18 | 637 MB |
+| nvfp4 + mxfp8 on `down_proj`, `o_proj`, `embedding_projection`, patch embedder | .973 / .986 | .978 / .987 | .978 / .987 | .990 / .991 | .987 / .988 | .979 / .975 | 19 / 17 | 484 MB |
+| nvfp4 + mxfp8 on all text layers, `embedding_projection`, patch embedder | .973 / .990 | .978 / .990 | .981 / .989 | .991 / .992 | .979 / .986 | .971 / .983 | 19 / 19 | 504 MB |
+
+Targets: mxfp8 mean >= 0.995 and min >= 0.99 per modality; nvfp4 mean >= 0.97 and
+min >= 0.95. Findings:
+
+- **mxfp8 (E4M3 elements, power-of-two group scales) needs the text layers dense.**
+  Text min only clears 0.99 once every text transformer layer is dense; the text
+  MLP is the single most sensitive class, then attention, then the per-layer input
+  block. `embed_tokens` is the largest tensor (262,144 x 512) and quantizing it
+  is nearly free (dense `embed_tokens` moves text mean by 0.0004 for +130 MB).
+- **The image tower is the other sensitive part**: quantized vision attention
+  costs about 0.007 of image min cosine. Keeping `self_attn` and the patch
+  embedder dense (and quantizing the vision MLP) is the cheapest way to reach
+  image min >= 0.99; keeping only `down_proj`/`o_proj` dense missed it (0.989).
+- **The audio tower tolerates mxfp8 fully quantized** (min 0.996 once the text
+  layers are dense), so it is where most of the saving comes from.
+- **nvfp4 (4-bit, group 16, fp8 scales) meets its target with every linear
+  quantized**, which is the smallest recipe that does. Text min 0.952 is the thin
+  margin: keeping `embed_tokens` or the projection dense does not help it
+  (0.936 / 0.942), while protecting `down_proj`, `o_proj`, `embedding_projection`
+  and the patch embedder at mxfp8 lifts text min to 0.973 for +42 MB (484 MB) but
+  did not improve top-1 neighbour agreement (19/17 of 21 vs 20/18), so the plain
+  build ships. If you need the extra headroom, use the protected command below.
+- A `--skip` must hit the same module in every layer. Keeping layer 0 dense and
+  quantizing the rest crashes the MLX leaf swap, so `krill quantize` refuses it.
+
+### Parity of the shipped builds (cosine to the sentence-transformers fp32 reference)
+
+| | mxfp8 min / mean | nvfp4 min / mean | Krill bf16/fp32 floor |
+|---|---|---|---|
+| text (42) | 0.9937 / 0.9977 | 0.9523 / 0.9809 | >= 0.9994 |
+| image (8) | 0.9925 / 0.9961 | 0.9701 / 0.9828 | >= 0.9994 |
+| mixed (12) | 0.9959 / 0.9970 | 0.9717 / 0.9817 | >= 0.9994 |
+| audio (6) | 0.9963 / 0.9968 | 0.9839 / 0.9851 | >= 0.9994 |
+| video (4) | 0.9955 / 0.9966 | 0.9806 / 0.9815 | >= 0.9994 |
+
+Text ranking vs Krill fp32 (21 strings): mxfp8 Spearman 0.998 raw / 0.997 `Document`,
+top-1 neighbour 21/21 both; nvfp4 Spearman 0.973 / 0.968, top-1 20/21 raw and
+18/21 `Document`. nvfp4 is a retrieval-grade compromise, not a drop-in: expect
+some neighbour reordering among near ties.
+
+### Size, speed and memory (release build, HTTP, fp32 compute)
+
+| | bf16 | mxfp8 | nvfp4 |
+|---|---|---|---|
+| `model.safetensors` | 1,489 MB | 1,007 MB | 442 MB |
+| single query p50 | 12.2 ms | 11.5 ms | 10.7 ms |
+| batch of 32 short docs p50 | 74.1 ms | 74.9 ms | 76.0 ms |
+| one image p50 | 349 ms | 360 ms | 359 ms |
+| peak MLX memory (text + image tower) | 2,818 MB | 2,146 MB | 1,480 MB |
+
+Quantization saves disk and memory, not time: the model is small and compute
+is fp32, so dequantize-on-the-fly is a wash (latencies are within noise of bf16,
+single-query and image are within about 3%). Measured on a shared Mac, 12 to 30
+runs after 3 warm-ups.
+
+### Rebuilding them
+
+`--output-dir` writes a complete folder (it does not register the model or touch
+`~/.krill`); `--skip` keeps modules whose path contains the substring at full
+precision. Run from the bf16 repo folder:
+
+```
+# mxfp8: text layers dense, vision attention + patch embedder dense, rest mxfp8
+krill quantize <bf16-dir> --mode mxfp8 --dtype bf16 \
+  --skip language_model.layers --skip self_attn --skip patch_embedder \
+  --output-dir embeddinggemma-2-mlx-mxfp8
+
+# nvfp4: every linear and the embedding table (group 16)
+krill quantize <bf16-dir> --mode nvfp4 --dtype bf16 \
+  --output-dir embeddinggemma-2-mlx-nvfp4
+
+# nvfp4 with more headroom (484 MB; text min 0.973)
+krill quantize <bf16-dir> --mode nvfp4 --dtype bf16 --protect-mode mxfp8 \
+  --protect down_proj --protect o_proj --protect embedding_projection \
+  --protect patch_embedder --output-dir embeddinggemma-2-mlx-nvfp4-protected
+```
+
+Note `--skip self_attn` also matches the audio conformer's
+`audio_tower.layers.N.self_attn.*`, so audio attention stays dense in the shipped
+mxfp8 build; the sizes and parity above include that. All sizes are the
+`model.safetensors` file in decimal MB.
+
+Weighted parity tests: `KRILL_EG2_MXFP8_DIR` / `KRILL_EG2_NVFP4_DIR` point
+`EmbeddingGemma2QuantizedParityTests` at a built folder (skipped otherwise); they
+gate at the targets above per modality.
 
 ---
 

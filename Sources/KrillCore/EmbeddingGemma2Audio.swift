@@ -276,7 +276,7 @@ public final class EG2AudioTower: Module {
     }
 
     public func setComputeDtype(_ dtype: DType) {
-        update(parameters: parameters().mapValues { $0.asType(dtype) })
+        eg2CastFloatParameters(self, to: dtype)
         computeDtype = dtype
     }
 
@@ -354,6 +354,12 @@ public func loadEG2AudioTower(
     let audio = all.filter { $0.key.hasPrefix("audio_tower.") || $0.key.hasPrefix("embed_audio.") }
     guard audio.keys.contains(where: { $0.hasPrefix("audio_tower.") }) else { throw EG2AudioLoadError.noAudioTower }
     let tower = EG2AudioTower(AudioConfig(from: acfg), textHidden: tcfg.hiddenSize)
+    // Quantized checkpoint: swap in the quantized leaves before the strict bind
+    // (which then also expects each module's `.scales`).
+    let quant = try eg2QuantizationConfig(configData: cfgData)
+    let qmods = try eg2QuantizedModules(in: all.keys)
+    try eg2ValidateQuantization(modules: qmods, config: quant)
+    eg2ApplyQuantization(to: tower, prefix: "", modules: qmods, config: quant)
     let expected = Dictionary(uniqueKeysWithValues: tower.parameters().flattened().map { ($0.0, $0.1.shape) })
     let bound = audio.map { (k, v) in (k, eg2AudioConvToMLXLayout(key: k, value: v, expected: expected[k])) }
     try tower.update(
