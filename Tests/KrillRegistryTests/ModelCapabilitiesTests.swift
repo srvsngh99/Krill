@@ -101,10 +101,13 @@ final class ModelCapabilitiesTests: XCTestCase {
     }
 
     func testEmbeddingGemma2QuantizedAliasesResolve() {
-        for (name, quant) in [("embeddinggemma-2-mxfp8", "mxfp8"), ("embeddinggemma-2-nvfp4", "nvfp4")] {
+        for (name, quant, repo) in [
+            ("embeddinggemma-2-mxfp8", "mxfp8", "srv-sngh/embeddinggemma-2-mlx-mixed-mxfp8"),
+            ("embeddinggemma-2-nvfp4", "nvfp4", "srv-sngh/embeddinggemma-2-mlx-nvfp4"),
+        ] {
             let hit = AliasMap.allAliases.first { $0.shortName == name }
             XCTAssertNotNil(hit, name)
-            XCTAssertEqual(hit?.model.repo, "srv-sngh/embeddinggemma-2-mlx-" + quant)
+            XCTAssertEqual(hit?.model.repo, repo)
             XCTAssertEqual(hit?.model.quant, quant)
             XCTAssertEqual(hit?.model.family, .bert)
             XCTAssertEqual(hit?.model.context, 8192)
