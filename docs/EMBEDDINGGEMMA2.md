@@ -688,9 +688,9 @@ some neighbour reordering among near ties.
 ### Size, speed and memory
 
 > **Superseded.** The earlier single-run timings in this section (bf16 / mxfp8 / nvfp4, measured on a loaded, shared
-> Mac) have been replaced by the quiet-machine protocol, 3 repetitions with ranges, and all contenders in
+> Mac) have been replaced by a gated protocol (load, free memory, thermal and AC checks before every repetition; 3 repetitions with ranges; re-measured until spreads are <= 10%) and all contenders in
 > [`docs/bench/embeddinggemma2-2026-10-08.md`](bench/embeddinggemma2-2026-10-08.md). The conclusion held: quantization saves
-> disk and memory, not time, because compute is fp32 and the model is small. Sizes below are the
+> disk and memory and changes time little (single-query p50 8.8-10.5 ms and 34-39 docs/s at batch 32 x ~256 tokens across the Krill ladder), because compute is fp32 and the model is small. Sizes below are the
 > `model.safetensors` file: bf16 1,489 MB, mxfp8 1,007 MB, nvfp4 442 MB.
 
 ### Rebuilding the first two builds

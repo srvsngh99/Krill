@@ -256,11 +256,26 @@ Reading it:
 
 ## Speed and memory
 
-Protocol (quiet machine): before each measured run the harness requires 1-minute load < 3.0, `memory_pressure` >= 50%
-free, swap used < 1 GB, no `pmset -g therm` limit and AC power, and otherwise waits (20 s poll). If the machine is still
-not quiet after 2 hours of waiting it measures anyway and flags the numbers. One contender at a time; the server is
-started and stopped for every repetition (so cold start is measured 3 times); 10 discarded warm-up requests; 3
-repetitions per metric, reporting the median of the three with the min-max range in brackets.
+Measurement method. One contender at a time; the server is started and stopped for every repetition (so cold start is
+measured 3 times); 10 discarded warm-up requests; 3 repetitions per metric, reporting the median of the three with the
+min-max range in brackets.
+
+- Before each repetition starts the harness requires: 1-minute load < 3, free memory >= 50%, no thermal limit, AC power.
+  If a condition fails it waits and polls. Swap used is recorded, not gated (5.8-8.4 GB before every repetition in this run).
+- A contender is stable when the spread (max - min over the median) of every metric across its 3 repetitions is <= 10%.
+  Otherwise it is re-measured, up to 3 more attempts. Every published contender ended stable; the `attempts` column
+  gives the number of attempts it needed (1 = stable first time).
+- Free memory dipping below 50% DURING a repetition is recorded, not gated: it is the contender's own working memory (MLX
+  memory is invisible to RSS). Lowest free memory seen during a repetition: 25-54% for the Krill rows, 16% for sentence-transformers, 75-85% for Ollama and llama.cpp.
+- macOS photo analysis (`mediaanalysisd`) was using ~120% CPU from about 17:00. It passed the load gate but caused
+  tail-latency jitter. The contenders measured under it that came out unstable (nvfp4, mixed-mxfp8, every Unsloth GGUF), plus
+  6bit, 4bit-dyn, 6bit-dyn and Unsloth UD-Q4_K_XL, were (re-)measured between 18:51 and 19:20 with `mediaanalysisd` paused
+  (SIGSTOP, resumed afterwards) on an otherwise quiet machine. The others (4bit-g32, 4bit-dyn-text, 5bit: before 17:00;
+  bf16, 8bit, sentence-transformers bf16, Ollama: 17:36-18:05) were measured earlier and passed the 10% spread rule; bf16, 8bit,
+  sentence-transformers and Ollama overlapped the photo-analysis window. The last column shows which applied.
+- Versions: llama.cpp commit `24e4183` (Metal), Ollama 0.40.0 (private instance), Krill release binary built from this branch. Hardware: Apple M4 Pro.
+
+Metrics:
 
 - single query: 50 requests of one 11-word query, p50 / p95 in ms.
 - batch of 32 at ~256 tokens (mean 277) and ~1k tokens (mean 1,086): documents per second, median of 5 / 4 timed batches
@@ -269,41 +284,32 @@ repetitions per metric, reporting the median of the three with the min-max range
 - cold first request: process launch (or model load, for in-process ST) to the first completed embedding.
 - peak memory: Krill `KRILL_EMBED_LOG_MEM` MLX peak; sentence-transformers `torch.mps.driver_allocated_memory()`;
   Ollama and llama-server resident set of the runner process (`ps rss`; `ollama ps` output is in the raw JSON).
-- Krill rows use fp32 compute (the default) unless marked `bf16` (bfloat16 compute); the Krill binary is the release build of this
-  branch; Google sentence-transformers runs in process on MPS in bf16.
+- Krill rows use fp32 compute (the default); the Krill binary is the release build of this branch; Google sentence-transformers runs in process on MPS in bf16.
 
-**Every speed run is flagged as NOT quiet.** The machine never met the protocol: swap used stayed at 5.9-8.3 GB (other
-processes; it did not fall below 1 GB during a 2 hour wait that started 12:42, after which the harness measured anyway, as
-specified), the free-memory reading was 32-89% (below the 50% threshold during most Krill runs), and the 1-minute load
-peaked at 2.6 for the Krill and Ollama runs and at 3.1-8.5 for the llama.cpp runs (another session's work on the
-machine). AC power and no thermal limit held throughout. The three repetitions of a contender were taken minutes apart, and the ranges
-show the effect: most single-query medians are tight (within 0.3 ms) but some rows carry an outlier repetition
-(for example `6bit` single query 9.2 (9.2-12.9), `unsloth-UD-Q5_K_XL` 16.3 (11.5-17.2)). Read differences under about 10% as noise,
-and read the ordering between engine families (Krill ~9-10 ms, llama.cpp ~17 ms, Ollama and
-sentence-transformers ~25 ms) as real. The per-run gate readings are in the scratch logs (`bench-logs/gate-*.log`).
-Memory: Krill is the MLX peak over the whole run (single queries, both batch sizes and the image); `bf16` rows differ by compute dtype
-(fp32 compute doubles activations); sentence-transformers is the MPS driver allocation after the run; Ollama and
-llama.cpp are the resident set of the server process.
+Memory: Krill is the MLX peak over the whole run (single queries, both batch sizes and the image); sentence-transformers is
+the MPS driver allocation after the run; Ollama and llama.cpp are the resident set of the server process. Read differences under about 10% as noise (the stability rule allows that much between repetitions of one
+contender), and read the ordering between engine families (Krill ~9-10 ms, llama.cpp ~17 ms, Ollama and
+sentence-transformers ~25 ms) as real. Per-repetition gate readings (load, free memory, swap, time) and per-attempt spreads are
+stored in the raw result JSON of the run (scratch directory, not in the repository).
 
-| contender | weights MB | single p50 ms | single p95 ms | batch-32 ~256 tok, docs/s | batch-32 ~1k tok, docs/s | one image p50 ms | cold first request ms | peak memory MB | quiet machine |
-|---|---|---|---|---|---|---|---|---|---|
-| krill-bf16-fp32 | 1488.9 | 10.6 (10.4-10.6) | 14.7 (14.5-15.5) | 38 (33-39) | 9 (8-9) | 368 (362-375) | 1115 (994-1358) | 3234 (3234-3234) | NO - flagged |
-| krill-bf16-bf16 | 1488.9 | 9.2 (9.2-9.3) | 9.4 (9.4-9.6) | 47 (46-47) | 10 (10-10) | 367 (365-377) | 1078 (1073-1788) | 1934 (1934-1934) | NO - flagged |
-| krill-mixed-mxfp8-fp32 | 1007.4 | 10.4 (10.4-10.5) | 11.6 (10.6-13.1) | 38 (38-39) | 8 (8-8) | 393 (391-394) | 1030 (1007-1047) | 2835 (2835-2835) | NO - flagged |
-| krill-8bit-fp32 | 806.2 | 9.1 (8.8-9.1) | 13.2 (13.2-13.2) | 35 (33-36) | 7 (7-7) | 408 (405-408) | 1079 (1054-1085) | 2498 (2498-2498) | NO - flagged |
-| krill-6bit-fp32 | 624.2 | 9.2 (9.2-12.9) | 13.1 (12.8-15.5) | 34 (34-34) | 7 (7-7) | 409 (409-409) | 999 (988-1038) | 2433 (2433-2433) | NO - flagged |
-| krill-6bit-dyn-fp32 | 656.8 | 9.1 (9.1-9.1) | 13.2 (13.0-13.3) | 35 (34-35) | 7 (7-7) | 412 (407-414) | 1016 (984-1040) | 2464 (2464-2464) | NO - flagged |
-| krill-5bit-fp32 | 533.1 | 8.9 (8.9-9.1) | 12.4 (12.1-13.2) | 34 (32-35) | 7 (6-7) | 417 (415-530) | 1063 (1018-1077) | 2401 (2401-2401) | NO - flagged |
-| krill-4bit-g32-fp32 | 487.6 | 8.8 (8.6-9.1) | 12.4 (12.3-12.5) | 24 (22-30) | 6 (5-7) | 459 (395-573) | 1073 (1037-1073) | 2401 (2401-2401) | NO - flagged |
-| krill-4bit-dyn-fp32 | 472.7 | 8.9 (8.9-9.1) | 12.9 (11.9-13.0) | 34 (33-35) | 7 (6-7) | 407 (396-465) | 1044 (1035-1077) | 2398 (2398-2398) | NO - flagged |
-| krill-4bit-dyn-text-fp32 | 507.3 | 9.0 (9.0-9.1) | 12.7 (12.6-13.0) | 26 (22-27) | 5 (5-6) | 494 (426-548) | 1082 (1065-1083) | 2431 (2431-2431) | NO - flagged |
-| krill-nvfp4-fp32 | 442.0 | 8.6 (8.6-8.7) | 9.0 (8.9-9.4) | 34 (32-36) | 7 (7-7) | 403 (403-429) | 1058 (1057-1069) | 2353 (2353-2353) | NO - flagged |
-| st-mps-bf16 | 1488.9 | 26.5 (26.0-27.0) | 28.9 (28.7-29.7) | 25 (22-26) | 5 (5-5) | - | 2912 (2348-3699) | 16117 (14483-18113) | NO - flagged |
-| ollama-own | 1300 | 25.5 (25.5-28.1) | 37.8 (36.9-37.9) | 31 (31-32) | 8 (8-8) | - | 766 (757-1487) | 1470 (1461-1481) | NO - flagged |
-| unsloth-Q8_0 | 309.9 | 16.8 (16.2-16.9) | 18.3 (18.3-18.8) | 33 (33-33) | 8 (7-8) | - | 877 (872-883) | 1824 (1819-1828) | NO - flagged |
-| unsloth-UD-Q6_K_XL | 248.8 | 17.1 (16.7-17.3) | 18.3 (18.3-18.4) | 32 (32-32) | 7 (7-7) | - | 869 (866-880) | 1767 (1764-1768) | NO - flagged |
-| unsloth-UD-Q5_K_XL | 210.1 | 16.3 (11.5-17.2) | 18.0 (13.3-18.3) | 31 (30-31) | 7 (7-7) | - | 880 (651-882) | 1730 (1728-1731) | NO - flagged |
-| unsloth-UD-Q4_K_XL | 175.7 | 17.1 (16.4-17.3) | 18.2 (18.0-18.7) | 32 (32-32) | 7 (7-7) | - | 875 (651-879) | 1697 (1697-1697) | NO - flagged |
+| contender | weights MB | single p50 ms | single p95 ms | batch-32 ~256 tok, docs/s | batch-32 ~1k tok, docs/s | one image p50 ms | cold first request ms | peak memory MB | attempts | final attempt, reps started | photo analysis |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| krill-bf16-fp32 | 1488.9 | 10.2 (10.2-10.2) | 14.9 (14.5-15.3) | 39 (39-40) | 9 (9-9) | 361 (361-362) | 1117 (1016-1135) | 3234 (3234-3234) | 2 | 17:36:28 to 17:39:22 | running |
+| krill-mixed-mxfp8-fp32 | 1007.4 | 10.5 (10.5-10.6) | 14.8 (14.5-14.9) | 38 (37-40) | 8 (8-8) | 388 (380-402) | 1053 (986-1068) | 2835 (2835-2835) | 1 | 19:05:29 to 19:07:08 | paused |
+| krill-8bit-fp32 | 806.2 | 8.8 (8.6-8.9) | 12.9 (12.5-13.1) | 37 (37-38) | 8 (7-8) | 382 (381-406) | 1086 (1069-1287) | 2498 (2498-2498) | 1 | 17:40:40 to 17:45:22 | running |
+| krill-6bit-fp32 | 624.2 | 9.2 (9.2-9.2) | 13.6 (13.4-14.4) | 37 (34-37) | 8 (7-8) | 390 (388-396) | 1001 (995-1008) | 2433 (2433-2433) | 2 | 18:54:24 to 18:56:04 | paused |
+| krill-6bit-dyn-fp32 | 656.8 | 9.1 (8.9-9.1) | 13.3 (13.2-14.0) | 37 (35-38) | 8 (7-8) | 386 (382-399) | 1057 (1002-1061) | 2464 (2464-2464) | 1 | 19:14:08 to 19:15:50 | paused |
+| krill-5bit-fp32 | 533.1 | 9.1 (9.1-9.1) | 12.9 (12.2-13.0) | 34 (34-34) | 7 (7-7) | 412 (410-415) | 985 (964-1001) | 2401 (2401-2401) | 2 | 16:55:54 to 16:57:21 | not started |
+| krill-4bit-g32-fp32 | 487.6 | 9.0 (9.0-9.0) | 13.2 (12.7-14.0) | 37 (34-37) | 8 (7-8) | 394 (387-395) | 998 (998-1003) | 2401 (2401-2401) | 1 | 16:35:43 to 16:38:49 | not started |
+| krill-4bit-dyn-fp32 | 472.7 | 9.0 (9.0-9.1) | 13.0 (12.8-13.3) | 34 (34-35) | 7 (7-7) | 403 (400-404) | 992 (989-1005) | 2398 (2398-2398) | 2 | 18:58:55 to 19:00:21 | paused |
+| krill-4bit-dyn-text-fp32 | 507.3 | 9.1 (9.1-9.1) | 13.0 (12.8-13.2) | 34 (34-35) | 7 (7-7) | 400 (392-417) | 1001 (993-1014) | 2431 (2431-2431) | 1 | 16:43:26 to 16:47:40 | not started |
+| krill-nvfp4-fp32 | 442.0 | 8.9 (8.9-8.9) | 9.2 (9.0-9.4) | 35 (35-35) | 8 (7-8) | 389 (387-396) | 996 (991-1008) | 2353 (2353-2353) | 2 | 19:03:27 to 19:04:48 | paused |
+| st-mps-bf16 | 1488.9 | 26.2 (25.4-27.1) | 29.1 (27.5-29.9) | 26 (26-26) | 5 (5-6) | - | 3411 (3296-3479) | 17283 (17136-17561) | 2 | 17:59:05 to 18:01:29 | running |
+| ollama-own | 1300 | 25.2 (25.1-25.3) | 37.1 (37.1-37.9) | 32 (31-32) | 8 (8-8) | - | 1155 (754-1158) | 1476 (1467-1477) | 1 | 18:02:29 to 18:05:00 | running |
+| unsloth-Q8_0 | 309.9 | 16.4 (15.7-16.6) | 18.1 (17.4-18.7) | 33 (33-33) | 7 (7-7) | - | 866 (863-877) | 1825 (1822-1826) | 1 | 19:09:41 to 19:10:53 | paused |
+| unsloth-UD-Q6_K_XL | 248.8 | 16.6 (16.6-16.8) | 18.1 (17.9-18.3) | 32 (32-32) | 7 (7-7) | - | 864 (860-874) | 1767 (1764-1767) | 1 | 19:11:29 to 19:12:44 | paused |
+| unsloth-UD-Q5_K_XL | 210.1 | 16.6 (16.6-17.3) | 17.8 (17.7-18.0) | 30 (30-30) | 7 (7-7) | - | 878 (857-880) | 1727 (1727-1728) | 1 | 19:07:47 to 19:09:03 | paused |
+| unsloth-UD-Q4_K_XL | 175.7 | 17.4 (17.2-17.4) | 18.3 (18.3-18.4) | 31 (31-31) | 7 (7-7) | - | 866 (861-867) | 1697 (1696-1698) | 2 | 19:18:21 to 19:19:35 | paused |
 
 ## Caveats
 
@@ -313,7 +319,7 @@ llama.cpp are the resident set of the server process.
 - Audio-text uses 60 Clotho clips with 5 captions concatenated; Recall@1 around 25% is a property of that protocol (hard,
   concatenated captions), not of the model.
 - Fidelity fixtures contain 42 text and 30 multimodal vectors; per-tensor sensitivity deltas below 0.001 are noise.
-- The Krill bf16 reference runs with fp32 compute; bf16 compute rows are listed separately in the speed table.
+- The Krill bf16 reference runs with fp32 compute.
 - Unsloth and Ollama are text only here: image and audio were not measured on them.
 - The 256-dimension numbers are the first 256 components re-normalised (Matryoshka); they are reported for all variants.
 - The speed numbers were measured with the benchmark binary built from this branch; the serving path is unchanged from
