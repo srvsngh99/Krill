@@ -158,7 +158,7 @@ Full methodology and gates: [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md), [`docs/B
 
 ## Models
 
-**39 chat & multimodal models** ship as one-word `krill pull` shortcuts (plus 21 embedding / reranker shortcuts, 19 distinct models), spanning ~15 architecture families. Switch between installed models **live in a chat** with `/model` — the conversation carries over — or import any `mlx-community` repo and it joins the picker.
+**46 chat & multimodal models** ship as one-word `krill pull` shortcuts (plus 30 embedding / reranker shortcuts, 28 distinct models), spanning ~15 architecture families. Switch between installed models **live in a chat** with `/model` — the conversation carries over — or import any `mlx-community` repo and it joins the picker.
 
 ```bash
 krill pull gemma-4-e2b       # Gemma 4 — text + image + audio, all native (also: -e4b, -12b flagship)

@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.25.0] - 2026-10-08
+
 ### Added
 
 - **EmbeddingGemma 2 quantization ladder, with a measured quality gate** — seven new
@@ -243,6 +245,12 @@ reverse chronological order. Versioning follows
 
 ### Fixed
 
+- **`KRILL_MODELS_DIR` and the `models_dir` config setting now apply to every
+  command** (#335). Before, only `krill serve` honoured them; `pull`, `run`,
+  `list`, `rm`, `show`, `cp`, `create`, `quantize`, `bench`, `code`, `launch`,
+  `catalog` and `perplexity` always used `~/.krill/models`, so pointing Krill
+  at another drive pulled models to one place and served from another. Every
+  command now resolves the models directory the same way `serve` does.
 - **A raw HF/torch-format snapshot of a qwen3_5-VL-config'd checkpoint
   (e.g. `huggingface-cli download Qwen/Qwen3.5-4B`, no `mlx_vlm.convert`
   step) loaded via `krill serve`/`krill debug` without error and then

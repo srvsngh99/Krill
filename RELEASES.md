@@ -7,6 +7,21 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.25.0 - 2026-10-08
+**Embeddings that see, hear and fit.** EmbeddingGemma 2 now runs natively in
+Krill for text, images, audio and video, and comes in nine ready-made
+quantized builds from 1.0 GB down to 0.44 GB (`krill pull embeddinggemma-2-8bit`,
+`-6bit`, `-5bit`, `-4bit-dyn`, `-nvfp4` and more), each measured against
+Google's reference so you can pick the size you can afford. Chat gains
+`logprobs` and `top_logprobs` on the OpenAI and Ollama endpoints (including
+streaming, tool calls and legacy `/v1/completions` with `echo`), a per-request
+switch to turn a model's thinking on or off, and a new `qwen3.5-4b` shortcut.
+Also fixed: `KRILL_MODELS_DIR` (or `models_dir` in config) is now honoured by
+every command, not just `krill serve`, so `pull`, `run`, `list` and `rm` all
+use the same folder.
+
+---
+
 ## v0.24.0 - 2026-09-20
 **Ternary-Bonsai-2-27B runs natively now.** Prism ML's from-scratch ternary
 requant of Qwen3.8-27B needed no new architecture: it's the same GatedDeltaNet
