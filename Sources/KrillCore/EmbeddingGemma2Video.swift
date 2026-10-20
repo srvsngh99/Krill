@@ -132,7 +132,17 @@ public final class EG2VideoSource {
         // Synchronous track accessors (deprecated in favour of async `load`, but this
         // runs on the embedding engine's synchronous path).
         guard let track = asset.tracks(withMediaType: .video).first else { throw EG2VideoError.noVideoTrack }
-        let natural = track.naturalSize
+        // The frames AVAssetReader decodes have the CODED size (the format description's
+        // dimensions), which is what the reference decoder returns too. `naturalSize` is
+        // the DISPLAY size: it is scaled by the stream's pixel aspect ratio (SAR != 1 is
+        // common: ffmpeg-muxed MSR-VTT clips), so sizing the prompt from it reserved a
+        // different soft-token count than the decoded frames produced (HTTP 400).
+        var natural = track.naturalSize
+        if let fd = track.formatDescriptions.first {
+            // swiftlint:disable:next force_cast
+            let dims = CMVideoFormatDescriptionGetDimensions(fd as! CMFormatDescription)
+            if dims.width > 0, dims.height > 0 { natural = CGSize(width: Int(dims.width), height: Int(dims.height)) }
+        }
         let nominal = track.nominalFrameRate
         let trackRange = track.timeRange
 
@@ -190,7 +200,14 @@ public final class EG2VideoSource {
             // Frames past the end of a clip that reports fewer frames than it has are not
             // asked for; a requested index repeated (very low fps) reuses the same frame.
             while let want = wanted.first, want == n {
-                result.append(try transform(try Self.yuvToRGB(px, colour)))
+                var rgb = try Self.yuvToRGB(px, colour)
+                // Belt and braces: the prompt was sized from `info`, so every frame must
+                // have exactly that size (a decoder that crops / pads differently is
+                // resampled rather than failing the request).
+                if rgb.width != info.width || rgb.height != info.height {
+                    rgb = EG2ImagePreprocessor.resize(rgb, toWidth: info.width, height: info.height)
+                }
+                result.append(try transform(rgb))
                 wanted = wanted.dropFirst()
             }
             n += 1

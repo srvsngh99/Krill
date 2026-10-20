@@ -57,6 +57,7 @@ public final class RerankEngine: @unchecked Sendable {
     /// Load (or hot-swap to) the reranker model in `directory`.
     public func load(directory: URL) async throws {
         if isLoaded(directory: directory) { return }
+        MLXMemoryConfig.apply()  // same unbounded buffer-pool growth as the embed path
 
         let configURL = directory.appendingPathComponent("config.json")
         let data = try Data(contentsOf: configURL)

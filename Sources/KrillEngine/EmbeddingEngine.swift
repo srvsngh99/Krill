@@ -78,6 +78,14 @@ public final class EmbeddingEngine: @unchecked Sendable {
     public func load(directory: URL) async throws {
         if isLoaded(directory: directory) { return }
 
+        // Bound MLX's Metal buffer-recycling pool. The embed path never went through
+        // `loadModel` (which applies this for chat models), so the pool was left at MLX's
+        // default (the device working set, ~16 GB on a 24 GB Mac). Embedding requests
+        // allocate intermediates sized by (batch x padded length); every NEW shape needs
+        // buffers the pool cannot reuse, so the pool grew to 17 GB over 25 requests while
+        // MLX's active memory stayed at 0.2 GB. With the cap, freed buffers go back to the OS.
+        MLXMemoryConfig.apply()
+
         let configURL = directory.appendingPathComponent("config.json")
         let data = try Data(contentsOf: configURL)
         let mt = Self.modelType(from: data) ?? ""
@@ -563,7 +571,8 @@ public final class EmbeddingEngine: @unchecked Sendable {
             // MLX unified-memory high-water mark (RSS does not see it).
             let mb = Double(Memory.peakMemory) / 1_048_576
             FileHandle.standardError.write(Data(String(
-                format: "EmbeddingGemma2: mlx peak memory %.0f MB\n", mb).utf8))
+                format: "EmbeddingGemma2: mlx peak memory %.0f MB (active %.0f MB, cache %.0f MB)\n",
+                mb, Double(Memory.activeMemory) / 1_048_576, Double(Memory.cacheMemory) / 1_048_576).utf8))
         }
     }
 
