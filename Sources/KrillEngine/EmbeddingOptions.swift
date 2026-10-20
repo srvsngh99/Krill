@@ -16,11 +16,44 @@ public struct EmbeddingRequestOptions: Equatable, Sendable {
     public var dimensions: Int?
     public var task: String?
     public var instruction: String?
+    /// Per-request input length cap in tokens (`max_length`, or Ollama's
+    /// `options.num_ctx`). Longer inputs are truncated (keeping the trailing
+    /// EOS where the model uses one). nil = the model/server limit. It can only
+    /// lower the effective cap: see ``effectiveTokenCap(modelCap:requestCap:environment:)``.
+    public var maxLength: Int?
 
-    public init(dimensions: Int? = nil, task: String? = nil, instruction: String? = nil) {
+    public init(dimensions: Int? = nil, task: String? = nil, instruction: String? = nil,
+                maxLength: Int? = nil) {
         self.dimensions = dimensions
         self.task = task
         self.instruction = instruction
+        self.maxLength = maxLength
+    }
+
+    /// Server-wide input cap env var (tokens). Unset/invalid = no server cap.
+    public static let maxTokensEnvVar = "KRILL_EMBED_MAX_TOKENS"
+
+    /// Effective truncation length: the smallest of the model's own limit, the
+    /// server-wide `KRILL_EMBED_MAX_TOKENS` and the request's `max_length`.
+    /// Never below 2 (one content token plus EOS). With nothing set it is the
+    /// model limit, i.e. the default truncation length is unchanged.
+    public static func effectiveTokenCap(
+        modelCap: Int, requestCap: Int?,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Int {
+        var cap = modelCap
+        if let raw = environment[maxTokensEnvVar]?.trimmingCharacters(in: .whitespaces),
+           let n = Int(raw), n > 0 { cap = min(cap, n) }
+        if let r = requestCap, r > 0 { cap = min(cap, r) }
+        return max(2, cap)
+    }
+
+    private static func positiveInt(_ raw: Any, _ field: String) throws -> Int {
+        guard let n = raw as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
+              n.doubleValue == n.doubleValue.rounded(), n.intValue > 0 else {
+            throw ParseError(message: "'\(field)' must be a positive integer")
+        }
+        return n.intValue
     }
 
     public struct ParseError: Error, Equatable, CustomStringConvertible {
@@ -47,6 +80,12 @@ public struct EmbeddingRequestOptions: Equatable, Sendable {
             o.task = s
         }
         if let s = json["instruction"] as? String, !s.isEmpty { o.instruction = s }
+        if let raw = json["max_length"], !(raw is NSNull) {
+            o.maxLength = try positiveInt(raw, "max_length")
+        } else if let opts = json["options"] as? [String: Any],
+                  let raw = opts["num_ctx"], !(raw is NSNull) {
+            o.maxLength = try positiveInt(raw, "options.num_ctx")
+        }
         if o.task != nil, o.instruction != nil {
             throw ParseError(message: "'task' and 'instruction' are mutually exclusive")
         }

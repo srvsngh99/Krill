@@ -36,16 +36,17 @@ public enum MLXMemoryConfig {
     /// values fall back to ``defaultCacheLimitMB`` and emit a warning.
     /// No MLX/Metal side effects — safe to unit test.
     public static func resolveCacheLimitMB(
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        defaultMB: Int = defaultCacheLimitMB
     ) -> Int? {
         guard let raw = environment[envVar]?.trimmingCharacters(in: .whitespaces),
               !raw.isEmpty else {
-            return defaultCacheLimitMB
+            return defaultMB
         }
         guard let parsed = Int(raw), parsed >= 0 else {
             FileHandle.standardError.write(Data(
-                "[Krill] ignoring invalid \(envVar)=\(raw); using default \(defaultCacheLimitMB) MB\n".utf8))
-            return defaultCacheLimitMB
+                "[Krill] ignoring invalid \(envVar)=\(raw); using default \(defaultMB) MB\n".utf8))
+            return defaultMB
         }
         return parsed == 0 ? nil : parsed
     }
@@ -55,9 +56,10 @@ public enum MLXMemoryConfig {
     /// `nil` if the cap was explicitly disabled.
     @discardableResult
     public static func apply(
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        defaultMB: Int = defaultCacheLimitMB
     ) -> Int? {
-        guard let mb = resolveCacheLimitMB(environment: environment) else {
+        guard let mb = resolveCacheLimitMB(environment: environment, defaultMB: defaultMB) else {
             // Explicit opt-out: leave MLX's default (device-scaled) cache limit.
             return nil
         }

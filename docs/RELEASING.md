@@ -17,7 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| _(empty - cleared at v0.25.1)_ | | | |
+| 2026-10-21 | _(this PR)_ | Embedding/rerank idle unload (`keep_alive`), `KRILL_EMBED_MAX_BATCH_TOKENS` sub-batching (default 512), `max_length` / `options.num_ctx` / `KRILL_EMBED_MAX_TOKENS`, embed cache cap 64 MB, per-tower eval for media | A resting embedding server returns to the bare-process footprint after the TTL (default 5 min, then a reload on the next request); default embeddings behaviour otherwise unchanged and vectors identical. |
 
 ### Known-open, NOT yet merged
 

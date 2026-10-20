@@ -253,6 +253,17 @@ re-normalised). `task` and `dimensions` are honoured by `embeddinggemma-2`
 `dimensions` and answer `400` to `task`. See
 [EMBEDDINGGEMMA2.md](EMBEDDINGGEMMA2.md).
 
+**Bounding memory (embeddings and rerank).** Three knobs keep an always-on
+embedding server small; all default to the previous behaviour except the batch
+split, which never changes a vector:
+
+| Knob | Where | Effect |
+|---|---|---|
+| `keep_alive` | request field + `KRILL_KEEP_ALIVE` / `OLLAMA_KEEP_ALIVE` | Same semantics as chat models (see [Model Lifecycle](#model-lifecycle-keep-alive)). The embedding and rerank model are unloaded, weights and MLX buffer cache both, once idle past the TTL (default `5m`); `0` unloads right after the request; negative pins. The next request reloads transparently. |
+| `KRILL_EMBED_MAX_BATCH_TOKENS` | env | A request is split into sub-batches of at most this many padded tokens (sequences x padded length); default 512. Peak transient memory follows this number, not the request size. Per-item vectors do not depend on the split. Applies to EmbeddingGemma 2 batching and to `/v1/rerank`. |
+| `max_length` (or Ollama `options.num_ctx`) | request field | Truncate each input to at most this many tokens (trailing EOS kept). It can only lower the cap. |
+| `KRILL_EMBED_MAX_TOKENS` | env | Server-wide input cap in tokens. Effective cap = min(model limit, this, request `max_length`); with none set the truncation length is the model's own, unchanged. |
+
 **Multimodal input (`embeddinggemma-2` only).** On `/v1/embeddings` and
 `/api/embed`, `input` may also hold content-part items; one item is one vector
 and part order is token order:
