@@ -32,6 +32,19 @@ public final class RerankEngine: @unchecked Sendable {
         withLock { loadedDir?.lastPathComponent }
     }
 
+    /// Drop the model and tokenizer and return MLX's buffer cache to the OS
+    /// (idle unload). The next `load` reloads transparently. True if resident.
+    @discardableResult
+    public func unload() -> Bool {
+        let was: Bool = withLock {
+            let had = model != nil
+            model = nil; tokenizer = nil; loadedDir = nil
+            return had
+        }
+        if was { MLX.Memory.clearCache() }
+        return was
+    }
+
     public func isLoaded(directory: URL) -> Bool {
         withLock {
             loadedDir?.standardizedFileURL == directory.standardizedFileURL
@@ -57,7 +70,7 @@ public final class RerankEngine: @unchecked Sendable {
     /// Load (or hot-swap to) the reranker model in `directory`.
     public func load(directory: URL) async throws {
         if isLoaded(directory: directory) { return }
-        MLXMemoryConfig.apply()  // same unbounded buffer-pool growth as the embed path
+        MLXMemoryConfig.apply(defaultMB: EmbeddingEngine.defaultCacheLimitMB)  // same unbounded buffer-pool growth as the embed path
 
         let configURL = directory.appendingPathComponent("config.json")
         let data = try Data(contentsOf: configURL)
@@ -173,41 +186,41 @@ public final class RerankEngine: @unchecked Sendable {
             perPairIds.append(pairIds)
         }
 
-        // Pad every pair to the batch's longest sequence and build an
-        // additive key-padding mask ([B, 1, 1, T], broadcast over heads
-        // and query rows). Padding ids are arbitrary (0): they are
-        // masked out as attention keys, and their query rows are never
-        // read - only the CLS row at position 0 is, and CLS is always a
-        // real token. The batched result is therefore identical to
-        // scoring each pair alone.
-        let batch = perPairIds.count
-        let maxLen = perPairIds.map(\.count).max() ?? 1
-        var tokenBuf = [Int32](repeating: 0, count: batch * maxLen)
-        var maskBuf = [Float](repeating: 0, count: batch * maxLen)
+        // Sub-batch by a padded-token budget (shared KRILL_EMBED_MAX_BATCH_TOKENS):
+        // pairs are sorted by length, each chunk is padded to its own longest
+        // pair, and a key-padding mask ([B, 1, 1, T], broadcast over heads and
+        // query rows) keeps padding out of attention. Padding ids are arbitrary
+        // (0): only the CLS row at position 0 is read, and CLS is a real token,
+        // so a pair's logit is identical however the request is split.
+        let order = perPairIds.indices.sorted { perPairIds[$0].count < perPairIds[$1].count }
+        let chunks = EmbeddingEngine.planChunks(
+            sortedLengths: order.map { perPairIds[$0].count },
+            budget: EmbeddingEngine.paddedTokenBudget(), maxBatch: Int.max)
+        var logits = [Double](repeating: 0, count: perPairIds.count)
         let padMaskValue: Float = -1e9
-        for (b, ids) in perPairIds.enumerated() {
-            for (t, id) in ids.enumerated() {
-                tokenBuf[b * maxLen + t] = Int32(id)
+        for chunk in chunks {
+            let idx = Array(order[chunk])
+            let batch = idx.count
+            let maxLen = idx.map { perPairIds[$0].count }.max() ?? 1
+            var tokenBuf = [Int32](repeating: 0, count: batch * maxLen)
+            var maskBuf = [Float](repeating: 0, count: batch * maxLen)
+            for (b, k) in idx.enumerated() {
+                let ids = perPairIds[k]
+                for (t, id) in ids.enumerated() { tokenBuf[b * maxLen + t] = Int32(id) }
+                for t in ids.count ..< maxLen { maskBuf[b * maxLen + t] = padMaskValue }
             }
-            for t in ids.count ..< maxLen {
-                maskBuf[b * maxLen + t] = padMaskValue
+            let tokens = MLXArray(tokenBuf).reshaped(batch, maxLen)
+            let mask = MLXArray(maskBuf).reshaped(batch, 1, 1, maxLen)
+            let out = model(tokens, mask: mask)   // [B, numLabels]
+            MLX.eval(out)
+            let numLabels = out.dim(1)
+            let flat = out.asArray(Float.self)    // row-major [B * numLabels]
+            for (b, k) in idx.enumerated() {
+                // numLabels == 1 for a reranker: column 0 is the relevance logit.
+                logits[k] = Double(flat[b * numLabels])
             }
         }
-        let tokens = MLXArray(tokenBuf).reshaped(batch, maxLen)
-        let mask = MLXArray(maskBuf).reshaped(batch, 1, 1, maxLen)
-
-        let out = model(tokens, mask: mask)   // [B, numLabels]
-        MLX.eval(out)
-        let numLabels = out.dim(1)
-        let flat = out.asArray(Float.self)    // row-major [B * numLabels]
-        var logits: [Double] = []
-        logits.reserveCapacity(batch)
-        for b in 0 ..< batch {
-            // numLabels == 1 for a reranker: column 0 is the relevance
-            // logit. Take it explicitly so a stray multi-label head
-            // does not silently read the wrong column.
-            logits.append(Double(flat[b * numLabels]))
-        }
+        MLX.Memory.clearCache()
 
         // Sigmoid-normalize each logit so callers get a [0, 1]
         // probability directly comparable to Cohere's API and to

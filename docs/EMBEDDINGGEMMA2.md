@@ -94,11 +94,15 @@ as before, and `task` returns `400` because those models define no prompt table.
 NaN / Inf output is never returned: the request fails with `500` instead.
 
 Batches are sorted by length and run as padded batches with a key-padding mask
-(<= 32 texts and <= 8,192 padded tokens per forward); results come back in input
-order. A text embedded alone and inside a mixed batch agree (cos 1.0000000 fp32,
+(<= 32 texts and <= `KRILL_EMBED_MAX_BATCH_TOKENS` padded tokens per forward,
+default 512; one longer text runs alone); results come back in input order. A text embedded alone and inside a mixed batch agree (cos 1.0000000 fp32,
 0.99987 bf16).
 
 Env: `KRILL_EMBED_DTYPE=float32|bfloat16` (EmbeddingGemma 2 only),
+`KRILL_EMBED_MAX_BATCH_TOKENS` (padded tokens per forward, default 512),
+`KRILL_VISION_ATTN_CHUNK` (query rows per vision-tower attention block for 2,048+ patch images, default 1024, `0` = off),
+`KRILL_EMBED_MAX_TOKENS` (server-wide input cap; request field `max_length` /
+`options.num_ctx` lowers it per request; see [SERVER_API.md](SERVER_API.md)),
 `KRILL_EMBED_LOG_MEM=1` logs the MLX peak-memory high-water mark per request.
 
 ## Images and mixed input (Milestone 2a)

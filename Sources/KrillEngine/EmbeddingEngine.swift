@@ -84,7 +84,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
         // allocate intermediates sized by (batch x padded length); every NEW shape needs
         // buffers the pool cannot reuse, so the pool grew to 17 GB over 25 requests while
         // MLX's active memory stayed at 0.2 GB. With the cap, freed buffers go back to the OS.
-        MLXMemoryConfig.apply()
+        MLXMemoryConfig.apply(defaultMB: Self.defaultCacheLimitMB)
 
         let configURL = directory.appendingPathComponent("config.json")
         let data = try Data(contentsOf: configURL)
@@ -312,7 +312,8 @@ public final class EmbeddingEngine: @unchecked Sendable {
         let model = self.model
         let tokenizer = self.tokenizer
         let cpTokenizer = self.cpTokenizer
-        let cap = self.maxTokens
+        let cap = EmbeddingRequestOptions.effectiveTokenCap(
+            modelCap: self.maxTokens, requestCap: options.maxLength)
         let pooling = self.pooling
         let appendEOS = self.appendEOS
         let eos = self.eosTokenId
@@ -330,7 +331,8 @@ public final class EmbeddingEngine: @unchecked Sendable {
         if let eg = model as? EmbeddingGemma2Model {
             guard let cpTokenizer else { throw EmbeddingError.notLoaded }
             return try embedGemma2(eg, tokenizer: cpTokenizer, texts: texts.map { prefix + $0 },
-                                   cap: cap, dimensions: options.dimensions)
+                                   cap: cap, dimensions: options.dimensions,
+                                   tokenBudget: Self.paddedTokenBudget())
         }
         guard let tokenizer else { throw EmbeddingError.notLoaded }
 
@@ -421,7 +423,10 @@ public final class EmbeddingEngine: @unchecked Sendable {
         if !textIdx.isEmpty {
             let r = try embedGemma2(eg, tokenizer: cp,
                                     texts: textIdx.map { prefix + inputs[$0].joinedText },
-                                    cap: EmbeddingGemma2Config.maxContext, dimensions: options.dimensions)
+                                    cap: EmbeddingRequestOptions.effectiveTokenCap(
+                                        modelCap: EmbeddingGemma2Config.maxContext, requestCap: options.maxLength),
+                                    dimensions: options.dimensions,
+                                    tokenBudget: Self.paddedTokenBudget())
             for (k, i) in textIdx.enumerated() { out[i] = r.vectors[k] }
             total += r.promptTokens
         }
@@ -433,6 +438,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
             total += n
         }
         logPeakMemory()
+        MLX.Memory.clearCache()
         return EmbedResult(vectors: out, promptTokens: total)
     }
 
@@ -492,7 +498,12 @@ public final class EmbeddingEngine: @unchecked Sendable {
             let tower = try ensureVisionTower()  // images and video share one tower
             if !decoded.isEmpty {
                 do {
-                    features[.image] = try decoded.map { tower.softTokens(try EG2ImagePreprocessor.prepare($0)) }
+                    // Evaluate each image's soft tokens right away (numerically identical): left lazy,
+                    // every image/frame's tower intermediates would stay alive in one graph until
+                    // the final pooled.eval(), so the transient peak grew with the item count.
+                    features[.image] = try decoded.map {
+                        let t = tower.softTokens(try EG2ImagePreprocessor.prepare($0)); t.eval(); return t
+                    }
                 } catch { throw EmbeddingError.invalidOption("image: \(error)") }
             }
             if !pendingVideos.isEmpty {
@@ -504,7 +515,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
                         let patches = try v.src.frames(at: v.indices) {
                             try EG2ImagePreprocessor.prepare($0, maxSoftTokens: EG2ImagePreprocessor.videoFrameSoftTokens)
                         }
-                        perFrame += patches.map { tower.softTokens($0) }
+                        perFrame += patches.map { let t = tower.softTokens($0); t.eval(); return t }
                     }
                     features[.video] = perFrame
                 } catch { throw EmbeddingError.invalidOption("video: \(error)") }
@@ -514,7 +525,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
             let tower = try ensureAudioTower()
             do {
                 features[.audio] = try pendingWaves.map {
-                    try tower.softTokens(try EG2AudioPreprocessor.prepare(waveform: $0))
+                    let t = try tower.softTokens(try EG2AudioPreprocessor.prepare(waveform: $0)); t.eval(); return t
                 }
             } catch { throw EmbeddingError.invalidOption("audio: \(error)") }
         }
@@ -539,6 +550,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
         do {
             let t = try loadEG2VisionTower(directory: dir, dtype: dtype).tower
             visionTower = t
+            logPeakMemory(label: "after vision tower load")
             return t
         } catch EG2VisionLoadError.noVisionTower {
             throw EmbeddingError.invalidOption("this checkpoint has no vision tower; images are not supported")
@@ -566,12 +578,12 @@ public final class EmbeddingEngine: @unchecked Sendable {
     /// True once the lazily loaded vision tower is resident (tests / diagnostics).
     public var isVisionTowerLoaded: Bool { towerLock.lock(); defer { towerLock.unlock() }; return visionTower != nil }
 
-    private func logPeakMemory() {
+    private func logPeakMemory(label: String = "") {
         if ProcessInfo.processInfo.environment["KRILL_EMBED_LOG_MEM"] != nil {
             // MLX unified-memory high-water mark (RSS does not see it).
             let mb = Double(Memory.peakMemory) / 1_048_576
             FileHandle.standardError.write(Data(String(
-                format: "EmbeddingGemma2: mlx peak memory %.0f MB (active %.0f MB, cache %.0f MB)\n",
+                format: "EmbeddingGemma2: mlx peak memory %.0f MB (active %.0f MB, cache %.0f MB) \(label)\n",
                 mb, Double(Memory.activeMemory) / 1_048_576, Double(Memory.cacheMemory) / 1_048_576).utf8))
         }
     }
@@ -580,7 +592,8 @@ public final class EmbeddingEngine: @unchecked Sendable {
     /// in chunks bounded by a padded-token budget; results return in input
     /// order. Every vector is NaN/Inf-guarded.
     private func embedGemma2(_ model: EmbeddingGemma2Model, tokenizer: CodePointBPETokenizer,
-                             texts: [String], cap: Int, dimensions: Int?) throws -> EmbedResult {
+                             texts: [String], cap: Int, dimensions: Int?,
+                             tokenBudget: Int) throws -> EmbedResult {
         var encoded: [[Int32]] = texts.map { t in
             var ids = tokenizer.encode(t)
             // Truncate keeping the trailing <eos>, like HF `truncation=True`.
@@ -592,15 +605,10 @@ public final class EmbeddingEngine: @unchecked Sendable {
         let order = encoded.indices.sorted { encoded[$0].count < encoded[$1].count }
         var out = [[Float]](repeating: [], count: texts.count)
 
-        var i = 0
-        while i < order.count {
-            // Grow the chunk while (count * longest) stays within the budget.
-            var j = i
-            while j < order.count, (j - i + 1) <= Self.gemma2MaxBatch,
-                  (j - i + 1) * encoded[order[j]].count <= Self.gemma2PaddedTokenBudget || j == i {
-                j += 1
-            }
-            let idx = Array(order[i ..< j])
+        let chunks = Self.planChunks(sortedLengths: order.map { encoded[$0].count },
+                                     budget: tokenBudget, maxBatch: Self.gemma2MaxBatch)
+        for chunk in chunks {
+            let idx = Array(order[chunk])
             let T = idx.map { encoded[$0].count }.max() ?? 1
             var flat = [Int32](); flat.reserveCapacity(idx.count * T)
             for k in idx { flat += encoded[k] + [Int32](repeating: 0, count: T - encoded[k].count) }
@@ -615,7 +623,6 @@ public final class EmbeddingEngine: @unchecked Sendable {
                 let v = EmbeddingMath.l2Normalize(full)
                 out[k] = dimensions.map { EmbeddingMath.truncate(v, to: $0) } ?? v
             }
-            i = j
         }
         encoded.removeAll()
         logPeakMemory()
@@ -623,7 +630,65 @@ public final class EmbeddingEngine: @unchecked Sendable {
     }
 
     private static let gemma2MaxBatch = 32
-    private static let gemma2PaddedTokenBudget = 8192
+
+    /// Default per-forward budget of padded tokens (sequences x padded length).
+    /// A request is split into sub-batches that each stay within it; one
+    /// sequence longer than the budget still runs alone. Peak MLX transient
+    /// memory scales with this number, not with the request size. Each item's
+    /// vector is independent of the split (key-padding mask + length-aware pooling).
+    public static let defaultPaddedTokenBudget = 512
+
+    /// MLX buffer-cache cap used by the embedding path when
+    /// `KRILL_MLX_CACHE_LIMIT_MB` is unset. Embedding forwards allocate
+    /// transients that never repeat a shape, so a large recycling pool only
+    /// inflates the footprint (measured: the 256 MB chat default adds ~280 MB to the
+    /// lifetime peak at the default budget). Chat models keep 256.
+    public static let defaultCacheLimitMB = 64
+    public static let batchTokensEnvVar = "KRILL_EMBED_MAX_BATCH_TOKENS"
+
+    /// `KRILL_EMBED_MAX_BATCH_TOKENS` (positive integer) or the default.
+    public static func paddedTokenBudget(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Int {
+        if let raw = environment[batchTokensEnvVar]?.trimmingCharacters(in: .whitespaces),
+           let n = Int(raw), n > 0 { return n }
+        return defaultPaddedTokenBudget
+    }
+
+    /// Split `lengths` (sorted ascending by the caller) into consecutive
+    /// chunks of indices where count x longest <= budget and count <= maxBatch.
+    /// A chunk always holds at least one item. Pure; unit-tested.
+    static func planChunks(sortedLengths lengths: [Int], budget: Int, maxBatch: Int) -> [Range<Int>] {
+        var out: [Range<Int>] = []
+        var i = 0
+        while i < lengths.count {
+            var j = i
+            while j < lengths.count, (j - i + 1) <= maxBatch,
+                  (j - i + 1) * lengths[j] <= budget || j == i { j += 1 }
+            out.append(i ..< j)
+            i = j
+        }
+        return out
+    }
+
+    /// Drop the loaded model, tokenizers and lazily loaded towers, then return
+    /// MLX's buffer cache to the OS so the process footprint falls back to the
+    /// bare-process baseline. The next `embed`/`load` reloads transparently.
+    /// Returns true if a model was resident.
+    @discardableResult
+    public func unload() -> Bool {
+        let was: Bool = withLock {
+            let had = model != nil
+            model = nil; tokenizer = nil; cpTokenizer = nil; loadedDir = nil
+            prompts = nil; mrlDimensions = nil
+            return had
+        }
+        towerLock.lock(); visionTower = nil; audioTower = nil; towerLock.unlock()
+        if was { MLX.Memory.clearCache() }
+        return was
+    }
+
+    public var isResident: Bool { withLock { model != nil } }
 
     // MARK: - Decoder-LLM embedder detection
 

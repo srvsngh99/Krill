@@ -33,6 +33,7 @@ public final class KrillServer: Sendable {
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
+    private let auxKeepAlive: AuxKeepAlive
     private let logger = KrillLogging.makeLogger("krill.server")
 
     private let apiKey: String?
@@ -52,7 +53,9 @@ public final class KrillServer: Sendable {
                 apiKey: String? = nil,
                 corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
                 defaultContextLimit: Int? = nil,
-                numParallel: Int = 1, maxQueue: Int = 512) {
+                numParallel: Int = 1, maxQueue: Int = 512,
+                auxKeepAliveSeconds: Int = 300) {
+        self.auxKeepAlive = AuxKeepAlive(defaultSeconds: auxKeepAliveSeconds)
         self.host = host
         self.port = port
         self.compat = compat
@@ -106,6 +109,7 @@ public final class KrillServer: Sendable {
                                     fallbackEngine: self.fallbackEngine, registry: self.registry,
                                     compat: self.compat, embedEngine: self.embedEngine,
                                     rerankEngine: self.rerankEngine,
+                                    auxKeepAlive: self.auxKeepAlive,
                                     apiKey: self.apiKey,
                                     corsOrigins: self.corsOrigins,
                                     defaultContextLimit: self.defaultContextLimit,
@@ -150,6 +154,11 @@ public final class KrillServer: Sendable {
                 let evicted = await pool.evictExpired()
                 if !evicted.isEmpty {
                     self.logger.info("[KrillServer] auto-unloaded \(evicted.count) idle model(s): \(evicted.joined(separator: ", "))")
+                }
+                let auxEvicted = await self.auxKeepAlive.evictExpired(
+                    embedEngine: self.embedEngine, rerankEngine: self.rerankEngine)
+                if !auxEvicted.isEmpty {
+                    self.logger.info("[KrillServer] auto-unloaded idle embed/rerank model(s): \(auxEvicted.joined(separator: ", "))")
                 }
             }
         }
@@ -216,6 +225,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
+    private let auxKeepAlive: AuxKeepAlive
     private let logger = KrillLogging.makeLogger("krill.http")
     private let startedAt = Date()
 
@@ -240,6 +250,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
          fallbackEngine: InferenceEngine, registry: Registry,
          compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
          rerankEngine: RerankEngine = RerankEngine(),
+         auxKeepAlive: AuxKeepAlive = AuxKeepAlive(defaultSeconds: 300),
          apiKey: String? = nil,
          corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
          defaultContextLimit: Int? = nil,
@@ -253,6 +264,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         self.compat = compat
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
+        self.auxKeepAlive = auxKeepAlive
         self.apiKey = apiKey
         self.corsOrigins = corsOrigins
         self.defaultContextLimit = defaultContextLimit
@@ -2666,12 +2678,29 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let rerank = rerankEngine
+        let keepAlive = auxKeepAlive.rerank
+        let keepAliveOverride = KeepAliveParse.seconds(from: json["keep_alive"])
         let modelName = manifest.name
 
         let started = CFAbsoluteTimeGetCurrent()
         Task {
             guard await self.enterQueueOr503(ctx, eventLoop) else { return }
             defer { self.leaveQueue() }
+            // Same keep-alive semantics as chat: hold the model while this
+            // request runs, then arm the idle deadline (or unload for 0).
+            await keepAlive.beginRequest()
+            defer {
+                Task {
+                    // Arm the deadline from the END of the request, then unload
+                    // right away if it is already due (keep_alive: 0).
+                    await keepAlive.endRequest()
+                    await keepAlive.touch(override: keepAliveOverride)
+                    if await keepAlive.shouldEvict() {
+                        rerank.unload()
+                        await keepAlive.markEvicted()
+                    }
+                }
+            }
             do {
                 try await rerank.load(directory: dir)
                 let result = try rerank.score(
@@ -2804,12 +2833,27 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
         let embed = embedEngine
+        let keepAlive = auxKeepAlive.embed
+        let keepAliveOverride = KeepAliveParse.seconds(from: json["keep_alive"])
         let modelName = manifest.name
 
         let started = CFAbsoluteTimeGetCurrent()
         Task {
             guard await self.enterQueueOr503(ctx, eventLoop) else { return }
             defer { self.leaveQueue() }
+            await keepAlive.beginRequest()
+            defer {
+                Task {
+                    // Arm the deadline from the END of the request, then unload
+                    // right away if it is already due (keep_alive: 0).
+                    await keepAlive.endRequest()
+                    await keepAlive.touch(override: keepAliveOverride)
+                    if await keepAlive.shouldEvict() {
+                        embed.unload()
+                        await keepAlive.markEvicted()
+                    }
+                }
+            }
             do {
                 try await embed.load(directory: dir)
                 let result = try embed.embed(inputs: inputs, options: options)

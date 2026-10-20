@@ -9,6 +9,35 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Fixed
+
+- **Embedding and rerank models now unload when idle.** They honoured neither
+  `KRILL_KEEP_ALIVE` nor the per-request `keep_alive`, so a resting embedding server held
+  its full weights (384 MB 4-bit, 1.38 GB bf16) forever. They now use the chat path's
+  keep-alive semantics, env vars and default (`5m`): past the TTL the weights and MLX's
+  buffer cache are freed and the footprint drops to the bare-process baseline; the next
+  request reloads transparently. `keep_alive: 0` unloads right after the request.
+- **Embedding batches are bounded by a padded-token budget.** A request is split into
+  sub-batches of at most `KRILL_EMBED_MAX_BATCH_TOKENS` (default 512) sequences x padded
+  length, so peak memory no longer scales with the request size (batch-8 work peaked at
+  1.5-2.4 GB, batch 32 at 3.8 GB). Per-item vectors do not depend on the split. `/v1/rerank`
+  is sub-batched the same way. The embed/rerank path also caps MLX's buffer cache at 64 MB
+  by default (`KRILL_MLX_CACHE_LIMIT_MB` still overrides).
+- **Image embeddings no longer spike MLX memory by ~1.2 GB.** The vision tower's attention
+  materialised a full `heads x patches x patches` score matrix for a 2,520-patch image; it
+  now runs the query rows in blocks of `KRILL_VISION_ATTN_CHUNK` (default 1024, `0` = off) for
+  sequences of 2,048+ patches. Softmax is per row, so the result is identical (cosine 1.0
+  against 0.25.1); an image request peaks ~1.0 GB instead of ~2.0 GB on 4-bit. Image, video
+  and audio tower outputs are also evaluated as they are produced instead of piling up in
+  one lazy graph.
+
+### Added
+
+- **Per-request and server-wide embedding input length.** `max_length` (or Ollama's
+  `options.num_ctx`) on `/v1/embeddings`, `/api/embed` and `/api/embeddings`, and the
+  `KRILL_EMBED_MAX_TOKENS` env var, cap the tokens per input (the smallest of the model
+  limit, the env cap and the request cap wins). Unset, the truncation length is unchanged.
+
 ## [0.25.1] - 2026-10-20
 
 ### Fixed

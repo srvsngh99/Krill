@@ -262,6 +262,36 @@ class VisionAttention: Module {
         _kNorm = ModuleInfo(wrappedValue: VisionRMSNorm(dimensions: headDim), key: "k_norm")
     }
 
+    /// Query rows per attention block (`KRILL_VISION_ATTN_CHUNK`, default 1024; 0 = one block).
+    static let queryChunk: Int = Int(ProcessInfo.processInfo.environment["KRILL_VISION_ATTN_CHUNK"] ?? "") ?? 1024
+
+    /// Only sequences at least this long are blocked: below it the score matrix
+    /// is small and blocking just adds sync points (video frames, 1,260 patches, are slower blocked).
+    static let chunkMinLength = 2048
+
+    /// Attention over `[B, H, L, D]`. With a query chunk set and no mask, the
+    /// query rows are processed in blocks (softmax is per row, so each block sees
+    /// every key and the result is identical) and each block is evaluated before
+    /// the next so only one block's score matrix is live.
+    static func attend(_ q: MLXArray, _ k: MLXArray, _ v: MLXArray, mask: MLXArray?,
+                       queryChunk: Int = queryChunk, minLength: Int = chunkMinLength) -> MLXArray {
+        let L = q.dim(2)
+        guard queryChunk > 0, mask == nil, L >= minLength, L > queryChunk else {
+            return MLXFast.scaledDotProductAttention(queries: q, keys: k, values: v, scale: 1.0, mask: mask)
+        }
+        var parts: [MLXArray] = []
+        var s = 0
+        while s < L {
+            let e = min(s + queryChunk, L)
+            let o = MLXFast.scaledDotProductAttention(
+                queries: q[0..., 0..., s ..< e, 0...], keys: k, values: v, scale: 1.0, mask: nil)
+            o.eval()
+            parts.append(o)
+            s = e
+        }
+        return concatenated(parts, axis: 2)
+    }
+
     func callAsFunction(_ x: MLXArray, positions: MLXArray, mask: MLXArray?) -> MLXArray {
         let B = x.dim(0)
         let L = x.dim(1)
@@ -281,8 +311,7 @@ class VisionAttention: Module {
         k = k.transposed(0, 2, 1, 3)
         v = v.transposed(0, 2, 1, 3)
 
-        let out = MLXFast.scaledDotProductAttention(
-            queries: q, keys: k, values: v, scale: 1.0, mask: mask)
+        let out = Self.attend(q, k, v, mask: mask)
 
         return oProj(out.transposed(0, 2, 1, 3).reshaped(B, L, -1))
     }
