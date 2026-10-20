@@ -100,6 +100,23 @@ final class EmbeddingGemma2VideoTests: XCTestCase {
         }
     }
 
+    /// Non-square pixels (SAR != 1): the container's DISPLAY size differs from the coded
+    /// size AVAssetReader decodes. The prompt was once sized from the display size, so the
+    /// reserved soft-token count disagreed with the decoded frames' ("video features have
+    /// 130 soft tokens but the prompt reserved 126", HTTP 400 on 745 of 1,000 MSR-VTT clips).
+    func testNonSquarePixelVideoSizesThePromptFromTheDecodedFrames() throws {
+        for (file, w, h) in [("v_sar_wide.mp4", 320, 240), ("v_sar_narrow.mp4", 360, 480)] {
+            let src = try EG2VideoSource(data: Data(contentsOf: Self.fixture("video/\(file)")))
+            XCTAssertEqual(src.info.width, w, file); XCTAssertEqual(src.info.height, h, file)
+            let reserved = try EG2ImagePreprocessor.softTokens(
+                width: src.info.width, height: src.info.height, maxSoftTokens: EG2ImagePreprocessor.videoFrameSoftTokens)
+            let produced = try src.frames(at: [0, 10, 20]) {
+                try EG2ImagePreprocessor.prepare($0, maxSoftTokens: EG2ImagePreprocessor.videoFrameSoftTokens).softTokens
+            }
+            XCTAssertEqual(produced, [reserved, reserved, reserved], file)
+        }
+    }
+
     func testDecodesExactlyTheRequestedFramesInOrder() throws {
         let src = try EG2VideoSource(data: Data(contentsOf: Self.fixture("video/v3.mp4")))
         let frames = try src.frames(at: [0, 10, 20]) { $0 }
