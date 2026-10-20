@@ -5,10 +5,10 @@
 class Krill < Formula
   desc "Fast local LLM inference CLI for Apple Silicon"
   homepage "https://github.com/srvsngh99/Krill"
-  url "https://github.com/srvsngh99/Krill/releases/download/v0.25.0/krill-0.25.0-arm64-apple-macos.tar.gz"
-  sha256 "ea3c34dfed125d3c0d9b66aa6002ca3a02ee6ae6b88a4ab5c6d7f295d115b4da"
+  url "https://github.com/srvsngh99/Krill/releases/download/v0.25.1/krill-0.25.1-arm64-apple-macos.tar.gz"
+  sha256 "d24ac4cd88468e5c692bb0e8c7f8e74c0f5b763058118b1cf6bfa7c72e1fe590"
   license "MIT"
-  version "0.25.0"
+  version "0.25.1"
 
   depends_on :macos
   depends_on arch: :arm64

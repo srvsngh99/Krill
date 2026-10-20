@@ -7,6 +7,13 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.25.1 - 2026-10-20
+**Embedding servers stay small.** Embedding and reranker servers no longer grow
+memory with every new input shape (17 GB down to under 1 GB in testing), and
+EmbeddingGemma 2 video no longer returns HTTP 400 on non-square-pixel clips.
+
+---
+
 ## v0.25.0 - 2026-10-08
 **Embeddings that see, hear and fit.** EmbeddingGemma 2 now runs natively in
 Krill for text, images, audio and video, and comes in nine ready-made

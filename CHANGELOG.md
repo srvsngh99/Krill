@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.25.1] - 2026-10-20
+
 ### Fixed
 
 - **Embedding server memory no longer grows with every new input shape.** The embed and
@@ -16,13 +18,13 @@ reverse chronological order. Versioning follows
   its default (device-sized) limit and ballooned to 17 GB in 21 requests (MLX `active`
   memory stayed at 0.2 GB; `phys_footprint` is what filled swap). The cap
   (`KRILL_MLX_CACHE_LIMIT_MB`, default 256) now applies when an embedding or reranker
-  model loads. Vectors are unchanged (cosine 1.0000 against 0.25.0).
+  model loads. Vectors are unchanged (cosine 1.0000 against 0.25.0). (#338)
 - **Video embeddings no longer 400 on non-square-pixel clips.** The prompt was sized from
   the track's display size (`naturalSize`, scaled by the pixel aspect ratio) while the
   decoder returns coded-size frames, so the reserved soft-token count could differ from
   what the vision tower produced ("video features have 130 soft tokens but the prompt
   reserved 126"). It is now sized from the coded size, and any frame that still differs
-  is resampled to it.
+  is resampled to it. (#338)
 
 ## [0.25.0] - 2026-10-08
 

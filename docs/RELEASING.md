@@ -17,7 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| 2026-10-20 | _(this PR)_ | Embed/rerank paths apply the MLX buffer-cache cap; video prompt sized from coded frame size | Embedding servers stop growing without bound; non-square-pixel videos stop returning 400 |
+| _(empty - cleared at v0.25.1)_ | | | |
 
 ### Known-open, NOT yet merged
 
