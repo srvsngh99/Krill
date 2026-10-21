@@ -230,7 +230,7 @@ let package = Package(
         ),
         .testTarget(
             name: "KrillHarnessTests",
-            dependencies: ["KrillHarness", "KrillTooling"],
+            dependencies: ["KrillHarness", "KrillTooling", "KrillObs"],
             swiftSettings: kreachSettings
         ),
         .testTarget(

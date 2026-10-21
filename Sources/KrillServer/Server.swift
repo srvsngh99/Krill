@@ -834,7 +834,10 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         // Record token counts on the request trace when the handler reads the final stats.
         func traced(_ r: (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?))
             -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
-            (r.stream, {
+            // Streaming handlers may never read the stats themselves; the log handler asks for them
+            // once the response has ended.
+            t.setStatsProvider { r.stats().map { ($0.promptTokens, $0.generatedTokens, $0.prefillTime, $0.decodeTime) } }
+            return (r.stream, {
                 let st = r.stats()
                 if let st {
                     t.setStats(prompt: st.promptTokens, completion: st.generatedTokens,
@@ -2998,6 +3001,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let keepAlive = auxKeepAlive.embed
         let keepAliveOverride = KeepAliveParse.seconds(from: json["keep_alive"])
         let modelName = manifest.name
+        trace.setModel(modelName)
 
         let started = CFAbsoluteTimeGetCurrent()
         Task {

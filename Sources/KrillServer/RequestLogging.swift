@@ -27,11 +27,27 @@ final class RequestTrace: @unchecked Sendable {
 
     private let lock = NSLock()
     private var s = Snapshot()
+    private var statsProvider: (@Sendable () -> (Int, Int, Double, Double)?)?
+
+    func setStatsProvider(_ p: @escaping @Sendable () -> (Int, Int, Double, Double)?) {
+        lock.lock(); statsProvider = p; lock.unlock()
+    }
+
+    /// Final snapshot: if no handler recorded token stats, read them from the engine now.
+    func finalSnapshot() -> Snapshot {
+        lock.lock()
+        let missing = s.completionTokens == nil && s.embedDevice == nil
+        let provider = statsProvider
+        lock.unlock()
+        if missing, let v = provider?() { setStats(prompt: v.0, completion: v.1, prefillSeconds: v.2, decodeSeconds: v.3) }
+        return snapshot()
+    }
 
     func begin(requestID: String, method: String, endpoint: String, sessionID: String?) {
         lock.lock()
         s = Snapshot(requestID: requestID, method: method, endpoint: endpoint,
                      startNs: DispatchTime.now().uptimeNanoseconds, sessionID: sessionID)
+        statsProvider = nil
         lock.unlock()
     }
     func snapshot() -> Snapshot { lock.lock(); defer { lock.unlock() }; return s }
@@ -117,7 +133,7 @@ final class RequestLogHandler: ChannelDuplexHandler, @unchecked Sendable {
     private func finish(closedEarly: Bool) {
         active = false
         let now = DispatchTime.now().uptimeNanoseconds
-        var snap = trace.snapshot()
+        var snap = trace.finalSnapshot()
         let totalMs = Double(now &- snap.startNs) / 1e6
         let code = closedEarly && status == 0 ? 0 : status
         if closedEarly && snap.error == nil { snap.error = "client closed the connection before the response finished" }
