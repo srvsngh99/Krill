@@ -9,6 +9,18 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Added
+
+- **`krill serve` restarts itself onto a newly installed version, so `brew upgrade krill` is the only command.**
+  Under launchd, the server polls (every 60 s, one `stat`) the binary it was launched as; when a different,
+  usable version appears (stable for a second look, `codesign --verify` clean, `krill version` reports a new
+  version) and the server is idle (no queued/in-flight generation, embed or rerank request and 10 s since the
+  last request), it drains gracefully and relaunches via `launchctl kickstart -k`, which works under any
+  `KeepAlive`. Handles Homebrew's repointed Cellar symlink and `install.sh`'s rm + cp. A terminal-run server
+  never restarts; it prints "Krill X is installed; restart to use it" once. Turn off with
+  `auto_restart_on_upgrade = false` or `KRILL_AUTO_RESTART_ON_UPGRADE=0`. Also covers the `krill ui --install`
+  login item. See [`docs/SELF_RESTART_ON_UPGRADE.md`](docs/SELF_RESTART_ON_UPGRADE.md).
+
 ## [0.26.1] - 2026-10-22
 
 ### Changed

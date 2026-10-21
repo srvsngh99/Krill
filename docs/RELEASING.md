@@ -17,6 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
+| (pending) | PR_NUM | `krill serve` self-restarts onto a newly installed version under launchd (`UpgradeWatcher`, `auto_restart_on_upgrade`) | New config key + 3 env knobs; release notes must say a `brew upgrade` now bounces running launchd servers when idle |
 
 ### Known-open, NOT yet merged
 

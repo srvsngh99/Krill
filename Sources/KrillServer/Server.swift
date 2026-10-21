@@ -35,12 +35,13 @@ public final class KrillServer: Sendable {
     private let rerankEngine: RerankEngine
     private let auxKeepAlive: AuxKeepAlive
     private let embedDevice: EmbedDevice
+    let autoRestartOnUpgrade: Bool
     private let logger = KrillLogging.makeLogger("krill.server")
 
     private let apiKey: String?
     private let corsOrigins: [String]
     private let defaultContextLimit: Int?
-    private let genQueue: GenerationQueue
+    let genQueue: GenerationQueue
     /// Shared agent-session table: every connection handler sees the same
     /// sessions, so a phone can reconnect from a new connection and resume.
     private let agentSessions = AgentSessionStore()
@@ -56,7 +57,9 @@ public final class KrillServer: Sendable {
                 defaultContextLimit: Int? = nil,
                 numParallel: Int = 1, maxQueue: Int = 512,
                 auxKeepAliveSeconds: Int = 300,
-                embedDevice: EmbedDevice = .gpu) {
+                embedDevice: EmbedDevice = .gpu,
+                autoRestartOnUpgrade: Bool = true) {
+        self.autoRestartOnUpgrade = autoRestartOnUpgrade
         self.auxKeepAlive = AuxKeepAlive(defaultSeconds: auxKeepAliveSeconds)
         self.embedDevice = embedDevice
         self.host = host
@@ -194,6 +197,9 @@ public final class KrillServer: Sendable {
             Task { await self.gracefulShutdown(channel: channel, evictor: evictor, grace: grace) }
         }
 
+        let upgradeWatch = startUpgradeWatch(channel: channel, evictor: evictor)
+        defer { upgradeWatch?.cancel() }
+
         try await channel.closeFuture.get()
         // The signal handler closes the listener itself and then drains, unloads and exits the
         // process; returning here would end `main` (and cut in-flight requests) before that.
@@ -205,7 +211,8 @@ public final class KrillServer: Sendable {
     /// unload what is resident, then exit 0. If requests are still running when
     /// the grace expires the unload is skipped (unloading under a live forward is
     /// the race), and the process still exits 0.
-    func gracefulShutdown(channel: Channel, evictor: Task<Void, Never>, grace: Double) async {
+    func gracefulShutdown(channel: Channel, evictor: Task<Void, Never>, grace: Double,
+                          finish: (@Sendable () -> Void)? = nil) async {
         evictor.cancel()
         try? await channel.close().get()          // listener closed: no new connections
         let queue = genQueue
@@ -216,7 +223,7 @@ public final class KrillServer: Sendable {
         } else {
             logger.info("[KrillServer] shutdown grace expired with requests in flight; exiting without unload")
         }
-        ShutdownSignals.exitNow(0)
+        if let finish { finish() } else { ShutdownSignals.exitNow(0) }
     }
 
     /// Best-effort Tailscale IPv4 of this machine, so the startup banner can
@@ -398,6 +405,10 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             body.clear()
             currentOrigin = head.headers.first(name: "Origin")
             discardingUnauthorizedRequest = false
+            // Upgrade-watcher quiet period; liveness/status polls must not count as activity.
+            if head.method != .GET || !["/healthz", "/v1/status"].contains(where: { head.uri.hasPrefix($0) }) {
+                RequestActivity.note()
+            }
             // OPTIONS stays open so CORS preflights (which cannot carry
             // credentials) succeed; /healthz stays open so liveness probes
             // (launchd, uptime monitors) keep working — it leaks nothing

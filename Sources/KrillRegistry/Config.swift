@@ -41,6 +41,11 @@ public struct KrillConfig: Sendable {
     /// `KRILL_NGRAM_SPEC` by the CLI.
     public var ngramSpec: Bool
 
+    /// `krill serve` under launchd restarts itself onto a newly installed version when idle
+    /// (`brew upgrade krill`). `auto_restart_on_upgrade`; env `KRILL_AUTO_RESTART_ON_UPGRADE` wins.
+    /// A terminal-run server never restarts; it only prints a notice.
+    public var autoRestartOnUpgrade: Bool
+
     /// Models directory override.
     public var modelsDir: String?
 
@@ -180,6 +185,7 @@ public struct KrillConfig: Sendable {
         self.speculativeDecoding = false
         self.decodePipeline = true
         self.ngramSpec = true
+        self.autoRestartOnUpgrade = true
         self.modelsDir = nil
         self.serverPort = 57455   // "KRILL" on a phone keypad; unique vs Ollama's 11434
         self.serverHost = "127.0.0.1"
@@ -263,6 +269,8 @@ public struct KrillConfig: Sendable {
                 decodePipeline = value == "true" || value == "1"
             case "ngram_spec":
                 ngramSpec = value == "true" || value == "1"
+            case "auto_restart_on_upgrade":
+                autoRestartOnUpgrade = value == "true" || value == "1"
             case "models_dir":
                 modelsDir = value.isEmpty ? nil : value
             case "server_port", "port":
@@ -363,7 +371,7 @@ public struct KrillConfig: Sendable {
             "voice_identifier", "voice_rate", "voice_whisper_model",
             "voice_orb",
             "prefix_cache_size_gb", "prefix_cache_max_entry_gb",
-            "speculative_decoding", "decode_pipeline", "ngram_spec", "flash_attention",
+            "speculative_decoding", "decode_pipeline", "ngram_spec", "auto_restart_on_upgrade", "flash_attention",
             "server_port", "server_host", "server_api_key", "idle_timeout", "keep_alive",
             "num_parallel", "max_loaded_models", "max_queue", "models_dir",
             "embed_device",
@@ -474,6 +482,7 @@ public struct KrillConfig: Sendable {
             "speculative_decoding": b(speculativeDecoding),
             "decode_pipeline": b(decodePipeline),
             "ngram_spec": b(ngramSpec),
+            "auto_restart_on_upgrade": b(autoRestartOnUpgrade),
             "flash_attention": b(flashAttention),
             "server_port": "\(serverPort)",
             "server_host": serverHost,

@@ -154,7 +154,14 @@ struct UICommand: AsyncParsableCommand {
 
     private static var krillPath: String {
         let raw = Bundle.main.executablePath ?? CommandLine.arguments[0]
-        return URL(fileURLWithPath: raw).resolvingSymlinksInPath().path
+        let resolved = URL(fileURLWithPath: raw).resolvingSymlinksInPath().path
+        // Homebrew: the Cellar dir is deleted on `brew upgrade`, so the login item must point at the
+        // stable `bin/krill` symlink (the self-restart on upgrade relaunches through it).
+        if resolved.contains("/Cellar/"), let stable = UpgradeWatcher.invocationPath(),
+           !stable.contains("/Cellar/"), FileManager.default.isExecutableFile(atPath: stable) {
+            return stable
+        }
+        return resolved
     }
 
     private func startDetached(host: String, port: Int, model: String?, apiKey: String,
