@@ -17,7 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| 2026-10-22 | #TBD | Neural Engine EmbeddingGemma 2 backend (`embed_device`), serve SIGTERM/SIGINT fix | **v0.26.0.** The package `embeddinggemma-2-ane-lin8` is built locally (`make ane-package`), never published; no AliasMap entry. Default stays `gpu`. Check: `krill serve` banner shows `Embeddings: embed_device = ...`, SIGTERM exits 0 in under 5 s. |
+| 2026-10-22 | #343 | Neural Engine EmbeddingGemma 2 backend (`embed_device`), serve SIGTERM/SIGINT fix | **v0.26.0.** The package `embeddinggemma-2-ane-lin8` is built locally (`make ane-package`), never published; no AliasMap entry. Default stays `gpu`. Check: `krill serve` banner shows `Embeddings: embed_device = ...`, SIGTERM exits 0 in under 5 s. |
 
 ### Known-open, NOT yet merged
 
