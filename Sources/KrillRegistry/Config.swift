@@ -1,4 +1,5 @@
 import Foundation
+import KrillObs
 
 /// Krill configuration loaded from ~/.krill/config.toml.
 ///
@@ -176,7 +177,29 @@ public struct KrillConfig: Sendable {
     /// when the server starts. docs/ANE_EMBEDDER.md.
     public var embedDevice: EmbedDevice
 
+    /// Write the structured server event log (`~/.krill/logs/serve-YYYY-MM-DD.jsonl`).
+    /// Local only, metadata only (no prompts or completions). `event_log` in config;
+    /// `KRILL_EVENT_LOG` env (`off` disables). docs/OBSERVABILITY.md.
+    public var eventLog: Bool
+
+    /// Agent session transcripts in `~/.krill/sessions`: `full` (text + tool payloads,
+    /// each field capped at 16 KB), `meta` (structure only) or `off`. Local only.
+    /// `session_log` in config; `KRILL_SESSION_LOG` env.
+    public var sessionLog: String
+
+    /// Delete logs and session transcripts older than this many days.
+    /// `log_retention_days` in config; `KRILL_LOG_RETENTION_DAYS` env.
+    public var logRetentionDays: Int
+
+    /// Keep logs plus sessions under this many MB (oldest deleted first).
+    /// `log_max_mb` in config; `KRILL_LOG_MAX_MB` env.
+    public var logMaxMB: Int
+
     public init() {
+        self.eventLog = true
+        self.sessionLog = "full"
+        self.logRetentionDays = 30
+        self.logMaxMB = 1024
         self.defaultModel = nil
         self.defaultQuant = 4
         self.kvCacheDtype = "fp16"
@@ -234,6 +257,13 @@ public struct KrillConfig: Sendable {
         config.mergeFromEnvironment()
 
         return config
+    }
+
+    /// The observability settings this config resolves to (logs and sessions stay in `~/.krill`,
+    /// or `KRILL_OBS_HOME`).
+    public var obsSettings: ObsSettings {
+        ObsSettings(eventLog: eventLog, sessionLog: SessionLogMode.parse(sessionLog) ?? .full,
+                    retentionDays: logRetentionDays, maxMB: logMaxMB, root: ObsPaths.root())
     }
 
     /// Merge values from a TOML string (simplified parser).
@@ -329,6 +359,14 @@ public struct KrillConfig: Sendable {
                     FileHandle.standardError.write(Data(
                         "warning: config embed_device = \"\(value)\" is not one of \(EmbedDevice.validValues); ignored\n".utf8))
                 }
+            case "event_log":
+                eventLog = Self.parseBool(value)
+            case "session_log":
+                if SessionLogMode.parse(value) != nil { sessionLog = value.lowercased() }
+            case "log_retention_days":
+                if let v = Int(value), v > 0 { logRetentionDays = v }
+            case "log_max_mb":
+                if let v = Int(value), v > 0 { logMaxMB = v }
             case "num_parallel":
                 if let v = Int(value) { numParallel = v }
             case "max_queue":
@@ -375,6 +413,7 @@ public struct KrillConfig: Sendable {
             "server_port", "server_host", "server_api_key", "idle_timeout", "keep_alive",
             "num_parallel", "max_loaded_models", "max_queue", "models_dir",
             "embed_device",
+            "event_log", "session_log", "log_retention_days", "log_max_mb",
         ]
         #if KREACH
         keys.append("kreach_url")   // private local backend; dev builds only
@@ -494,6 +533,10 @@ public struct KrillConfig: Sendable {
             "max_queue": "\(maxQueue)",
             "models_dir": modelsDir ?? "(default)",
             "embed_device": embedDevice.rawValue,
+            "event_log": b(eventLog),
+            "session_log": sessionLog,
+            "log_retention_days": "\(logRetentionDays)",
+            "log_max_mb": "\(logMaxMB)",
         ]
         #if KREACH
         map["kreach_url"] = kreachURL ?? "(none)"
@@ -579,6 +622,10 @@ public struct KrillConfig: Sendable {
                     "warning: \(EmbedDevice.envVar)=\"\(v)\" is not one of \(EmbedDevice.validValues); ignored\n".utf8))
             }
         }
+        if let v = env["KRILL_EVENT_LOG"] { eventLog = Self.parseBool(v) }
+        if let v = env["KRILL_SESSION_LOG"], SessionLogMode.parse(v) != nil { sessionLog = v.lowercased() }
+        if let v = env["KRILL_LOG_RETENTION_DAYS"], let i = Int(v), i > 0 { logRetentionDays = i }
+        if let v = env["KRILL_LOG_MAX_MB"], let i = Int(v), i > 0 { logMaxMB = i }
         if let v = env["KRILL_SEARCH_BACKEND"] { searchBackend = v }
         if let v = env["KRILL_SEARXNG_URL"] { searxngURL = v.isEmpty ? nil : v }
         if let v = env["KRILL_BRAVE_API_KEY"] { braveAPIKey = v.isEmpty ? nil : v }

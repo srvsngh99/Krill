@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import KrillObs
 import KrillHarness
 import KrillRegistry
 import KrillTooling
@@ -111,6 +112,11 @@ extension CodeCommand {
         }
         print("\n> \(task)\n")
 
+        Obs.configure(kind: "cli", settings: config.obsSettings, version: KrillVersion)
+        let session = SessionRecorder.start(
+            surface: "code", project: FileManager.default.currentDirectoryPath,
+            model: modelName, provider: provider.rawValue, version: KrillVersion,
+            settings: config.obsSettings)
         let loop = AgentLoop(
             generator: generator,
             tools: ToolRegistry(tools),
@@ -118,10 +124,14 @@ extension CodeCommand {
             constrainToolArgs: false,
             permission: permissionBox.policy,
             permissionBox: permissionBox,
-            gate: (mode != .acceptAll && RawTerminal.isInteractive) ? StdinApprover() : nil)
+            gate: (mode != .acceptAll && RawTerminal.isInteractive) ? StdinApprover() : nil,
+            recorder: session)
         let renderer = LineAgentRenderer()
         let onEvent: @Sendable (AgentEvent) -> Void = { renderer.handle($0) }
-        _ = await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
+        let transcript = await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
+        session?.end(outcome: transcript.wasCancelled ? "cancelled"
+            : (transcript.hitIterationLimit ? "iteration_limit" : "completed"))
+        Obs.shutdown()
     }
 
     /// Hosted reasoning models need a larger completion allowance than the

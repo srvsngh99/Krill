@@ -1,4 +1,5 @@
 import Foundation
+import KrillObs
 import KrillEngine
 import KrillHarness
 import KrillTooling
@@ -218,7 +219,8 @@ extension HTTPHandler {
                 maxIterations: session.maxIterations,
                 permission: session.permissionBox.policy,
                 permissionBox: session.permissionBox,
-                gate: session.approver)
+                gate: session.approver,
+                recorder: session.recorder)
 
             // First turn: synthesize the same system prompt `krill code` uses,
             // with the ambient cwd + Krill.md resolved inside the session's

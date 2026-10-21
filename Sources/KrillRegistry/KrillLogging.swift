@@ -1,5 +1,6 @@
 import Foundation
 import Logging
+import KrillObs
 
 /// Process-wide logging setup.
 ///
@@ -37,9 +38,9 @@ public enum KrillLogging {
     private static let once: Void = {
         let level = resolvedLevel()
         LoggingSystem.bootstrap { label in
-            var handler = StreamLogHandler.standardError(label: label)
-            handler.logLevel = level
-            return handler
+            var inner = StreamLogHandler.standardError(label: label)
+            inner.logLevel = level
+            return ObsLogHandler(inner: inner, stderrLevel: level, label: label)
         }
     }()
 
@@ -54,5 +55,41 @@ public enum KrillLogging {
         }
         if env["KRILL_DEBUG"] != nil { return .debug }
         return .notice
+    }
+}
+
+/// Stderr handler that also copies warnings and errors into the local event log, whatever the
+/// stderr level is (`KRILL_LOG_LEVEL=critical` silences the terminal, not the evidence). Routine
+/// lifecycle events (model load, unload, evict, start, stop) are written by their owners as
+/// structured events and do not go through here. A no-op until `Obs.configure` ran.
+struct ObsLogHandler: LogHandler {
+    var inner: StreamLogHandler
+    let stderrLevel: Logger.Level
+    let label: String
+
+    var metadata: Logger.Metadata {
+        get { inner.metadata }
+        set { inner.metadata = newValue }
+    }
+    var logLevel: Logger.Level {
+        // Logger drops anything below this before calling `log`; keep warnings flowing.
+        get { min(stderrLevel, .warning) }
+        set { }
+    }
+    subscript(metadataKey key: String) -> Logger.Metadata.Value? {
+        get { inner[metadataKey: key] }
+        set { inner[metadataKey: key] = newValue }
+    }
+
+    func log(level: Logger.Level, message: Logger.Message, metadata: Logger.Metadata?,
+             source: String, file: String, function: String, line: UInt) {
+        if level >= stderrLevel {
+            inner.log(level: level, message: message, metadata: metadata,
+                      source: source, file: file, function: function, line: line)
+        }
+        if level >= .warning, Obs.eventsEnabled {
+            Obs.emit("log", [("level", .string(level.rawValue)), ("logger", .string(label)),
+                             ("message", .string(String("\(message)".prefix(2000))))])
+        }
     }
 }

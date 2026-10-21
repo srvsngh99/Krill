@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import KrillObs
 import KrillEngine
 import KrillHarness
 import KrillRegistry
@@ -232,6 +233,7 @@ struct CodeCommand: AsyncParsableCommand {
                 shellOutputToModelSetting: config.shellOutputToModel,
                 modeSetting: "agent", agentPermissionsSetting: mode.rawValue,
                 initialAgentTask: task)
+            tui.obsSurface = "code"
             await tui.run()
             return
         }
@@ -267,6 +269,11 @@ struct CodeCommand: AsyncParsableCommand {
                 stats.promptTokens, stats.generatedTokens, rate)
             FileHandle.standardError.write(Data(line.utf8))
         }
+        Obs.configure(kind: "cli", settings: config.obsSettings, version: KrillVersion)
+        let session = SessionRecorder.start(
+            surface: "code", project: FileManager.default.currentDirectoryPath,
+            model: model, provider: "local", version: KrillVersion,
+            settings: config.obsSettings)
         let loop = AgentLoop(
             generator: generator,
             tools: ToolRegistry(tools),
@@ -274,7 +281,8 @@ struct CodeCommand: AsyncParsableCommand {
             constrainToolArgs: constrainArgs,
             permission: permissionBox.policy,
             permissionBox: permissionBox,
-            gate: (mode != .acceptAll && RawTerminal.isInteractive) ? StdinApprover() : nil)
+            gate: (mode != .acceptAll && RawTerminal.isInteractive) ? StdinApprover() : nil,
+            recorder: session)
 
         print("\n> \(task)\n")
         // Render the run live as the loop emits events, instead of dumping the
@@ -284,7 +292,10 @@ struct CodeCommand: AsyncParsableCommand {
         // once rather than only in this command's hand-rolled switch.
         let renderer = LineAgentRenderer()
         let onEvent: @Sendable (AgentEvent) -> Void = { renderer.handle($0) }
-        _ = await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
+        let transcript = await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
+        session?.end(outcome: transcript.wasCancelled ? "cancelled"
+            : (transcript.hitIterationLimit ? "iteration_limit" : "completed"))
+        Obs.shutdown()
     }
 
     /// Local generations derive their ceiling from the loaded model's context

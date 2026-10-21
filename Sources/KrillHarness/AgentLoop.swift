@@ -1,5 +1,6 @@
 import Foundation
 import KrillTooling
+import KrillObs
 
 /// One tool call the loop executed, with its observation.
 public struct ToolInvocation: Sendable, Equatable {
@@ -117,6 +118,8 @@ public struct AgentLoop: Sendable {
     /// Interactive approver for `.ask` decisions. When the policy returns `.ask`
     /// and this is nil, the call is denied (fail-safe: no silent execution).
     public let gate: (any PermissionGate)?
+    /// Optional local session transcript (`~/.krill/sessions`). Nil records nothing.
+    public let recorder: SessionRecorder?
 
     public init(
         generator: any HarnessGenerator,
@@ -125,8 +128,10 @@ public struct AgentLoop: Sendable {
         constrainToolArgs: Bool = true,
         permission: PermissionPolicy = PermissionPolicy(),
         permissionBox: PermissionBox? = nil,
-        gate: (any PermissionGate)? = nil
+        gate: (any PermissionGate)? = nil,
+        recorder: SessionRecorder? = nil
     ) {
+        self.recorder = recorder
         self.generator = generator
         self.tools = tools
         self.maxIterations = max(1, maxIterations)
@@ -169,6 +174,8 @@ public struct AgentLoop: Sendable {
             messages = priorMessages
             messages.append(["role": "user", "content": user])
         }
+
+        recorder?.user(user)
 
         var steps: [AgentStep] = []
         var finalText = ""
@@ -218,6 +225,8 @@ public struct AgentLoop: Sendable {
             if calls.isEmpty {
                 finalText = visible
                 steps.append(AgentStep(assistantText: visible, toolCalls: []))
+                recorder?.assistant(visible)
+                recorder?.stop(reason: "final_answer")
                 onEvent?(.finalAnswer(visible))
                 break
             }
@@ -242,12 +251,15 @@ public struct AgentLoop: Sendable {
             if freshCalls.isEmpty || remaining <= 0 {
                 finalText = visible
                 steps.append(AgentStep(assistantText: visible, toolCalls: []))
+                recorder?.assistant(visible)
+                recorder?.stop(reason: freshCalls.isEmpty ? "repeat_guard" : "tool_budget")
                 onEvent?(.finalAnswer(visible))
                 break
             }
             let toRun = Array(freshCalls.prefix(remaining))
             executedToolCalls += toRun.count
 
+            recorder?.assistant(visible, toolCalls: toRun.count)
             onEvent?(.assistantTurn(text: visible))
 
             // Record the model's own turn (raw, so it sees the call it made),
@@ -264,7 +276,9 @@ public struct AgentLoop: Sendable {
                 let effectiveBeforeCall = permissionBox?.effective ?? permission.mode
                 // Feed `result` back as the observation, record the invocation,
                 // and emit it, whether the tool ran, was denied, or was unknown.
-                func record(args: String, _ result: ToolResult) {
+                func record(args: String, _ result: ToolResult, ms: Int = 0) {
+                    recorder?.toolCall(name: call.name, arguments: args)
+                    recorder?.toolResult(name: call.name, content: result.content, isError: result.isError, ms: ms)
                     let invocation = ToolInvocation(
                         name: call.name, argumentsJSON: args, result: result)
                     invocations.append(invocation)
@@ -279,6 +293,7 @@ public struct AgentLoop: Sendable {
                 }
 
                 guard let tool = tools.tool(named: call.name), let spec = tools.spec(named: call.name) else {
+                    recorder?.permission(tool: call.name, decision: "unknown_tool")
                     record(args: call.argumentsJSON,
                            ToolResult(content: "Error: unknown tool '\(call.name)'. "
                                + "Available tools: \(tools.names.joined(separator: ", ")).",
@@ -292,6 +307,7 @@ public struct AgentLoop: Sendable {
                 let decision = (permissionBox?.policy ?? permission).decision(
                     toolName: call.name, isReadOnly: tool.isReadOnly, isFileEdit: tool.isFileEdit)
                 if case .deny(let reason) = decision {
+                    recorder?.permission(tool: call.name, decision: "deny", reason: reason)
                     record(args: call.argumentsJSON,
                            ToolResult(content: "Permission denied: \(reason)", isError: true))
                     continue
@@ -302,6 +318,7 @@ public struct AgentLoop: Sendable {
                 if case .ask = decision {
                     let approved = await (gate?.approve(
                         toolName: call.name, argumentsJSON: argsJSON) ?? false)
+                    recorder?.permission(tool: call.name, decision: approved ? "ask_approved" : "ask_declined")
                     if !approved {
                         record(args: argsJSON, ToolResult(
                             content: "Permission denied: the user declined to run '\(call.name)'.",
@@ -310,14 +327,17 @@ public struct AgentLoop: Sendable {
                     }
                 }
 
+                if case .allow = decision { recorder?.permission(tool: call.name, decision: "allow") }
                 onEvent?(.toolStarted(name: call.name, argumentsJSON: argsJSON))
-                record(args: argsJSON, await tool.run(argumentsJSON: argsJSON))
+                let t0 = DispatchTime.now().uptimeNanoseconds
+                let result = await tool.run(argumentsJSON: argsJSON)
+                record(args: argsJSON, result, ms: Int((DispatchTime.now().uptimeNanoseconds &- t0) / 1_000_000))
             }
             steps.append(AgentStep(assistantText: visible, toolCalls: invocations))
         }
 
-        if cancelled { onEvent?(.cancelled) }
-        else if hitLimit { onEvent?(.iterationLimitReached) }
+        if cancelled { recorder?.stop(reason: "cancelled"); onEvent?(.cancelled) }
+        else if hitLimit { recorder?.stop(reason: "iteration_limit"); onEvent?(.iterationLimitReached) }
 
         return AgentTranscript(
             steps: steps, finalText: finalText,
@@ -388,7 +408,11 @@ public struct AgentLoop: Sendable {
             messages: repairMessages,
             jsonSchema: ToolCalling.toolNameEnumSchema(offered: offered))
         guard let name = ToolCalling.parseRepairedToolName(reply, offered: offered)
-        else { return call }
+        else {
+            recorder?.retry(kind: "tool_name_repair", tool: call.name, detail: "failed")
+            return call
+        }
+        recorder?.retry(kind: "tool_name_repair", tool: call.name, detail: "repicked as \(name)")
         return ToolCalling.ParsedToolCall(name: name, argumentsJSON: call.argumentsJSON)
     }
 
@@ -410,8 +434,9 @@ public struct AgentLoop: Sendable {
         let repairMessages = history + [["role": "user", "content": ToolCalling.argsRegenPrompt(tool: spec)]]
         let repaired = await generator.completeConstrained(
             messages: repairMessages, jsonSchema: spec.parametersJSON)
-        return ToolCalling.argsSatisfySchema(
+        let ok = ToolCalling.argsSatisfySchema(
             argumentsJSON: repaired, parametersJSON: spec.parametersJSON)
-            ? repaired : call.argumentsJSON
+        recorder?.retry(kind: "arg_repair", tool: spec.name, detail: ok ? "accepted" : "rejected")
+        return ok ? repaired : call.argumentsJSON
     }
 }
