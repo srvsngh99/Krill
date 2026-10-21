@@ -1,6 +1,6 @@
 # Krill architecture
 
-Krill is a native Swift + MLX inference runtime for Apple Silicon. The `krill`
+Krill is a native Swift + MLX LLM engine and coding agent for Apple Silicon. The `krill`
 binary contains the model runtimes, tokenizer, caches, sampler, grammar engine,
 HTTP server, coding-agent harness, and terminal UI. Production inference does
 not call Python or `mlx-vlm`.

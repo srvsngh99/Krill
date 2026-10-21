@@ -7,6 +7,15 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.26.1 - 2026-10-22
+**Krill says what it is.** It is a local LLM engine and a coding agent in one
+Mac-native binary, and now `krill --help`, the startup banner, the Homebrew
+description and caveats, and the installer all say so, with the four ways in:
+run a model, give it work (`krill code`), serve it, or lend it to Claude Code or
+Codex (`krill launch`). Messaging only; nothing about how Krill runs changed.
+
+---
+
 ## v0.26.0 - 2026-10-22
 **Embeddings on the Neural Engine, one setting away.** New `embed_device = "gpu" |
 "ane" | "auto"` (also `KRILL_EMBED_DEVICE` and a per-request `device` field) picks

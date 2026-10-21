@@ -5,11 +5,12 @@ import KrillRegistry
 struct Krill: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "krill",
-        abstract: "Krill - a fast, lean LLM runtime, built for Mac.",
+        abstract: "Krill - the model and the agent, in one Mac-native binary.",
         discussion: """
-            A Mac-native LLM runtime on Apple's MLX framework: run open models \
-            locally with Metal acceleration - chat, a full-screen TUI with voice, \
-            an Ollama/OpenAI-compatible server, and native multimodal.
+            Runs open models locally on Apple's MLX framework (text, vision and \
+            voice), serves OpenAI-, Ollama- and Anthropic-compatible APIs, and \
+            runs its own coding agent (`krill code`) or lends its engine to other \
+            agents (`krill launch`).
 
             Run `krill run <model>` to chat, or set default_model in
             ~/.krill/config.toml and just run `krill`. A Sourav AI Labs project.

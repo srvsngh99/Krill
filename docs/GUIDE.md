@@ -1,6 +1,6 @@
 # Krill User Guide
 
-The complete, example-driven guide to using Krill — a Mac-native LLM runtime on
+The complete, example-driven guide to using Krill — a Mac-native LLM engine and coding agent on
 Apple's MLX framework. Run open models locally with Metal acceleration: chat, a
 full-screen TUI with voice, agentic coding, native multimodal (image / audio /
 OCR), and an Ollama / OpenAI / Anthropic–compatible server.
