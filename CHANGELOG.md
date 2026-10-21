@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.25.2] - 2026-10-21
+
 ### Fixed
 
 - **Embedding and rerank models now unload when idle.** They honoured neither
@@ -16,21 +18,20 @@ reverse chronological order. Versioning follows
   its full weights (384 MB 4-bit, 1.38 GB bf16) forever. They now use the chat path's
   keep-alive semantics, env vars and default (`5m`): past the TTL the weights and MLX's
   buffer cache are freed and the footprint drops to the bare-process baseline; the next
-  request reloads transparently. `keep_alive: 0` unloads right after the request.
+  request reloads transparently. `keep_alive: 0` unloads right after the request. (#340)
 - **Embedding batches are bounded by a padded-token budget.** A request is split into
   sub-batches of at most `KRILL_EMBED_MAX_BATCH_TOKENS` (default 512) sequences x padded
   length, so peak memory no longer scales with the request size (batch-8 work peaked at
   1.5-2.4 GB, batch 32 at 3.8 GB). Per-item vectors do not depend on the split. `/v1/rerank`
   is sub-batched the same way. The embed/rerank path also caps MLX's buffer cache at 64 MB
-  by default (`KRILL_MLX_CACHE_LIMIT_MB` still overrides).
+  by default (`KRILL_MLX_CACHE_LIMIT_MB` still overrides). (#340)
 - **Image embeddings no longer spike MLX memory by ~1.2 GB.** The vision tower's attention
   materialised a full `heads x patches x patches` score matrix for a 2,520-patch image; it
   now runs the query rows in blocks of `KRILL_VISION_ATTN_CHUNK` (default 1024, `0` = off) for
   sequences of 2,048+ patches. Softmax is per row, so the result is identical (cosine 1.0
   against 0.25.1); an image request peaks ~1.0 GB instead of ~2.0 GB on 4-bit. Image, video
   and audio tower outputs are also evaluated as they are produced instead of piling up in
-  one lazy graph.
-
+  one lazy graph. (#340)
 - **Long embedding inputs no longer spike MLX memory.** EmbeddingGemma 2's attention
   materialised `heads x L x L` scores plus a dense `L x L` window mask (and a 400 MB
   per-layer-input tensor): a single 8,192-token input peaked at 5.1 GB on 4-bit and 6.0 GB
@@ -38,18 +39,18 @@ reverse chronological order. Versioning follows
   `KRILL_EMBED_ATTN_BLOCK` query rows (default 512; sliding layers read only their
   +-512-key window) and compute the per-layer inputs one layer at a time. Same vectors
   (cosine 1.000000 against the previous build): 8,192 tokens peak 1.2 GB (4-bit) / 2.0 GB
-  (bf16) and run 30% faster, 2,048 tokens 0.63 GB (4-bit).
+  (bf16) and run 30% faster, 2,048 tokens 0.63 GB (4-bit). (#341)
 - **An embed/rerank request could lose its model to the idle unloader.** The server
   checked "is it due?" and then unloaded in two steps, so a request that began in between
   passed `load()` (already resident, a no-op) and then failed with "No embedding model
   loaded". The check and the unload are now one step inside the keep-alive actor, so a
-  request that has begun always vetoes the unload.
+  request that has begun always vetoes the unload. (#341)
 - **The image/audio towers now unload on their own.** EmbeddingGemma 2's vision and audio
   towers were loaded lazily but never released while the text model stayed warm. Each now
   has its own idle clock (same `keep_alive` / `KRILL_KEEP_ALIVE` semantics), armed only by
   requests that carry that modality: a text-only server that once served an image drops
   from 561 MB back to 334 MB after the TTL (4-bit), and to ~55 MB once the text model
-  expires too.
+  expires too. (#341)
 
 ### Changed
 
@@ -60,14 +61,14 @@ reverse chronological order. Versioning follows
   the 5,000-passage worst-case bulk set; ~55 MB resting after the idle unload).
   bf16 *compute* for the quantized builds was measured and left off (cosine 0.998-0.9995
   against fp32 compute, below the 0.9999 bar; one 8-bit MRR@10 delta significant); it stays
-  an opt-in via `KRILL_EMBED_DTYPE=bfloat16` (+20% speed, -100 MB).
+  an opt-in via `KRILL_EMBED_DTYPE=bfloat16` (+20% speed, -100 MB). (#341)
 
 ### Added
 
 - **Per-request and server-wide embedding input length.** `max_length` (or Ollama's
   `options.num_ctx`) on `/v1/embeddings`, `/api/embed` and `/api/embeddings`, and the
   `KRILL_EMBED_MAX_TOKENS` env var, cap the tokens per input (the smallest of the model
-  limit, the env cap and the request cap wins). Unset, the truncation length is unchanged.
+  limit, the env cap and the request cap wins). Unset, the truncation length is unchanged. (#340)
 
 ## [0.25.1] - 2026-10-20
 

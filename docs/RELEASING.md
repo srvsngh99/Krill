@@ -17,8 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| 2026-10-21 | #340 | Embedding/rerank idle unload (`keep_alive`), `KRILL_EMBED_MAX_BATCH_TOKENS` sub-batching (default 512), `max_length` / `options.num_ctx` / `KRILL_EMBED_MAX_TOKENS`, embed cache cap 64 MB, per-tower eval for media | A resting embedding server returns to the bare-process footprint after the TTL (default 5 min, then a reload on the next request); default embeddings behaviour otherwise unchanged and vectors identical. |
-| 2026-10-21 | #341 | EmbeddingGemma 2 long-input attention in blocks (`KRILL_EMBED_ATTN_BLOCK`), per-layer PLE, full-precision batch budget 2,048, per-tower (vision/audio) idle unload, atomic check-and-unload for embed/rerank keep-alive | An 8,192-token embed peaks ~1.2 GB instead of ~5 GB (4-bit); a text-only server that once served an image returns to its text-only footprint; quantized builds unchanged (512 budget, <1 GB), bf16 bulk faster at 2.0 GB. Vectors identical (cosine >= 0.9999999). bf16 compute for quantized builds measured and NOT adopted. |
+| _(empty - cleared at v0.25.2)_ | | | |
 
 ### Known-open, NOT yet merged
 

@@ -7,6 +7,20 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.25.2 - 2026-10-21
+**Embedding servers rest light and stay under 1 GB.** Embedding and reranker
+models now unload after the idle keep-alive (default 5 minutes, same
+`keep_alive` / `KRILL_KEEP_ALIVE` as chat), so a resting server drops to about
+55 MB; the next request reloads in under a second. Requests are split into
+bounded sub-batches, long inputs run attention in blocks, and the image and
+audio towers unload on their own: the quantized EmbeddingGemma 2 builds now
+peak under 800 MB for bulk indexing (was 1.5-3 GB) and an 8,192-token input
+peaks at 1.2 GB instead of 5 GB. New `max_length` (or `options.num_ctx`) and
+`KRILL_EMBED_MAX_TOKENS` cap input length. The full-precision build indexes
+faster (29 passages/s, was 26) at half the memory. Vectors are unchanged.
+
+---
+
 ## v0.25.1 - 2026-10-20
 **Embedding servers stay small.** Embedding and reranker servers no longer grow
 memory with every new input shape (17 GB down to under 1 GB in testing), and
