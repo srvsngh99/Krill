@@ -228,7 +228,13 @@ public enum Doctor {
 /// `codesign -dv`, `launchctl print` (print, never bootstrap/bootout), TCP connect + GET /healthz,
 /// `statfs`, directory listings.
 public struct LiveProbe: SystemProbe {
-    public init() {}
+    /// Directories scanned for launchd plists as `path` (user domain unless under /Library/LaunchDaemons).
+    /// `KRILL_DOCTOR_LAUNCHD_DIRS` (colon separated) replaces the defaults, for fixtures and tests.
+    private let launchDirs: [String]?
+
+    public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+        launchDirs = environment["KRILL_DOCTOR_LAUNCHD_DIRS"].map { $0.split(separator: ":").map(String.init) }
+    }
 
     public func platform() -> String {
         let v = ProcessInfo.processInfo.operatingSystemVersion
@@ -282,7 +288,8 @@ public struct LiveProbe: SystemProbe {
         let home = NSHomeDirectory()
         let uid = getuid()
         var jobs: [LaunchdJob] = []
-        let dirs = [("\(home)/Library/LaunchAgents", "gui/\(uid)"), ("/Library/LaunchAgents", "gui/\(uid)"), ("/Library/LaunchDaemons", "system")]
+        var dirs = [("\(home)/Library/LaunchAgents", "gui/\(uid)"), ("/Library/LaunchAgents", "gui/\(uid)"), ("/Library/LaunchDaemons", "system")]
+        if let override = launchDirs { dirs = override.map { ($0, $0.hasPrefix("/Library/LaunchDaemons") ? "system" : "gui/\(uid)") } }
         for (dir, domain) in dirs {
             let files = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
             for f in files where f.hasSuffix(".plist") {
