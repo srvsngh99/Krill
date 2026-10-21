@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import KrillObs
 import KrillEngine
 import KrillCache
 import KrillServer
@@ -69,6 +70,10 @@ struct ServeCommand: AsyncParsableCommand {
         }
         let host = self.host ?? config.serverHost
         let port = self.port ?? config.serverPort
+        // Local-only event log + unclean-exit breadcrumb (docs/OBSERVABILITY.md). Cleared on any
+        // orderly exit; a marker that survives a dead process is reported on the next start.
+        Obs.configure(kind: "serve", settings: config.obsSettings, port: port, version: KrillVersion)
+        defer { Obs.shutdown() }
         let rawAPIKey = self.apiKey ?? config.serverAPIKey
         let apiKey = ServerSecurity.normalizedAPIKey(rawAPIKey)
         if rawAPIKey != nil, apiKey == nil {
@@ -188,6 +193,11 @@ struct ServeCommand: AsyncParsableCommand {
                                auxKeepAliveSeconds: KeepAliveParse.duration(config.keepAlive) ?? 300,
                                embedDevice: config.embedDevice,
                                autoRestartOnUpgrade: config.autoRestartOnUpgrade)
-        try await server.start()
+        do {
+            try await server.start()
+        } catch {
+            Obs.emit("server_error", [("error", .string(String("\(error)".prefix(500))))])
+            throw error
+        }
     }
 }

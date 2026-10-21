@@ -36,6 +36,9 @@ struct Krill: AsyncParsableCommand {
             DebugCommand.self,
             UpdateCommand.self,
             VersionCommand.self,
+            LogsCommand.self,
+            DoctorCommand.self,
+            BugReportCommand.self,
         ],
         defaultSubcommand: RunCommand.self
     )

@@ -1,4 +1,5 @@
 import Foundation
+import KrillObs
 import KrillCore
 import KrillEngine
 import KrillHarness
@@ -21,6 +22,10 @@ final class ChatTUI {
     // Model / session
     private var engine: InferenceEngine
     private var modelName: String
+    /// Local session transcript for this TUI run (`~/.krill/sessions`); nil when `session_log = off`.
+    private var obsSession: SessionRecorder?
+    /// Which surface to stamp on the transcript: `run` (default) or `code`.
+    var obsSurface = "run"
     private var system: String?
     private let params: SamplingParams
     private let maxTokens: Int
@@ -282,6 +287,11 @@ final class ChatTUI {
     // MARK: - Run loop
 
     func run() async {
+        Obs.configure(kind: "cli", settings: KrillConfig.load().obsSettings, version: KrillVersion)
+        obsSession = SessionRecorder.start(
+            surface: obsSurface, project: FileManager.default.currentDirectoryPath,
+            model: modelName, provider: "local", version: KrillVersion)
+        defer { obsSession?.end(outcome: "exited"); Obs.shutdown() }
         raw.enter()
         resolveTheme()
         installWinch()
@@ -1664,7 +1674,8 @@ final class ChatTUI {
             tools: agentTools(),
             permission: permissionBox.policy,
             permissionBox: permissionBox,
-            gate: approver)
+            gate: approver,
+            recorder: obsSession)
 
         let queue = EventQueue()
         let prior = agentMessages
@@ -1975,6 +1986,7 @@ final class ChatTUI {
             effectivePolicy: permissionBox.policy)
         s.configureTools(agentTools(
             asker: s.asker, permissionBox: s.permissionBox, todoTool: s.todoTool))
+        s.recorder = obsSession
         nextSessionID += 1
         sessions.append(s)
         s.start(task: task, displayAs: displayAs)
@@ -2324,6 +2336,7 @@ final class ChatTUI {
             : (pendingAudio != nil ? "[voice message]"
                : (!pendingImages.isEmpty ? "[media]" : prompt)))
         view.append(Msg(role: .user, text: shown))
+        obsSession?.user(prompt.isEmpty ? shown : prompt)
         modelTurns.append((role: "user", content: modelPrompt))
         var messages: [[String: String]] = []
         // Chat carries the same ambient line as agent mode (date, cwd,
@@ -2423,7 +2436,11 @@ final class ChatTUI {
         if cancelled {
             synth.stop()                       // hush any in-flight speech
             view.append(Msg(role: .note, text: "(cancelled)"))
+            obsSession?.assistant(assistant)
+            obsSession?.stop(reason: "cancelled")
         } else {
+            obsSession?.assistant(assistant)
+            obsSession?.stop(reason: assistant.isEmpty ? "empty_reply" : "final_answer")
             modelTurns.append((role: "assistant", content: assistant))
             if let st = gen.stats() { recordTurnStats(st) }
             lastStatus = ""

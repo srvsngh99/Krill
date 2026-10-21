@@ -8,6 +8,7 @@ import KrillRegistry
 import KrillSampler
 import KrillTooling
 import KrillHarness
+import KrillObs
 
 /// Krill HTTP server providing OpenAI-compatible and Ollama-compatible endpoints.
 ///
@@ -84,7 +85,8 @@ public final class KrillServer: Sendable {
         embedEngine: EmbeddingEngine = EmbeddingEngine(),
         rerankEngine: RerankEngine = RerankEngine(),
         apiKey: String? = nil,
-        maxBodySizeOverride: Int? = nil
+        maxBodySizeOverride: Int? = nil,
+        trace: RequestTrace = RequestTrace()
     ) -> any ChannelHandler & Sendable {
         let activeRef = ActiveEngineRef(engine.isLoaded ? engine : nil)
         let engines = EngineRegistry(
@@ -98,7 +100,8 @@ public final class KrillServer: Sendable {
                     rerankEngine: rerankEngine,
                     apiKey: apiKey,
                     genQueue: GenerationQueue(numParallel: 1, maxQueue: 512),
-                    maxBodySizeOverride: maxBodySizeOverride)
+                    maxBodySizeOverride: maxBodySizeOverride,
+                    trace: trace)
     }
 
     /// Start the HTTP server (blocks until shutdown).
@@ -109,7 +112,10 @@ public final class KrillServer: Sendable {
             .serverChannelOption(.backlog, value: 256)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.configureHTTPServerPipeline().flatMap {
+                let trace = RequestTrace()
+                return channel.pipeline.configureHTTPServerPipeline().flatMap {
+                    channel.pipeline.addHandler(RequestLogHandler(trace: trace))
+                }.flatMap {
                     channel.pipeline.addHandler(
                         HTTPHandler(engines: self.engines, activeRef: self.activeRef,
                                     fallbackEngine: self.fallbackEngine, registry: self.registry,
@@ -121,7 +127,8 @@ public final class KrillServer: Sendable {
                                     corsOrigins: self.corsOrigins,
                                     defaultContextLimit: self.defaultContextLimit,
                                     genQueue: self.genQueue,
-                                    agentSessions: self.agentSessions)
+                                    agentSessions: self.agentSessions,
+                                    trace: trace)
                     )
                 }
             }
@@ -130,6 +137,13 @@ public final class KrillServer: Sendable {
 
         let channel = try await bootstrap.bind(host: host, port: port).get()
         logger.info("Krill server listening on http://\(host):\(port)")
+        _ = ProcessStats.startDate   // pin the process start before anything reads uptime
+        Obs.emit("server_start", [
+            ("version", .string(KrillVersion)), ("host", .string(host)), ("listen_port", .int(port)),
+            ("compat", .string(compat.rawValue)), ("embed_device", .string(embedDevice.rawValue)),
+            ("binary", .string(CommandLine.arguments.first.map { URL(fileURLWithPath: $0).path } ?? "")),
+            ("auth", .bool(apiKey != nil)),
+        ])
         print("Krill server listening on http://\(host):\(port)  (compat: \(compat.rawValue))")
         if compat.openAIEnabled {
             print("OpenAI API: http://\(host):\(port)/v1/chat/completions")
@@ -167,16 +181,31 @@ public final class KrillServer: Sendable {
         // prior single-model behavior.
         let pool = engines
         let evictor = Task {
+            var ticks = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 10 * 1_000_000_000)
+                ticks += 1
+                if ticks % 8640 == 0 {   // once a day: age/size retention for logs and sessions
+                    DispatchQueue.global(qos: .utility).async {
+                        Retention.pruneIfDue(settings: Obs.settings, minInterval: 20 * 3600)
+                    }
+                }
                 let evicted = await pool.evictExpired()
                 if !evicted.isEmpty {
                     self.logger.info("[KrillServer] auto-unloaded \(evicted.count) idle model(s): \(evicted.joined(separator: ", "))")
+                    for name in evicted {
+                        Obs.emit("keepalive_unload", [("model", .string(name)), ("kind", .string("generation")),
+                                                      ("rss_mb", .int(ProcessStats.physFootprintBytes() / 1_048_576))])
+                    }
                 }
                 let auxEvicted = await self.auxKeepAlive.evictExpired(
                     embedEngine: self.embedEngine, rerankEngine: self.rerankEngine)
                 if !auxEvicted.isEmpty {
                     self.logger.info("[KrillServer] auto-unloaded idle embed/rerank model(s): \(auxEvicted.joined(separator: ", "))")
+                    for name in auxEvicted {
+                        Obs.emit("keepalive_unload", [("model", .string(name)), ("kind", .string("embed_rerank")),
+                                                      ("rss_mb", .int(ProcessStats.physFootprintBytes() / 1_048_576))])
+                    }
                 }
             }
         }
@@ -188,6 +217,7 @@ public final class KrillServer: Sendable {
         ShutdownSignals.installDefaults()
         ShutdownSignals.setHandler { [self] sig in
             logger.info("[KrillServer] signal \(sig): shutting down")
+            Obs.emit("shutdown_signal", [("signal", .int(Int(sig)))])
             print("Received signal \(sig); shutting down...")
             let grace = ShutdownSignals.graceSeconds()
             // Backstop that does not depend on the async runtime being responsive.
@@ -216,13 +246,21 @@ public final class KrillServer: Sendable {
         evictor.cancel()
         try? await channel.close().get()          // listener closed: no new connections
         let queue = genQueue
+        var drained = true
         if await ShutdownSignals.waitForDrain(grace: grace, pending: { await queue.pending }) {
             await engines.unloadAll()
             _ = embedEngine.unload()
             _ = rerankEngine.unload()
         } else {
+            drained = false
             logger.info("[KrillServer] shutdown grace expired with requests in flight; exiting without unload")
         }
+        Obs.emit("server_stop", [
+            ("version", .string(KrillVersion)), ("drained", .bool(drained)),
+            ("uptime_s", .int(Int(ProcessStats.uptimeSeconds()))),
+            ("requests", .int(ServerMetrics.shared.totalRequests)), ("errors", .int(ServerMetrics.shared.totalErrors)),
+        ])
+        Obs.shutdown()          // flush, then clear the unclean-exit marker
         if let finish { finish() } else { ShutdownSignals.exitNow(0) }
     }
 
@@ -294,7 +332,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         if inputs.contains(where: { $0.usesAudio }) { out.append(auxKeepAlive.audio) }
         return out
     }
-    private let startedAt = Date()
+    /// Per-request facts shared with ``RequestLogHandler`` (model, tokens, queue wait, error).
+    let trace: RequestTrace
 
     private let maxBodySize: Int
     private let apiKey: String?
@@ -324,7 +363,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
          defaultContextLimit: Int? = nil,
          genQueue: GenerationQueue = GenerationQueue(numParallel: 1, maxQueue: 512),
          agentSessions: AgentSessionStore = AgentSessionStore(),
-         maxBodySizeOverride: Int? = nil) {
+         maxBodySizeOverride: Int? = nil,
+         trace: RequestTrace = RequestTrace()) {
+        self.trace = trace
         self.engines = engines
         self.activeRef = activeRef
         self.fallbackEngine = fallbackEngine
@@ -722,7 +763,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         await engines.retain(eng)
         do {
+            let waitStart = DispatchTime.now().uptimeNanoseconds
             try await genQueue.enter()
+            trace.addQueueWait(ms: Double(DispatchTime.now().uptimeNanoseconds &- waitStart) / 1e6)
             return true
         } catch {
             await engines.release(eng)     // rejected: balance the in-flight hold
@@ -750,7 +793,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private func tryEnterQueue(retaining eng: InferenceEngine? = nil) async -> Bool {
         await engines.retain(eng)          // hold from acceptance (P1), per model
         do {
+            let waitStart = DispatchTime.now().uptimeNanoseconds
             try await genQueue.enter()
+            trace.addQueueWait(ms: Double(DispatchTime.now().uptimeNanoseconds &- waitStart) / 1e6)
             return true
         } catch {
             await engines.release(eng)     // rejected: balance the in-flight hold
@@ -784,27 +829,41 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         enableThinking: Bool? = nil,
         reasoningEffort: String? = nil
     ) async -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
+        trace.setModel(eng.modelName)
+        let t = trace
+        // Record token counts on the request trace when the handler reads the final stats.
+        func traced(_ r: (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?))
+            -> (stream: AsyncStream<TokenEvent>, stats: @Sendable () -> GenerationStats?) {
+            (r.stream, {
+                let st = r.stats()
+                if let st {
+                    t.setStats(prompt: st.promptTokens, completion: st.generatedTokens,
+                               prefillSeconds: st.prefillTime, decodeSeconds: st.decodeTime)
+                }
+                return st
+            })
+        }
         if let sched = await engines.scheduler(for: eng) {
             // Current concurrency drives the load-adaptive spec/batch decision in
             // the scheduler (retain() already counted this request).
             let concurrency = await engines.inFlightCount(for: eng)
-            return await sched.submit(
+            return traced(await sched.submit(
                 messages: messages, params: params, maxTokens: maxTokens,
                 useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
                 imageData: imageData, audioData: audioData,
                 contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
                 format: format, currentConcurrency: concurrency, imagesData: imagesData,
                 wantLogprobs: wantLogprobs, topLogprobs: topLogprobs,
-                enableThinking: enableThinking, reasoningEffort: reasoningEffort)
+                enableThinking: enableThinking, reasoningEffort: reasoningEffort))
         }
-        return eng.generate(
+        return traced(eng.generate(
             messages: messages, params: params, maxTokens: maxTokens,
             useSpeculative: useSpeculative, usePrefixCache: usePrefixCache,
             imageData: imageData, audioData: audioData,
             contextLimit: contextLimit, promptTemplateOverride: promptTemplateOverride,
             format: format, imagesData: imagesData,
             enableThinking: enableThinking, reasoningEffort: reasoningEffort,
-            wantLogprobs: wantLogprobs, topLogprobs: topLogprobs)
+            wantLogprobs: wantLogprobs, topLogprobs: topLogprobs))
     }
 
     /// Prompt-shaped convenience over ``runGenerate(_:messages:...)`` mirroring
@@ -2100,31 +2159,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     // MARK: - Metrics: GET /metrics
 
     private func handleMetrics(context: ChannelHandlerContext) {
-        // Prometheus text format
-        let uptime = ProcessInfo.processInfo.systemUptime
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
-        let _ = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
-            }
-        }
-        let residentMB = Double(info.resident_size) / 1_048_576
-
-        let body = """
-        # HELP krill_up Whether the server is up
-        # TYPE krill_up gauge
-        krill_up 1
-        # HELP krill_model_loaded Whether a model is loaded
-        # TYPE krill_model_loaded gauge
-        krill_model_loaded \(displayEngine.isLoaded ? 1 : 0)
-        # HELP krill_resident_memory_mb Process resident memory in MB
-        # TYPE krill_resident_memory_mb gauge
-        krill_resident_memory_mb \(String(format: "%.1f", residentMB))
-        # HELP krill_uptime_seconds Process uptime in seconds
-        # TYPE krill_uptime_seconds counter
-        krill_uptime_seconds \(String(format: "%.0f", uptime))
-        """
+        // Prometheus text format. Uptime is the PROCESS's age (kernel start time); memory is the
+        // physical footprint (includes Metal/MLX buffers, which resident_size does not).
+        let body = Self.metricsBody(modelLoaded: displayEngine.isLoaded)
 
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "text/plain; version=0.0.4")
@@ -2137,6 +2174,40 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         buf.writeBytes(data)
         context.write(wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
         context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+    }
+
+    /// The `/metrics` document (also used by tests).
+    static func metricsBody(modelLoaded: Bool, metrics: ServerMetrics = .shared) -> String {
+        let footprintMB = Double(ProcessStats.physFootprintBytes()) / 1_048_576
+        let residentMB = Double(ProcessStats.residentBytes()) / 1_048_576
+        let mlxActiveMB = Double(EngineMemory.activeBytes) / 1_048_576
+        let mlxPeakMB = Double(EngineMemory.peakBytes) / 1_048_576
+        var o = """
+        # HELP krill_up Whether the server is up
+        # TYPE krill_up gauge
+        krill_up 1
+        # HELP krill_model_loaded Whether a model is loaded
+        # TYPE krill_model_loaded gauge
+        krill_model_loaded \(modelLoaded ? 1 : 0)
+        # HELP krill_memory_footprint_mb Process physical footprint in MB (includes Metal/MLX buffers)
+        # TYPE krill_memory_footprint_mb gauge
+        krill_memory_footprint_mb \(String(format: "%.1f", footprintMB))
+        # HELP krill_resident_memory_mb Process resident set size in MB (does NOT include MLX weights; prefer krill_memory_footprint_mb)
+        # TYPE krill_resident_memory_mb gauge
+        krill_resident_memory_mb \(String(format: "%.1f", residentMB))
+        # HELP krill_mlx_active_memory_mb MLX arrays currently alive, in MB
+        # TYPE krill_mlx_active_memory_mb gauge
+        krill_mlx_active_memory_mb \(String(format: "%.1f", mlxActiveMB))
+        # HELP krill_mlx_peak_memory_mb MLX active-memory high-water mark, in MB
+        # TYPE krill_mlx_peak_memory_mb gauge
+        krill_mlx_peak_memory_mb \(String(format: "%.1f", mlxPeakMB))
+        # HELP krill_uptime_seconds Seconds since this server process started
+        # TYPE krill_uptime_seconds counter
+        krill_uptime_seconds \(String(format: "%.0f", ProcessStats.uptimeSeconds()))
+
+        """
+        o += metrics.prometheus()
+        return o
     }
 
     // MARK: - OpenAI: GET /v1/models
@@ -2759,6 +2830,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let keepAlive = auxKeepAlive.rerank
         let keepAliveOverride = KeepAliveParse.seconds(from: json["keep_alive"])
         let modelName = manifest.name
+        trace.setModel(modelName)
 
         let started = CFAbsoluteTimeGetCurrent()
         Task {
@@ -2969,6 +3041,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
                 let result = try embed.embed(inputs: inputs, options: options)
                 servedBy = result.servedBy.rawValue
+                self.trace.setEmbed(device: servedBy, promptTokens: result.promptTokens, inputs: inputs.count)
                 self.logger.debug("[embed] \(modelName): \(inputs.count) input(s) served by \(servedBy)")
                 let totalNs = Int64((CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
                 let response: [String: Any]
@@ -3449,17 +3522,12 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     // MARK: - Status: GET /v1/status
 
     private func handleStatus(context: ChannelHandlerContext) {
-        let serverUptime = Date().timeIntervalSince(startedAt)
+        // Process age from the kernel start time. (This used to be a per-connection `Date()`, so it
+        // read 0 on every request.)
+        let serverUptime = ProcessStats.uptimeSeconds()
 
-        // Process memory
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
-        let _ = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
-            }
-        }
-        let residentMB = Double(info.resident_size) / 1_048_576
+        // Physical footprint includes Metal/MLX buffers; resident_size does not.
+        let residentMB = Double(ProcessStats.physFootprintBytes()) / 1_048_576
 
         // Installed models
         let installed = registry.listModels().map { $0.name }
@@ -3470,6 +3538,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             "model_loaded": active.isLoaded,
             "uptime_seconds": Int(serverUptime),
             "memory_mb": Int(residentMB),
+            "mlx_active_mb": EngineMemory.activeBytes / 1_048_576,
+            "mlx_peak_mb": EngineMemory.peakBytes / 1_048_576,
             "installed_models": installed,
             "embed_device": embedDeviceStatus(),
             "version": KrillVersion
@@ -3705,11 +3775,21 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         for (k, v) in corsHeaders() { headers.add(name: k, value: v) }
         for (k, v) in extraHeaders { headers.add(name: k, value: v) }
         let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
+        if status.code >= 400 { recordErrorBody(data) }
 
         context.write(wrapOutboundOut(.head(head)), promise: nil)
         var buf = ByteBufferAllocator().buffer(capacity: data.count)
         buf.writeBytes(data)
         context.write(wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
         context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+    }
+
+    /// Copy an error response's message onto the request trace so the event log says WHY it failed.
+    private func recordErrorBody(_ data: Data) {
+        guard let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let e = o["error"] else { return }
+        if let s = e as? String { trace.setError(s) }
+        else if let d = e as? [String: Any], let m = d["message"] as? String { trace.setError(m) }
+        else { trace.setError("\(e)") }
     }
 }

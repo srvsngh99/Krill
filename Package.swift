@@ -43,6 +43,9 @@ let package = Package(
         // split out so it is unit-testable without a terminal.
         .target(name: "KrillTUI", dependencies: []),
         .target(name: "KrillLaunch", dependencies: []),
+        // Local-only observability: event log, session transcripts, retention, redaction,
+        // doctor and bug-report logic. Foundation only, so it is portable and unit-testable.
+        .target(name: "KrillObs", dependencies: []),
         .target(
             name: "KrillRuntime",
             dependencies: []
@@ -97,6 +100,7 @@ let package = Package(
         .target(
             name: "KrillRegistry",
             dependencies: [
+                "KrillObs",
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "Logging", package: "swift-log"),
             ],
@@ -112,12 +116,13 @@ let package = Package(
         // lives in KrillCLI where InferenceEngine is wired.
         .target(
             name: "KrillHarness",
-            dependencies: ["KrillTooling"],
+            dependencies: ["KrillTooling", "KrillObs"],
             swiftSettings: kreachSettings
         ),
         .target(
             name: "KrillServer",
             dependencies: [
+                "KrillObs",
                 "KrillEngine",
                 "KrillCache",
                 "KrillRegistry",
@@ -151,6 +156,7 @@ let package = Package(
         .executableTarget(
             name: "KrillCLI",
             dependencies: [
+                "KrillObs",
                 "KrillEngine",
                 "KrillCore",
                 "KrillCache",
@@ -196,6 +202,7 @@ let package = Package(
             name: "KrillServerTests",
             dependencies: [
                 "KrillServer",
+                "KrillObs",
                 "KrillTooling",
                 "KrillEngine",
                 "KrillRegistry",
@@ -204,6 +211,10 @@ let package = Package(
                 .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ]
+        ),
+        .testTarget(
+            name: "KrillObsTests",
+            dependencies: ["KrillObs"]
         ),
         .testTarget(
             name: "KrillTUITests",

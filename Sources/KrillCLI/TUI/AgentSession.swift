@@ -1,4 +1,5 @@
 import Foundation
+import KrillObs
 import KrillEngine
 import KrillHarness
 
@@ -29,6 +30,8 @@ final class AgentSession {
     private var chipShown = false
     private(set) var startedAt = CFAbsoluteTimeGetCurrent()
     private(set) var lastStats: GenerationStats?
+    /// Shared local transcript of the TUI run this agent belongs to (nil = not recording).
+    var recorder: SessionRecorder?
 
     private final class StatsBox: @unchecked Sendable {
         private let lock = NSLock()
@@ -102,7 +105,8 @@ final class AgentSession {
             tools: tools,
             permission: permissionBox.policy,
             permissionBox: permissionBox,
-            gate: approver)
+            gate: approver,
+            recorder: recorder)
         // Capture only locals (loop/queue/strings) so the run closure stays
         // Sendable - no `self` capture. The transcript is stashed in the queue.
         let q = queue, prior = messages

@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import KrillObs
 import KrillLaunch
 import KrillRegistry
 import KrillServer
@@ -106,6 +107,26 @@ struct LaunchCommand: AsyncParsableCommand {
             print("  " + Ansi.hint("Tip: coding agents want a large context window; prefer a model/serve context >= 64k."))
         }
         print("")
+
+        // Local-only launch record: when and with what the agent was started. The agent owns its
+        // own transcript. `exec` replaces this process, so there is no "stop" to observe here;
+        // the record is closed as handed_off. Requests the agent makes to the server are tied back
+        // to this id through the X-Krill-Session header where the harness supports custom headers
+        // (Claude Code does), so `krill logs --session <id>` lists the server-side request ids.
+        Obs.configure(kind: "cli", settings: cfg.obsSettings, version: KrillVersion)
+        let launchSession = SessionRecorder.start(
+            surface: "launch", project: FileManager.default.currentDirectoryPath,
+            model: modelName, provider: "local", version: KrillVersion,
+            extra: [("agent", .string(profile.id)), ("base_url", .string(baseURL))],
+            settings: cfg.obsSettings)
+        if let sid = launchSession?.id {
+            setenv("KRILL_SESSION_ID", sid, 1)
+            if profile.wire == .anthropic, ProcessInfo.processInfo.environment["ANTHROPIC_CUSTOM_HEADERS"] == nil {
+                setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Krill-Session: \(sid)", 1)
+            }
+        }
+        launchSession?.end(outcome: "handed_off")
+        Obs.shutdown()
 
         // Export env, then replace this process with the agent so it owns the TTY.
         for (k, v) in env { setenv(k, expandTilde(v), 1) }

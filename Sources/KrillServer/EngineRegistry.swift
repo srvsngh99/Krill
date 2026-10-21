@@ -1,4 +1,5 @@
 import Foundation
+import KrillObs
 import os
 import Logging
 import KrillEngine
@@ -172,18 +173,34 @@ public actor EngineRegistry {
                 order: order, inFlight: inFlight) else {
                 throw PoolBusy(maxLoaded: maxLoaded)
             }
+            let victimName = entries[victim]?.engine.modelName ?? (victim as NSString).lastPathComponent
             entries[victim]?.engine.unload()
             entries.removeValue(forKey: victim)
             order.removeAll { $0 == victim }
             logger.info("evicted LRU model to make room (cap=\(self.maxLoaded))")
+            Obs.emit("model_evict", [
+                ("model", .string(victimName)), ("reason", .string("lru_make_room_for:\(name)")),
+                ("cap", .int(maxLoaded)), ("mlx_active_mb", .int(EngineMemory.activeBytes / 1_048_576)),
+                ("footprint_mb", .int(ProcessStats.physFootprintBytes() / 1_048_576)),
+            ])
         }
 
         let dir = registry.modelPath(name)
         let engine = InferenceEngine(modelDirectory: dir,
                                      prefixCache: prefixCache,
                                      kvCacheDtype: kvCacheDtype)
-        try await engine.load()
+        let loadStart = DispatchTime.now().uptimeNanoseconds
+        do {
+            try await engine.load()
+        } catch {
+            Obs.emit("model_load_failed", [
+                ("model", .string(name)), ("error", .string(String("\(error)".prefix(500)))),
+                ("ms", .double(Double(DispatchTime.now().uptimeNanoseconds &- loadStart) / 1e6)),
+            ])
+            throw error
+        }
         await engine.warmup()
+        let loadMs = Double(DispatchTime.now().uptimeNanoseconds &- loadStart) / 1e6
         entries[key] = Entry(engine: engine, lastUsed: Date(),
                              keepAlive: KeepAliveController(defaultSeconds: defaultKeepAliveSeconds),
                              scheduler: BatchScheduler(engine: engine,
@@ -192,6 +209,13 @@ public actor EngineRegistry {
         order.append(key)
         activeRef.set(engine)
         logger.info("loaded model '\(name)' (resident=\(self.entries.count)/\(self.maxLoaded))")
+        Obs.emit("model_load", [
+            ("model", .string(name)), ("family", .opt(engine.family)), ("ms", .double(loadMs)),
+            ("resident", .int(entries.count)), ("cap", .int(maxLoaded)),
+            ("mlx_active_mb", .int(EngineMemory.activeBytes / 1_048_576)),
+            ("mlx_peak_mb", .int(EngineMemory.peakBytes / 1_048_576)),
+            ("footprint_mb", .int(ProcessStats.physFootprintBytes() / 1_048_576)),
+        ])
         return engine
     }
 
@@ -296,7 +320,12 @@ public actor EngineRegistry {
     /// Unload every resident model and clear the active pointer. Used by
     /// `POST /v1/models/unload` (a deliberate, immediate force-unload).
     public func unloadAll() {
-        for (_, entry) in entries { entry.engine.unload() }
+        for (_, entry) in entries {
+            let n = entry.engine.modelName ?? "?"
+            entry.engine.unload()
+            Obs.emit("model_unload", [("model", .string(n)), ("reason", .string("unload_all")),
+                                      ("footprint_mb", .int(ProcessStats.physFootprintBytes() / 1_048_576))])
+        }
         entries.removeAll()
         order.removeAll()
         inFlight.removeAll()

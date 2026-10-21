@@ -1,4 +1,6 @@
 import Foundation
+import KrillRegistry
+import KrillObs
 import KrillEngine
 import KrillHarness
 import KrillTooling
@@ -301,6 +303,8 @@ final class RemoteAgentSession: @unchecked Sendable {
     /// call already emitted a `tool_call` event (a denied/unknown tool skips
     /// `toolStarted`, so its result must synthesize one).
     private var chipShown = false
+    /// Local transcript of this hosted session (nil when `session_log = off`).
+    var recorder: SessionRecorder?
 
     init(id: String, title: String, workspace: URL, modelName: String?,
          mode: PermissionMode, maxTokens: Int, maxIterations: Int) {
@@ -469,6 +473,7 @@ final class RemoteAgentSession: @unchecked Sendable {
 
     /// A run failed before the loop could start (no engine).
     func failRun(_ message: String) {
+        recorder?.error(message)
         emit(["type": "note", "text": message])
         lock.lock(); _status = .idle; runTask = nil; lock.unlock()
         emit(["type": "status", "status": Status.idle.rawValue])
@@ -545,6 +550,9 @@ public final class AgentSessionStore: @unchecked Sendable {
         let session = RemoteAgentSession(
             id: id, title: title, workspace: workspace, modelName: modelName,
             mode: mode, maxTokens: maxTokens, maxIterations: maxIterations)
+        session.recorder = SessionRecorder.start(
+            surface: "ui", project: workspace.path, model: modelName, provider: "local",
+            version: KrillVersion, extra: [("permission_mode", .string(mode.rawValue))], id: id)
         lock.lock()
         sessions[id] = session
         order.append(id)
@@ -570,6 +578,7 @@ public final class AgentSessionStore: @unchecked Sendable {
         order.removeAll { $0 == id }
         lock.unlock()
         session?.cancel()
+        session?.recorder?.end(outcome: "closed")
         return session
     }
 }
