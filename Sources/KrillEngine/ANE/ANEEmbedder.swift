@@ -119,17 +119,18 @@ final class CoreMLBucketRunner: ANEBucketRunner, @unchecked Sendable {
     private let options = MLPredictionOptions()
     private let lock = NSLock()
     private let outDim: Int
+    private let outputName: String
 
-    init(url: URL, seq: Int, hidden: Int, outDim: Int, units: MLComputeUnits) throws {
+    init(url: URL, seq: Int, hidden: Int, outDim: Int, outputName: String = "emb", units: MLComputeUnits) throws {
         let cfg = MLModelConfiguration()
         cfg.computeUnits = units
         self.model = try MLModel(contentsOf: url, configuration: cfg)
-        self.seq = seq; self.hidden = hidden; self.outDim = outDim
+        self.seq = seq; self.hidden = hidden; self.outDim = outDim; self.outputName = outputName
         embeds = try MLMultiArray(shape: [1, NSNumber(value: seq), NSNumber(value: hidden)], dataType: .float16)
         mask = try MLMultiArray(shape: [1, NSNumber(value: seq)], dataType: .float16)
         output = try MLMultiArray(shape: [1, NSNumber(value: outDim)], dataType: .float16)
         provider = try MLDictionaryFeatureProvider(dictionary: ["embeds": embeds, "mask": mask])
-        options.outputBackings = ["emb": output]
+        options.outputBackings = [outputName: output]
     }
 
     func run(tokenCount: Int, fill: (UnsafeMutablePointer<UInt16>, UnsafeMutablePointer<UInt16>) -> Void) throws -> [Float] {
@@ -146,8 +147,8 @@ final class CoreMLBucketRunner: ANEBucketRunner, @unchecked Sendable {
             do {
                 let result = try model.prediction(from: provider, options: options)
                 // With outputBackings the result wraps `output`; read through the result to be safe.
-                guard let arr = result.featureValue(for: "emb")?.multiArrayValue else {
-                    throw EmbeddingError.unsupported("Core ML model has no 'emb' output")
+                guard let arr = result.featureValue(for: outputName)?.multiArrayValue else {
+                    throw EmbeddingError.unsupported("Core ML model has no '\(outputName)' output")
                 }
                 let p = arr.dataPointer.bindMemory(to: UInt16.self, capacity: outDim)
                 for i in 0 ..< outDim { out[i] = Half.toFloat(p[i]) }
@@ -166,7 +167,7 @@ public extension ANEEmbedder {
         let outDim = manifest.outputDim
         return try ANEEmbedder(directory: directory, manifest: manifest) { bucket, dir in
             try CoreMLBucketRunner(url: dir.appendingPathComponent(bucket.path), seq: bucket.seq,
-                                   hidden: hidden, outDim: outDim, units: units)
+                                   hidden: hidden, outDim: outDim, outputName: manifest.outputName, units: units)
         }
     }
 }

@@ -151,15 +151,16 @@ public final class KrillServer: Sendable {
         if compat.ollamaEnabled {
             print("Ollama API: http://\(host):\(port)/api/chat")
         }
-        let aneInstalled = EmbedDeviceRouter.installedPackage(in: registry) != nil
+        let anePackages = EmbedDeviceRouter.installedPackages(in: registry)
+        let aneInstalled = !anePackages.isEmpty
         let effectiveEmbed = EmbedDeviceRouter.effective(
             setting: embedDevice, packageInstalled: aneInstalled, coreML: ANEPlatform.coreMLAvailable)
-        print("Embeddings: embed_device = \(embedDevice.rawValue) -> \(effectiveEmbed.rawValue)"
-              + (effectiveEmbed == .ane ? " (Neural Engine package: \(EmbedDeviceRouter.installedPackage(in: registry)?.lastPathComponent ?? "?"))" : ""))
+        print("Embeddings and rerank: embed_device = \(embedDevice.rawValue) -> \(effectiveEmbed.rawValue)"
+              + (effectiveEmbed == .ane ? " (Neural Engine packages: \(anePackages.map { $0.directory.lastPathComponent }.joined(separator: ", ")))" : ""))
         if embedDevice == .ane, effectiveEmbed != .ane {
             let why = ANEPlatform.coreMLAvailable
                 ? "no ANE package is installed (make ane-package; docs/ANE_EMBEDDER.md)" : "Core ML is unavailable here"
-            let msg = "WARNING: embed_device = ane but \(why); EmbeddingGemma 2 requests are served on the GPU."
+            let msg = "WARNING: embed_device = ane but \(why); embedding and rerank requests are served on the GPU."
             print(msg); logger.warning("\(msg)")
         }
         let uiHost = (host == "0.0.0.0" || host == "::") ? "localhost" : host
@@ -2826,6 +2827,25 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let topN = (json["top_n"] as? Int) ?? documents.count
         let returnDocs = (json["return_documents"] as? Bool) ?? false
+        var rerankOverride: EmbedDevice?
+        if let raw = json["device"], !(raw is NSNull) {
+            guard let d = EmbedDevice.parse(raw as? String) else {
+                sendJSON(context: context, status: .badRequest, body: [
+                    "error": "invalid 'device'; use one of: \(EmbedDevice.validValues)"])
+                return
+            }
+            rerankOverride = d
+        }
+        // The same `embed_device` setting that places embedders places rerankers: a package named
+        // `<reranker>-ane-lin8` serves the request on the Neural Engine, otherwise the GPU build does.
+        let rerankRoute = EmbedDeviceRouter.route(
+            requested: manifest.name, requestedDir: registry.modelPath(name), setting: embedDevice,
+            override: rerankOverride,
+            installedPackage: EmbedDeviceRouter.installedPackage(for: manifest.name, in: registry),
+            coreML: ANEPlatform.coreMLAvailable)
+        if let w = rerankRoute.warning, EmbedDeviceRouter.warned.first(manifest.name) {
+            logger.warning("[rerank] \(w)")
+        }
         let dir = registry.modelPath(name)
         let eventLoop = context.eventLoop
         nonisolated(unsafe) let ctx = context
@@ -2852,7 +2872,12 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             }
             do {
-                try await rerank.load(directory: dir)
+                do {
+                    try await rerank.load(directory: rerankRoute.directory)
+                } catch where rerankRoute.device == .ane {
+                    self.logger.warning("[rerank] ANE package \(rerankRoute.directory.lastPathComponent) failed to load (\(error)); serving \(modelName) on the GPU")
+                    try await rerank.load(directory: dir)
+                }
                 let result = try rerank.score(
                     query: query, documents: documents)
                 let totalNs = Int64(
@@ -2887,7 +2912,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 ]
                 self.sendJSONOnLoop(
                     context: ctx, eventLoop: eventLoop,
-                    status: .ok, body: response)
+                    status: .ok, body: response,
+                    extraHeaders: [("x-krill-embed-device", rerank.isLoadedOnANE ? "ane" : "gpu")])
             } catch {
                 let msg = String(describing: error).prefix(300)
                 self.sendJSONOnLoop(
@@ -2983,7 +3009,11 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         let initialRoute = EmbedDeviceRouter.route(
             requested: manifest.name, requestedDir: dir, setting: embedDevice, override: deviceOverride,
-            installedPackage: installedANEPackage(), coreML: ANEPlatform.coreMLAvailable)
+            installedPackage: EmbedDeviceRouter.installedPackage(for: manifest.name, in: registry),
+            coreML: ANEPlatform.coreMLAvailable)
+        if let w = initialRoute.warning, EmbedDeviceRouter.warned.first(manifest.name) {
+            logger.warning("[embed] \(w)")
+        }
         // BERT/nomic encoders are family .bert; decoder-LLM embedders (gte-Qwen2,
         // e5-mistral) keep their causal family (.qwen/.mistral/...) but ship a
         // sentence-transformers pooling head, which the engine detects on disk.
@@ -3093,17 +3123,17 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    private func installedANEPackage() -> URL? { EmbedDeviceRouter.installedPackage(in: registry) }
-
     /// The `embed_device` block of `/v1/status`.
     private func embedDeviceStatus() -> [String: Any] {
-        let pkg = installedANEPackage()
+        let pkgs = EmbedDeviceRouter.installedPackages(in: registry)
+        let pkg = pkgs.first?.directory
         let coreML = ANEPlatform.coreMLAvailable
         return [
             "setting": embedDevice.rawValue,
             "effective": EmbedDeviceRouter.effective(
                 setting: embedDevice, packageInstalled: pkg != nil, coreML: coreML).rawValue,
             "ane_package": pkg?.lastPathComponent ?? NSNull(),
+            "ane_packages": pkgs.map { ["model": $0.model, "package": $0.directory.lastPathComponent] },
             "core_ml": coreML,
         ]
     }

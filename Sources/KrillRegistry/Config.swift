@@ -171,7 +171,7 @@ public struct KrillConfig: Sendable {
     /// `KRILL_SHELL_OUTPUT_TO_MODEL` env. The TUI can toggle it per session.
     public var shellOutputToModel: Bool
 
-    /// Where the EmbeddingGemma 2 text embedder runs: `gpu` (default, MLX), `ane`
+    /// Where embedders and rerankers run (models with an ANE package): `gpu` (default, MLX), `ane`
     /// (Neural Engine package, with automatic MLX fallback for what it cannot serve)
     /// or `auto`. `embed_device` in config; `KRILL_EMBED_DEVICE` env (wins). Applied
     /// when the server starts. docs/ANE_EMBEDDER.md.

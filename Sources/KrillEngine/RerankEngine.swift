@@ -24,9 +24,14 @@ public final class RerankEngine: @unchecked Sendable {
     private var tokenizer: KrillTokenizer?
     private var loadedDir: URL?
     private var maxTokens: Int = 512
+    /// Neural Engine (Core ML) cross-encoder, set instead of `model` when the loaded directory is an ANE package.
+    private var ane: ANEEmbedder?
     private let lock = NSLock()
 
     public init() {}
+
+    /// True while a Neural Engine package serves requests.
+    public var isLoadedOnANE: Bool { withLock { ane != nil } }
 
     public var loadedModelName: String? {
         withLock { loadedDir?.lastPathComponent }
@@ -37,8 +42,8 @@ public final class RerankEngine: @unchecked Sendable {
     @discardableResult
     public func unload() -> Bool {
         let was: Bool = withLock {
-            let had = model != nil
-            model = nil; tokenizer = nil; loadedDir = nil
+            let had = model != nil || ane != nil
+            model = nil; tokenizer = nil; loadedDir = nil; ane = nil
             return had
         }
         if was { MLX.Memory.clearCache() }
@@ -48,7 +53,7 @@ public final class RerankEngine: @unchecked Sendable {
     public func isLoaded(directory: URL) -> Bool {
         withLock {
             loadedDir?.standardizedFileURL == directory.standardizedFileURL
-                && model != nil
+                && (model != nil || ane != nil)
         }
     }
 
@@ -64,12 +69,17 @@ public final class RerankEngine: @unchecked Sendable {
             self.tokenizer = tokenizer
             self.loadedDir = directory
             self.maxTokens = maxTokens
+            self.ane = nil
         }
     }
 
     /// Load (or hot-swap to) the reranker model in `directory`.
     public func load(directory: URL) async throws {
         if isLoaded(directory: directory) { return }
+        if ANEPackageManifest.exists(in: directory) {
+            try await loadANE(directory: directory)
+            return
+        }
         MLXMemoryConfig.apply(defaultMB: EmbeddingEngine.defaultCacheLimitMB)  // same unbounded buffer-pool growth as the embed path
 
         let configURL = directory.appendingPathComponent("config.json")
@@ -96,6 +106,32 @@ public final class RerankEngine: @unchecked Sendable {
         install(
             model: m, tokenizer: tok, directory: directory,
             maxTokens: config.maxPositionEmbeddings)
+    }
+
+    /// Load a Neural Engine cross-encoder package (`krill_ane.json`, kind `reranker`).
+    func loadANE(directory: URL, embedder injected: ANEEmbedder? = nil) async throws {
+        let manifest = try ANEPackageManifest.load(directory: directory)
+        guard manifest.kind == ANEPackageManifest.kindReranker, manifest.tokenizer == ANEPackageManifest.tokenizerKrill else {
+            throw RerankError.unavailable("\(directory.lastPathComponent) is not a reranker package")
+        }
+        let embedder: ANEEmbedder
+        if let injected {
+            embedder = injected
+        } else {
+            #if canImport(CoreML)
+            embedder = try ANEEmbedder.coreML(directory: directory, manifest: manifest)
+            #else
+            throw RerankError.unavailable("the Neural Engine reranker needs Core ML (macOS on Apple Silicon)")
+            #endif
+        }
+        let tok = try await KrillTokenizer(from: directory)
+        withLock {
+            self.model = nil
+            self.tokenizer = tok
+            self.loadedDir = directory
+            self.maxTokens = min(manifest.contextTokens, manifest.maxTokens)   // pairs never exceed the largest bucket
+            self.ane = embedder
+        }
     }
 
     public struct RerankResult: Sendable {
@@ -125,9 +161,10 @@ public final class RerankEngine: @unchecked Sendable {
         let model = self.model
         let tokenizer = self.tokenizer
         let cap = self.maxTokens
+        let aneEmbedder = self.ane
         lock.unlock()
 
-        guard let model, let tokenizer else {
+        guard (model != nil || aneEmbedder != nil), let tokenizer else {
             throw RerankError.notLoaded
         }
 
@@ -186,6 +223,18 @@ public final class RerankEngine: @unchecked Sendable {
             perPairIds.append(pairIds)
         }
 
+        if let aneEmbedder {
+            // Neural Engine: one fixed-shape batch-1 prediction per pair, the raw classifier logit out.
+            var logits = [Double](repeating: 0, count: perPairIds.count)
+            for (k, ids) in perPairIds.enumerated() {
+                let (raw, _) = try aneEmbedder.embed(tokenIDs: ids.map { Int32($0) })
+                guard let v = raw.first, v.isFinite else { throw RerankError.unavailable("non-finite score") }
+                logits[k] = Double(v)
+            }
+            return RerankResult(scores: logits.map { 1.0 / (1.0 + exp(-$0)) }, logits: logits, totalTokens: totalTokens)
+        }
+        guard let model else { throw RerankError.notLoaded }
+
         // Sub-batch by a padded-token budget (shared KRILL_EMBED_MAX_BATCH_TOKENS):
         // pairs are sorted by length, each chunk is padded to its own longest
         // pair, and a key-padding mask ([B, 1, 1, T], broadcast over heads and
@@ -235,10 +284,12 @@ public final class RerankEngine: @unchecked Sendable {
 
 public enum RerankError: Error, CustomStringConvertible {
     case notLoaded
+    case unavailable(String)
 
     public var description: String {
         switch self {
         case .notLoaded: return "No reranker model loaded"
+        case .unavailable(let m): return m
         }
     }
 }

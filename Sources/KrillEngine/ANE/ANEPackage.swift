@@ -1,4 +1,5 @@
 import Foundation
+import KrillCore
 
 // Platform-neutral half of the Neural Engine (Core ML) embedding backend:
 // package manifest, bucket selection and the fp16 embedding table. Nothing in
@@ -10,7 +11,7 @@ import Foundation
 public struct ANEPackageManifest: Codable, Equatable, Sendable {
     public static let fileName = "krill_ane.json"
     public static let backendCoreML = "coreml"
-    public static let supportedFormat = 1
+    public static let supportedFormat = 2
 
     public struct Bucket: Codable, Equatable, Sendable {
         /// Padded sequence length of the compiled model.
@@ -36,32 +37,104 @@ public struct ANEPackageManifest: Codable, Equatable, Sendable {
     }
 
     public let backend: String
+    /// 1 = EmbeddingGemma 2 only (PR 343); 2 adds the per-model fields below. Format 1 is still read.
     public let format: Int
     /// Weight variant label: `lin8` (int8 per-channel, default) or `fp16`.
     public let variant: String
-    /// Output (pre-truncation) embedding width.
+    /// Output (pre-truncation) embedding width; 1 for a reranker (the score).
     public let outputDim: Int
-    /// Host-side multiplier applied to gathered embedding rows (`sqrt(hidden)` for Gemma).
+    /// Host-side multiplier applied to gathered embedding rows (`sqrt(hidden)` for Gemma, 1 elsewhere).
     public let embedScale: Float
     /// Longest sequence the ANE buckets serve; longer inputs go to the fallback model.
     public let maxTokens: Int
     public let buckets: [Bucket]
     public let table: Table
-    /// Registry name of the MLX model that serves what the buckets cannot.
+    /// Registry name of the MLX model that serves what the buckets cannot (the GPU build of the same model).
     public let fallbackModel: String
+    // ---- format 2 ----
+    /// `embedder` or `reranker`.
+    public let kind: String
+    /// Registry name of the model this package was built from (nil for format 1: EmbeddingGemma 2).
+    public let model: String?
+    /// `mean`, `cls`, `last_token` (embedders) or `classifier` (cross-encoder score). Baked into the graph.
+    public let pooling: String
+    /// Where the token-embedding rows are gathered: `host` (the mapped fp16 table). `model` is reserved.
+    public let gather: String
+    /// `codepoint_bpe` (EmbeddingGemma 2) or `krill` (the tokenizer Krill's GPU path uses for that model).
+    public let tokenizer: String
+    /// Name of the Core ML output.
+    public let outputName: String
+    /// The model's own context in tokens (what the GPU path truncates to); defaults to `maxTokens`.
+    public let contextTokens: Int
+    /// Decoder embedders pool the last token, so exactly one trailing EOS is appended.
+    public let appendEOS: Bool
+    /// Matryoshka widths the model supports (nil = not an MRL model).
+    public let mrlDims: [Int]?
 
-    public init(backend: String = ANEPackageManifest.backendCoreML, format: Int = ANEPackageManifest.supportedFormat,
+    public static let kindEmbedder = "embedder"
+    public static let kindReranker = "reranker"
+    public static let tokenizerCodePointBPE = "codepoint_bpe"
+    public static let tokenizerKrill = "krill"
+
+    public init(backend: String = ANEPackageManifest.backendCoreML, format: Int = 1,
                 variant: String, outputDim: Int, embedScale: Float, maxTokens: Int,
-                buckets: [Bucket], table: Table, fallbackModel: String) {
+                buckets: [Bucket], table: Table, fallbackModel: String,
+                kind: String = ANEPackageManifest.kindEmbedder, model: String? = nil, pooling: String = "mean",
+                gather: String = "host", tokenizer: String = ANEPackageManifest.tokenizerCodePointBPE,
+                outputName: String = "emb", contextTokens: Int? = nil, appendEOS: Bool = false,
+                mrlDims: [Int]? = nil) {
         self.backend = backend; self.format = format; self.variant = variant
         self.outputDim = outputDim; self.embedScale = embedScale; self.maxTokens = maxTokens
         self.buckets = buckets; self.table = table; self.fallbackModel = fallbackModel
+        self.kind = kind; self.model = model; self.pooling = pooling; self.gather = gather
+        self.tokenizer = tokenizer; self.outputName = outputName
+        self.contextTokens = contextTokens ?? maxTokens; self.appendEOS = appendEOS; self.mrlDims = mrlDims
     }
 
     enum CodingKeys: String, CodingKey {
-        case backend, format, variant, buckets, table
+        case backend, format, variant, buckets, table, kind, model, pooling, gather, tokenizer
         case outputDim = "output_dim", embedScale = "embed_scale", maxTokens = "max_tokens"
-        case fallbackModel = "fallback_model"
+        case fallbackModel = "fallback_model", outputName = "output_name", contextTokens = "context_tokens"
+        case appendEOS = "append_eos", mrlDims = "mrl_dims"
+    }
+
+    /// Format 1 has none of the format-2 keys; they default to the EmbeddingGemma 2 values it implied.
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        let fmt = try c.decode(Int.self, forKey: .format)
+        let max = try c.decode(Int.self, forKey: .maxTokens)
+        self.init(backend: try c.decode(String.self, forKey: .backend), format: fmt,
+                  variant: try c.decode(String.self, forKey: .variant),
+                  outputDim: try c.decode(Int.self, forKey: .outputDim),
+                  embedScale: try c.decode(Float.self, forKey: .embedScale), maxTokens: max,
+                  buckets: try c.decode([Bucket].self, forKey: .buckets),
+                  table: try c.decode(Table.self, forKey: .table),
+                  fallbackModel: try c.decode(String.self, forKey: .fallbackModel),
+                  kind: try c.decodeIfPresent(String.self, forKey: .kind) ?? Self.kindEmbedder,
+                  model: try c.decodeIfPresent(String.self, forKey: .model),
+                  pooling: try c.decodeIfPresent(String.self, forKey: .pooling) ?? "mean",
+                  gather: try c.decodeIfPresent(String.self, forKey: .gather) ?? "host",
+                  tokenizer: try c.decodeIfPresent(String.self, forKey: .tokenizer) ?? Self.tokenizerCodePointBPE,
+                  outputName: try c.decodeIfPresent(String.self, forKey: .outputName) ?? "emb",
+                  contextTokens: try c.decodeIfPresent(Int.self, forKey: .contextTokens),
+                  appendEOS: try c.decodeIfPresent(Bool.self, forKey: .appendEOS) ?? false,
+                  mrlDims: try c.decodeIfPresent([Int].self, forKey: .mrlDims))
+    }
+
+    public func encode(to e: Encoder) throws {
+        var c = e.container(keyedBy: CodingKeys.self)
+        try c.encode(backend, forKey: .backend); try c.encode(format, forKey: .format)
+        try c.encode(variant, forKey: .variant); try c.encode(outputDim, forKey: .outputDim)
+        try c.encode(embedScale, forKey: .embedScale); try c.encode(maxTokens, forKey: .maxTokens)
+        try c.encode(buckets, forKey: .buckets); try c.encode(table, forKey: .table)
+        try c.encode(fallbackModel, forKey: .fallbackModel)
+        if format >= 2 {
+            try c.encode(kind, forKey: .kind); try c.encodeIfPresent(model, forKey: .model)
+            try c.encode(pooling, forKey: .pooling); try c.encode(gather, forKey: .gather)
+            try c.encode(tokenizer, forKey: .tokenizer); try c.encode(outputName, forKey: .outputName)
+            try c.encode(contextTokens, forKey: .contextTokens); try c.encode(appendEOS, forKey: .appendEOS)
+            try c.encodeIfPresent(mrlDims, forKey: .mrlDims)
+        }
     }
 
     public enum ManifestError: Error, CustomStringConvertible, Equatable {
@@ -84,9 +157,19 @@ public struct ANEPackageManifest: Codable, Equatable, Sendable {
         return m
     }
 
+    /// Format 1 is EmbeddingGemma 2 only; the matryoshka widths it implied.
+    public var effectiveMRLDims: [Int]? { format == 1 ? EmbeddingGemma2Config.mrlDimensions : mrlDims }
+
     public func validate() throws {
         guard backend == Self.backendCoreML else { throw ManifestError.invalid("unknown backend '\(backend)'") }
-        guard format == Self.supportedFormat else { throw ManifestError.invalid("unsupported format \(format)") }
+        guard (1 ... Self.supportedFormat).contains(format) else { throw ManifestError.invalid("unsupported format \(format)") }
+        guard kind == Self.kindEmbedder || kind == Self.kindReranker else { throw ManifestError.invalid("unknown kind '\(kind)'") }
+        guard gather == "host" else { throw ManifestError.invalid("unsupported gather '\(gather)'") }
+        guard tokenizer == Self.tokenizerCodePointBPE || tokenizer == Self.tokenizerKrill else {
+            throw ManifestError.invalid("unknown tokenizer '\(tokenizer)'")
+        }
+        guard ["mean", "cls", "last_token", "classifier"].contains(pooling) else { throw ManifestError.invalid("unknown pooling '\(pooling)'") }
+        guard !outputName.isEmpty, contextTokens > 0 else { throw ManifestError.invalid("bad output_name or context_tokens") }
         let single = buckets.filter { $0.batch == 1 }
         guard !single.isEmpty else { throw ManifestError.invalid("no batch-1 bucket") }
         guard Set(single.map(\.seq)).count == single.count else { throw ManifestError.invalid("duplicate bucket length") }

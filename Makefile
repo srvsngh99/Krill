@@ -24,13 +24,17 @@ KRILL_VENV_PYTHON ?= python3
 
 .PHONY: build release dev install uninstall clean test bench bench-compare bench-concurrent bench-gemma4-multimodal bench-release-gate parity-gate metallib dist dist-app app-bundle version ane-package
 
-# Neural Engine embedder package (docs/ANE_EMBEDDER.md): converts the installed bf16
-# EmbeddingGemma 2 to Core ML buckets in a throwaway venv. Offline tool; not part of the runtime.
+# Neural Engine package for any embedder or reranker (docs/ANE_EMBEDDER.md): converts the weights
+# `krill pull <MODEL>` already installed to Core ML buckets, parity-gates them against the GPU build through
+# `krill serve`, then installs <MODEL>-ane-<variant>. Offline tool; not part of the runtime.
+#   make ane-package MODEL=bge-base-en [ANE_VARIANT=fp16|auto] [ANE_CORPUS=corpus.json]
+# The parity gate needs a corpus (JSON {"queries": [...], "passages": [...]}) and the release binary.
 ANE_VENV ?= $(HOME)/.krill/ane-venv
 ANE_VARIANT ?= lin8
+MODEL ?= embeddinggemma-2
 ane-package:
 	@test -x "$(ANE_VENV)/bin/python3" || { python3 -m venv "$(ANE_VENV)" && "$(ANE_VENV)/bin/pip" install -q -r tools/ane/requirements.txt; }
-	"$(ANE_VENV)/bin/python3" tools/ane/build_ane_embedder.py --variant $(ANE_VARIANT) --register $(ANE_ARGS)
+	"$(ANE_VENV)/bin/python3" tools/ane/build_ane_package.py --model $(MODEL) --variant $(ANE_VARIANT) --krill $(CURDIR)/.build/release/krill $(ANE_ARGS)
 
 # Debug build (default)
 build:
