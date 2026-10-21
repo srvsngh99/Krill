@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.26.0] - 2026-10-22
+
 ### Added
 
 - **EmbeddingGemma 2 on the Neural Engine, chosen by `embed_device`.** `embed_device = "gpu" | "ane" | "auto"`
@@ -20,7 +22,7 @@ reverse chronological order. Versioning follows
   small. Responses carry `x-krill-embed-device`; `/v1/status` and the `krill serve` banner show the active device. If `ane`
   is set without the package the server warns loudly and serves on the GPU. Idle buckets unload through the existing
   keep-alive. The full-precision `embeddinggemma-2` build (the corpus/reference embedder) is never moved by the setting; only a request that sends `"device": "ane"` routes it. See
-  [`docs/ANE_EMBEDDER.md`](docs/ANE_EMBEDDER.md).
+  [`docs/ANE_EMBEDDER.md`](docs/ANE_EMBEDDER.md). (#343)
 
 ### Fixed
 
@@ -28,7 +30,7 @@ reverse chronological order. Versioning follows
   can leave ignored or blocked across `exec` (a backgrounded shell job ignores SIGINT; supervisors and agent runners hand
   down an ignored SIGTERM), so only SIGKILL stopped it. It now owns both signals from its first line: it stops accepting,
   lets in-flight requests finish for up to `KRILL_SHUTDOWN_GRACE_SECONDS` (default 3), unloads and exits 0 in under 5 s.
-  A second signal exits immediately.
+  A second signal exits immediately. (#343)
 
 ## [0.25.2] - 2026-10-21
 

@@ -7,6 +7,20 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.26.0 - 2026-10-22
+**Embeddings on the Neural Engine, one setting away.** New `embed_device = "gpu" |
+"ane" | "auto"` (also `KRILL_EMBED_DEVICE` and a per-request `device` field) picks
+where EmbeddingGemma 2 text embeddings run. On the Neural Engine a query takes about
+4 ms instead of 14 ms, uses about 6 mJ instead of 80 mJ, and the server peaks at
+about 160 MB and rests near 50 MB, with vectors matching full precision (cosine
+0.9993). Long inputs, images, audio and video go to the GPU automatically, and the
+full-precision `embeddinggemma-2` build is never moved by the setting. Build the
+package once with `make ane-package` (see docs/ANE_EMBEDDER.md); the default stays
+`gpu`. Also fixed: `krill serve` now stops cleanly on SIGTERM/SIGINT (in-flight
+requests get up to 3 s) instead of ignoring them.
+
+---
+
 ## v0.25.2 - 2026-10-21
 **Embedding servers rest light and stay under 1 GB.** Embedding and reranker
 models now unload after the idle keep-alive (default 5 minutes, same
