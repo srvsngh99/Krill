@@ -18,7 +18,7 @@
 
 ## What makes Krill different
 
-Ollama runs a model. Claude Code drives one. Krill does both, in one binary on your Mac. Most local-LLM stacks are one half of a pair:
+Most local-LLM stacks are one half of a pair:
 
 - an **engine** (Ollama, llama.cpp) that runs a model but can't *do* anything, and
 - a **harness** (Claude Code, Codex) that drives tools and edits files but borrows someone else's model.
