@@ -10,7 +10,7 @@ enum Brand {
     static let lab = "Sourav AI Labs"
     static let labMark = ">SAI_"             // the SAI lockup device (matches the brand lockup)
     static let labTagline = "INDEPENDENT AI LAB"
-    static let tagline = "A fast, lean LLM runtime, built for Mac."
+    static let tagline = "The model and the agent, in one Mac-native binary."
     static let site = "souravailabs.ai"
     static let chips = ["text \u{00B7} vision \u{00B7} audio", "agentic", "macOS-native"]
 

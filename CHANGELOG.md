@@ -9,6 +9,16 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.26.1] - 2026-10-22
+
+### Changed
+
+- **Krill now introduces itself as both an LLM engine and a coding agent.** The `krill --help` overview, the
+  startup banner tagline, the Homebrew formula description and post-install caveats, the installer's closing
+  line and the architecture and guide docs now say what the README already did: "the model and the agent, in one
+  Mac-native binary", with the four ways in (`krill run`, `krill code`, `krill serve`, `krill launch`). Messaging
+  only; no behaviour change.
+
 ## [0.26.0] - 2026-10-22
 
 ### Added

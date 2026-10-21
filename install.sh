@@ -148,4 +148,4 @@ case ":$PATH:" in
   *":$BINDIR:"*) : ;;
   *) info "Note: $BINDIR is not on your PATH. Add it with:  export PATH=\"$BINDIR:\$PATH\"" ;;
 esac
-info "Verify with 'krill version', then 'krill pull gemma-4-e2b' to grab a model."
+info "Next: krill pull gemma-4-e2b, then krill run gemma-4-e2b (chat + agent) or krill code \"<task>\"."
