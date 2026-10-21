@@ -6,6 +6,10 @@
 </p>
 
 <p align="center">
+  <b>Ollama runs a model. Claude Code drives one. Krill does both, in one binary on your Mac.</b>
+</p>
+
+<p align="center">
   A Mac-native LLM runtime that's also a coding agent.<br>
   One Swift + MLX binary — text, vision, and voice. No Python.
 </p>
@@ -14,7 +18,7 @@
 
 ## What makes Krill different
 
-Most local-LLM stacks are one half of a pair:
+Ollama runs a model. Claude Code drives one. Krill does both, in one binary on your Mac. Most local-LLM stacks are one half of a pair:
 
 - an **engine** (Ollama, llama.cpp) that runs a model but can't *do* anything, and
 - a **harness** (Claude Code, Codex) that drives tools and edits files but borrows someone else's model.
