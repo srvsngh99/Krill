@@ -99,6 +99,19 @@ git checkout -b release/vX.Y.Z
       sh <(curl -fsSL https://raw.githubusercontent.com/srvsngh99/Krill/main/install.sh)
     /tmp/krillcheck/bin/krill version
     ```
+12. **Sync the release to souravailabs.ai and deploy.** The site has one page per
+    version at `/lab/krill/releases`, so a release that stops at `gh release create`
+    leaves the site showing the previous version as the newest. Do this after step 11,
+    so notes are not published for a release that failed verification.
+    ```bash
+    cd ~/souravailabs
+    npm run sync:krill-releases   # writes content/krill-releases/vX.Y.Z.md from the GitHub release
+    ```
+    Read the new file before committing it. The site forbids em dashes and the sync
+    only swaps them for hyphens and flags them, so rewrite each flagged sentence by
+    meaning, and remove any PR numbers or hashes it lists. Commit the file through a PR
+    to `main`, merge, then from a clean `main` run `npm run deploy`. Both punctuation
+    scans in that repo's `docs/DEPLOY.md` must return zero before you deploy.
 
 ---
 
