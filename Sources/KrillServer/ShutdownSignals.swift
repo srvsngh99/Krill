@@ -69,6 +69,12 @@ public enum ShutdownSignals {
         state.lock.lock(); state.handler = h; state.lock.unlock()
     }
 
+    /// Enter the shutting-down state without a signal (self-restart on upgrade): new generation
+    /// requests get 503 and `parkWhileShuttingDown()` holds `main` until the drain path exits.
+    public static func beginShutdown() {
+        state.lock.lock(); state.shuttingDown = true; state.lock.unlock()
+    }
+
     static func resetForTesting() {
         state.lock.lock(); state.count = 0; state.handler = nil; state.shuttingDown = false; state.lock.unlock()
     }

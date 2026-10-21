@@ -186,7 +186,8 @@ struct ServeCommand: AsyncParsableCommand {
                                numParallel: config.numParallel,
                                maxQueue: config.maxQueue,
                                auxKeepAliveSeconds: KeepAliveParse.duration(config.keepAlive) ?? 300,
-                               embedDevice: config.embedDevice)
+                               embedDevice: config.embedDevice,
+                               autoRestartOnUpgrade: config.autoRestartOnUpgrade)
         try await server.start()
     }
 }
