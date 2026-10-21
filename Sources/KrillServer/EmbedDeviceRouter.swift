@@ -32,6 +32,9 @@ public enum EmbedDeviceRouter {
 
     public static func isANEPackageName(_ name: String) -> Bool { name.lowercased().contains("-ane-") }
 
+    /// The full-precision (bf16 weights, fp32 compute) EmbeddingGemma 2 build.
+    public static func isFullPrecision(_ name: String) -> Bool { name.lowercased() == "embeddinggemma-2" }
+
     /// - Parameters:
     ///   - requested: the `model` the client sent (registry name).
     ///   - requestedDir: its directory.
@@ -47,6 +50,9 @@ public enum EmbedDeviceRouter {
             return Decision(directory: requestedDir, fallbackDirectory: nil, device: .ane, warning: nil)
         }
         guard isEG2Text(requested) else { return gpu }
+        // The full-precision build is the corpus/reference embedder: the server-wide setting never
+        // moves it; only a request that explicitly asks for `ane`/`auto` does.
+        if isFullPrecision(requested), override == nil { return gpu }
         let want = override ?? setting
         switch want {
         case .gpu:

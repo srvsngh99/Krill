@@ -25,17 +25,34 @@ final class EmbedDeviceRouterTests: XCTestCase {
     }
 
     func testANEUsesPackageAndFallsBackToTheRequestedBuild() {
-        let d = route("embeddinggemma-2", dir: bf16, setting: .ane)
+        let d = route("embeddinggemma-2-8bit", setting: .ane)
         XCTAssertEqual(d.device, .ane)
         XCTAssertEqual(d.directory, pkg)
-        XCTAssertEqual(d.fallbackDirectory, bf16, "long text / media go to the build the client asked for")
+        XCTAssertEqual(d.fallbackDirectory, mlx, "long text / media go to the build the client asked for")
     }
 
-    func testEveryEG2TextAliasIsRouted() {
-        for name in ["embeddinggemma-2", "embeddinggemma-2-mlx-4bit-dyn-text", "embeddinggemma-2-4bit-dyn-text",
+    func testEveryQuantizedEG2TextAliasIsRouted() {
+        for name in ["embeddinggemma-2-mlx-4bit-dyn-text", "embeddinggemma-2-4bit-dyn-text",
                      "embeddinggemma-2-8bit", "embeddinggemma-2-6bit-dyn"] {
             XCTAssertEqual(route(name, setting: .ane).device, .ane, name)
+            XCTAssertEqual(route(name, setting: .auto).device, .ane, name)
         }
+    }
+
+    func testFullPrecisionBuildIgnoresTheServerSetting() {
+        for setting in [EmbedDevice.ane, .auto] {
+            let d = route("embeddinggemma-2", dir: bf16, setting: setting)
+            XCTAssertEqual(d.device, .gpu, "corpus/reference build stays on the GPU under \(setting)")
+            XCTAssertEqual(d.directory, bf16)
+            XCTAssertNil(d.warning)
+        }
+    }
+
+    func testFullPrecisionBuildMovesOnlyOnAnExplicitRequest() {
+        let d = route("embeddinggemma-2", dir: bf16, setting: .gpu, override: .ane)
+        XCTAssertEqual(d.device, .ane)
+        XCTAssertEqual(d.directory, pkg)
+        XCTAssertEqual(d.fallbackDirectory, bf16)
     }
 
     func testAutoUsesANEWhenAvailable() {

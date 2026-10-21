@@ -19,7 +19,7 @@ reverse chronological order. Versioning follows
   Kreach retrieval; 3.7 ms per query instead of 13.6 ms, about 6 mJ instead of 80 mJ, and the server process stays
   small. Responses carry `x-krill-embed-device`; `/v1/status` and the `krill serve` banner show the active device. If `ane`
   is set without the package the server warns loudly and serves on the GPU. Idle buckets unload through the existing
-  keep-alive. Corpus embedding keeps using the full-precision GPU build. See
+  keep-alive. The full-precision `embeddinggemma-2` build (the corpus/reference embedder) is never moved by the setting; only a request that sends `"device": "ane"` routes it. See
   [`docs/ANE_EMBEDDER.md`](docs/ANE_EMBEDDER.md).
 
 ### Fixed
