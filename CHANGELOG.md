@@ -11,6 +11,20 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- **Neural Engine packages for every embedder and reranker it serves well, behind the same `embed_device` toggle.** Any
+  registry embedder or reranker `<model>` may have a sibling package `<model>-ane-lin8` (or `-fp16`), built from the weights you
+  already pulled with `make ane-package MODEL=<model>` (`ANE_VARIANT=auto` tries int8 then fp16). With `embed_device = ane|auto` (config,
+  `KRILL_EMBED_DEVICE`, or a per-request `device` on `/v1/embeddings`, `/api/embed` and `/v1/rerank`) a request for `<model>` runs on
+  its package; a model without one stays on the GPU and the log carries one warning per model, never a failed request. The
+  builder gates every package before it installs it: embedders need cosine >= 0.999 (minimum over 200 queries and 200 passages)
+  against the GPU build through `krill serve`, rerankers Spearman >= 0.999, and a model that fails writes nothing. Supported and
+  measured on an M4 Pro: all-minilm-l6-v2, bge-small-en, bge-base-en, all-mpnet-base-v2, gte-base-en-v1.5, jina-embeddings-v2-base-en,
+  nomic-embed-text (v1 and v1.5), nomic-embed-text-v2-moe and bge-reranker-base: 1.7x to 4.4x faster at p50, process peak 8x to
+  32x lower (for example bge-base-en 8.9 to 2.6 ms and 1,044 to 34 MB), 100% of ops on the ANE. gte-large-en-v1.5 (ANE slower),
+  gte-modernbert-base (fails parity), the 7B decoders and, for now, gte-qwen2-1.5b and the larger rerankers stay GPU-only. The package
+  manifest is now format 2 (`kind`, `pooling`, `tokenizer`, `context_tokens`, `append_eos`, `mrl_dims`, ...); format-1 EmbeddingGemma 2
+  packages still load, and the full-precision `embeddinggemma-2` guard is unchanged. `/v1/status` lists `ane_packages`. See
+  [`docs/ANE_EMBEDDER.md`](docs/ANE_EMBEDDER.md).
 - **`krill serve` restarts itself onto a newly installed version, so `brew upgrade krill` is the only command.**
   Under launchd, the server polls (every 60 s, one `stat`) the binary it was launched as; when a different,
   usable version appears (stable for a second look, `codesign --verify` clean, `krill version` reports a new
