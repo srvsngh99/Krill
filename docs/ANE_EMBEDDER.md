@@ -30,9 +30,10 @@ curl -si localhost:57455/v1/embeddings -d '{"model":"embeddinggemma-2-mlx-4bit-d
 Krill has no per-model config section, so there is no per-model layer in that order.
 
 - **`gpu`**: the MLX path. Nothing changes.
-- **`ane`**: every EmbeddingGemma 2 text request (`embeddinggemma-2`, `embeddinggemma-2-mlx-4bit-dyn-text`,
-  `embeddinggemma-2-8bit`, ... any `embeddinggemma-2*` alias) is served by the ANE package. Other embedders
-  (BGE, nomic, ...) are never routed.
+- **`ane`**: every quantized EmbeddingGemma 2 text request (`embeddinggemma-2-mlx-4bit-dyn-text`,
+  `embeddinggemma-2-8bit`, `embeddinggemma-2-6bit-dyn`, ...) is served by the ANE package. The full-precision
+  `embeddinggemma-2` build is the corpus/reference embedder and **stays on the GPU whatever the setting**; only a
+  request that sends `"device": "ane"` (or `"auto"`) moves it. Other embedders (BGE, nomic, ...) are never routed.
 - **`auto`**: `ane` when this machine has Core ML (Apple Silicon macOS) and the package is installed, otherwise `gpu`, silently.
 
 If `ane` is set but the package is missing (or Core ML is unavailable) the server **starts anyway, prints a
