@@ -152,6 +152,13 @@ private func rmsNormNoScale(_ x: MLXArray, eps: Float) -> MLXArray {
 
 private func geluTanh(_ x: MLXArray) -> MLXArray { geluApproximate(x) }
 
+/// Mask description for the blocked long-input attention path (no dense L x L mask).
+struct EG2BlockedMask {
+    let keyMask: MLXArray?
+    /// Sliding half-width, nil on full-attention layers.
+    let window: Int?
+}
+
 final class EG2Attention: Module {
     @ModuleInfo(key: "q_proj") var qProj: Linear
     @ModuleInfo(key: "k_proj") var kProj: Linear
@@ -183,7 +190,53 @@ final class EG2Attention: Module {
                     base: cfg.isFull(layer) ? cfg.ropeThetaFull : cfg.ropeThetaSliding)
     }
 
-    func callAsFunction(_ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode) -> MLXArray {
+    /// Query rows per attention block on long inputs (`KRILL_EMBED_ATTN_BLOCK`, default 512;
+    /// 0 = never block). MLX's fused attention kernel does not cover head dims 256/512 in
+    /// every dtype, where it falls back to materialising `heads x L x L` scores (and the
+    /// dense L x L band mask): 2.3 GB of transients at 8,192 tokens. Blocking bounds the
+    /// scores to `block x keys`, and a sliding layer only touches its +-window keys.
+    static let attnBlock: Int = Int(ProcessInfo.processInfo.environment["KRILL_EMBED_ATTN_BLOCK"] ?? "") ?? 512
+    /// Inputs shorter than this keep the single-call path (small scores; blocking adds sync points).
+    static let attnBlockMinLength: Int = Int(ProcessInfo.processInfo.environment["KRILL_EMBED_ATTN_MIN"] ?? "") ?? 1024
+
+    static func usesBlockedAttention(length: Int, block: Int = attnBlock, minLength: Int = attnBlockMinLength) -> Bool {
+        block > 0 && length >= minLength && length > block
+    }
+
+    /// Bidirectional attention in query blocks. Softmax is per query row and each block sees
+    /// every key that row may attend to, so the result equals the single-call path.
+    /// `keyMask` is the additive key-padding mask `[B, 1, 1, T]` (nil when unpadded);
+    /// `window` is the sliding half-width (|i - j| <= window) or nil for a full layer.
+    static func blockedAttention(q: MLXArray, k: MLXArray, v: MLXArray, keyMask: MLXArray?,
+                                 window: Int?, block: Int = attnBlock) -> MLXArray {
+        let T = q.dim(2)
+        let zero = MLXArray(Float(0)).asType(q.dtype), neg = MLXArray(Float(-1e9)).asType(q.dtype)
+        var parts: [MLXArray] = []
+        var s = 0
+        while s < T {
+            let e = min(s + block, T)
+            let ks = window.map { max(0, s - $0) } ?? 0
+            let ke = window.map { min(T, e + $0) } ?? T
+            var mask = keyMask.map { $0[0..., 0..., 0..., ks ..< ke] }
+            if let w = window {
+                let i = MLXArray(Int32(s) ..< Int32(e)).reshaped(e - s, 1)
+                let j = MLXArray(Int32(ks) ..< Int32(ke)).reshaped(1, ke - ks)
+                let band = MLX.where(MLX.abs(i - j) .<= MLXArray(Int32(w)), zero, neg).reshaped(1, 1, e - s, ke - ks)
+                mask = mask.map { $0 + band } ?? band
+            }
+            let o = MLXFast.scaledDotProductAttention(
+                queries: q[0..., 0..., s ..< e, 0...], keys: k[0..., 0..., ks ..< ke, 0...],
+                values: v[0..., 0..., ks ..< ke, 0...], scale: 1.0,
+                mask: mask.map { .array($0) } ?? .none)
+            o.eval()
+            parts.append(o)
+            s = e
+        }
+        return concatenated(parts, axis: 2)
+    }
+
+    func callAsFunction(_ x: MLXArray, mask: MLXFast.ScaledDotProductAttentionMaskMode,
+                        blocked: EG2BlockedMask? = nil) -> MLXArray {
         let B = x.dim(0), L = x.dim(1)
         var q = qProj(x).reshaped(B, L, numHeads, headDim).transposed(0, 2, 1, 3)
         var k = kProj(x).reshaped(B, L, numKV, headDim).transposed(0, 2, 1, 3)
@@ -191,7 +244,9 @@ final class EG2Attention: Module {
         q = rope(qNorm(q))
         k = rope(kNorm(k))
         v = rmsNormNoScale(v, eps: eps)
-        let o = MLXFast.scaledDotProductAttention(
+        let o = blocked.map {
+            Self.blockedAttention(q: q, k: k, v: v, keyMask: $0.keyMask, window: $0.window)
+        } ?? MLXFast.scaledDotProductAttention(
             queries: q, keys: k, values: v, scale: 1.0, mask: mask)
         return oProj(o.transposed(0, 2, 1, 3).reshaped(B, L, numHeads * headDim))
     }
@@ -246,8 +301,9 @@ final class EG2Layer: Module {
     }
 
     func callAsFunction(_ x: MLXArray, perLayerInput: MLXArray,
-                        mask: MLXFast.ScaledDotProductAttentionMaskMode) -> MLXArray {
-        var h = x + postAttnNorm(attn(inputNorm(x), mask: mask))
+                        mask: MLXFast.ScaledDotProductAttentionMaskMode,
+                        blocked: EG2BlockedMask? = nil) -> MLXArray {
+        var h = x + postAttnNorm(attn(inputNorm(x), mask: mask, blocked: blocked))
         h = h + postFfnNorm(mlp(preFfnNorm(h)))
         h = ple(h, perLayerInput)
         return h * layerScalar
@@ -271,6 +327,24 @@ final class EG2PLE: Module {
         _norm = ModuleInfo(wrappedValue: RMSNorm(dimensions: cfg.pleDim, eps: cfg.rmsNormEps),
                            key: "per_layer_projection_norm")
     }
+    /// One layer's slice of ``callAsFunction(_:)``: `[B, T, H] -> [B, T, pleDim]`. The full
+    /// result is `B x T x numLayers x pleDim` (12,288 floats per token: 400 MB at 8,192
+    /// tokens in fp32) and every layer reads only its own 512 columns, so computing the
+    /// rows of the projection per layer keeps just one slice live. Output rows of a
+    /// matmul are independent, so this is the same product (quantized weights slice by row too).
+    func layerInput(_ embeds: MLXArray, layer i: Int) -> MLXArray {
+        let lo = i * pleDim, hi = lo + pleDim
+        let y: MLXArray
+        if let q = projection as? QuantizedLinear {
+            y = quantizedMM(embeds, q.weight[lo ..< hi, 0...], scales: q.scales[lo ..< hi, 0...],
+                            biases: q.biases.map { $0[lo ..< hi, 0...] }, transpose: true,
+                            groupSize: q.groupSize, bits: q.bits, mode: q.mode)
+        } else {
+            y = matmul(embeds, projection.weight[lo ..< hi, 0...].T)
+        }
+        return norm(y * MLXArray(scale).asType(embeds.dtype))
+    }
+
     /// `[B, T, H] -> [B, T, numLayers, pleDim]`
     func callAsFunction(_ embeds: MLXArray) -> MLXArray {
         let p = projection(embeds) * MLXArray(scale).asType(embeds.dtype)
@@ -333,10 +407,17 @@ public final class EmbeddingGemma2Model: Module, SentenceEmbeddingEncoder {
     /// compute dtype): text embeddings with any modality soft tokens scattered
     /// in. Per-layer inputs (PLE) are computed here, i.e. AFTER the merge, as in
     /// the reference (`language_model(inputs_embeds=...)`).
+    /// Forwards with at least this many tokens (batch x padded length) compute the PLE inputs per layer.
+    static let pleSliceMinTokens = 1024
+
     public func forward(inputsEmbeds: MLXArray, lengths: [Int]) -> MLXArray {
         let B = inputsEmbeds.dim(0), T = inputsEmbeds.dim(1)
         var h = inputsEmbeds
-        let perLayer = ple(h)  // [B, T, L, pleDim]
+        // Per-layer inputs (PLE): one full projection for small forwards (fewer kernel
+        // launches: single queries are latency-bound), one layer at a time once the
+        // `B x T x 12,288`-float result would be large (see EG2PLE.layerInput).
+        let slicedPLE = B * T >= Self.pleSliceMinTokens
+        let perLayer: MLXArray? = slicedPLE ? nil : ple(h)  // [B, T, L, pleDim]
 
         // Key-padding mask (only when the batch is actually padded) combined
         // with the sliding band for sliding layers.
@@ -352,7 +433,8 @@ public final class EmbeddingGemma2Model: Module, SentenceEmbeddingEncoder {
         let fullMode: MLXFast.ScaledDotProductAttentionMaskMode =
             keyMask.map { .array($0) } ?? .none
         var slidingMode = fullMode
-        if T > config.slidingWindow + 1 {
+        let blockedLong = EG2Attention.usesBlockedAttention(length: T)
+        if T > config.slidingWindow + 1 && !blockedLong {
             let i = MLXArray(0 ..< Int32(T)).reshaped(T, 1)
             let j = MLXArray(0 ..< Int32(T)).reshaped(1, T)
             let band = MLX.where(MLX.abs(i - j) .<= MLXArray(Int32(config.slidingWindow)), zero, neg)
@@ -361,8 +443,12 @@ public final class EmbeddingGemma2Model: Module, SentenceEmbeddingEncoder {
         }
 
         for (i, layer) in layers.enumerated() {
-            h = layer(h, perLayerInput: perLayer[0..., 0..., i, 0...],
-                      mask: config.isFull(i) ? fullMode : slidingMode)
+            let full = config.isFull(i)
+            h = layer(h, perLayerInput: perLayer.map { $0[0..., 0..., i, 0...] }
+                          ?? ple.layerInput(inputsEmbeds, layer: i),
+                      mask: full ? fullMode : slidingMode,
+                      blocked: blockedLong
+                          ? EG2BlockedMask(keyMask: keyMask, window: full ? nil : config.slidingWindow) : nil)
             if i % 6 == 5 { eval(h) }  // bound the lazy graph on long inputs
         }
         return embeddingProjection(norm(h))

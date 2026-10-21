@@ -31,6 +31,37 @@ reverse chronological order. Versioning follows
   and audio tower outputs are also evaluated as they are produced instead of piling up in
   one lazy graph.
 
+- **Long embedding inputs no longer spike MLX memory.** EmbeddingGemma 2's attention
+  materialised `heads x L x L` scores plus a dense `L x L` window mask (and a 400 MB
+  per-layer-input tensor): a single 8,192-token input peaked at 5.1 GB on 4-bit and 6.0 GB
+  on bf16, 2,048 tokens at 1.5 GB. Inputs of 1,024+ tokens now run attention in blocks of
+  `KRILL_EMBED_ATTN_BLOCK` query rows (default 512; sliding layers read only their
+  +-512-key window) and compute the per-layer inputs one layer at a time. Same vectors
+  (cosine 1.000000 against the previous build): 8,192 tokens peak 1.2 GB (4-bit) / 2.0 GB
+  (bf16) and run 30% faster, 2,048 tokens 0.63 GB (4-bit).
+- **An embed/rerank request could lose its model to the idle unloader.** The server
+  checked "is it due?" and then unloaded in two steps, so a request that began in between
+  passed `load()` (already resident, a no-op) and then failed with "No embedding model
+  loaded". The check and the unload are now one step inside the keep-alive actor, so a
+  request that has begun always vetoes the unload.
+- **The image/audio towers now unload on their own.** EmbeddingGemma 2's vision and audio
+  towers were loaded lazily but never released while the text model stayed warm. Each now
+  has its own idle clock (same `keep_alive` / `KRILL_KEEP_ALIVE` semantics), armed only by
+  requests that carry that modality: a text-only server that once served an image drops
+  from 561 MB back to 334 MB after the TTL (4-bit), and to ~55 MB once the text model
+  expires too.
+
+### Changed
+
+- **The full-precision EmbeddingGemma 2 build batches 2,048 padded tokens per forward**
+  (quantized builds keep 512). Bulk indexing runs at 29 passages/s against 26 on 0.25.1
+  (22 on the 512 budget) at a 2.0 GB peak instead of 3.8 GB; `KRILL_EMBED_MAX_BATCH_TOKENS` still overrides. Quantized
+  builds were measured flat across 512-2,048 and stay under 1 GB (770 MB lifetime peak on
+  the 5,000-passage worst-case bulk set; ~55 MB resting after the idle unload).
+  bf16 *compute* for the quantized builds was measured and left off (cosine 0.998-0.9995
+  against fp32 compute, below the 0.9999 bar; one 8-bit MRR@10 delta significant); it stays
+  an opt-in via `KRILL_EMBED_DTYPE=bfloat16` (+20% speed, -100 MB).
+
 ### Added
 
 - **Per-request and server-wide embedding input length.** `max_length` (or Ollama's

@@ -227,6 +227,14 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let rerankEngine: RerankEngine
     private let auxKeepAlive: AuxKeepAlive
     private let logger = KrillLogging.makeLogger("krill.http")
+
+    /// Tower keep-alive clocks a request must hold: vision for images/video, audio for audio.
+    private func towerControllers(for inputs: [EmbeddingInput]) -> [KeepAliveController] {
+        var out: [KeepAliveController] = []
+        if inputs.contains(where: { $0.usesVision }) { out.append(auxKeepAlive.vision) }
+        if inputs.contains(where: { $0.usesAudio }) { out.append(auxKeepAlive.audio) }
+        return out
+    }
     private let startedAt = Date()
 
     private let maxBodySize: Int
@@ -2695,10 +2703,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     // right away if it is already due (keep_alive: 0).
                     await keepAlive.endRequest()
                     await keepAlive.touch(override: keepAliveOverride)
-                    if await keepAlive.shouldEvict() {
-                        rerank.unload()
-                        await keepAlive.markEvicted()
-                    }
+                    await keepAlive.evictIfDue { rerank.unload() }
                 }
             }
             do {
@@ -2842,15 +2847,27 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             guard await self.enterQueueOr503(ctx, eventLoop) else { return }
             defer { self.leaveQueue() }
             await keepAlive.beginRequest()
+            // Media requests also hold (and later re-arm) their tower's own clock.
+            let towers = self.towerControllers(for: inputs)
+            for t in towers { await t.beginRequest() }
             defer {
                 Task {
                     // Arm the deadline from the END of the request, then unload
-                    // right away if it is already due (keep_alive: 0).
+                    // right away if it is already due (keep_alive: 0). Check and
+                    // unload are one actor step, so a request that begins in
+                    // between cannot lose its model.
                     await keepAlive.endRequest()
                     await keepAlive.touch(override: keepAliveOverride)
-                    if await keepAlive.shouldEvict() {
-                        embed.unload()
-                        await keepAlive.markEvicted()
+                    await keepAlive.evictIfDue { embed.unload() }
+                    for t in towers {
+                        await t.endRequest()
+                        await t.touch(override: keepAliveOverride)
+                    }
+                    if towers.contains(where: { $0 === self.auxKeepAlive.vision }) {
+                        await self.auxKeepAlive.vision.evictIfDue { embed.unloadVisionTower() }
+                    }
+                    if towers.contains(where: { $0 === self.auxKeepAlive.audio }) {
+                        await self.auxKeepAlive.audio.evictIfDue { embed.unloadAudioTower() }
                     }
                 }
             }
