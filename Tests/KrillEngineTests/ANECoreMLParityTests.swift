@@ -38,6 +38,32 @@ final class ANECoreMLParityTests: XCTestCase {
         XCTAssertEqual(embedder.loadedBuckets, [16, 32], "both buckets were needed and loaded lazily")
     }
 
+    /// Format-2 fixtures: a mean-pooled BERT embedder and a cross-encoder, each a tiny seeded random-weight model
+    /// (tools/ane/make_generic_fixtures.py) run through the real runner against the PyTorch fp32 output.
+    func testGenericEmbedderFixtureMatchesPyTorch() throws {
+        let dir = URL(fileURLWithPath: "\(#filePath)").deletingLastPathComponent().appendingPathComponent("Fixtures/ane_tiny_bert")
+        let manifest = try ANEPackageManifest.load(directory: dir)
+        let refs = try JSONDecoder().decode([Ref].self, from: Data(contentsOf: dir.appendingPathComponent("reference.json")))
+        let embedder = try ANEEmbedder.coreML(directory: dir, manifest: manifest, units: .cpuOnly)
+        for r in refs {
+            let (v, _) = try embedder.embed(tokenIDs: r.ids)
+            XCTAssertEqual(v.count, 32)
+            XCTAssertGreaterThan(cosine(v, r.vector), 0.999, "\(r.ids.count) tokens")
+        }
+    }
+
+    func testRerankerFixtureScoresMatchPyTorch() throws {
+        let dir = URL(fileURLWithPath: "\(#filePath)").deletingLastPathComponent().appendingPathComponent("Fixtures/ane_tiny_rerank")
+        let manifest = try ANEPackageManifest.load(directory: dir)
+        let refs = try JSONDecoder().decode([Ref].self, from: Data(contentsOf: dir.appendingPathComponent("reference.json")))
+        let embedder = try ANEEmbedder.coreML(directory: dir, manifest: manifest, units: .cpuOnly)
+        for r in refs {
+            let (v, _) = try embedder.embed(tokenIDs: r.ids)
+            XCTAssertEqual(v.count, 1, "one logit per pair")
+            XCTAssertEqual(v[0], r.vector[0], accuracy: 0.02 + 0.02 * abs(r.vector[0]), "\(r.ids.count) tokens")
+        }
+    }
+
     func testRepeatedPredictionsAreStable() throws {
         let dir = fixtureDir()
         let embedder = try ANEEmbedder.coreML(directory: dir, manifest: try ANEPackageManifest.load(directory: dir),

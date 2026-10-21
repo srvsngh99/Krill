@@ -42,6 +42,8 @@ public final class EmbeddingEngine: @unchecked Sendable {
     /// is created lazily and unloaded with this engine. See EmbeddingEngine+ANE.swift.
     var ane: ANEEmbedder?
     var aneFallbackDir: URL?
+    /// The package's tokenizer when it is Krill's own (every package but EmbeddingGemma 2). Also seeds the MLX fallback.
+    var aneTokenizer: KrillTokenizer?
     var fallback: EmbeddingEngine?
     let fallbackLock = NSLock()
 
@@ -83,6 +85,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
             self.audioTower = nil
             self.ane = nil
             self.aneFallbackDir = nil
+            self.aneTokenizer = nil
         }
         dropFallback()
     }
@@ -98,7 +101,10 @@ public final class EmbeddingEngine: @unchecked Sendable {
             return
         }
         if ANEPackageManifest.exists(in: directory) {
-            try loadANE(directory: directory, fallbackDirectory: fallbackDirectory)
+            let m = try ANEPackageManifest.load(directory: directory)
+            let tok: KrillTokenizer? = m.tokenizer == ANEPackageManifest.tokenizerKrill
+                ? try await KrillTokenizer(from: directory) : nil
+            try loadANE(directory: directory, fallbackDirectory: fallbackDirectory, krillTokenizer: tok)
             return
         }
 
@@ -123,7 +129,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
         try loadResolved(directory: directory, data: data, mt: "embedding_gemma2", tok: nil)
     }
 
-    private func loadResolved(directory: URL, data: Data, mt: String, tok: KrillTokenizer?) throws {
+    func loadResolved(directory: URL, data: Data, mt: String, tok: KrillTokenizer?) throws {
         // Bound MLX's Metal buffer-recycling pool. The embed path never went through
         // `loadModel` (which applies this for chat models), so the pool was left at MLX's
         // default (the device working set, ~16 GB on a 24 GB Mac). Embedding requests
@@ -311,7 +317,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
 
     /// Peek the `model_type` field from a raw config.json to select the encoder
     /// architecture without committing to a full config decode.
-    private static func modelType(from configData: Data) -> String? {
+    static func modelType(from configData: Data) -> String? {
         struct Peek: Decodable {
             let modelType: String?
             enum CodingKeys: String, CodingKey { case modelType = "model_type" }
@@ -371,8 +377,8 @@ public final class EmbeddingEngine: @unchecked Sendable {
         let aneEmbedder = self.ane
         lock.unlock()
 
-        if let aneEmbedder, let cpTokenizer {
-            return try embedANE(aneEmbedder, tokenizer: cpTokenizer, texts: texts, options: options,
+        if let aneEmbedder, let tk = aneTextTokenizer() {
+            return try embedANE(aneEmbedder, tokenizer: tk, texts: texts, options: options,
                                 cap: cap, prompts: prompts, mrl: mrl)
         }
         guard let model else { throw EmbeddingError.notLoaded }
@@ -788,7 +794,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
             let had = model != nil || ane != nil
             model = nil; tokenizer = nil; cpTokenizer = nil; loadedDir = nil
             prompts = nil; mrlDimensions = nil
-            ane = nil; aneFallbackDir = nil
+            ane = nil; aneFallbackDir = nil; aneTokenizer = nil
             return had
         }
         let hadFallback = dropFallback()

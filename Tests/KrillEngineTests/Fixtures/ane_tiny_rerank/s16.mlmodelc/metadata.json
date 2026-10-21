@@ -1,0 +1,83 @@
+[
+  {
+    "metadataOutputVersion" : "3.0",
+    "storagePrecision" : "Float16",
+    "outputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 1)",
+        "shortDescription" : "",
+        "shape" : "[1, 1]",
+        "name" : "score",
+        "type" : "MultiArray"
+      }
+    ],
+    "modelParameters" : [
+
+    ],
+    "specificationVersion" : 9,
+    "mlProgramOperationTypeHistogram" : {
+      "Ios18.linear" : 14,
+      "Ios18.sub" : 1,
+      "Ios18.matmul" : 4,
+      "Ios18.expandDims" : 2,
+      "Ios18.gelu" : 2,
+      "Ios18.add" : 7,
+      "Ios18.tanh" : 1,
+      "Ios18.softmax" : 2,
+      "Ios18.sliceByIndex" : 1,
+      "Ios18.layerNorm" : 5,
+      "Ios18.transpose" : 8,
+      "Ios18.reshape" : 8,
+      "Ios18.mul" : 3
+    },
+    "computePrecision" : "Mixed (Float16, Int32)",
+    "isUpdatable" : "0",
+    "stateSchema" : [
+
+    ],
+    "availability" : {
+      "macOS" : "15.0",
+      "tvOS" : "18.0",
+      "visionOS" : "2.0",
+      "watchOS" : "11.0",
+      "iOS" : "18.0",
+      "macCatalyst" : "18.0"
+    },
+    "modelType" : {
+      "name" : "MLModelType_mlProgram"
+    },
+    "userDefinedMetadata" : {
+      "com.github.apple.coremltools.conversion_date" : "2026-10-22",
+      "com.github.apple.coremltools.source" : "torch==2.14.1",
+      "com.github.apple.coremltools.version" : "9.0",
+      "com.github.apple.coremltools.source_dialect" : "TorchScript"
+    },
+    "inputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 16 × 32)",
+        "shortDescription" : "",
+        "shape" : "[1, 16, 32]",
+        "name" : "embeds",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 16)",
+        "shortDescription" : "",
+        "shape" : "[1, 16]",
+        "name" : "mask",
+        "type" : "MultiArray"
+      }
+    ],
+    "generatedClassName" : "s16",
+    "method" : "predict"
+  }
+]

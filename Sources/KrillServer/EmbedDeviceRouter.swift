@@ -5,12 +5,39 @@ import KrillRegistry
 /// Decides where one embedding request runs: the MLX build the client named (GPU) or the
 /// Neural Engine package. Pure, so the fallback cases are unit-tested without hardware.
 ///
-/// Only EmbeddingGemma 2 text builds are routed (`embeddinggemma-2`, `embeddinggemma-2-mlx-4bit-dyn-text`,
-/// ...). Every other embedder is left alone. A request that names an ANE package itself
-/// (`embeddinggemma-2-ane-lin8`) runs there regardless of the setting.
+/// Any embedder or reranker may have a sibling package `<model>-ane-lin8` (or `-fp16`); with `ane`/`auto` a request
+/// for `<model>` runs there, and a model without a package stays on the GPU. Every quantized EmbeddingGemma 2 text
+/// alias shares the `embeddinggemma-2` package. A request that names an ANE package itself
+/// (`bge-base-en-ane-lin8`) runs there regardless of the setting.
 public enum EmbedDeviceRouter {
-    /// ANE packages in preference order: int8 first, fp16 if only that is installed.
-    public static let packageNames = ["embeddinggemma-2-ane-lin8", "embeddinggemma-2-ane-fp16"]
+    /// Package variants in preference order: int8 first, fp16 if only that is installed.
+    public static let variants = ["lin8", "fp16"]
+    /// The EmbeddingGemma 2 packages (kept for callers that predate per-model packages).
+    public static let packageNames = variants.map { "embeddinggemma-2-ane-\($0)" }
+
+    /// The model whose package serves `requested`: quantized EmbeddingGemma 2 aliases share the
+    /// `embeddinggemma-2` package, every other model has its own.
+    public static func packageBase(for requested: String) -> String {
+        isEG2Text(requested) ? "embeddinggemma-2" : requested.lowercased()
+    }
+
+    /// Candidate package names for `requested`, preferred first.
+    public static func packageNames(for requested: String) -> [String] {
+        variants.map { "\(packageBase(for: requested))-ane-\($0)" }
+    }
+
+    /// Process-wide "warn once per model" ledger for an `ane` setting that could not be honoured.
+    public final class WarnOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var seen = Set<String>()
+        public init() {}
+        /// True the first time `model` is seen.
+        public func first(_ model: String) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            return seen.insert(model.lowercased()).inserted
+        }
+    }
+    public static let warned = WarnOnce()
 
     public struct Decision: Equatable, Sendable {
         /// Directory to load into the embed engine.
@@ -49,7 +76,6 @@ public enum EmbedDeviceRouter {
         if isANEPackageName(requested) {
             return Decision(directory: requestedDir, fallbackDirectory: nil, device: .ane, warning: nil)
         }
-        guard isEG2Text(requested) else { return gpu }
         // The full-precision build is the corpus/reference embedder: the server-wide setting never
         // moves it; only a request that explicitly asks for `ane`/`auto` does.
         if isFullPrecision(requested), override == nil { return gpu }
@@ -63,10 +89,10 @@ public enum EmbedDeviceRouter {
             }
             guard want == .ane else { return gpu }   // auto: quietly the GPU
             let why = coreML
-                ? "the ANE package is not installed (build it: make ane-package; see docs/ANE_EMBEDDER.md)"
+                ? "no ANE package is installed for \(requested) (build it: make ane-package MODEL=\(packageBase(for: requested)); see docs/ANE_EMBEDDER.md)"
                 : "Core ML is not available on this platform"
             return Decision(directory: requestedDir, fallbackDirectory: nil, device: .gpu,
-                            warning: "embed_device = ane but \(why); serving embeddings on the GPU")
+                            warning: "embed_device = ane but \(why); serving \(requested) on the GPU")
         }
     }
 
@@ -78,12 +104,26 @@ public enum EmbedDeviceRouter {
         }
     }
 
-    /// Directory of the first installed ANE package in `registry`, if any.
-    public static func installedPackage(in registry: Registry) -> URL? {
-        for n in packageNames where registry.hasModel(n) {
+    /// Directory of the first installed ANE package in `registry` for `model`, if any.
+    public static func installedPackage(for model: String, in registry: Registry) -> URL? {
+        for n in packageNames(for: model) where registry.hasModel(n) {
             let d = registry.modelPath(n)
             if ANEPackageManifest.exists(in: d) { return d }
         }
         return nil
     }
+
+    /// Every installed ANE package as (model it serves, package directory), sorted by model.
+    public static func installedPackages(in registry: Registry) -> [(model: String, directory: URL)] {
+        var out: [(String, URL)] = []
+        for m in registry.listModels() where isANEPackageName(m.name) {
+            let d = registry.modelPath(m.name)
+            guard ANEPackageManifest.exists(in: d), let mf = try? ANEPackageManifest.load(directory: d) else { continue }
+            out.append((mf.model ?? "embeddinggemma-2", d))
+        }
+        return out.sorted { $0.0 < $1.0 }.map { (model: $0.0, directory: $0.1) }
+    }
+
+    /// Directory of the first installed EmbeddingGemma 2 package, if any.
+    public static func installedPackage(in registry: Registry) -> URL? { installedPackage(for: "embeddinggemma-2", in: registry) }
 }
