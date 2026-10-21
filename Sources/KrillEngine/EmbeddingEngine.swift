@@ -32,6 +32,8 @@ public final class EmbeddingEngine: @unchecked Sendable {
     private var visionTower: EG2VisionTower?
     private var audioTower: EG2AudioTower?
     private var eg2Dtype: DType = .float32
+    /// Per-forward padded-token budget default of the loaded EG2 build (see `modelDefaultBudget`).
+    private var eg2DefaultBudget = EmbeddingEngine.defaultPaddedTokenBudget
     private var eg2Tokens = EG2ModalityTokens.checkpointDefaults
     private let towerLock = NSLock()
 
@@ -109,7 +111,10 @@ public final class EmbeddingEngine: @unchecked Sendable {
             let dtype: DType = Self.envDtype() ?? .float32
             cpTok = try CodePointBPETokenizer(directory: directory)
             let loaded = try loadEmbeddingGemma2(directory: directory, dtype: dtype)
-            withLock { eg2Dtype = dtype; eg2Tokens = loaded.model.config.modalityTokens }
+            withLock {
+                eg2Dtype = dtype; eg2Tokens = loaded.model.config.modalityTokens
+                eg2DefaultBudget = Self.modelDefaultBudget(quantized: loaded.report.quantizedText > 0)
+            }
             model = loaded.model
             maxTokens = EmbeddingGemma2Config.maxContext
             pooling = .mean
@@ -319,6 +324,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
         let eos = self.eosTokenId
         let prompts = self.prompts
         let mrl = self.mrlDimensions
+        let budget = Self.paddedTokenBudget(modelDefault: self.eg2DefaultBudget)
         lock.unlock()
 
         guard let model else { throw EmbeddingError.notLoaded }
@@ -332,7 +338,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
             guard let cpTokenizer else { throw EmbeddingError.notLoaded }
             return try embedGemma2(eg, tokenizer: cpTokenizer, texts: texts.map { prefix + $0 },
                                    cap: cap, dimensions: options.dimensions,
-                                   tokenBudget: Self.paddedTokenBudget())
+                                   tokenBudget: budget)
         }
         guard let tokenizer else { throw EmbeddingError.notLoaded }
 
@@ -407,6 +413,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
         let prompts = self.prompts
         let mrl = self.mrlDimensions
         let tokens = self.eg2Tokens
+        let budget = Self.paddedTokenBudget(modelDefault: self.eg2DefaultBudget)
         lock.unlock()
         guard let model else { throw EmbeddingError.notLoaded }
         guard let eg = model as? EmbeddingGemma2Model, let cp = cpTokenizer else {
@@ -426,7 +433,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
                                     cap: EmbeddingRequestOptions.effectiveTokenCap(
                                         modelCap: EmbeddingGemma2Config.maxContext, requestCap: options.maxLength),
                                     dimensions: options.dimensions,
-                                    tokenBudget: Self.paddedTokenBudget())
+                                    tokenBudget: budget)
             for (k, i) in textIdx.enumerated() { out[i] = r.vectors[k] }
             total += r.promptTokens
         }
@@ -572,6 +579,29 @@ public final class EmbeddingEngine: @unchecked Sendable {
         }
     }
 
+    /// Drop the vision tower only (text tower stays resident); frees its weights and
+    /// MLX's buffer cache. The next image/video request reloads it. Returns true if resident.
+    @discardableResult
+    public func unloadVisionTower() -> Bool {
+        towerLock.lock()
+        let was = visionTower != nil
+        visionTower = nil
+        towerLock.unlock()
+        if was { MLX.Memory.clearCache() }
+        return was
+    }
+
+    /// Drop the audio tower only (see ``unloadVisionTower()``).
+    @discardableResult
+    public func unloadAudioTower() -> Bool {
+        towerLock.lock()
+        let was = audioTower != nil
+        audioTower = nil
+        towerLock.unlock()
+        if was { MLX.Memory.clearCache() }
+        return was
+    }
+
     /// True once the lazily loaded audio tower is resident (tests / diagnostics).
     public var isAudioTowerLoaded: Bool { towerLock.lock(); defer { towerLock.unlock() }; return audioTower != nil }
 
@@ -594,6 +624,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
     private func embedGemma2(_ model: EmbeddingGemma2Model, tokenizer: CodePointBPETokenizer,
                              texts: [String], cap: Int, dimensions: Int?,
                              tokenBudget: Int) throws -> EmbedResult {
+        let t0 = CFAbsoluteTimeGetCurrent()
         var encoded: [[Int32]] = texts.map { t in
             var ids = tokenizer.encode(t)
             // Truncate keeping the trailing <eos>, like HF `truncation=True`.
@@ -601,6 +632,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
             else if ids.count > cap { ids = Array(ids.prefix(cap)) }
             return ids.map { Int32($0) }
         }
+        let tokenizeMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
         let total = encoded.reduce(0) { $0 + $1.count }
         let order = encoded.indices.sorted { encoded[$0].count < encoded[$1].count }
         var out = [[Float]](repeating: [], count: texts.count)
@@ -625,6 +657,11 @@ public final class EmbeddingEngine: @unchecked Sendable {
             }
         }
         encoded.removeAll()
+        if ProcessInfo.processInfo.environment["KRILL_EMBED_LOG_MEM"] != nil {
+            FileHandle.standardError.write(Data(String(
+                format: "EmbeddingGemma2: %d texts, %d tokens, tokenize %.0f ms, total %.0f ms\n",
+                texts.count, total, tokenizeMs, (CFAbsoluteTimeGetCurrent() - t0) * 1000).utf8))
+        }
         logPeakMemory()
         return EmbedResult(vectors: out, promptTokens: total)
     }
@@ -648,11 +685,24 @@ public final class EmbeddingEngine: @unchecked Sendable {
 
     /// `KRILL_EMBED_MAX_BATCH_TOKENS` (positive integer) or the default.
     public static func paddedTokenBudget(
+        modelDefault: Int = defaultPaddedTokenBudget,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Int {
         if let raw = environment[batchTokensEnvVar]?.trimmingCharacters(in: .whitespaces),
            let n = Int(raw), n > 0 { return n }
-        return defaultPaddedTokenBudget
+        return modelDefault
+    }
+
+    /// Default budget for the full-precision (non-quantized) EmbeddingGemma 2 build, the
+    /// bulk-embedding build whose weights already put it well past 1 GB (fp32 compute
+    /// copy of the bf16 weights): a larger forward is ~15% faster at +0.2 GB peak
+    /// (measured, M4 Pro: 28.4 -> 32.6 passages/s). Quantized builds stay at 512, where
+    /// throughput is flat in the budget and the lifetime peak stays under 1 GB.
+    public static let defaultPaddedTokenBudgetFullPrecision = 2048
+
+    /// Budget default for a loaded EmbeddingGemma 2 build.
+    static func modelDefaultBudget(quantized: Bool) -> Int {
+        quantized ? defaultPaddedTokenBudget : defaultPaddedTokenBudgetFullPrecision
     }
 
     /// Split `lengths` (sorted ascending by the caller) into consecutive

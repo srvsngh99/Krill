@@ -117,6 +117,22 @@ public actor KeepAliveController {
         return now >= deadline
     }
 
+    /// Check-and-unload as ONE actor step. `shouldEvict()` followed by a separate
+    /// unload leaves a window in which a request can `beginRequest()` and pass
+    /// `load()` (already resident, so a no-op) just before the unload lands, then
+    /// find its model gone. Running `unload` inside the actor means a concurrent
+    /// `beginRequest()` is ordered strictly before the check (so `inFlight > 0`
+    /// vetoes the eviction) or after the unload (so its `load()` reloads).
+    /// `unload` runs synchronously on the actor; it must be quick and non-blocking
+    /// on this controller. Returns whether the slot was due (and was reset).
+    @discardableResult
+    public func evictIfDue(now: Date = Date(), unload: () -> Void) -> Bool {
+        guard shouldEvict(now: now) else { return false }
+        unload()
+        markEvicted()
+        return true
+    }
+
     public func expiresAt() -> Date? { deadline }
 
     public func markEvicted() {

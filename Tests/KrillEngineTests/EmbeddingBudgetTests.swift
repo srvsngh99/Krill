@@ -40,6 +40,17 @@ final class EmbeddingBudgetTests: XCTestCase {
         }
     }
 
+    func testModelDefaultBudgetFollowsPrecisionAndEnvStillWins() {
+        XCTAssertEqual(EmbeddingEngine.modelDefaultBudget(quantized: true), 512)
+        XCTAssertEqual(EmbeddingEngine.modelDefaultBudget(quantized: false), 2048)
+        let full = EmbeddingEngine.modelDefaultBudget(quantized: false)
+        XCTAssertEqual(EmbeddingEngine.paddedTokenBudget(modelDefault: full, environment: [:]), 2048)
+        XCTAssertEqual(EmbeddingEngine.paddedTokenBudget(
+            modelDefault: full, environment: ["KRILL_EMBED_MAX_BATCH_TOKENS": "512"]), 512)
+        XCTAssertEqual(EmbeddingEngine.paddedTokenBudget(
+            modelDefault: full, environment: ["KRILL_EMBED_MAX_BATCH_TOKENS": "junk"]), 2048)
+    }
+
     // MARK: max input length
 
     func testDefaultCapIsModelCapUnchanged() {

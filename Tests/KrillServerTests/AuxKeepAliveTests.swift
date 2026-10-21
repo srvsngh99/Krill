@@ -48,3 +48,74 @@ final class AuxKeepAliveTests: XCTestCase {
         XCTAssertTrue(five)
     }
 }
+
+/// Check-and-unload atomicity and independent tower clocks.
+final class AuxKeepAliveRaceTests: XCTestCase {
+    private final class Slot: @unchecked Sendable {
+        private let lock = NSLock()
+        private var resident = true
+        func unload() { lock.lock(); resident = false; lock.unlock() }
+        /// What `load()` does: no-op when resident, else reload.
+        func ensureLoaded() { lock.lock(); resident = true; lock.unlock() }
+        var isResident: Bool { lock.lock(); defer { lock.unlock() }; return resident }
+    }
+
+    /// A request that has begun must never see its model unloaded under it, however the
+    /// evictor interleaves. (With a separate shouldEvict() then unload() this fails.)
+    func testEvictIfDueNeverUnloadsUnderABegunRequest() async {
+        for _ in 0 ..< 300 {
+            let c = KeepAliveController(defaultSeconds: 0)
+            await c.touch(override: 0)          // due: nothing in flight
+            let slot = Slot()
+            async let evict: Bool = c.evictIfDue { slot.unload() }
+            async let request: Bool = {
+                await c.beginRequest()
+                slot.ensureLoaded()              // load(): reloads only if the evictor won
+                await Task.yield()
+                let held = slot.isResident       // embed() reads the model here
+                await c.endRequest()
+                return held
+            }()
+            let (_, held) = await (evict, request)
+            XCTAssertTrue(held, "request lost its model between load() and embed()")
+        }
+    }
+
+    func testEvictIfDueResetsAndRespectsInFlight() async {
+        let c = KeepAliveController(defaultSeconds: 1)
+        await c.beginRequest()
+        var ran = false
+        var due = await c.evictIfDue(now: Date().addingTimeInterval(100)) { ran = true }
+        XCTAssertFalse(due); XCTAssertFalse(ran)
+        await c.endRequest()
+        due = await c.evictIfDue(now: Date().addingTimeInterval(100)) { ran = true }
+        XCTAssertTrue(due); XCTAssertTrue(ran)
+        due = await c.evictIfDue(now: Date().addingTimeInterval(200)) { XCTFail("deadline was cleared") }
+        XCTAssertFalse(due)
+    }
+
+    func testTowerClocksAreIndependentOfTextAndEachOther() async {
+        let aux = AuxKeepAlive(defaultSeconds: 300)
+        let later = Date().addingTimeInterval(400)
+        await aux.embed.touch(override: 10_000)      // text tower stays warm
+        await aux.vision.touch(override: 1)          // an image was served once
+        await aux.audio.touch(override: 10_000)
+        let text = await aux.embed.shouldEvict(now: later)
+        let vis = await aux.vision.shouldEvict(now: later)
+        let aud = await aux.audio.shouldEvict(now: later)
+        XCTAssertFalse(text); XCTAssertTrue(vis); XCTAssertFalse(aud)
+        let engine = EmbeddingEngine()
+        XCTAssertFalse(engine.unloadVisionTower())   // nothing resident: no-op
+        XCTAssertFalse(engine.unloadAudioTower())
+        let names = await aux.evictExpired(embedEngine: engine, rerankEngine: RerankEngine(), now: later)
+        XCTAssertTrue(names.isEmpty)
+    }
+
+    func testMediaKindsSelectTowers() {
+        let img = EmbeddingInput(parts: [.text("a"), .image(Data([1]))])
+        let aud = EmbeddingInput(parts: [.audio(Data([1]), format: "")])
+        XCTAssertTrue(img.usesVision); XCTAssertFalse(img.usesAudio)
+        XCTAssertTrue(aud.usesAudio); XCTAssertFalse(aud.usesVision)
+        XCTAssertFalse(EmbeddingInput(text: "x").usesVision)
+    }
+}

@@ -94,12 +94,14 @@ as before, and `task` returns `400` because those models define no prompt table.
 NaN / Inf output is never returned: the request fails with `500` instead.
 
 Batches are sorted by length and run as padded batches with a key-padding mask
-(<= 32 texts and <= `KRILL_EMBED_MAX_BATCH_TOKENS` padded tokens per forward,
-default 512; one longer text runs alone); results come back in input order. A text embedded alone and inside a mixed batch agree (cos 1.0000000 fp32,
+(<= 32 texts and <= `KRILL_EMBED_MAX_BATCH_TOKENS` padded tokens per forward;
+default 512 for the quantized builds, 2,048 for the full-precision build; one
+longer text runs alone); results come back in input order. A text embedded alone and inside a mixed batch agree (cos 1.0000000 fp32,
 0.99987 bf16).
 
 Env: `KRILL_EMBED_DTYPE=float32|bfloat16` (EmbeddingGemma 2 only),
-`KRILL_EMBED_MAX_BATCH_TOKENS` (padded tokens per forward, default 512),
+`KRILL_EMBED_MAX_BATCH_TOKENS` (padded tokens per forward; default 512 quantized, 2,048 full precision),
+`KRILL_EMBED_ATTN_BLOCK` (query rows per attention block on inputs of `KRILL_EMBED_ATTN_MIN` (default 1,024) or more tokens, default 512, `0` = off),
 `KRILL_VISION_ATTN_CHUNK` (query rows per vision-tower attention block for 2,048+ patch images, default 1024, `0` = off),
 `KRILL_EMBED_MAX_TOKENS` (server-wide input cap; request field `max_length` /
 `options.num_ctx` lowers it per request; see [SERVER_API.md](SERVER_API.md)),
@@ -566,7 +568,13 @@ from `config.quantization` (with per-path overrides), and a checkpoint and
 config that disagree fail the load instead of producing plausible garbage. The
 vision tower, the audio tower and the text model all load quantized leaves, at any
 affine width (2, 3, 4, 5, 6, 8 bits) or `mxfp4` / `nvfp4` / `mxfp8`.
-Compute is still fp32 by default (`KRILL_EMBED_DTYPE`).
+Compute is still fp32 by default (`KRILL_EMBED_DTYPE`). Measured 2026-10-21 (M4 Pro,
+9,618-passage Kreach sub-corpus: all hi/kn passages + 6,000 random en, 750 queries,
+paired bootstrap 10k): `KRILL_EMBED_DTYPE=bfloat16` on a quantized build is ~20% faster
+and ~100 MB lower at peak, but vectors differ from fp32 compute by cosine 0.998-0.9995
+(min; mean 0.99995) and 8-bit shows a significant dense MRR@10 loss on the English sets
+(bf16 lower by 0.005, CI 0.001 to 0.010); 4-bit and 6-bit deltas are not significant (hit@5 unchanged).
+It is therefore opt-in only; the full-precision build always defaults to fp32 compute.
 
 ### Dynamic builds: what is kept at 8-bit
 

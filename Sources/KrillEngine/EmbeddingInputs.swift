@@ -45,6 +45,14 @@ public struct EmbeddingInput: Equatable, Sendable {
         parts.reduce(into: "") { if case .text(let t) = $1 { $0 += t } }
     }
     public var hasMedia: Bool { !isTextOnly }
+    /// Needs the vision tower (images and video share it).
+    public var usesVision: Bool {
+        parts.contains { switch $0 { case .image, .video: return true; default: return false } }
+    }
+    /// Needs the audio tower.
+    public var usesAudio: Bool {
+        parts.contains { if case .audio = $0 { return true } else { return false } }
+    }
 }
 
 public struct EmbeddingInputError: Error, Equatable, CustomStringConvertible {
