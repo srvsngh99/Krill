@@ -1,0 +1,90 @@
+[
+  {
+    "metadataOutputVersion" : "3.0",
+    "storagePrecision" : "Float16",
+    "outputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 48)",
+        "shortDescription" : "",
+        "shape" : "[1, 48]",
+        "name" : "emb",
+        "type" : "MultiArray"
+      }
+    ],
+    "modelParameters" : [
+
+    ],
+    "specificationVersion" : 9,
+    "mlProgramOperationTypeHistogram" : {
+      "Ios18.expandDims" : 3,
+      "Ios18.softmax" : 3,
+      "Ios18.mul" : 105,
+      "Ios18.matmul" : 6,
+      "Ios18.rsqrt" : 26,
+      "Ios16.reduceMean" : 26,
+      "Ios18.realDiv" : 2,
+      "Split" : 6,
+      "Tile" : 6,
+      "Ios18.add" : 44,
+      "Ios16.reduceSum" : 2,
+      "Ios18.reshape" : 13,
+      "Ios18.maximum" : 1,
+      "Ios18.linear" : 29,
+      "Ios18.gelu" : 6,
+      "Ios18.concat" : 12,
+      "Ios18.sub" : 1,
+      "Ios18.transpose" : 12,
+      "Ios18.sliceByIndex" : 3,
+      "Ios16.reduceL2Norm" : 1
+    },
+    "computePrecision" : "Mixed (Float16, Float32, Int32)",
+    "isUpdatable" : "0",
+    "stateSchema" : [
+
+    ],
+    "availability" : {
+      "macOS" : "15.0",
+      "tvOS" : "18.0",
+      "visionOS" : "2.0",
+      "watchOS" : "11.0",
+      "iOS" : "18.0",
+      "macCatalyst" : "18.0"
+    },
+    "modelType" : {
+      "name" : "MLModelType_mlProgram"
+    },
+    "userDefinedMetadata" : {
+      "com.github.apple.coremltools.conversion_date" : "2026-10-22",
+      "com.github.apple.coremltools.source" : "torch==2.14.1",
+      "com.github.apple.coremltools.version" : "9.0",
+      "com.github.apple.coremltools.source_dialect" : "TorchScript"
+    },
+    "inputSchema" : [
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 32 × 64)",
+        "shortDescription" : "",
+        "shape" : "[1, 32, 64]",
+        "name" : "embeds",
+        "type" : "MultiArray"
+      },
+      {
+        "hasShapeFlexibility" : "0",
+        "isOptional" : "0",
+        "dataType" : "Float16",
+        "formattedType" : "MultiArray (Float16 1 × 32)",
+        "shortDescription" : "",
+        "shape" : "[1, 32]",
+        "name" : "mask",
+        "type" : "MultiArray"
+      }
+    ],
+    "generatedClassName" : "s32",
+    "method" : "predict"
+  }
+]

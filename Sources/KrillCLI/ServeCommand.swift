@@ -40,6 +40,9 @@ struct ServeCommand: AsyncParsableCommand {
         // redirect the banner and request log to ~/.krill/ui/serve.log, and a
         // fully buffered stream shows nothing until exit (or never, on SIGTERM).
         setvbuf(stdout, nil, _IOLBF, 0)
+        // Own SIGINT/SIGTERM from the first line (a launcher may have left them ignored or
+        // blocked); the server switches to the graceful drain once it is listening.
+        ShutdownSignals.installDefaults()
         // n-gram spec is on by default (single-stream + batcher, each self-gated
         // and adaptive). The flag remains as an explicit pin: set the env EVERY
         // engine reads at init before any engine is constructed, so a config
@@ -182,7 +185,8 @@ struct ServeCommand: AsyncParsableCommand {
                                defaultContextLimit: config.contextLength,
                                numParallel: config.numParallel,
                                maxQueue: config.maxQueue,
-                               auxKeepAliveSeconds: KeepAliveParse.duration(config.keepAlive) ?? 300)
+                               auxKeepAliveSeconds: KeepAliveParse.duration(config.keepAlive) ?? 300,
+                               embedDevice: config.embedDevice)
         try await server.start()
     }
 }

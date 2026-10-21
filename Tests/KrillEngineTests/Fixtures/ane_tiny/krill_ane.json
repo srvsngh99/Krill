@@ -1,0 +1,27 @@
+{
+  "backend": "coreml",
+  "format": 1,
+  "variant": "fp16",
+  "output_dim": 48,
+  "embed_scale": 8.0,
+  "max_tokens": 32,
+  "buckets": [
+    {
+      "seq": 16,
+      "batch": 1,
+      "path": "s16.mlmodelc"
+    },
+    {
+      "seq": 32,
+      "batch": 1,
+      "path": "s32.mlmodelc"
+    }
+  ],
+  "table": {
+    "file": "embed_tokens.f16",
+    "vocab": 100,
+    "dim": 64,
+    "dtype": "float16"
+  },
+  "fallback_model": "embeddinggemma-2-mlx-4bit-dyn-text"
+}

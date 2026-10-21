@@ -1343,6 +1343,11 @@ final class ChatTUI {
                         + "\(shellOutputToModel). Use true or false.")
                 }
             }
+            if key == EmbedDevice.configKey {
+                note("Set embed_device = \(value.lowercased()) in ~/.krill/config.toml. "
+                    + "It takes effect the next time `krill serve` starts (KRILL_EMBED_DEVICE overrides it).")
+                return
+            }
             note("Set \(key) = \(value) in ~/.krill/config.toml. "
                 + (appliedNow
                    ? "Active in this session too."

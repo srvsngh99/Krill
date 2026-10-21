@@ -165,6 +165,12 @@ public struct KrillConfig: Sendable {
     /// `KRILL_SHELL_OUTPUT_TO_MODEL` env. The TUI can toggle it per session.
     public var shellOutputToModel: Bool
 
+    /// Where the EmbeddingGemma 2 text embedder runs: `gpu` (default, MLX), `ane`
+    /// (Neural Engine package, with automatic MLX fallback for what it cannot serve)
+    /// or `auto`. `embed_device` in config; `KRILL_EMBED_DEVICE` env (wins). Applied
+    /// when the server starts. docs/ANE_EMBEDDER.md.
+    public var embedDevice: EmbedDevice
+
     public init() {
         self.defaultModel = nil
         self.defaultQuant = 4
@@ -205,6 +211,7 @@ public struct KrillConfig: Sendable {
         #endif
         self.thinking = true
         self.shellOutputToModel = true
+        self.embedDevice = .gpu
     }
 
     /// Load configuration with full precedence chain.
@@ -309,6 +316,11 @@ public struct KrillConfig: Sendable {
                 shellOutputToModel = Self.parseBool(value)
             case "keep_alive":
                 keepAlive = value
+            case "embed_device":
+                if let d = EmbedDevice.parse(value) { embedDevice = d } else {
+                    FileHandle.standardError.write(Data(
+                        "warning: config embed_device = \"\(value)\" is not one of \(EmbedDevice.validValues); ignored\n".utf8))
+                }
             case "num_parallel":
                 if let v = Int(value) { numParallel = v }
             case "max_queue":
@@ -354,6 +366,7 @@ public struct KrillConfig: Sendable {
             "speculative_decoding", "decode_pipeline", "ngram_spec", "flash_attention",
             "server_port", "server_host", "server_api_key", "idle_timeout", "keep_alive",
             "num_parallel", "max_loaded_models", "max_queue", "models_dir",
+            "embed_device",
         ]
         #if KREACH
         keys.append("kreach_url")   // private local backend; dev builds only
@@ -376,6 +389,9 @@ public struct KrillConfig: Sendable {
         // corrupt the file on the atomic rewrite, so reject it rather than write
         // something the parser cannot read. No legitimate config value needs them.
         guard !value.contains(where: { $0 == "\"" || $0 == "\\" || $0 == "\n" || $0 == "\r" }) else {
+            throw ConfigError.invalidValue(key: key, value: value)
+        }
+        if key == EmbedDevice.configKey, EmbedDevice.parse(value) == nil {
             throw ConfigError.invalidValue(key: key, value: value)
         }
         let url = configPath()
@@ -468,6 +484,7 @@ public struct KrillConfig: Sendable {
             "max_loaded_models": "\(maxLoadedModels)",
             "max_queue": "\(maxQueue)",
             "models_dir": modelsDir ?? "(default)",
+            "embed_device": embedDevice.rawValue,
         ]
         #if KREACH
         map["kreach_url"] = kreachURL ?? "(none)"
@@ -484,6 +501,7 @@ public struct KrillConfig: Sendable {
                 return "unknown config key '\(k)'. Known keys: "
                     + KrillConfig.writableKeys.joined(separator: ", ")
             case .invalidValue(let k, _):
+                if k == EmbedDevice.configKey { return "embed_device must be one of: \(EmbedDevice.validValues)." }
                 return "value for '\(k)' may not contain a quote, backslash, or newline."
             }
         }
@@ -492,8 +510,7 @@ public struct KrillConfig: Sendable {
     /// Override from environment. `OLLAMA_*` aliases are applied first so a
     /// native `KRILL_*` of the same setting always wins (KRILL_* is the
     /// canonical surface; OLLAMA_* exists only for drop-in compatibility).
-    mutating func mergeFromEnvironment() {
-        let env = ProcessInfo.processInfo.environment
+    mutating func mergeFromEnvironment(_ env: [String: String] = ProcessInfo.processInfo.environment) {
 
         // --- OLLAMA_* drop-in aliases (WS-G / T3-3) ---
         if let v = env["OLLAMA_HOST"] {
@@ -546,6 +563,12 @@ public struct KrillConfig: Sendable {
         }
         if let v = env["KRILL_SHELL_OUTPUT_TO_MODEL"] {
             shellOutputToModel = Self.parseBool(v)
+        }
+        if let v = env[EmbedDevice.envVar] {
+            if let d = EmbedDevice.parse(v) { embedDevice = d } else {
+                FileHandle.standardError.write(Data(
+                    "warning: \(EmbedDevice.envVar)=\"\(v)\" is not one of \(EmbedDevice.validValues); ignored\n".utf8))
+            }
         }
         if let v = env["KRILL_SEARCH_BACKEND"] { searchBackend = v }
         if let v = env["KRILL_SEARXNG_URL"] { searxngURL = v.isEmpty ? nil : v }

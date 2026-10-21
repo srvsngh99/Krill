@@ -34,6 +34,7 @@ public final class KrillServer: Sendable {
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
     private let auxKeepAlive: AuxKeepAlive
+    private let embedDevice: EmbedDevice
     private let logger = KrillLogging.makeLogger("krill.server")
 
     private let apiKey: String?
@@ -54,8 +55,10 @@ public final class KrillServer: Sendable {
                 corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
                 defaultContextLimit: Int? = nil,
                 numParallel: Int = 1, maxQueue: Int = 512,
-                auxKeepAliveSeconds: Int = 300) {
+                auxKeepAliveSeconds: Int = 300,
+                embedDevice: EmbedDevice = .gpu) {
         self.auxKeepAlive = AuxKeepAlive(defaultSeconds: auxKeepAliveSeconds)
+        self.embedDevice = embedDevice
         self.host = host
         self.port = port
         self.compat = compat
@@ -110,6 +113,7 @@ public final class KrillServer: Sendable {
                                     compat: self.compat, embedEngine: self.embedEngine,
                                     rerankEngine: self.rerankEngine,
                                     auxKeepAlive: self.auxKeepAlive,
+                                    embedDevice: self.embedDevice,
                                     apiKey: self.apiKey,
                                     corsOrigins: self.corsOrigins,
                                     defaultContextLimit: self.defaultContextLimit,
@@ -129,6 +133,17 @@ public final class KrillServer: Sendable {
         }
         if compat.ollamaEnabled {
             print("Ollama API: http://\(host):\(port)/api/chat")
+        }
+        let aneInstalled = EmbedDeviceRouter.installedPackage(in: registry) != nil
+        let effectiveEmbed = EmbedDeviceRouter.effective(
+            setting: embedDevice, packageInstalled: aneInstalled, coreML: ANEPlatform.coreMLAvailable)
+        print("Embeddings: embed_device = \(embedDevice.rawValue) -> \(effectiveEmbed.rawValue)"
+              + (effectiveEmbed == .ane ? " (Neural Engine package: \(EmbedDeviceRouter.installedPackage(in: registry)?.lastPathComponent ?? "?"))" : ""))
+        if embedDevice == .ane, effectiveEmbed != .ane {
+            let why = ANEPlatform.coreMLAvailable
+                ? "no ANE package is installed (make ane-package; docs/ANE_EMBEDDER.md)" : "Core ML is unavailable here"
+            let msg = "WARNING: embed_device = ane but \(why); EmbeddingGemma 2 requests are served on the GPU."
+            print(msg); logger.warning("\(msg)")
         }
         let uiHost = (host == "0.0.0.0" || host == "::") ? "localhost" : host
         print("Agent UI: http://\(uiHost):\(port)/ui")
@@ -164,8 +179,44 @@ public final class KrillServer: Sendable {
         }
         defer { evictor.cancel() }
 
+        // SIGINT / SIGTERM: stop accepting, drain in-flight requests for a bounded
+        // grace period, unload, exit 0. See ShutdownSignals for why the default
+        // disposition was not enough.
+        ShutdownSignals.installDefaults()
+        ShutdownSignals.setHandler { [self] sig in
+            logger.info("[KrillServer] signal \(sig): shutting down")
+            print("Received signal \(sig); shutting down...")
+            let grace = ShutdownSignals.graceSeconds()
+            // Backstop that does not depend on the async runtime being responsive.
+            DispatchQueue.global().asyncAfter(deadline: .now() + grace + 1) {
+                ShutdownSignals.exitNow(0)
+            }
+            Task { await self.gracefulShutdown(channel: channel, evictor: evictor, grace: grace) }
+        }
+
         try await channel.closeFuture.get()
+        // The signal handler closes the listener itself and then drains, unloads and exits the
+        // process; returning here would end `main` (and cut in-flight requests) before that.
+        await ShutdownSignals.parkWhileShuttingDown()
         try await group.shutdownGracefully()
+    }
+
+    /// Stop accepting, let in-flight requests finish for up to `grace` seconds,
+    /// unload what is resident, then exit 0. If requests are still running when
+    /// the grace expires the unload is skipped (unloading under a live forward is
+    /// the race), and the process still exits 0.
+    func gracefulShutdown(channel: Channel, evictor: Task<Void, Never>, grace: Double) async {
+        evictor.cancel()
+        try? await channel.close().get()          // listener closed: no new connections
+        let queue = genQueue
+        if await ShutdownSignals.waitForDrain(grace: grace, pending: { await queue.pending }) {
+            await engines.unloadAll()
+            _ = embedEngine.unload()
+            _ = rerankEngine.unload()
+        } else {
+            logger.info("[KrillServer] shutdown grace expired with requests in flight; exiting without unload")
+        }
+        ShutdownSignals.exitNow(0)
     }
 
     /// Best-effort Tailscale IPv4 of this machine, so the startup banner can
@@ -226,6 +277,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
     private let auxKeepAlive: AuxKeepAlive
+    private let embedDevice: EmbedDevice
     private let logger = KrillLogging.makeLogger("krill.http")
 
     /// Tower keep-alive clocks a request must hold: vision for images/video, audio for audio.
@@ -259,6 +311,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
          compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
          rerankEngine: RerankEngine = RerankEngine(),
          auxKeepAlive: AuxKeepAlive = AuxKeepAlive(defaultSeconds: 300),
+         embedDevice: EmbedDevice = .gpu,
          apiKey: String? = nil,
          corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
          defaultContextLimit: Int? = nil,
@@ -273,6 +326,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
         self.auxKeepAlive = auxKeepAlive
+        self.embedDevice = embedDevice
         self.apiKey = apiKey
         self.corsOrigins = corsOrigins
         self.defaultContextLimit = defaultContextLimit
@@ -650,6 +704,11 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         // slot-handoff/queue-wait window and leave the resumed waiter
         // generating against an unloaded engine. Balanced by release() in the
         // catch below and in leaveQueue.
+        if ShutdownSignals.isShuttingDown {
+            sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .serviceUnavailable,
+                           body: ["error": "server is shutting down"])
+            return false
+        }
         await engines.retain(eng)
         do {
             try await genQueue.enter()
@@ -2824,6 +2883,21 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
         let dir = registry.modelPath(name)
+        // `embed_device` / KRILL_EMBED_DEVICE decides whether an EmbeddingGemma 2 text request
+        // runs on the GPU (MLX) or the Neural Engine package. A request may pin the device with
+        // a `device` field (e.g. a bulk corpus job that must stay on the full-precision GPU build).
+        var deviceOverride: EmbedDevice?
+        if let raw = json["device"], !(raw is NSNull) {
+            guard let d = EmbedDevice.parse(raw as? String) else {
+                sendJSON(context: context, status: .badRequest, body: [
+                    "error": "invalid 'device'; use one of: \(EmbedDevice.validValues)"])
+                return
+            }
+            deviceOverride = d
+        }
+        let initialRoute = EmbedDeviceRouter.route(
+            requested: manifest.name, requestedDir: dir, setting: embedDevice, override: deviceOverride,
+            installedPackage: installedANEPackage(), coreML: ANEPlatform.coreMLAvailable)
         // BERT/nomic encoders are family .bert; decoder-LLM embedders (gte-Qwen2,
         // e5-mistral) keep their causal family (.qwen/.mistral/...) but ship a
         // sentence-transformers pooling head, which the engine detects on disk.
@@ -2844,6 +2918,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
         let started = CFAbsoluteTimeGetCurrent()
         Task {
+            var route = initialRoute
+            var servedBy = "gpu"
             guard await self.enterQueueOr503(ctx, eventLoop) else { return }
             defer { self.leaveQueue() }
             await keepAlive.beginRequest()
@@ -2872,8 +2948,17 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             }
             do {
-                try await embed.load(directory: dir)
+                do {
+                    try await embed.load(directory: route.directory, fallbackDirectory: route.fallbackDirectory)
+                } catch where route.device == .ane && route.fallbackDirectory != nil {
+                    // The ANE package would not open (corrupt, Core ML refused it): keep serving on the GPU.
+                    self.logger.warning("[embed] ANE package \(route.directory.lastPathComponent) failed to load (\(error)); serving \(modelName) on the GPU")
+                    route = EmbedDeviceRouter.Decision(directory: dir, fallbackDirectory: nil, device: .gpu, warning: nil)
+                    try await embed.load(directory: dir)
+                }
                 let result = try embed.embed(inputs: inputs, options: options)
+                servedBy = result.servedBy.rawValue
+                self.logger.debug("[embed] \(modelName): \(inputs.count) input(s) served by \(servedBy)")
                 let totalNs = Int64((CFAbsoluteTimeGetCurrent() - started) * 1_000_000_000)
                 let response: [String: Any]
                 switch style {
@@ -2900,7 +2985,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     response = ["embedding": result.vectors.first ?? []]
                 }
                 self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
-                                    status: .ok, body: response)
+                                    status: .ok, body: response,
+                                    extraHeaders: [("x-krill-embed-device", servedBy)])
             } catch let e as EmbeddingError {
                 if case .invalidOption(let m) = e {
                     self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop,
@@ -2917,6 +3003,21 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                                     body: ["error": "embedding failed: \(msg)"])
             }
         }
+    }
+
+    private func installedANEPackage() -> URL? { EmbedDeviceRouter.installedPackage(in: registry) }
+
+    /// The `embed_device` block of `/v1/status`.
+    private func embedDeviceStatus() -> [String: Any] {
+        let pkg = installedANEPackage()
+        let coreML = ANEPlatform.coreMLAvailable
+        return [
+            "setting": embedDevice.rawValue,
+            "effective": EmbedDeviceRouter.effective(
+                setting: embedDevice, packageInstalled: pkg != nil, coreML: coreML).rawValue,
+            "ane_package": pkg?.lastPathComponent ?? NSNull(),
+            "core_ml": coreML,
+        ]
     }
 
     // MARK: - Ollama discovery: GET /api/ps
@@ -3359,6 +3460,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             "uptime_seconds": Int(serverUptime),
             "memory_mb": Int(residentMB),
             "installed_models": installed,
+            "embed_device": embedDeviceStatus(),
             "version": KrillVersion
         ]
 
@@ -3567,7 +3669,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         context: ChannelHandlerContext,
         eventLoop: EventLoop,
         status: HTTPResponseStatus,
-        body: [String: Any]
+        body: [String: Any],
+        extraHeaders: [(String, String)] = []
     ) {
         guard let data = try? JSONSerialization.data(withJSONObject: body) else {
             writeOnLoop(context, .end(nil), flush: true)
@@ -3575,7 +3678,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         nonisolated(unsafe) let ctx = context
         eventLoop.execute {
-            self.sendJSONData(context: ctx, status: status, data: data)
+            self.sendJSONData(context: ctx, status: status, data: data, extraHeaders: extraHeaders)
         }
     }
 

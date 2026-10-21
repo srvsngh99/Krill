@@ -9,24 +9,24 @@ import KrillTokenizer
 /// `InferenceEngine` so embeddings do not require - or disturb - a loaded
 /// chat model, and so a RAG client can embed while chat is unloaded.
 public final class EmbeddingEngine: @unchecked Sendable {
-    private var model: (any SentenceEmbeddingEncoder)?
-    private var tokenizer: KrillTokenizer?
+    var model: (any SentenceEmbeddingEncoder)?
+    var tokenizer: KrillTokenizer?
     /// Code-point BPE used by EmbeddingGemma 2 (swift-transformers' BPE seeds
     /// merges with grapheme clusters, which breaks Indic scripts; see
     /// `CodePointBPETokenizer`). Set only for that model.
-    private var cpTokenizer: CodePointBPETokenizer?
-    private var loadedDir: URL?
-    private var maxTokens: Int = 512
+    var cpTokenizer: CodePointBPETokenizer?
+    var loadedDir: URL?
+    var maxTokens: Int = 512
     private var pooling = EmbeddingPooling.fromEnv()
     /// Decoder-LLM embedders (last-token pooling) append an EOS so the pooled
     /// final position has attended over the whole input; BERT encoders do not.
     private var appendEOS = false
     private var eosTokenId = 0
     /// sentence-transformers `prompts` table of the loaded model (task -> prefix).
-    private var prompts: EmbeddingPromptTable?
+    var prompts: EmbeddingPromptTable?
     /// Matryoshka dimensions the loaded model supports (nil = not an MRL model).
-    private var mrlDimensions: [Int]?
-    private let lock = NSLock()
+    var mrlDimensions: [Int]?
+    let lock = NSLock()
     /// EmbeddingGemma 2 modality towers are loaded LAZILY, on the first request
     /// that carries media, so text-only use keeps the text-only footprint.
     private var visionTower: EG2VisionTower?
@@ -35,7 +35,15 @@ public final class EmbeddingEngine: @unchecked Sendable {
     /// Per-forward padded-token budget default of the loaded EG2 build (see `modelDefaultBudget`).
     private var eg2DefaultBudget = EmbeddingEngine.defaultPaddedTokenBudget
     private var eg2Tokens = EG2ModalityTokens.checkpointDefaults
-    private let towerLock = NSLock()
+    let towerLock = NSLock()
+    /// Neural Engine (Core ML) backend, set instead of `model` when the loaded directory is an
+    /// ANE package (`krill_ane.json`). Text inputs up to the package's `max_tokens` run here;
+    /// longer inputs and media go to `fallback`, an ordinary MLX EmbeddingGemma 2 engine that
+    /// is created lazily and unloaded with this engine. See EmbeddingEngine+ANE.swift.
+    var ane: ANEEmbedder?
+    var aneFallbackDir: URL?
+    var fallback: EmbeddingEngine?
+    let fallbackLock = NSLock()
 
     public init() {}
 
@@ -46,11 +54,11 @@ public final class EmbeddingEngine: @unchecked Sendable {
     public func isLoaded(directory: URL) -> Bool {
         withLock {
             loadedDir?.standardizedFileURL == directory.standardizedFileURL
-                && model != nil
+                && (model != nil || ane != nil)
         }
     }
 
-    private func withLock<T>(_ body: () -> T) -> T {
+    func withLock<T>(_ body: () -> T) -> T {
         lock.lock(); defer { lock.unlock() }
         return body()
     }
@@ -73,20 +81,26 @@ public final class EmbeddingEngine: @unchecked Sendable {
             self.eosTokenId = eosTokenId
             self.visionTower = nil
             self.audioTower = nil
+            self.ane = nil
+            self.aneFallbackDir = nil
         }
+        dropFallback()
     }
 
     /// Load (or hot-swap to) the embedding model in `directory`.
-    public func load(directory: URL) async throws {
-        if isLoaded(directory: directory) { return }
-
-        // Bound MLX's Metal buffer-recycling pool. The embed path never went through
-        // `loadModel` (which applies this for chat models), so the pool was left at MLX's
-        // default (the device working set, ~16 GB on a 24 GB Mac). Embedding requests
-        // allocate intermediates sized by (batch x padded length); every NEW shape needs
-        // buffers the pool cannot reuse, so the pool grew to 17 GB over 25 requests while
-        // MLX's active memory stayed at 0.2 GB. With the cap, freed buffers go back to the OS.
-        MLXMemoryConfig.apply(defaultMB: Self.defaultCacheLimitMB)
+    ///
+    /// `fallbackDirectory` only matters for a Neural Engine package (`krill_ane.json`): the
+    /// MLX EmbeddingGemma 2 build that serves what the package cannot (text over its largest
+    /// bucket, images, audio, video). Default: the sibling directory named by the package manifest.
+    public func load(directory: URL, fallbackDirectory: URL? = nil) async throws {
+        if isLoaded(directory: directory) {
+            retargetFallback(fallbackDirectory)
+            return
+        }
+        if ANEPackageManifest.exists(in: directory) {
+            try loadANE(directory: directory, fallbackDirectory: fallbackDirectory)
+            return
+        }
 
         let configURL = directory.appendingPathComponent("config.json")
         let data = try Data(contentsOf: configURL)
@@ -95,6 +109,29 @@ public final class EmbeddingEngine: @unchecked Sendable {
         // swift-transformers load for it.
         let tok: KrillTokenizer? = mt == "embedding_gemma2"
             ? nil : try await KrillTokenizer(from: directory)
+        try loadResolved(directory: directory, data: data, mt: mt, tok: tok)
+    }
+
+    /// Synchronous load of an MLX EmbeddingGemma 2 build (the Neural Engine package's fallback is
+    /// loaded lazily from inside the synchronous `embed`). Other model types need the async `load`.
+    func loadEG2Sync(directory: URL) throws {
+        if isLoaded(directory: directory) { return }
+        let data = try Data(contentsOf: directory.appendingPathComponent("config.json"))
+        guard Self.modelType(from: data) == "embedding_gemma2" else {
+            throw EmbeddingError.unavailable("Neural Engine fallback must be an EmbeddingGemma 2 build: \(directory.lastPathComponent)")
+        }
+        try loadResolved(directory: directory, data: data, mt: "embedding_gemma2", tok: nil)
+    }
+
+    private func loadResolved(directory: URL, data: Data, mt: String, tok: KrillTokenizer?) throws {
+        // Bound MLX's Metal buffer-recycling pool. The embed path never went through
+        // `loadModel` (which applies this for chat models), so the pool was left at MLX's
+        // default (the device working set, ~16 GB on a 24 GB Mac). Embedding requests
+        // allocate intermediates sized by (batch x padded length); every NEW shape needs
+        // buffers the pool cannot reuse, so the pool grew to 17 GB over 25 requests while
+        // MLX's active memory stayed at 0.2 GB. With the cap, freed buffers go back to the OS.
+        MLXMemoryConfig.apply(defaultMB: Self.defaultCacheLimitMB)
+
         var cpTok: CodePointBPETokenizer? = nil
 
         let model: any SentenceEmbeddingEncoder
@@ -302,6 +339,12 @@ public final class EmbeddingEngine: @unchecked Sendable {
     public struct EmbedResult: Sendable {
         public let vectors: [[Float]]
         public let promptTokens: Int
+        /// Which backend produced the vectors: `gpu` (MLX), `ane` (Neural Engine) or
+        /// `mixed` (a Neural Engine request that sent some items to MLX).
+        public var servedBy: EmbedServedBy = .gpu
+        public init(vectors: [[Float]], promptTokens: Int, servedBy: EmbedServedBy = .gpu) {
+            self.vectors = vectors; self.promptTokens = promptTokens; self.servedBy = servedBy
+        }
     }
 
     /// Embed a batch of texts. Generic encoders run each text independently
@@ -325,8 +368,13 @@ public final class EmbeddingEngine: @unchecked Sendable {
         let prompts = self.prompts
         let mrl = self.mrlDimensions
         let budget = Self.paddedTokenBudget(modelDefault: self.eg2DefaultBudget)
+        let aneEmbedder = self.ane
         lock.unlock()
 
+        if let aneEmbedder, let cpTokenizer {
+            return try embedANE(aneEmbedder, tokenizer: cpTokenizer, texts: texts, options: options,
+                                cap: cap, prompts: prompts, mrl: mrl)
+        }
         guard let model else { throw EmbeddingError.notLoaded }
 
         let prefix = try Self.resolvePrefix(options, prompts: prompts, mrl: mrl)
@@ -372,7 +420,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
 
     /// Resolve the prefix (task table or literal instruction) and validate
     /// `dimensions` against the loaded model.
-    private static func resolvePrefix(_ options: EmbeddingRequestOptions,
+    static func resolvePrefix(_ options: EmbeddingRequestOptions,
                                       prompts: EmbeddingPromptTable?, mrl: [Int]?) throws -> String {
         var prefix = options.instruction ?? ""
         if let task = options.task {
@@ -407,6 +455,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
         if inputs.allSatisfy({ !$0.hasMedia }) {
             return try embed(inputs.map { $0.joinedText }, options: options)
         }
+        if withLock({ ane != nil }) { return try embedANEInputs(inputs, options: options) }
         lock.lock()
         let model = self.model
         let cpTokenizer = self.cpTokenizer
@@ -588,7 +637,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
         visionTower = nil
         towerLock.unlock()
         if was { MLX.Memory.clearCache() }
-        return was
+        return (fallbackEngine()?.unloadVisionTower() ?? false) || was
     }
 
     /// Drop the audio tower only (see ``unloadVisionTower()``).
@@ -599,14 +648,20 @@ public final class EmbeddingEngine: @unchecked Sendable {
         audioTower = nil
         towerLock.unlock()
         if was { MLX.Memory.clearCache() }
-        return was
+        return (fallbackEngine()?.unloadAudioTower() ?? false) || was
     }
 
     /// True once the lazily loaded audio tower is resident (tests / diagnostics).
-    public var isAudioTowerLoaded: Bool { towerLock.lock(); defer { towerLock.unlock() }; return audioTower != nil }
+    public var isAudioTowerLoaded: Bool {
+        towerLock.lock(); defer { towerLock.unlock() }
+        return audioTower != nil || (fallbackEngine()?.isAudioTowerLoaded ?? false)
+    }
 
     /// True once the lazily loaded vision tower is resident (tests / diagnostics).
-    public var isVisionTowerLoaded: Bool { towerLock.lock(); defer { towerLock.unlock() }; return visionTower != nil }
+    public var isVisionTowerLoaded: Bool {
+        towerLock.lock(); defer { towerLock.unlock() }
+        return visionTower != nil || (fallbackEngine()?.isVisionTowerLoaded ?? false)
+    }
 
     private func logPeakMemory(label: String = "") {
         if ProcessInfo.processInfo.environment["KRILL_EMBED_LOG_MEM"] != nil {
@@ -728,17 +783,24 @@ public final class EmbeddingEngine: @unchecked Sendable {
     @discardableResult
     public func unload() -> Bool {
         let was: Bool = withLock {
-            let had = model != nil
+            // A Neural Engine embedder is released, not torn down: a request that already
+            // holds it finishes on its own reference and Core ML frees the buckets after it.
+            let had = model != nil || ane != nil
             model = nil; tokenizer = nil; cpTokenizer = nil; loadedDir = nil
             prompts = nil; mrlDimensions = nil
+            ane = nil; aneFallbackDir = nil
             return had
         }
+        let hadFallback = dropFallback()
         towerLock.lock(); visionTower = nil; audioTower = nil; towerLock.unlock()
-        if was { MLX.Memory.clearCache() }
+        if was || hadFallback { MLX.Memory.clearCache() }
+        // The tokenizer's vocabulary tables and Core ML's buffers were malloc'd; hand the freed
+        // pages back so a resting Neural Engine server really returns to a small footprint.
+        if was { malloc_zone_pressure_relief(nil, 0) }
         return was
     }
 
-    public var isResident: Bool { withLock { model != nil } }
+    public var isResident: Bool { withLock { model != nil || ane != nil } }
 
     // MARK: - Decoder-LLM embedder detection
 
@@ -804,6 +866,9 @@ public enum EmbeddingError: Error, CustomStringConvertible {
     case invalidOption(String)
     /// The forward produced NaN/Inf (HTTP 500; never returned as a vector).
     case nonFinite
+    /// A backend the request needs is not available (e.g. Core ML off-platform, or the MLX
+    /// fallback model of a Neural Engine package is not installed). HTTP 500 with this message.
+    case unavailable(String)
 
     public var description: String {
         switch self {
@@ -812,6 +877,8 @@ public enum EmbeddingError: Error, CustomStringConvertible {
         case .unsupported(let mt):
             return "Model type '\(mt)' is not a supported embedder"
         case .invalidOption(let m):
+            return m
+        case .unavailable(let m):
             return m
         case .nonFinite:
             return "embedding produced non-finite values (NaN/Inf); refusing to return a degraded vector"

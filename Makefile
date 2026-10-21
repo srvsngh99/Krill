@@ -22,7 +22,15 @@ GEMMA4_BENCH_WARMUP ?= 1
 KRILL_PYTHON ?= $(HOME)/.krill/venv/bin/python3
 KRILL_VENV_PYTHON ?= python3
 
-.PHONY: build release dev install uninstall clean test bench bench-compare bench-concurrent bench-gemma4-multimodal bench-release-gate parity-gate metallib dist dist-app app-bundle version
+.PHONY: build release dev install uninstall clean test bench bench-compare bench-concurrent bench-gemma4-multimodal bench-release-gate parity-gate metallib dist dist-app app-bundle version ane-package
+
+# Neural Engine embedder package (docs/ANE_EMBEDDER.md): converts the installed bf16
+# EmbeddingGemma 2 to Core ML buckets in a throwaway venv. Offline tool; not part of the runtime.
+ANE_VENV ?= $(HOME)/.krill/ane-venv
+ANE_VARIANT ?= lin8
+ane-package:
+	@test -x "$(ANE_VENV)/bin/python3" || { python3 -m venv "$(ANE_VENV)" && "$(ANE_VENV)/bin/pip" install -q -r tools/ane/requirements.txt; }
+	"$(ANE_VENV)/bin/python3" tools/ane/build_ane_embedder.py --variant $(ANE_VARIANT) --register $(ANE_ARGS)
 
 # Debug build (default)
 build:
