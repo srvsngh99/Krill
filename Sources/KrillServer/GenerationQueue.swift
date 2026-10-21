@@ -26,6 +26,9 @@ public actor GenerationQueue {
     /// Current queue depth (waiting requests), for diagnostics/tests.
     public var depth: Int { waiters.count }
 
+    /// Requests holding a slot or waiting for one (graceful shutdown drains this to 0).
+    public var pending: Int { active + waiters.count }
+
     public func enter() async throws {
         if active < numParallel {
             active += 1

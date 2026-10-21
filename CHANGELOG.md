@@ -9,6 +9,27 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Added
+
+- **EmbeddingGemma 2 on the Neural Engine, chosen by `embed_device`.** `embed_device = "gpu" | "ane" | "auto"`
+  in `config.toml` (also `KRILL_EMBED_DEVICE`, `/config embed_device=...`, and a per-request `device` field) picks where
+  the EG2 text embedder runs; `gpu` stays the default. `ane` serves text up to 512 tokens from a Core ML package
+  (`embeddinggemma-2-ane-lin8`, built offline with `make ane-package`) and sends longer text and every image, audio or
+  video input to the MLX build automatically. Query vectors match bf16 (cosine min 0.9993) with no significant change in
+  Kreach retrieval; 3.7 ms per query instead of 13.6 ms, about 6 mJ instead of 80 mJ, and the server process stays
+  small. Responses carry `x-krill-embed-device`; `/v1/status` and the `krill serve` banner show the active device. If `ane`
+  is set without the package the server warns loudly and serves on the GPU. Idle buckets unload through the existing
+  keep-alive. Corpus embedding keeps using the full-precision GPU build. See
+  [`docs/ANE_EMBEDDER.md`](docs/ANE_EMBEDDER.md).
+
+### Fixed
+
+- **`krill serve` ignored SIGTERM and SIGINT.** The server relied on the default signal dispositions, which a launcher
+  can leave ignored or blocked across `exec` (a backgrounded shell job ignores SIGINT; supervisors and agent runners hand
+  down an ignored SIGTERM), so only SIGKILL stopped it. It now owns both signals from its first line: it stops accepting,
+  lets in-flight requests finish for up to `KRILL_SHUTDOWN_GRACE_SECONDS` (default 3), unloads and exits 0 in under 5 s.
+  A second signal exits immediately.
+
 ## [0.25.2] - 2026-10-21
 
 ### Fixed

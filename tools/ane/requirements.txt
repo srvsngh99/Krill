@@ -1,0 +1,7 @@
+# Offline conversion only (tools/ane/build_ane_embedder.py). Python 3.12, macOS on Apple Silicon.
+# torch 2.14.1 is newer than coremltools 9.0's tested range (2.7); conversion was verified with
+# exactly these pins (docs/ANE_EMBEDDER.md).
+torch==2.14.1
+coremltools==9.0
+numpy==2.5.4
+safetensors==0.8.0
