@@ -7,6 +7,18 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.27.0 - 2026-10-22
+**Faster embeddings, local logs, and upgrades that apply themselves.** Most embedders
+and the bge-reranker-base reranker can now run on the Neural Engine with the same
+`embed_device` setting. For bge-base a query drops from 8.9 to 2.6 ms and the server's
+peak memory from about 1 GB to 34 MB. Krill now keeps logs on your Mac and nowhere else:
+`krill logs`, `krill doctor` and `krill bug-report` read them, and nothing is ever sent
+anywhere. After `brew upgrade`, a running service switches to the new version by itself
+once it is idle. Upgrading from 0.26.x to 0.27.0 needs one manual service restart,
+because the old version has no watcher.
+
+---
+
 ## v0.26.1 - 2026-10-22
 **Krill says what it is.** It is a local LLM engine and a coding agent in one
 Mac-native binary, and now `krill --help`, the startup banner, the Homebrew

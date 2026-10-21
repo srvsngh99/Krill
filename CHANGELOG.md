@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.27.0] - 2026-10-22
+
 ### Added
 
 - **Neural Engine packages for every embedder and reranker it serves well, behind the same `embed_device` toggle.** Any
@@ -24,7 +26,7 @@ reverse chronological order. Versioning follows
   gte-modernbert-base (fails parity), the 7B decoders and, for now, gte-qwen2-1.5b and the larger rerankers stay GPU-only. The package
   manifest is now format 2 (`kind`, `pooling`, `tokenizer`, `context_tokens`, `append_eos`, `mrl_dims`, ...); format-1 EmbeddingGemma 2
   packages still load, and the full-precision `embeddinggemma-2` guard is unchanged. `/v1/status` lists `ane_packages`. See
-  [`docs/ANE_EMBEDDER.md`](docs/ANE_EMBEDDER.md).
+  [`docs/ANE_EMBEDDER.md`](docs/ANE_EMBEDDER.md). (#349)
 - **`krill serve` restarts itself onto a newly installed version, so `brew upgrade krill` is the only command.**
   Under launchd, the server polls (every 60 s, one `stat`) the binary it was launched as; when a different,
   usable version appears (stable for a second look, `codesign --verify` clean, `krill version` reports a new
@@ -33,7 +35,7 @@ reverse chronological order. Versioning follows
   `KeepAlive`. Handles Homebrew's repointed Cellar symlink and `install.sh`'s rm + cp. A terminal-run server
   never restarts; it prints "Krill X is installed; restart to use it" once. Turn off with
   `auto_restart_on_upgrade = false` or `KRILL_AUTO_RESTART_ON_UPGRADE=0`. Also covers the `krill ui --install`
-  login item. See [`docs/SELF_RESTART_ON_UPGRADE.md`](docs/SELF_RESTART_ON_UPGRADE.md).
+  login item. See [`docs/SELF_RESTART_ON_UPGRADE.md`](docs/SELF_RESTART_ON_UPGRADE.md). (#347)
 - **Local-only observability.** No telemetry and no remote reporting; everything stays in `~/.krill`
   ([`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md)).
   - **Event log:** `krill serve` writes `~/.krill/logs/serve-YYYY-MM-DD.jsonl` (default on): one line per
@@ -50,6 +52,7 @@ reverse chronological order. Versioning follows
   - **Crash breadcrumbs:** a run marker is cleared on clean exit; a surviving marker becomes an `unclean_exit`
     event with the last events and any matching macOS crash report.
   - **Retention:** `log_retention_days` (30) and `log_max_mb` (1024), checked at start and daily.
+  - The README gained a Privacy section. (#348)
 
 ### Fixed
 
@@ -57,7 +60,11 @@ reverse chronological order. Versioning follows
   `/v1/status` `uptime_seconds` was always 0; both now use the server process's age. Memory was the resident set,
   which excludes MLX/Metal weights (15 MB with a model loaded); it is now the physical footprint, with
   `krill_mlx_active_memory_mb` / `krill_mlx_peak_memory_mb`. `/metrics` also gained request and error counters,
-  a latency histogram and token counters.
+  a latency histogram and token counters. (#348)
+
+### Changed
+
+- **Release docs.** `docs/RELEASING.md` gained step 12 (syncing the site) and the release procedure was tightened. (#350)
 
 ## [0.26.1] - 2026-10-22
 
