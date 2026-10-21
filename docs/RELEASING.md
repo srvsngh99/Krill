@@ -18,6 +18,7 @@ section, then delete the rows.
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
 | 2026-10-22 | #347 | `krill serve` self-restarts onto a newly installed version under launchd (`UpgradeWatcher`, `auto_restart_on_upgrade`) | New config key + 3 env knobs; release notes must say a `brew upgrade` now bounces running launchd servers when idle |
+| 2026-10-22 | #348 | Local-only observability: server event log, agent session transcripts, `krill logs` / `doctor` / `bug-report`, crash breadcrumbs, retention; `/metrics` and `/v1/status` uptime and memory fixed, request/error/latency metrics | Adds `~/.krill/logs`, `~/.krill/sessions`, `~/.krill/run` and config keys `event_log`, `session_log`, `log_retention_days`, `log_max_mb`. Changelog: Added + Fixed. Say in the notes that nothing is sent anywhere. README gained a Privacy section. |
 
 ### Known-open, NOT yet merged
 

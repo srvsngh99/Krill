@@ -193,6 +193,7 @@ Native text also runs Phi, GLM-4, Mixtral, OLMoE, and DeepSeek-V2/V3, plus an 11
 | `krill ui` | One command for the phone app: serve in the background, print the phone link, open the UI (`--install` = always on) |
 | `krill launch <agent>` | Wire an external coding agent (Claude Code, Codex, …) to Krill |
 | `krill pull / list / rm <model>` | Manage models (download from HuggingFace) |
+| `krill logs` · `krill doctor` · `krill bug-report` | Read the local event log and agent sessions · one-screen health check · redacted bundle for an issue ([docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)) |
 | `krill quantize <hf-path>` | Convert an HF model to MLX |
 | `krill bench <model>` · `krill version` | Benchmark · version + system info |
 
@@ -306,6 +307,26 @@ krill --config brave_api_key=YOUR_KEY        # or export KRILL_BRAVE_API_KEY
 
 Or point at a self-hosted SearXNG with `search_backend=searxng` + `searxng_url`.
 See [docs/decisions/0002-web-search-backends.md](docs/decisions/0002-web-search-backends.md).
+
+## Privacy
+
+**Krill sends nothing anywhere.** There is no telemetry, analytics or crash reporting. The only
+network traffic is what you ask for: model downloads, `krill update`, and the web search/fetch
+tools when an agent uses them.
+
+Krill does keep local records so problems can be diagnosed: a request log (no prompt text) in
+`~/.krill/logs` and agent session transcripts in `~/.krill/sessions`, pruned after 30 days or 1 GB.
+They never leave your machine on their own. Turn them off or shrink them:
+
+```toml
+# ~/.krill/config.toml  (or KRILL_EVENT_LOG / KRILL_SESSION_LOG)
+event_log = "off"       # no request/lifecycle log
+session_log = "off"     # or "meta": structure only, no text or tool payloads
+```
+
+`krill bug-report` is the only way logs can leave: it builds a redacted zip in your current
+directory and prints what is inside. Nothing is uploaded; you review it and attach it to a GitHub
+issue yourself. Details: [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
 
 ## Author
 

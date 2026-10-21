@@ -20,6 +20,30 @@ reverse chronological order. Versioning follows
   never restarts; it prints "Krill X is installed; restart to use it" once. Turn off with
   `auto_restart_on_upgrade = false` or `KRILL_AUTO_RESTART_ON_UPGRADE=0`. Also covers the `krill ui --install`
   login item. See [`docs/SELF_RESTART_ON_UPGRADE.md`](docs/SELF_RESTART_ON_UPGRADE.md).
+- **Local-only observability.** No telemetry and no remote reporting; everything stays in `~/.krill`
+  ([`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md)).
+  - **Event log:** `krill serve` writes `~/.krill/logs/serve-YYYY-MM-DD.jsonl` (default on): one line per
+    request (endpoint, model, status, error, time to first token, total, tokens, tokens/s, queue wait,
+    embed device, `X-Krill-Session`) and every model load, unload, evict, keep-alive unload, shutdown signal
+    and error, at full detail whatever `KRILL_LOG_LEVEL` is. No prompt or completion text. Async, bounded, never blocks a
+    request; rotated at 16 MB; responses carry `X-Krill-Request-Id`.
+  - **Agent session transcripts:** `krill run`, `krill code`, hosted `/ui` sessions and `krill launch` write
+    `~/.krill/sessions/YYYY/MM/DD/<time>-<id>.jsonl` plus an index (turns, tool calls and results, permission
+    decisions, retries, errors, stop reason). `session_log = full|meta|off` / `KRILL_SESSION_LOG`.
+  - **`krill logs`** (`--today --since --errors --session --project --json -f`), **`krill doctor`** (installs,
+    launchd jobs, codesign, ports, disk, last crash; read-only) and **`krill bug-report`** (redacted zip, manifest
+    and a prefilled GitHub issue URL; sends nothing).
+  - **Crash breadcrumbs:** a run marker is cleared on clean exit; a surviving marker becomes an `unclean_exit`
+    event with the last events and any matching macOS crash report.
+  - **Retention:** `log_retention_days` (30) and `log_max_mb` (1024), checked at start and daily.
+
+### Fixed
+
+- **`/metrics` and `/v1/status` reported wrong numbers.** `krill_uptime_seconds` was the machine's uptime and
+  `/v1/status` `uptime_seconds` was always 0; both now use the server process's age. Memory was the resident set,
+  which excludes MLX/Metal weights (15 MB with a model loaded); it is now the physical footprint, with
+  `krill_mlx_active_memory_mb` / `krill_mlx_peak_memory_mb`. `/metrics` also gained request and error counters,
+  a latency histogram and token counters.
 
 ## [0.26.1] - 2026-10-22
 
