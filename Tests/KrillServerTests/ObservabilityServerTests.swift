@@ -136,4 +136,30 @@ final class ObservabilityServerTests: XCTestCase {
         XCTAssertEqual(LogQuery.records(settings: settings, filter: LogFilter()).filter { $0.event == "request" }.count, 0)
         XCTAssertEqual(ServerMetrics.shared.totalRequests, 2)
     }
+
+    /// What one request costs the request path: metrics bookkeeping plus queueing the event.
+    /// (File I/O happens later on the writer queue.) Asserted far below the 1 ms budget; the
+    /// measured mean is printed so the PR can quote it.
+    func testPerRequestLoggingCostIsFarBelowOneMillisecond() {
+        let settings = ObsSettings(eventLog: true, sessionLog: .off, root: tmp.appendingPathComponent("obs"))
+        Obs.configure(kind: "serve", settings: settings, port: 57499, version: "t", prune: false)
+        let m = ServerMetrics()
+        let n = 20_000
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        for i in 0..<n {
+            m.begin()
+            m.record(endpoint: "/v1/chat/completions", status: 200, seconds: 0.25, promptTokens: 40, completionTokens: 120)
+            Obs.emit("request", [
+                ("request_id", .string("0123456789ab")), ("method", "POST"), ("endpoint", "/v1/chat/completions"),
+                ("model", "llama-3.2-1b"), ("status", 200), ("error", .null), ("ttft_ms", 151.8), ("total_ms", 332.7),
+                ("prompt_tokens", 40), ("completion_tokens", 120), ("tok_s", 82.0), ("queue_wait_ms", 0.0),
+                ("session_id", .string("s\(i % 7)")),
+            ])
+        }
+        let perRequestUs = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000 / Double(n)
+        Obs.flush()
+        print("OBS-COST per request (debug build): \(String(format: "%.2f", perRequestUs)) us")
+        XCTAssertLessThan(perRequestUs, 200, "logging must cost well under 1 ms per request")
+        XCTAssertEqual(LogQuery.records(settings: settings, filter: LogFilter()).filter { $0.event == "request" }.count, n)
+    }
 }

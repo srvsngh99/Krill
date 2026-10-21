@@ -97,7 +97,7 @@ struct LogsCommand: ParsableCommand {
         guard let info = SessionIndex.find(id: id, settings: settings) else {
             throw ValidationError("no session '\(id)'. List sessions with: krill logs --project .")
         }
-        if !json { print("session \(info.id)  \(LogQuery.renderSession(info))\n") }
+        if !json { print(LogQuery.renderSession(info) + "\n") }
         var rows: [(Date, String)] = []
         if let text = try? String(contentsOf: SessionIndex.transcriptURL(info, settings: settings), encoding: .utf8) {
             for line in text.split(separator: "\n") {
