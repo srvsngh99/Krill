@@ -17,7 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| 2026-10-22 | #PR | `krill pull <model>-ane-<variant>`: 11 prebuilt Neural Engine packages published to `srv-sngh` (public) with AliasMap entries; pull allowlist accepts `.mlmodelc` bundles, `embed_tokens.f16`, `krill_ane.json` | **v0.27.1.** Repos must exist before the release (they do: file count and sizes checked against the local build). Check: `krill pull bge-base-en-ane-fp16 bge-base-en` then `embed_device = ane` returns `x-krill-embed-device: ane`. |
+| 2026-10-22 | #PR | `krill pull <model>-ane-<variant>`: 11 prebuilt Neural Engine packages published to `srv-sngh` (public) with AliasMap entries; pull allowlist accepts `.mlmodelc` bundles, `embed_tokens.f16`, `krill_ane.json` | **v0.27.1.** Repos must exist before the release (they do: file count and sizes checked against the local build). Check: `krill pull bge-base-en-ane-fp16` and `krill pull bge-base-en`, then `embed_device = ane` returns `x-krill-embed-device: ane`. |
 
 ### Known-open, NOT yet merged
 

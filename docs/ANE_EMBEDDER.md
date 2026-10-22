@@ -7,9 +7,10 @@ and keeps the always-on query server small. It is opt-in: the default is the GPU
 
 ```
 # once per model: download the prebuilt package and its source model (the source is the fallback for text past 512 tokens)
-krill pull bge-base-en-ane-fp16 bge-base-en
-# EmbeddingGemma 2: krill pull embeddinggemma-2-ane-lin8 embeddinggemma-2-mlx-4bit-dyn-text
-# reranker: krill pull bge-reranker-base-ane-lin8 bge-reranker-base
+krill pull bge-base-en-ane-fp16
+krill pull bge-base-en
+# EmbeddingGemma 2: krill pull embeddinggemma-2-ane-lin8; krill pull embeddinggemma-2-mlx-4bit-dyn-text
+# reranker: krill pull bge-reranker-base-ane-lin8; krill pull bge-reranker-base
 
 # then choose the device (one setting for embedders and rerankers)
 echo 'embed_device = "ane"' >> ~/.krill/config.toml    # or KRILL_EMBED_DEVICE=ane, or /config embed_device=ane
