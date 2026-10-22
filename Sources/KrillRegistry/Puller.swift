@@ -298,6 +298,11 @@ extension Puller {
         let name = filename.lowercased()
         // Sharded or single-file weights.
         if name.hasSuffix(".safetensors") { return true }
+        // Neural Engine packages (docs/ANE_EMBEDDER.md): every file inside a
+        // compiled `.mlmodelc` bundle (nested dirs: weights/, analytics/), the
+        // memory-mapped word-embedding table and the package manifest.
+        if name == "krill_ane.json" || name == "embed_tokens.f16" { return true }
+        if name.split(separator: "/").dropLast().contains(where: { $0.hasSuffix(".mlmodelc") }) { return true }
         // Shard map for multi-file safetensors. Without this the
         // loader can't find weights split across model-00001-of-N
         // shards.

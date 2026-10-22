@@ -328,6 +328,65 @@ final class PullerTests: XCTestCase {
         XCTAssertFalse(Puller.isEssentialFile("qwen3coder_tool_parser.py"))
     }
 
+    func testIsEssentialFileAcceptsNeuralEnginePackageFiles() {
+        XCTAssertTrue(Puller.isEssentialFile("krill_ane.json"))
+        XCTAssertTrue(Puller.isEssentialFile("embed_tokens.f16"))
+        // Every file inside a compiled bundle, at any depth.
+        XCTAssertTrue(Puller.isEssentialFile("s64.mlmodelc/model.mil"))
+        XCTAssertTrue(Puller.isEssentialFile("s512.mlmodelc/coremldata.bin"))
+        XCTAssertTrue(Puller.isEssentialFile("s128.mlmodelc/weights/weight.bin"))
+        XCTAssertTrue(Puller.isEssentialFile("s256.mlmodelc/analytics/coremldata.bin"))
+        // Clutter next to a package stays out, and so does a bare "bundle" file.
+        XCTAssertFalse(Puller.isEssentialFile("README.md"))
+        XCTAssertFalse(Puller.isEssentialFile("s64.mlmodelc"))
+        XCTAssertFalse(Puller.isEssentialFile("notes/weight.bin"))
+    }
+
+    func testPullDownloadsNeuralEnginePackageWithNestedBundles() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let registry = Registry(baseDir: tempDir)
+
+        let listing = #"""
+        {"siblings":[
+         {"rfilename":".gitattributes","size":10},
+         {"rfilename":"README.md","size":10},
+         {"rfilename":"krill_ane.json","size":2},
+         {"rfilename":"embed_tokens.f16","size":3},
+         {"rfilename":"tokenizer.json","size":4},
+         {"rfilename":"s64.mlmodelc/model.mil","size":5},
+         {"rfilename":"s64.mlmodelc/weights/weight.bin","size":6},
+         {"rfilename":"s64.mlmodelc/analytics/coremldata.bin","size":7}]}
+        """#
+        // Download order follows the listing minus the files the allowlist skips.
+        let bodies = ["{}", "f16", "tok", "mil", "weights", "analytics"]
+        let client = MockPullerHTTPClient(
+            tempDir: tempDir,
+            dataResponses: [.init(statusCode: 200, body: Data(listing.utf8))],
+            downloadResponses: bodies.map { .init(statusCode: 200, body: Data($0.utf8)) }
+        )
+        let puller = Puller(
+            registry: registry, httpClient: client, tokenProvider: { nil }, sleeper: { _ in }
+        )
+        let resolved = try XCTUnwrap(AliasMap.resolve("bge-base-en-ane-fp16"))
+
+        let manifest = try await puller.pull(resolved)
+
+        let blob = registry.modelPath("bge-base-en-ane-fp16")
+        func read(_ path: String) throws -> String {
+            String(decoding: try Data(contentsOf: blob.appendingPathComponent(path)), as: UTF8.self)
+        }
+        XCTAssertEqual(try read("krill_ane.json"), "{}")
+        XCTAssertEqual(try read("embed_tokens.f16"), "f16")
+        XCTAssertEqual(try read("s64.mlmodelc/model.mil"), "mil")
+        XCTAssertEqual(try read("s64.mlmodelc/weights/weight.bin"), "weights")
+        XCTAssertEqual(try read("s64.mlmodelc/analytics/coremldata.bin"), "analytics")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: blob.appendingPathComponent("README.md").path))
+        XCTAssertEqual(manifest.files.count, 6)
+        XCTAssertEqual(manifest.source, "srv-sngh/bge-base-en-ane-fp16")
+        XCTAssertEqual(registry.getModel("bge-base-en-ane-fp16")?.quant, "ane-fp16")
+    }
+
     func testIsEssentialFileMatchesCaseInsensitively() {
         // HF filenames are case-stable but the loader treats them
         // case-insensitively. Make sure both forms work.

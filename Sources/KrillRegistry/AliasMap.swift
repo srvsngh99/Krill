@@ -511,4 +511,44 @@ private let aliases: [String: ResolvedModel] = [
     "bge-reranker-v2-m3": ResolvedModel(
         repo: "BAAI/bge-reranker-v2-m3",
         name: "bge-reranker-v2-m3", family: .reranker, params: "568M", quant: "fp32", context: 8192),
+
+    // Prebuilt Neural Engine (Core ML) packages, published under srv-sngh so
+    // `krill pull <model>-ane-<variant>` replaces `make ane-package`. Each repo
+    // is the package directory as the ANE loader expects it (krill_ane.json,
+    // s64..s512.mlmodelc bundles, embed_tokens.f16, tokenizer and config files).
+    // Pull the source model too: it is the fallback for text past 512 tokens.
+    // See docs/ANE_EMBEDDER.md. Only models marked supported there are listed.
+    "all-minilm-l6-v2-ane-fp16": ResolvedModel(
+        repo: "srv-sngh/all-minilm-l6-v2-ane-fp16",
+        name: "all-minilm-l6-v2-ane-fp16", family: .bert, params: "?", quant: "ane-fp16", context: 512),
+    "bge-small-en-ane-fp16": ResolvedModel(
+        repo: "srv-sngh/bge-small-en-ane-fp16",
+        name: "bge-small-en-ane-fp16", family: .bert, params: "?", quant: "ane-fp16", context: 512),
+    "bge-base-en-ane-fp16": ResolvedModel(
+        repo: "srv-sngh/bge-base-en-ane-fp16",
+        name: "bge-base-en-ane-fp16", family: .bert, params: "?", quant: "ane-fp16", context: 512),
+    "all-mpnet-base-v2-ane-fp16": ResolvedModel(
+        repo: "srv-sngh/all-mpnet-base-v2-ane-fp16",
+        name: "all-mpnet-base-v2-ane-fp16", family: .bert, params: "?", quant: "ane-fp16", context: 512),
+    "gte-base-en-v1.5-ane-fp16": ResolvedModel(
+        repo: "srv-sngh/gte-base-en-v1.5-ane-fp16",
+        name: "gte-base-en-v1.5-ane-fp16", family: .bert, params: "?", quant: "ane-fp16", context: 512),
+    "jina-embeddings-v2-base-en-ane-fp16": ResolvedModel(
+        repo: "srv-sngh/jina-embeddings-v2-base-en-ane-fp16",
+        name: "jina-embeddings-v2-base-en-ane-fp16", family: .bert, params: "?", quant: "ane-fp16", context: 512),
+    "nomic-embed-text-ane-fp16": ResolvedModel(
+        repo: "srv-sngh/nomic-embed-text-ane-fp16",
+        name: "nomic-embed-text-ane-fp16", family: .bert, params: "?", quant: "ane-fp16", context: 512),
+    "nomic-embed-text-v1-ane-fp16": ResolvedModel(
+        repo: "srv-sngh/nomic-embed-text-v1-ane-fp16",
+        name: "nomic-embed-text-v1-ane-fp16", family: .bert, params: "?", quant: "ane-fp16", context: 512),
+    "nomic-embed-text-v2-moe-ane-fp16": ResolvedModel(
+        repo: "srv-sngh/nomic-embed-text-v2-moe-ane-fp16",
+        name: "nomic-embed-text-v2-moe-ane-fp16", family: .bert, params: "?", quant: "ane-fp16", context: 512),
+    "bge-reranker-base-ane-lin8": ResolvedModel(
+        repo: "srv-sngh/bge-reranker-base-ane-lin8",
+        name: "bge-reranker-base-ane-lin8", family: .reranker, params: "?", quant: "ane-lin8", context: 512),
+    "embeddinggemma-2-ane-lin8": ResolvedModel(
+        repo: "srv-sngh/embeddinggemma-2-ane-lin8",
+        name: "embeddinggemma-2-ane-lin8", family: .bert, params: "?", quant: "ane-lin8", context: 512),
 ]

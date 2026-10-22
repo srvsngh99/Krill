@@ -6,16 +6,27 @@ The ANE is faster per query, uses far less energy, takes the load off the GPU (a
 and keeps the always-on query server small. It is opt-in: the default is the GPU, exactly as before.
 
 ```
-# once per model: build the package from weights you already pulled
-krill pull bge-base-en                       # source weights
-make ane-package MODEL=bge-base-en ANE_VARIANT=auto   # converts, parity-gates against the GPU, installs bge-base-en-ane-<variant>
-# EmbeddingGemma 2: krill pull embeddinggemma-2 embeddinggemma-2-mlx-4bit-dyn-text; make ane-package
+# once per model: download the prebuilt package and its source model (the source is the fallback for text past 512 tokens)
+krill pull bge-base-en-ane-fp16
+krill pull bge-base-en
+# EmbeddingGemma 2: krill pull embeddinggemma-2-ane-lin8; krill pull embeddinggemma-2-mlx-4bit-dyn-text
+# reranker: krill pull bge-reranker-base-ane-lin8; krill pull bge-reranker-base
 
 # then choose the device (one setting for embedders and rerankers)
 echo 'embed_device = "ane"' >> ~/.krill/config.toml    # or KRILL_EMBED_DEVICE=ane, or /config embed_device=ane
 krill serve
 curl -si localhost:57455/v1/embeddings -d '{"model":"bge-base-en","input":"hi"}' | grep -i x-krill
 # x-krill-embed-device: ane
+```
+
+Prebuilt packages are published for every model marked supported in the table below, as `<model>-ane-<variant>`
+(variant as listed there; EmbeddingGemma 2 is `embeddinggemma-2-ane-lin8`). Each is a public repo under
+[huggingface.co/srv-sngh](https://huggingface.co/srv-sngh). To build one yourself instead (a different variant, or a
+model that is not published), see [Build a package](#build-a-package):
+
+```
+krill pull bge-base-en
+make ane-package MODEL=bge-base-en ANE_VARIANT=auto   # converts, parity-gates against the GPU, installs bge-base-en-ane-<variant>
 ```
 
 ## The setting
@@ -218,11 +229,11 @@ of the four. The ANE vectors are closer to bf16 than the 4-bit GPU vectors are. 
 ## Troubleshooting
 
 - `Embeddings: embed_device = ane -> gpu` in the banner: the package is not installed (`krill list` should show
-  `embeddinggemma-2-ane-lin8`) or this is not Apple Silicon macOS.
+  `embeddinggemma-2-ane-lin8`; get it with `krill pull embeddinggemma-2-ane-lin8`) or this is not Apple Silicon macOS.
 - 500 `needs the MLX model ... for long text and media`: install the fallback, the GPU build of the same model
   (`krill pull <model>`; for EmbeddingGemma 2 `krill pull embeddinggemma-2-mlx-4bit-dyn-text`).
 - `embed_device = ane` but a model is served on the GPU: the log has one `no ANE package is installed for <model>` line;
-  build it with `make ane-package MODEL=<model>`. `x-krill-embed-device` always says what served the request.
+  `krill pull <model>-ane-<variant>` (or build it with `make ane-package MODEL=<model>`). `x-krill-embed-device` always says what served the request.
 - `make ane-package` ends with `PARITY FAILED`: the numbers are printed and nothing was installed. Try `--variant fp16`
   (or `auto`); a model that still fails stays on the GPU.
 - Core ML refuses a package after a macOS update: rebuild with `make ane-package`.
