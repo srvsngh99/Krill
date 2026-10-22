@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.27.1] - 2026-10-22
+
 ### Added
 
 - **`krill pull` now downloads prebuilt Neural Engine packages.** Every model marked supported in
@@ -16,7 +18,7 @@ reverse chronological order. Versioning follows
   `krill pull bge-base-en-ane-fp16` (also `all-minilm-l6-v2`, `bge-small-en`, `all-mpnet-base-v2`,
   `gte-base-en-v1.5`, `jina-embeddings-v2-base-en`, `nomic-embed-text`, `nomic-embed-text-v1` and `nomic-embed-text-v2-moe`
   with `-ane-fp16`; `bge-reranker-base-ane-lin8`; `embeddinggemma-2-ane-lin8`). `make ane-package` stays as the build-it-yourself
-  path. The pull allowlist now accepts a package's `krill_ane.json`, `embed_tokens.f16` and every file inside its `.mlmodelc` bundles.
+  path. The pull allowlist now accepts a package's `krill_ane.json`, `embed_tokens.f16` and every file inside its `.mlmodelc` bundles. (#352)
 
 ## [0.27.0] - 2026-10-22
 

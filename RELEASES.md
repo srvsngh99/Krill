@@ -7,6 +7,15 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.27.1 - 2026-10-22
+**Neural Engine packages you can just download.** The faster Neural Engine versions of
+the embedders and bge-reranker-base are now published, so `krill pull bge-base-en-ane-fp16`
+replaces building them yourself (EmbeddingGemma 2 is `embeddinggemma-2-ane-lin8`). Pull the
+normal model too, set `embed_device = "ane"`, and queries run on the Neural Engine. Building
+a package with `make ane-package` still works.
+
+---
+
 ## v0.27.0 - 2026-10-22
 **Faster embeddings, local logs, and upgrades that apply themselves.** Most embedders
 and the bge-reranker-base reranker can now run on the Neural Engine with the same
