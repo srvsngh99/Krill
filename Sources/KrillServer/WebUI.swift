@@ -9,7 +9,7 @@ import NIOHTTP1
 /// for the API key and sends it as a Bearer token on every API call.
 ///
 /// Brand: the page and the icons follow the SAI suite spine + the Krill kit
-/// (`sai-brand-kit/SUITE-DESIGN.md`, `sai-brand-kit/krill/DESIGN.md`) — ink on
+/// (the shared brand assets and the brand kit) — ink on
 /// paper chrome, dark #161310 terminal panels, Ember colour on the symbol
 /// only, Space Grotesk + JetBrains Mono, hairline borders, corners <= 6px,
 /// zero elevation. Icon payloads are the kit's own PNGs (`krill/app/*`).
@@ -82,7 +82,7 @@ enum WebUI {
     }
     """#
 
-    // Brand icons, verbatim from sai-brand-kit/krill/app (the ink tile with
+    // Brand icons, verbatim from the shared brand assets (the ink tile with
     // Ember code-lines). Regenerate by re-running the embed script against the
     // kit if the mark changes.
     static let appleTouchIcon = Data(base64Encoded: appleTouchB64) ?? Data()
@@ -113,7 +113,7 @@ enum WebUI {
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
 <title>Krill</title>
 <style>
-/* SAI suite spine (sai-brand-kit/SUITE-DESIGN.md) + Krill kit (krill/DESIGN.md).
+/* SAI suite spine (the shared brand assets) + Krill kit (krill/DESIGN.md).
    Law: colour only in the symbol (Ember, on the tile + the mark's cursor);
    chrome/type ink on paper; dark #161310 terminal panels; hairline 1.5px
    borders; corners <=6px; zero elevation; whisper-dot texture. */

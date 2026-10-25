@@ -35,7 +35,7 @@ final class DoctorTests: ObsTestCase {
         let fails = msgs(r, .fail)
         XCTAssertTrue(fails.contains { $0.contains("com.example.krill-llm") && $0.contains("NOT LOADED") }, "\(fails)")
         XCTAssertTrue(fails.contains { $0.contains(":57456") && $0.contains("nothing is listening") }, "\(fails)")
-        XCTAssertFalse(fails.contains { $0.contains("sunday-krill") })
+        XCTAssertFalse(fails.contains { $0.contains("krill-weekly") })
         XCTAssertTrue(msgs(r, .ok).contains { $0.contains(":57457") && $0.contains("answers /healthz") })
         XCTAssertEqual(r.worst, .fail)
         XCTAssertTrue(r.render().contains("[FAIL]"))
