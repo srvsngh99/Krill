@@ -18,11 +18,17 @@ login item. The TUI and `krill code` are interactive and are not affected.
 3. **Wait until idle.** No queued or running generation, embedding or rerank request
    (`GenerationQueue.pending`) and no request head seen for 10 s. While waiting it logs once, e.g.
    `restart to 0.27.0 deferred: waiting for 2 in-flight request(s)`.
-4. **Restart.** Stop accepting, drain, unload (the same path as SIGTERM, `ShutdownSignals`), then run
-   `launchctl kickstart -k gui/<uid>/<label>`. launchd itself stops and relaunches the job onto the
-   binary now on disk. An exit code alone would not do: exit 0 does not relaunch under
-   `KeepAlive = { SuccessfulExit = false }` and nothing relaunches without `KeepAlive`. If `kickstart`
-   fails the process exits 75, which relaunches under `KeepAlive = true` and `SuccessfulExit = false`.
+4. **Restart.** Stop accepting, drain, unload (the same path as SIGTERM, `ShutdownSignals`), spawn a
+   detached helper in its own session that waits 2 s and runs `launchctl kickstart gui/<uid>/<label>`,
+   then **exit 75 (`EX_TEMPFAIL`)**. Both halves are needed: exit 0 does not relaunch under
+   `KeepAlive = { SuccessfulExit = false }` and nothing relaunches without `KeepAlive`, while a
+   non-zero exit relaunches under either `KeepAlive` form; the helper's kickstart starts a job with no
+   `KeepAlive`, and when both fire the second is a no-op. `launchctl kickstart -k` run from inside the job
+   does not work: launchd kills the job's process group, that `launchctl` included, before it starts the
+   replacement, so the job just stops.
+
+   **`last exit code = 75: EX_TEMPFAIL` in `launchctl print` after an upgrade is the normal, successful
+   restart**, not an error. Check `/v1/status` for the new version instead.
 
 "Under launchd" means `XPC_SERVICE_NAME` is a job label (not `0` / `application.*`, which terminals
 carry) and the parent pid is 1. A terminal `krill serve` never restarts: it prints and logs one notice,
@@ -46,6 +52,7 @@ To turn it off for one job, add `KRILL_AUTO_RESTART_ON_UPGRADE=0` to the plist's
   Cellar (the Cellar dir is deleted by `brew upgrade`). Re-run `krill ui --install` once to refresh an old plist.
 - Log lines are at notice level with the old and new version (`~/.krill/ui/serve.log` for the UI login
   item, your plist's `StandardOutPath` otherwise).
-- Only a `gui/<uid>` LaunchAgent can be kickstarted; a LaunchDaemon falls back to exit 75.
+- The helper's kickstart only reaches a `gui/<uid>` LaunchAgent; a LaunchDaemon relies on the exit 75 alone,
+  so it needs a `KeepAlive` to come back.
 - Not covered: agent-session turns that hold no generation slot do not defer a restart beyond the
   10 s quiet period.
