@@ -53,7 +53,7 @@ public func loadWeightArrays(from directory: URL) throws -> [String: MLXArray] {
 /// `embed_tokens.*`/`layers.N.*`/`norm.*` with no `model.` prefix and no
 /// lm_head), as sentence-embedding decoders like intfloat/e5-mistral-7b-instruct
 /// and Salesforce/SFR-Embedding-Mistral do (`MistralModel`, not
-/// `MistralForCausalLM`). The causal modules used as embedder backbones nest
+/// `MistralForCausalLM`). The causal modules used as embedder backbones sit
 /// the backbone under `model.`, so such keys must be prefixed. Normal
 /// `*ForCausalLM` checkpoints already carry the `model.` prefix and are left
 /// untouched.

@@ -242,7 +242,7 @@ public final class InferenceEngine: @unchecked Sendable {
 
     /// The loaded model's context window in tokens, or 0 when it cannot be
     /// determined. Read from `config.json`'s `max_position_embeddings`, falling
-    /// back to the text sub-config that multimodal checkpoints nest it under.
+    /// back to the text sub-config that multimodal checkpoints place it under.
     ///
     /// This is what makes a derived token budget possible: the real ceiling on
     /// a reply is the context window minus the prompt, not a constant.
@@ -260,7 +260,7 @@ public final class InferenceEngine: @unchecked Sendable {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return 0 }
         if let n = json["max_position_embeddings"] as? Int, n > 0 { return n }
-        // Multimodal checkpoints nest the language model's limit one level down.
+        // Multimodal checkpoints place the language model's limit one level down.
         for key in ["text_config", "llm_config", "language_config"] {
             if let sub = json[key] as? [String: Any],
                let n = sub["max_position_embeddings"] as? Int, n > 0 {

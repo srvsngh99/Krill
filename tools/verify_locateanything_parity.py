@@ -35,7 +35,7 @@ SRC_CANDIDATES = [
     os.environ.get("LA3B_SRC"),
     os.path.expanduser("~/.cache/huggingface/staged/LocateAnything-3B"),
     # scratchpad copy of just the custom code
-    "/private/tmp/claude-501/-Users-sourav-Desktop-playground-Krill/"
+    "/private/tmp/claude-501/-Users-example-Krill/"
     "e8f25ff7-901d-4159-90ba-b3fc542cff5d/scratchpad/la3b",
 ]
 SRC = next((p for p in SRC_CANDIDATES if p and Path(p, "modeling_vit.py").exists()), None)

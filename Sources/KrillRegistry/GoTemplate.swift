@@ -312,7 +312,7 @@ private struct Parser {
     /// overflow is an uncatchable trap -- it would crash the server
     /// instead of falling back to the built-in template -- so we cap the
     /// depth and throw a catchable `GoTemplateError.parse` instead. Real
-    /// TEMPLATEs nest only a few levels deep; the cap is far above that.
+    /// TEMPLATEs place scopes only a few levels deep; the cap is far above that.
     var depth = 0
     static let maxDepth = 200
 

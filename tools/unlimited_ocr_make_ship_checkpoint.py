@@ -166,7 +166,7 @@ def main() -> None:
                         metadata={"format": "mlx"})
 
     # 4. config: keep the unlimited-ocr top-level so the loader routes to the
-    #    multimodal path; nest the deepseek language_config; attach the mixed
+    #    multimodal path; place the deepseek language_config; attach the mixed
     #    quantization block (top-level nvfp4 + per-module 8-bit overrides).
     qblock = {"group_size": EXPERT_GS, "bits": EXPERT_BITS, "mode": EXPERT_MODE}
     qblock.update(overrides)

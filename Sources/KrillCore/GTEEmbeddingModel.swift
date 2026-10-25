@@ -60,7 +60,7 @@ public struct GTEConfig: Decodable, Sendable {
         let scaling = try? c.decode(RopeScaling.self, forKey: .ropeScaling)
         ropeScalingFactor = scaling?.factor
         ropeScalingType = scaling?.type
-        // Cap a single embed forward; deepkrill-scale chunks sit far under it.
+        // Cap a single embed forward; agent-scale chunks sit far under it.
         maxTokens = min((try? c.decode(Int.self, forKey: .maxPositionEmbeddings)) ?? 8192, 8192)
     }
 }

@@ -85,8 +85,8 @@ final class RedactorTests: XCTestCase {
     }
 
     func testEmailAndPrivateKeyBlocks() {
-        let out = r.redact("from srv.sngh99@gmail.com\n-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\nBBBB\n-----END OPENSSH PRIVATE KEY-----\nend")
-        XCTAssertFalse(out.contains("gmail.com"))
+        let out = r.redact("from someone@example.com\n-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\nBBBB\n-----END OPENSSH PRIVATE KEY-----\nend")
+        XCTAssertFalse(out.contains("someone@example.com"))
         XCTAssertFalse(out.contains("AAAA"))
         XCTAssertTrue(out.hasSuffix("end"))
     }

@@ -222,5 +222,5 @@ Things that are easy to break and cheap to check:
 - The prompt bytes for a non-plan, non-adaptive posture are unchanged by step 2's
   hoist.
 - `krill launch <agent>` and the tap/formula flows are unaffected.
-- **Public build has no Kreach strings** — run the usual release grep before
+- **Public build has no self-hosted index strings** — run the usual release grep before
   tagging; unrelated to this work but gated on every release.

@@ -1,6 +1,6 @@
 # 0003. Persistent Memory (opt-in, text + semantic, BYOM)
 
-Status: proposed. Date: 2026-06-28. Owner: Sourav. Scope: how Krill gives users
+Status: proposed. Date: 2026-06-28. Scope: how Krill gives users
 long-term memory across sessions — what is stored, where, in what form, how the
 model reaches it, and why this is built natively in Swift rather than bolted on
 with an external vector database.

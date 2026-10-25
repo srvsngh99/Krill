@@ -477,7 +477,7 @@ Use warm-server comparisons for release gating. Do not mix repeated CLI process
 startup against a warm Ollama daemon.
 
 Pass the **full local path** to `--krill-model` (e.g.
-`/Users/.../models/blobs/gemma-4-e2b`), not the registry name. The bench
+`~/.krill/models/blobs/gemma-4-e2b`), not the registry name. The bench
 reads `quantization_class` from the local `config.json`; with a registry
 name it falls back to a HuggingFace lookup that 401s for private/local
 models and records `quantization_class: "unknown"`, which makes the
@@ -498,11 +498,11 @@ Useful commands:
 make test
 make release
 
-KRILL_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b \
+KRILL_GEMMA4_MODEL_PATH=~/.krill/models/blobs/gemma-4-e2b \
 CLANG_MODULE_CACHE_PATH=.build/clang-module-cache \
 swift test --filter QuantizedKVCacheIntegrationTests/testInt8AndFp16ProduceSimilarGreedyPrefix --skip-build
 
-KRILL_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b \
+KRILL_GEMMA4_MODEL_PATH=~/.krill/models/blobs/gemma-4-e2b \
 CLANG_MODULE_CACHE_PATH=.build/clang-module-cache \
 swift test --filter MultimodalEndpointsTests/testTwoDifferentImagesProduceDifferentOutputs --skip-build
 

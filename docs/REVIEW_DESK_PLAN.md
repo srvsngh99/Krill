@@ -2,7 +2,7 @@
 
 Status: DRAFT under ideation (2026-07-18).
 
-Decided so far (2026-07-18, with Sourav):
+Decided so far (2026-07-18):
 - **Opt-in, not a gate.** Review is an on-demand surface (`/review`, ctrl+r,
   `krill diff`), used when the user chooses — typically before raising a PR,
   to manually correct something, or to leave inline comments. There is NO
@@ -19,7 +19,7 @@ Decided so far (2026-07-18, with Sourav):
   agent work.
 - **Boring names**: `/review`, `krill diff`, `krill show`. No sub-brand.
 
-Locked 2026-07-19 (Sourav):
+Locked 2026-07-19:
 - **Comments are repo-scoped**, persisted under `.krill/` (gitignored) so
   they survive across sessions until resolved.
 - **Default diff base = HEAD** (quick spot-check view); one key (`b`) flips
@@ -267,7 +267,7 @@ Desk-v1 unless noted):
 4. **Control socket.** herdr's agent API, re-homed: a local unix socket on
    `krill code` (and/or endpoints on `krill serve`) to list sessions +
    states, inject a prompt, and wait on a session finishing. Makes krill
-   scriptable by other tools (Reef, DeepKrill, CI) and is the foundation
+   scriptable by other tools (other agents, CI) and is the foundation
    for #5.
 5. **Await-able dispatch.** `dispatch_agent` is fire-and-forget today (the
    child never reports back). Add an opt-in `await`/collect mode so an

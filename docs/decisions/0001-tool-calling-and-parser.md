@@ -1,6 +1,6 @@
 # 0001. Tool Calling and Parsing
 
-Status: adopted. Date: 2026-06-27. Owner: Sourav. Scope: how Krill turns a model's
+Status: adopted. Date: 2026-06-27. Scope: how Krill turns a model's
 generated text into structured tool calls, for BOTH of Krill's tool-using
 systems (the inference server and the in-process agent harness), and why we
 chose the design we did.

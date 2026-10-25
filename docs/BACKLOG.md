@@ -455,7 +455,7 @@ loader's `quantize`/`loadWeights` machinery is generic over `bits`, so
 hypothesis, not a fact, until it has.
 
 Downloaded but UNTESTED at
-`/private/tmp/claude-501/-Users-sourav-linkedin/3a6c06ce-0c63-430a-a3ab-8345131b6166/scratchpad/bonsai1-mlx-2bit`
+`/private/tmp/claude-501/-Users-example/3a6c06ce-0c63-430a-a3ab-8345131b6166/scratchpad/bonsai1-mlx-2bit`
 (a session scratchpad - do not rely on that path surviving; re-download
 before picking this up). Do not claim it works until `loadModel(from:)`
 actually succeeds and a real prompt produces coherent output - "loads

@@ -132,8 +132,8 @@ final class UpgradeWatcherTests: XCTestCase {
     // MARK: launchd vs terminal, knobs
 
     func testLaunchdLabelNeedsJobLabelAndPid1Parent() {
-        let job = ["XPC_SERVICE_NAME": "dev.deepkrill.sunday-krill"]
-        XCTAssertEqual(UpgradeWatcher.launchdLabel(environment: job, parentPID: 1), "dev.deepkrill.sunday-krill")
+        let job = ["XPC_SERVICE_NAME": "dev.example.krill-weekly"]
+        XCTAssertEqual(UpgradeWatcher.launchdLabel(environment: job, parentPID: 1), "dev.example.krill-weekly")
         XCTAssertNil(UpgradeWatcher.launchdLabel(environment: job, parentPID: 4242))          // spawned from a shell
         XCTAssertNil(UpgradeWatcher.launchdLabel(environment: ["XPC_SERVICE_NAME": "0"], parentPID: 1))
         XCTAssertNil(UpgradeWatcher.launchdLabel(environment: ["XPC_SERVICE_NAME": "application.com.apple.Terminal.1"], parentPID: 1))
@@ -150,7 +150,7 @@ final class UpgradeWatcherTests: XCTestCase {
     }
 
     func testParseVersion() {
-        XCTAssertEqual(UpgradeWatcher.parseVersion("Krill v0.27.0\nBy Sourav"), "0.27.0")
+        XCTAssertEqual(UpgradeWatcher.parseVersion("Krill v0.27.0\nBy the Krill authors"), "0.27.0")
         XCTAssertNil(UpgradeWatcher.parseVersion("garbage"))
         XCTAssertNil(UpgradeWatcher.parseVersion(""))
     }

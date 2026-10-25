@@ -25,15 +25,15 @@ final class DoctorTests: ObsTestCase {
         var p = FakeProbe()
         p.installList = [KrillInstall(path: "/usr/local/bin/krill", resolved: "/usr/local/libexec/krill/krill", version: "0.26.0", codesign: "valid (adhoc)")]
         p.jobs = [
-            LaunchdJob(label: "com.sourav.deepkrill-llm", plist: "/L/a.plist", program: "/usr/local/bin/krill",
+            LaunchdJob(label: "com.example.krill-llm", plist: "/L/a.plist", program: "/usr/local/bin/krill",
                        arguments: ["/usr/local/bin/krill", "serve", "--port", "57456"], loaded: false),
-            LaunchdJob(label: "dev.deepkrill.sunday-krill", plist: "/L/b.plist", program: "/usr/local/bin/krill",
+            LaunchdJob(label: "dev.example.krill-weekly", plist: "/L/b.plist", program: "/usr/local/bin/krill",
                        arguments: ["/usr/local/bin/krill", "serve", "--port", "57457"], loaded: true, state: "active", pid: 123, runs: 1, lastExit: "(never exited)"),
         ]
         p.ports = [57457: PortStatus(port: 57457, listening: true, healthz: "ok, model m", owner: "krill")]
         let r = run(p)
         let fails = msgs(r, .fail)
-        XCTAssertTrue(fails.contains { $0.contains("com.sourav.deepkrill-llm") && $0.contains("NOT LOADED") }, "\(fails)")
+        XCTAssertTrue(fails.contains { $0.contains("com.example.krill-llm") && $0.contains("NOT LOADED") }, "\(fails)")
         XCTAssertTrue(fails.contains { $0.contains(":57456") && $0.contains("nothing is listening") }, "\(fails)")
         XCTAssertFalse(fails.contains { $0.contains("sunday-krill") })
         XCTAssertTrue(msgs(r, .ok).contains { $0.contains(":57457") && $0.contains("answers /healthz") })
@@ -56,7 +56,7 @@ final class DoctorTests: ObsTestCase {
         var p = FakeProbe()
         p.installList = [
             KrillInstall(path: "/usr/local/bin/krill", resolved: "/x/krill", version: "0.26.0"),
-            KrillInstall(path: "/Users/u/bin/krill", resolved: "/x/krill", version: "0.26.0"),
+            KrillInstall(path: "/home/u/bin/krill", resolved: "/x/krill", version: "0.26.0"),
         ]
         XCTAssertFalse(msgs(run(p), .warn).contains { $0.contains("different krill installs") })
     }
@@ -98,7 +98,7 @@ final class DoctorTests: ObsTestCase {
 
     func testReportsLastCrashAndRecentErrors() {
         var p = FakeProbe()
-        p.crashes = [URL(fileURLWithPath: "/Users/u/Library/Logs/DiagnosticReports/krill-2026-10-22-014228.ips")]
+        p.crashes = [URL(fileURLWithPath: "/home/u/Library/Logs/DiagnosticReports/krill-2026-10-22-014228.ips")]
         let day = ObsPaths.dayString(Date())
         write(settings.logsDir.appendingPathComponent("serve-\(day).jsonl"), """
         {"ts":"\(JSONLine.isoUTC(Date().addingTimeInterval(-60)))","event":"request","method":"POST","endpoint":"/v1/embeddings","status":500,"error":"boom"}

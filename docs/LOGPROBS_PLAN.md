@@ -74,7 +74,7 @@ closes an API-parity gap and unlocks real Krill use cases:
   token is a standard, cheaper alternative to parsing free text.
 
 One motivating *consumer*, mentioned here and nowhere else in this plan: a
-side project (Jugnu) wants a local teacher model's token probabilities for
+side project wants a local teacher model's token probabilities for
 distillation labelling. That is one caller among several — the API design
 below is OpenAI/Ollama parity, full stop, and must not bend to that one
 consumer's convenience.
@@ -826,7 +826,7 @@ bug: report as-is per the task's own instruction for this case.
 **Task 3 no-slowdown check** (`krill bench <model> --runs 3 --gen-len 128`,
 alternating baseline `7f8a506` (A) and this fix (B), A/B/A/B/A/B, in a
 scratch worktree removed afterward). The machine was NOT actually idle
-during this run - a long-running `kreach-crawler` background process (an
+during this run - a long-running `crawler` background process (an
 unrelated project, pre-existing, left running per this session's
 instructions) and several other concurrent agent sessions were competing
 for CPU/memory throughout, which shows up directly in the numbers below as
@@ -887,7 +887,7 @@ plumbing and `LogprobsAggregator` Phase 1 already built.
 `docs.ollama.com/api/generate` (WebFetch, 2026-09-30), cross-checked against
 the Go source `github.com/ollama/ollama/api/types.go` and the real `ollama`
 Python package (`pip install ollama`, version 0.6.3, installed trivially
-into `/Users/sourav/.krill/venv` — its `_types.py` matches the Go source
+into `~/.krill/venv` — its `_types.py` matches the Go source
 exactly):
 
 - Request: `logprobs: bool`, `top_logprobs: int` (0-20) — **top-level
@@ -935,7 +935,7 @@ exactly):
     path's tail-chunk handling).
 
 **Legacy OpenAI `/v1/completions`** — the OpenAI Python SDK's own type
-stubs in `/Users/sourav/.krill/venv` (authoritative, matches the task
+stubs in `~/.krill/venv` (authoritative, matches the task
 brief's instruction to check them over the docs site):
   - `openai/types/completion_create_params.py`: `logprobs: Optional[int]`,
     doc comment: *"Include the log probabilities on the `logprobs` most
@@ -1108,7 +1108,7 @@ same reasoning-filter stress case Phase 1 used) —
   "stream and non-stream" instruction does not apply here for a reason
   unrelated to this change.
 - **`ollama` Python package**: trivially installable into
-  `/Users/sourav/.krill/venv` (`pip install ollama`, no extra deps beyond
+  `~/.krill/venv` (`pip install ollama`, no extra deps beyond
   what was already there) — not skipped. `ollama.Client(host=...).chat(
   model=..., logprobs=True, top_logprobs=3)` and `.generate(...,
   logprobs=True, top_logprobs=2)` against `qwen3.5-4b` both parse into
@@ -1276,12 +1276,12 @@ flags (`--host 127.0.0.1`, `KRILL_API_KEY` set), same prompt
 `max_tokens: 320`), alternating build order every round.
 
 This dev Mac was NOT quiet during measurement — `ps aux | sort -k3 -nr`
-showed, at various points during the runs: a `kreach-crawler` process
+showed, at various points during the runs: a `crawler` process
 steady at ~10-12% CPU (pre-existing, left running per instructions), a
-`jugnu/step9/teacher_mlx.py` batched-labeling job at 4-40% CPU, and
+a `teacher_mlx.py` batched-labeling job at 4-40% CPU, and
 (heaviest) a `tools/dry_run.py` video-render job that pegged ONE CPU core
 at ~100% for several minutes during the first llama-3.2-1b pass, plus
-several `kreach/.venv` Python helpers at 10-65% CPU. None of these were
+several `.venv` Python helpers at 10-65% CPU. None of these were
 started by this task and none were killed. The result is a strongly
 BIMODAL distribution per config — most single requests land in a
 "contended" band (~20-60 tok/s) but a minority land in an "uncontended"
@@ -1471,7 +1471,7 @@ alone (not concurrently with other agents' work) to rule out the known
 `AgentSessionTests` ordering race — none observed on either run.
 
 **Real model — token/logprob parity** (`krill serve`, release build, port
-57483, `KRILL_API_KEY` set; OpenAI Python SDK via `/Users/sourav/.krill/
+57483, `KRILL_API_KEY` set; OpenAI Python SDK via `~/.krill/
 venv`), greedy, `top_logprobs: 5`, prompt "Explain in two sentences why the
 sky is blue.":
 
@@ -1706,7 +1706,7 @@ prefix-cache/LocateAnything/Muse Glimmer questions from earlier phases.
 
 **Task A: raw HF Qwen3.5-4B snapshot, before/after `qwen35VLKeyRewrite`.**
 Loaded the raw bf16 snapshot at
-`/Users/sourav/laya-demo/.hf-semif/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`
+`~/demo/.hf-semif/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`
 (read-only, belongs to another project) through `loadQwen35VL`. Before the
 fix it produced confident garbage (random-init output); after the fix it
 produces coherent multi-sentence output. Numeric parity against `mlx_lm`
@@ -1770,7 +1770,7 @@ concern).
 
 ### Sources checked before implementing
 
-- OpenAI Python SDK (`/Users/sourav/.krill/venv`, `openai==2.29.0`):
+- OpenAI Python SDK (`~/.krill/venv`, `openai==2.29.0`):
   `openai/types/completion_create_params.py` — `echo: Optional[bool]`,
   `"Echo back the prompt in addition to the completion"`; `logprobs:
   Optional[int]`, `"The API will always return the logprob of the sampled

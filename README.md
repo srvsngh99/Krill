@@ -243,8 +243,8 @@ you close the terminal), generates an API key on first run and saves it to
 >_ Krill UI
 This Mac    http://localhost:57455/ui
 Same Wi-Fi  http://192.168.1.23:57455/ui
-Tailscale   http://100.91.59.7:57455/ui
-Phone link  http://100.91.59.7:57455/ui#k=…   (carries the key)
+Tailscale   http://<tailscale-ip>:57455/ui
+Phone link  http://<tailscale-ip>:57455/ui#k=…   (carries the key)
 Stop        krill ui --stop      always-on at login: krill ui --install
 ```
 
