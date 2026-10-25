@@ -9,6 +9,13 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Docs
+
+- **Self-restart docs describe what the code does.** `docs/SELF_RESTART_ON_UPGRADE.md` said the server runs
+  `launchctl kickstart -k` and exits 75 only when that fails; it always spawns a detached `launchctl kickstart`
+  helper and exits 75, so `last exit code = 75: EX_TEMPFAIL` after an upgrade is the normal restart.
+  `docs/ANE_EMBEDDER.md` gains the missing `embeddinggemma-2` row in the supported-models table.
+
 ## [0.27.1] - 2026-10-22
 
 ### Added
@@ -42,7 +49,8 @@ reverse chronological order. Versioning follows
   Under launchd, the server polls (every 60 s, one `stat`) the binary it was launched as; when a different,
   usable version appears (stable for a second look, `codesign --verify` clean, `krill version` reports a new
   version) and the server is idle (no queued/in-flight generation, embed or rerank request and 10 s since the
-  last request), it drains gracefully and relaunches via `launchctl kickstart -k`, which works under any
+  last request), it drains gracefully and relaunches through launchd (a detached `launchctl kickstart`
+  helper plus exit 75, so `last exit code = 75` is the normal restart), which works under any
   `KeepAlive`. Handles Homebrew's repointed Cellar symlink and `install.sh`'s rm + cp. A terminal-run server
   never restarts; it prints "Krill X is installed; restart to use it" once. Turn off with
   `auto_restart_on_upgrade = false` or `KRILL_AUTO_RESTART_ON_UPGRADE=0`. Also covers the `krill ui --install`
