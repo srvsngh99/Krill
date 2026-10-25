@@ -9,6 +9,16 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Changed
+
+- The optional self-hosted search index backend (compiled only into local
+  `make dev` builds) now uses `selfhosted` naming throughout:
+  `search_backend = "selfhosted"`, the `selfhosted_url` config key, the
+  `KRILL_SELFHOSTED_URL` and `KRILL_SEARCH_BACKEND=selfhosted` environment
+  overrides, and the `KRILL_SELFHOSTED_INDEX=1` build switch. Earlier key
+  names for this dev-only backend are no longer read. Public release builds
+  are unaffected.
+
 ### Docs
 
 - **Self-restart docs describe what the code does.** `docs/SELF_RESTART_ON_UPGRADE.md` said the server runs

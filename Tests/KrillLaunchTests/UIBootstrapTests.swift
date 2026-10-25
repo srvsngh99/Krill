@@ -16,7 +16,7 @@ final class UIBootstrapTests: XCTestCase {
     }
 
     func testEndpointsOrderLocalThenLanThenTailscaleAndDedupe() {
-        let tsIP = "100." + "64.0.10"   // CGNAT documentation-style example
+        let tsIP = "100.64.0.10"   // CGNAT documentation-style example
         let rows = UIBootstrap.endpoints(
             port: 57455, lanIPs: ["192.168.1.5", "192.168.1.5", "10.0.0.2"], tailscaleIP: tsIP)
         XCTAssertEqual(rows.map(\.label), ["This Mac", "Same Wi-Fi", "Same Wi-Fi", "Tailscale"])

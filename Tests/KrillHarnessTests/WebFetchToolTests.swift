@@ -37,7 +37,7 @@ final class WebFetchToolTests: XCTestCase {
 
     func testBlocksPrivateAndLocalHosts() {
         for h in ["localhost", "127.0.0.1", "0.0.0.0", "10.1.2.3", "192.168.1.1",
-                  "172.16.0.1", "172.31.255.255", "169.254.169.254", "100." + "64.0.1",
+                  "172.16.0.1", "172.31.255.255", "169.254.169.254", "100.64.0.1",
                   "box.local", "svc.internal", "metadata.google.internal",
                   "::1", "fe80::1", "fd00::1"] {
             XCTAssertTrue(WebFetchTool.isBlockedHost(h), "\(h) must be blocked")
