@@ -6,7 +6,7 @@ so no padding is involved), `normalize_embeddings=True`. Everything here is synt
 (generated, seeded); nothing is copied from the web.
 
 Repo copy: `Tests/KrillEngineTests/Fixtures/eg2_mm/` (about 2.3 MB). Scratch (same files, plus the
-venv, scripts and debug dumps): `/private/tmp/claude-501/-Users-sourav/50cbce9a-3e53-4e5c-8d19-610463c2c451/scratchpad/eg2-m2/`.
+venv, scripts and debug dumps): `/private/tmp/claude-501/-Users-example/50cbce9a-3e53-4e5c-8d19-610463c2c451/scratchpad/eg2-m2/`.
 Weights (reuse, do not delete): `.../scratchpad/eg2-weights`.
 
 ## Layout

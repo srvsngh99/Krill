@@ -60,9 +60,9 @@ git checkout -b release/vX.Y.Z
    make metallib CONFIGURATION=release
    ./.build/arm64-apple-macosx/release/krill version   # MUST print the new number
    ```
-5. **Gate the public build.** Kreach is private and must never ship:
+5. **Gate the public build.** The self-hosted index backend is dev-only and must never ship:
    ```bash
-   strings -a .build/arm64-apple-macosx/release/krill | grep -ic kreach   # must be 0
+   strings -a .build/arm64-apple-macosx/release/krill | grep -ic SelfHostedIndex   # must be 0
    ```
 6. **Package and stamp.**
    ```bash
@@ -127,8 +127,8 @@ git checkout -b release/vX.Y.Z
 - **Version numbers only go up.** Brew and `krill update` semver-compare against
   the published version, so a "0.16.4" published after "0.17.0" can never be
   picked up. There is no un-publishing.
-- **The tap's `main` is hook-protected** and enforces the author identity
-  `Sourav Singh <srv.sngh99@gmail.com>`. Branch and PR there too; never
+- **The tap's `main` is hook-protected** and enforces the maintainer's
+  no-reply author identity. Branch and PR there too; never
   `--no-verify`.
 - **Model-blob aliases must point at a repo that exists.** An `AliasMap` entry
   referencing an unpublished HF repo builds and tests green, then 404s for every

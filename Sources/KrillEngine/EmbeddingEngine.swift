@@ -262,7 +262,7 @@ public final class EmbeddingEngine: @unchecked Sendable {
                 ?? Self.sentenceTransformerPooling(directory: directory) ?? .lastToken
             appendEOS = (pooling == .lastToken)
             // Cap context to keep a single embed forward bounded (these backbones
-            // advertise 100k+ positions); deepkrill-scale chunks sit far under it.
+            // advertise 100k+ positions); agent-scale chunks sit far under it.
             maxTokens = min(Self.maxPositionEmbeddings(from: data) ?? 8192, 8192)
         } else if Self.isJinaBert(data) {
             // jina-embeddings-v2: model_type is "bert" but it uses ALiBi (no

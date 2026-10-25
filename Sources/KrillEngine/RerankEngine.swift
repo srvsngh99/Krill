@@ -89,7 +89,7 @@ public final class RerankEngine: @unchecked Sendable {
         let m = RerankerModel(config, numLabels: 1)
         // BGE Reranker keys are nested under `roberta.` for the
         // backbone and bare `classifier.` for the head. Plain
-        // BERT-class rerankers nest under `bert.`. The loader's
+        // BERT-class rerankers sit under `bert.`. The loader's
         // existing `keyPrefix` argument strips the backbone
         // prefix only; classifier weights already match the
         // RerankerModel module hierarchy.

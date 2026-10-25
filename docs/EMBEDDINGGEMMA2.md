@@ -569,7 +569,7 @@ config that disagree fail the load instead of producing plausible garbage. The
 vision tower, the audio tower and the text model all load quantized leaves, at any
 affine width (2, 3, 4, 5, 6, 8 bits) or `mxfp4` / `nvfp4` / `mxfp8`.
 Compute is still fp32 by default (`KRILL_EMBED_DTYPE`). Measured 2026-10-21 (M4 Pro,
-9,618-passage Kreach sub-corpus: all hi/kn passages + 6,000 random en, 750 queries,
+9,618-passage web sub-corpus: all hi/kn passages + 6,000 random en, 750 queries,
 paired bootstrap 10k): `KRILL_EMBED_DTYPE=bfloat16` on a quantized build is ~20% faster
 and ~100 MB lower at peak, but vectors differ from fp32 compute by cosine 0.998-0.9995
 (min; mean 0.99995) and 8-bit shows a significant dense MRR@10 loss on the English sets

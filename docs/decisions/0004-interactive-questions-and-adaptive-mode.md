@@ -1,6 +1,6 @@
 # 0004. Interactive questions, plan promotion, and the adaptive posture
 
-Status: proposed. Date: 2026-08-23. Owner: Sourav. Scope: how Krill's agent asks
+Status: proposed. Date: 2026-08-23. Scope: how Krill's agent asks
 the user a question mid-run, how it leaves plan mode, and the new posture in
 which it decides that for itself.
 

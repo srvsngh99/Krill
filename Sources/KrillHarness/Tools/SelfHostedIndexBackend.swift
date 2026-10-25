@@ -3,33 +3,33 @@ import Foundation
 import FoundationNetworking
 #endif
 
-// PRIVATE backend, gated behind the `KREACH` compile flag (set via KRILL_KREACH=1
+// Optional backend, gated behind the `SELFHOSTED_INDEX` compile flag (set via KRILL_SELFHOSTED_INDEX=1
 // — see Package.swift / `make dev`). The entire type is compiled in ONLY for
-// Sourav's local dev builds and is ABSENT from public release binaries. Public
+// local development builds and is ABSENT from public release binaries. Public
 // users get DuckDuckGo (default) + Brave/Tavily (BYOK) + SearXNG instead.
-#if KREACH
+#if SELFHOSTED_INDEX
 
-/// Kreach backend: queries the user's own Kreach search engine
+/// Self-hosted index backend: queries the user's own search index service
 /// (`<base>/search?q=...&limit=N`) and maps its ranked results into
 /// `SearchResult`s. This is the conformer the `SearchBackend` protocol was
-/// designed to accept — selecting it (`search_backend = "kreach"`) is the only
+/// designed to accept — selecting it (`search_backend = "selfhosted"`) is the only
 /// change; the `web_search` tool and the `DeepResearch` orchestrator are
 /// backend-agnostic.
 ///
-/// The role this plays: Kreach is the *search platform* underneath Krill's
-/// `DeepResearch` — Kreach retrieves over its owned, crawled index; the agent
+/// The role this plays: the self-hosted index is the *search platform* underneath Krill's
+/// `DeepResearch` — the index retrieves over its owned, crawled index; the agent
 /// (this process, driven by the local model) plans the queries, reads the
 /// pages, and synthesizes the cited answer. Every client that talks to Krill
-/// (deepkrill, minikrill, …) gets deep research over Kreach for free via the
+/// built on Krill gets deep research over the index for free via the
 /// server's `/research` route, without reimplementing the loop.
 ///
-/// Kreach is a trusted service the user runs (typically loopback on
+/// The index is a trusted service the user runs (typically loopback on
 /// `127.0.0.1:8000`), so — exactly like `SearxngBackend` — the first hop is
 /// allowed to reach a private/loopback host (the shared `URLSessionWebFetcher`
-/// only vets *redirects*, not the first request, and Kreach answers 200
+/// only vets *redirects*, not the first request, and the index answers 200
 /// directly without redirecting).
-public struct KreachBackend: SearchBackend {
-    public let name = "kreach"
+public struct SelfHostedIndexBackend: SearchBackend {
+    public let name = "selfhosted"
     private let baseURL: String
     private let fetcher: WebFetcher
     private let timeout: TimeInterval
@@ -45,13 +45,13 @@ public struct KreachBackend: SearchBackend {
         var base = baseURL.trimmingCharacters(in: .whitespaces)
         while base.hasSuffix("/") { base = String(base.dropLast()) }
         guard var comps = URLComponents(string: base + "/search") else {
-            throw KreachError.badBackendURL(baseURL)
+            throw SelfHostedIndexError.badBackendURL(baseURL)
         }
         comps.queryItems = [
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "limit", value: String(max(1, count))),
         ]
-        guard let url = comps.url else { throw KreachError.badBackendURL(baseURL) }
+        guard let url = comps.url else { throw SelfHostedIndexError.badBackendURL(baseURL) }
 
         var request = URLRequest(url: url)
         request.timeoutInterval = timeout
@@ -60,17 +60,17 @@ public struct KreachBackend: SearchBackend {
 
         let (data, response) = try await fetcher.fetch(request)
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw KreachError.httpStatus(http.statusCode)
+            throw SelfHostedIndexError.httpStatus(http.statusCode)
         }
         return try Self.parse(data, limit: count)
     }
 
-    /// Parse a Kreach `/search` JSON body (`{results:[{title,url,snippet,...}]}`)
+    /// Parse a self-hosted index `/search` JSON body (`{results:[{title,url,snippet,...}]}`)
     /// into the top `limit` results, in rank order.
     static func parse(_ data: Data, limit: Int) throws -> [SearchResult] {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let rows = obj["results"] as? [[String: Any]]
-        else { throw KreachError.badResponse }
+        else { throw SelfHostedIndexError.badResponse }
         var out: [SearchResult] = []
         for row in rows {
             guard let url = (row["url"] as? String), !url.isEmpty else { continue }
@@ -82,15 +82,15 @@ public struct KreachBackend: SearchBackend {
         return out
     }
 
-    public enum KreachError: Error, CustomStringConvertible, LocalizedError {
+    public enum SelfHostedIndexError: Error, CustomStringConvertible, LocalizedError {
         case badBackendURL(String)
         case httpStatus(Int)
         case badResponse
         public var description: String {
             switch self {
-            case .badBackendURL(let u): return "invalid Kreach backend URL: \(u)"
-            case .httpStatus(let c): return "Kreach returned HTTP \(c)"
-            case .badResponse: return "Kreach returned an unparseable response"
+            case .badBackendURL(let u): return "invalid self-hosted index backend URL: \(u)"
+            case .httpStatus(let c): return "self-hosted index returned HTTP \(c)"
+            case .badResponse: return "self-hosted index returned an unparseable response"
             }
         }
         // So `error.localizedDescription` returns this readable text.
@@ -98,4 +98,4 @@ public struct KreachBackend: SearchBackend {
     }
 }
 
-#endif // KREACH
+#endif // SELFHOSTED_INDEX

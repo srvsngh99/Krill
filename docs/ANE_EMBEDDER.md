@@ -219,8 +219,8 @@ request after the keep-alive TTL unloaded the model.
 
 ### Accuracy
 
-2,000 Kreach passages (including the 500 longest, cut to 512 tokens) and the 750 queries, vectors compared with the
-bf16 build: queries cosine min 0.9993 (mean 0.9998), passages min 0.9989, p01 0.9994. Dense retrieval on the Kreach set,
+2,000 web-corpus passages (including the 500 longest, cut to 512 tokens) and the 750 queries, vectors compared with the
+bf16 build: queries cosine min 0.9993 (mean 0.9998), passages min 0.9989, p01 0.9994. Dense retrieval on the web-corpus set,
 ANE queries against bf16 passages versus MLX 4-bit queries (paired bootstrap, 10,000 resamples): English hit@5 0.442 vs
 0.440 and MRR@10 0.357 vs 0.350, Indic hit@5 0.178 vs 0.170 and MRR@10 0.105 vs 0.102; no significant loss in any
 of the four. The ANE vectors are closer to bf16 than the 4-bit GPU vectors are. Same request on `gpu` and `ane`

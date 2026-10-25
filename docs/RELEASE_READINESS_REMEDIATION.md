@@ -160,7 +160,7 @@ do not affect these results):
 The two live tests previously named in the review (the int8 KV "no
 tokens" failure and the chat-multimodal-not-conditioning question) both
 pass against the local Gemma 4 e2b checkpoint at
-`/Users/sourav/.krill/models/blobs/gemma-4-e2b`.
+`~/.krill/models/blobs/gemma-4-e2b`.
 
 ### Latest benchmark measurements
 
@@ -581,7 +581,7 @@ Two findings the fresh benchmark surfaced:
    Krill because the bench was invoked with `--krill-model gemma-4-e2b`
    (registry name), and `krill_quantization()` couldn't find a local
    config and got a HuggingFace 401 falling back to "unknown". With the
-   full path (`/Users/sourav/.krill/models/blobs/gemma-4-e2b`), the
+   full path (`~/.krill/models/blobs/gemma-4-e2b`), the
    on-disk config correctly identifies as 4-bit affine MLX and the
    comparison is class-equal with Ollama's Q4_K_M GGUF. The auto-downgrade
    for `memory_ratio` therefore does *not* apply on the canonical

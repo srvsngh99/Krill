@@ -349,8 +349,8 @@ struct RunCommand: AsyncParsableCommand {
         print("            or:  export KRILL_DEFAULT_MODEL=\(installed[0])")
     }
 
-    /// Branded first-run welcome (fresh install, no models yet), in the Sourav AI
-    /// Labs identity. Plain stdout (not the alt-screen TUI), styling auto-disabled
+    /// Branded first-run welcome (fresh install, no models yet), in the Sourav AI Labs
+    /// identity. Plain stdout (not the alt-screen TUI), styling auto-disabled
     /// when not a TTY / under NO_COLOR.
     private func printWelcome() {
         print("")

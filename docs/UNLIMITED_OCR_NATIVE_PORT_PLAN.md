@@ -1,7 +1,7 @@
 # Unlimited-OCR — Native Krill Port Plan
 
 Status: proposed (plan-first; no engine code until signed off). Date: 2026-06-28.
-Owner: Sourav. Target: `krill run unlimited-ocr` serving document/OCR parsing
+Target: `krill run unlimited-ocr` serving document/OCR parsing
 natively on Apple Silicon, in a fast Mac-native quantized format.
 
 > **Release coupling:** per decision on 2026-06-28, **v0.15.0 is held until this

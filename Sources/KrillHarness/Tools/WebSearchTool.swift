@@ -20,8 +20,8 @@ public struct SearchResult: Sendable, Equatable {
 /// A pluggable web-search provider. Shipped conformers: `DuckDuckGoBackend`
 /// (keyless, the zero-config default), `BraveBackend` / `TavilyBackend` (BYOK,
 /// the reliable upgrades), and `SearxngBackend` (self-hosted). A private
-/// `KreachBackend` (a self-hosted crawled index) drops in behind this same
-/// interface for `KRILL_KREACH=1` local dev builds only. The tool is
+/// `SelfHostedIndexBackend` (a self-hosted crawled index) drops in behind this same
+/// interface for `KRILL_SELFHOSTED_INDEX=1` local dev builds only. The tool is
 /// backend-agnostic, so adding a provider is a new conformer + a `search_backend`
 /// value, not a tool change.
 public protocol SearchBackend: Sendable {
@@ -184,13 +184,13 @@ public struct WebSearchTool: Tool {
                 return nil
             }
             return SearxngBackend(baseURL: url)
-        #if KREACH
-        case "kreach":
+        #if SELFHOSTED_INDEX
+        case "selfhosted":
             // PRIVATE local backend (a self-hosted crawled index). Compiled in
-            // ONLY for `KRILL_KREACH=1` dev builds; absent from public releases.
+            // ONLY for `KRILL_SELFHOSTED_INDEX=1` dev builds; absent from public releases.
             // Defaults to the loopback API so it works with no extra URL config.
-            let url = cfg.kreachURL?.trimmingCharacters(in: .whitespaces)
-            return KreachBackend(baseURL: (url?.isEmpty == false ? url! : "http://127.0.0.1:8000"))
+            let url = cfg.selfHostedURL?.trimmingCharacters(in: .whitespaces)
+            return SelfHostedIndexBackend(baseURL: (url?.isEmpty == false ? url! : "http://127.0.0.1:8000"))
         #endif
         default:
             return nil

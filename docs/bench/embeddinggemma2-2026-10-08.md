@@ -20,7 +20,7 @@ The published builds are collected, with Google's original, in the [Hugging Face
   K-quants are ahead on cosine at 5 bit and equal on retrieval. Krill's builds also carry the vision and
   audio towers, which Unsloth ships as a separate 0.55-0.98 GB `mmproj`.
 
-## Gate (Claude's proposal, not Sourav's)
+## Gate (proposal)
 
 A variant is publishable if, compared with the bf16 reference:
 

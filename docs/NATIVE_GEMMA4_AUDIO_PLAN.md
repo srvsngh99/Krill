@@ -142,7 +142,7 @@ Tasks:
 1. Inspect the local checkpoint:
 
    ```text
-   /Users/sourav/.krill/models/blobs/gemma-4-e2b
+   ~/.krill/models/blobs/gemma-4-e2b
    ```
 
 2. Extract and document:
@@ -358,7 +358,7 @@ ServerAudioRoutingTests
 Live tests, gated by:
 
 ```text
-KRILL_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b
+KRILL_GEMMA4_MODEL_PATH=~/.krill/models/blobs/gemma-4-e2b
 ```
 
 Required live checks:
@@ -400,8 +400,8 @@ Start server:
 Run multimodal benchmark:
 
 ```text
-/Users/sourav/.krill/venv/bin/python3 tools/gemma4_multimodal_benchmark.py \
-  --krill-model /Users/sourav/.krill/models/blobs/gemma-4-e2b \
+~/.krill/venv/bin/python3 tools/gemma4_multimodal_benchmark.py \
+  --krill-model ~/.krill/models/blobs/gemma-4-e2b \
   --ollama-model gemma4:e2b \
   --krill-url http://127.0.0.1:11435 \
   --krill-image-mode native_server \
@@ -444,7 +444,7 @@ Gemma 4 E2B checkpoint + `mlx-vlm` + Ollama; it is gated/skipped in CI.
    semantically equivalent to the bridge on the deterministic fixture:
 
    ```text
-   KRILL_GEMMA4_MODEL_PATH=/Users/sourav/.krill/models/blobs/gemma-4-e2b \
+   KRILL_GEMMA4_MODEL_PATH=~/.krill/models/blobs/gemma-4-e2b \
    KRILL_BENCH_ASSETS_DIR=.build/benchmarks/assets \
    swift test --filter Gemma4SmokeTests/testWS6NativeAudioMatchesBridgeOracleOnSineTone
    ```
@@ -461,11 +461,11 @@ Gemma 4 E2B checkpoint + `mlx-vlm` + Ollama; it is gated/skipped in CI.
    ```text
    make release
    KRILL_NATIVE_AUDIO=1 .build/release/krill serve \
-     --model /Users/sourav/.krill/models/blobs/gemma-4-e2b \
+     --model ~/.krill/models/blobs/gemma-4-e2b \
      --host 127.0.0.1 --port 11435 --compat both &
 
-   /Users/sourav/.krill/venv/bin/python3 tools/gemma4_multimodal_benchmark.py \
-     --krill-model /Users/sourav/.krill/models/blobs/gemma-4-e2b \
+   ~/.krill/venv/bin/python3 tools/gemma4_multimodal_benchmark.py \
+     --krill-model ~/.krill/models/blobs/gemma-4-e2b \
      --ollama-model gemma4:e2b --krill-url http://127.0.0.1:11435 \
      --krill-image-mode native_server --krill-native-audio \
      --runs 4 --warmup 2 \

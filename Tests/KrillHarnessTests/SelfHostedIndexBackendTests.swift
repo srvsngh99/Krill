@@ -4,11 +4,11 @@ import XCTest
 import FoundationNetworking
 #endif
 
-// KreachBackend is gated behind the KREACH compile flag (private, dev-only), so
-// its tests are too — they compile only under `KRILL_KREACH=1` (see Package.swift).
-#if KREACH
+// SelfHostedIndexBackend is gated behind the SELFHOSTED_INDEX compile flag (private, dev-only), so
+// its tests are too — they compile only under `KRILL_SELFHOSTED_INDEX=1` (see Package.swift).
+#if SELFHOSTED_INDEX
 
-/// Canned fetcher returning a fixed JSON body, to drive KreachBackend without
+/// Canned fetcher returning a fixed JSON body, to drive SelfHostedIndexBackend without
 /// the network (mirrors the SearxngBackend test's stub).
 private struct StubJSONFetcher: WebFetcher {
     let body: Data
@@ -28,9 +28,9 @@ private struct StubJSONFetcher: WebFetcher {
     }
 }
 
-final class KreachBackendTests: XCTestCase {
+final class SelfHostedIndexBackendTests: XCTestCase {
 
-    func testParsesKreachSearchResults() async throws {
+    func testParsesSearchResults() async throws {
         let json = """
         {"query":"diabetes","results":[
           {"title":"Diabetes","url":"https://medlineplus.gov/diabetes.html","snippet":"Diabetes is a disease.","domain":"medlineplus.gov","score":0.9},
@@ -38,10 +38,10 @@ final class KreachBackendTests: XCTestCase {
         ],"total":2,"took_ms":12.0}
         """
         let fetcher = StubJSONFetcher(json: json)
-        let backend = KreachBackend(baseURL: "http://127.0.0.1:8000/", fetcher: fetcher)
+        let backend = SelfHostedIndexBackend(baseURL: "http://127.0.0.1:8000/", fetcher: fetcher)
         let results = try await backend.search(query: "diabetes", count: 5)
 
-        XCTAssertEqual(backend.name, "kreach")
+        XCTAssertEqual(backend.name, "selfhosted")
         XCTAssertEqual(results.count, 2)
         XCTAssertEqual(results[0].url, "https://medlineplus.gov/diabetes.html")
         XCTAssertEqual(results[0].title, "Diabetes")
@@ -49,7 +49,7 @@ final class KreachBackendTests: XCTestCase {
 
         // Builds /search?q=&limit=, trailing slash on the base normalized away.
         let u = fetcher.box.url!.absoluteString
-        XCTAssertTrue(u.contains("/search?"), "calls Kreach /search")
+        XCTAssertTrue(u.contains("/search?"), "calls the index /search")
         XCTAssertTrue(u.contains("q=diabetes"))
         XCTAssertTrue(u.contains("limit=5"))
         XCTAssertFalse(u.contains("//search"), "trailing slash normalized")
@@ -61,13 +61,13 @@ final class KreachBackendTests: XCTestCase {
         {"title":"b","url":"https://b.com","snippet":"y"},
         {"title":"c","url":"https://c.com","snippet":"z"}]}
         """
-        let backend = KreachBackend(baseURL: "http://127.0.0.1:8000", fetcher: StubJSONFetcher(json: json))
+        let backend = SelfHostedIndexBackend(baseURL: "http://127.0.0.1:8000", fetcher: StubJSONFetcher(json: json))
         let results = try await backend.search(query: "q", count: 2)
         XCTAssertEqual(results.count, 2)
     }
 
     func testHTTPErrorThrows() async {
-        let backend = KreachBackend(
+        let backend = SelfHostedIndexBackend(
             baseURL: "http://127.0.0.1:8000", fetcher: StubJSONFetcher(json: "{}", status: 500))
         do {
             _ = try await backend.search(query: "q", count: 5)
@@ -77,16 +77,16 @@ final class KreachBackendTests: XCTestCase {
         }
     }
 
-    func testConfiguredBackendSelectsKreach() {
-        setenv("KRILL_SEARCH_BACKEND", "kreach", 1)
-        setenv("KRILL_KREACH_URL", "http://127.0.0.1:8000", 1)
+    func testConfiguredBackendSelectsSelfHosted() {
+        setenv("KRILL_SEARCH_BACKEND", "selfhosted", 1)
+        setenv("KRILL_SELFHOSTED_URL", "http://127.0.0.1:8000", 1)
         defer {
             unsetenv("KRILL_SEARCH_BACKEND")
-            unsetenv("KRILL_KREACH_URL")
+            unsetenv("KRILL_SELFHOSTED_URL")
         }
         let backend = WebSearchTool.configuredBackend()
-        XCTAssertEqual(backend?.name, "kreach", "search_backend=kreach selects KreachBackend")
+        XCTAssertEqual(backend?.name, "selfhosted", "search_backend=selfhosted selects SelfHostedIndexBackend")
     }
 }
 
-#endif // KREACH
+#endif // SELFHOSTED_INDEX

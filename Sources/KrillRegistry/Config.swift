@@ -148,12 +148,12 @@ public struct KrillConfig: Sendable {
     /// `/config` output.
     public var tavilyAPIKey: String?
 
-    #if KREACH
-    /// Base URL of the PRIVATE Kreach search engine for `search_backend =
-    /// "kreach"` (a self-hosted crawled index; default "http://127.0.0.1:8000"
-    /// when unset). Compiled in only for `KRILL_KREACH=1` dev builds.
-    /// `kreach_url` in config; `KRILL_KREACH_URL` env.
-    public var kreachURL: String?
+    #if SELFHOSTED_INDEX
+    /// Base URL of the optional self-hosted search index for `search_backend =
+    /// "selfhosted"` (a self-hosted crawled index; default "http://127.0.0.1:8000"
+    /// when unset). Compiled in only for `KRILL_SELFHOSTED_INDEX=1` dev builds.
+    /// `selfhosted_url` in config; `KRILL_SELFHOSTED_URL` env.
+    public var selfHostedURL: String?
     #endif
 
     /// Default reasoning ("thinking") state for new sessions: when true and the
@@ -235,8 +235,8 @@ public struct KrillConfig: Sendable {
         self.searxngURL = nil
         self.braveAPIKey = nil
         self.tavilyAPIKey = nil
-        #if KREACH
-        self.kreachURL = nil
+        #if SELFHOSTED_INDEX
+        self.selfHostedURL = nil
         #endif
         self.thinking = true
         self.shellOutputToModel = true
@@ -344,9 +344,9 @@ public struct KrillConfig: Sendable {
                 braveAPIKey = value.isEmpty ? nil : value
             case "tavily_api_key":
                 tavilyAPIKey = value.isEmpty ? nil : value
-            #if KREACH
-            case "kreach_url":
-                kreachURL = value.isEmpty ? nil : value
+            #if SELFHOSTED_INDEX
+            case "selfhosted_url":
+                selfHostedURL = value.isEmpty ? nil : value
             #endif
             case "thinking", "enable_thinking":
                 thinking = value == "true" || value == "1" || value == "on" || value == "yes"
@@ -415,8 +415,8 @@ public struct KrillConfig: Sendable {
             "embed_device",
             "event_log", "session_log", "log_retention_days", "log_max_mb",
         ]
-        #if KREACH
-        keys.append("kreach_url")   // private local backend; dev builds only
+        #if SELFHOSTED_INDEX
+        keys.append("selfhosted_url")   // private local backend; dev builds only
         #endif
         return keys
     }()
@@ -538,8 +538,8 @@ public struct KrillConfig: Sendable {
             "log_retention_days": "\(logRetentionDays)",
             "log_max_mb": "\(logMaxMB)",
         ]
-        #if KREACH
-        map["kreach_url"] = kreachURL ?? "(none)"
+        #if SELFHOSTED_INDEX
+        map["selfhosted_url"] = selfHostedURL ?? "(none)"
         #endif
         return KrillConfig.writableKeys.map { ($0, map[$0] ?? "") }
     }
@@ -630,8 +630,8 @@ public struct KrillConfig: Sendable {
         if let v = env["KRILL_SEARXNG_URL"] { searxngURL = v.isEmpty ? nil : v }
         if let v = env["KRILL_BRAVE_API_KEY"] { braveAPIKey = v.isEmpty ? nil : v }
         if let v = env["KRILL_TAVILY_API_KEY"] { tavilyAPIKey = v.isEmpty ? nil : v }
-        #if KREACH
-        if let v = env["KRILL_KREACH_URL"] { kreachURL = v.isEmpty ? nil : v }
+        #if SELFHOSTED_INDEX
+        if let v = env["KRILL_SELFHOSTED_URL"] { selfHostedURL = v.isEmpty ? nil : v }
         #endif
 
         if let v = ProcessInfo.processInfo.environment["KRILL_DEFAULT_MODEL"] {

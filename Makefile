@@ -84,21 +84,21 @@ metallib:
 	done; \
 	echo "Metal shaders compiled to $$BUILD_PATH/mlx.metallib"
 
-# Optimized release build (PUBLIC: Kreach is NOT compiled in)
+# Optimized release build (PUBLIC: the self-hosted index backend is NOT compiled in)
 release:
 	swift build -c release --arch arm64
 	$(MAKE) metallib CONFIGURATION=release REQUIRE_METALLIB=1
 	@echo "Binary at $(BUILD_DIR)/$(BINARY_NAME)"
 	@ls -lh $(BUILD_DIR)/$(BINARY_NAME)
 
-# LOCAL dev release with the PRIVATE Kreach backend compiled in. Sets the
-# KRILL_KREACH=1 build env that Package.swift turns into `-D KREACH`. Use this
-# for Sourav's own setup (search_backend=kreach). Public `make release` / `make
-# dist` leave it out, so Kreach never ships in a downloaded binary.
+# LOCAL dev release with the optional self-hosted index backend compiled in. Sets the
+# KRILL_SELFHOSTED_INDEX=1 build env that Package.swift turns into `-D SELFHOSTED_INDEX`. Use this
+# for local development (search_backend=selfhosted). Public `make release` / `make
+# dist` leave it out, so the backend never ships in a downloaded binary.
 dev:
-	KRILL_KREACH=1 swift build -c release --arch arm64
+	KRILL_SELFHOSTED_INDEX=1 swift build -c release --arch arm64
 	$(MAKE) metallib CONFIGURATION=release REQUIRE_METALLIB=1
-	@echo "Binary at $(BUILD_DIR)/$(BINARY_NAME) (KREACH enabled)"
+	@echo "Binary at $(BUILD_DIR)/$(BINARY_NAME) (SELFHOSTED_INDEX enabled)"
 	@ls -lh $(BUILD_DIR)/$(BINARY_NAME)
 
 # Install to PREFIX/bin

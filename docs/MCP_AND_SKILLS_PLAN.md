@@ -1,6 +1,6 @@
 # MCP + Skills support for Krill
 
-Status: Proposed &nbsp;·&nbsp; Date: 2026-08-02 &nbsp;·&nbsp; Owner: Sourav
+Status: Proposed &nbsp;·&nbsp; Date: 2026-08-02
 
 ## 0. TL;DR
 
@@ -176,7 +176,7 @@ plain chat clients benefit; that is a separate decision.
 ### 2.6 Skills
 
 Claude-compatible `SKILL.md` packages, because the format is a de-facto standard and
-Sourav already maintains skills in it:
+maintainers already keep skills in it:
 
 ```
 ~/.krill/skills/<name>/SKILL.md      # user scope
@@ -203,14 +203,14 @@ Frontmatter `name:` + `description:` are required; everything else is body. A
 
 Not in v1: executable hooks, skill-bundled scripts auto-run, remote skill registries.
 
-### 2.7 First consumer: artha / INDmoney
+### 2.7 First consumer: INDmoney
 
 `krill mcp add --url https://mcp.indmoney.com/mcp indmoney && krill mcp login indmoney`
 then `krill code --allow-tool 'mcp__indmoney__*' "what's my MF XIRR?"` works with any
 local model. Small-model reliability guidance (gemma-4-e2b struggles with wide tool
-menus): artha-style callers should pass `--mcp indmoney --no-bash` so the offered
+menus): finance-style callers should pass `--mcp indmoney --no-bash` so the offered
 toolset stays narrow — the fewer tools offered, the better `--constrain-args` repairs
-land. artha's production integration continues to prefer its own snapshot-injection
+land. a production integration may continue to prefer its own snapshot-injection
 design (holdings.json refreshed out-of-band); direct Krill→MCP is for interactive use.
 
 ## 3. Alternatives considered

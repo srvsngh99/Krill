@@ -2,15 +2,15 @@
 import PackageDescription
 import Foundation
 
-// Kreach is Sourav's PRIVATE local search engine (a self-hosted crawled index).
-// It is gated OUT of public release binaries and compiled in ONLY for local dev
-// builds that set `KRILL_KREACH=1` (see `make dev`). Public `make release` /
-// `make dist` leave it undefined, so the `KreachBackend`, its `search_backend =
-// "kreach"` wiring, and its config keys vanish from the shipped binary. Public
+// The self-hosted search index backend is optional and compiled only into local
+// development builds. It is gated OUT of public release binaries and compiled in ONLY for local dev
+// builds that set `KRILL_SELFHOSTED_INDEX=1` (see `make dev`). Public `make release` /
+// `make dist` leave it undefined, so the `SelfHostedIndexBackend`, its `search_backend =
+// "selfhosted"` wiring, and its config keys vanish from the shipped binary. Public
 // users get the keyless DuckDuckGo default + BYOK Brave/Tavily backends instead.
 // See docs/decisions/0002-web-search-backends.md.
-let kreachEnabled = ProcessInfo.processInfo.environment["KRILL_KREACH"] == "1"
-let kreachSettings: [SwiftSetting] = kreachEnabled ? [.define("KREACH")] : []
+let selfHostedIndexEnabled = ProcessInfo.processInfo.environment["KRILL_SELFHOSTED_INDEX"] == "1"
+let selfHostedIndexSettings: [SwiftSetting] = selfHostedIndexEnabled ? [.define("SELFHOSTED_INDEX")] : []
 
 let package = Package(
     name: "Krill",
@@ -104,7 +104,7 @@ let package = Package(
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "Logging", package: "swift-log"),
             ],
-            swiftSettings: kreachSettings
+            swiftSettings: selfHostedIndexSettings
         ),
         .target(
             name: "KrillTooling",
@@ -117,7 +117,7 @@ let package = Package(
         .target(
             name: "KrillHarness",
             dependencies: ["KrillTooling", "KrillObs"],
-            swiftSettings: kreachSettings
+            swiftSettings: selfHostedIndexSettings
         ),
         .target(
             name: "KrillServer",
@@ -231,7 +231,7 @@ let package = Package(
         .testTarget(
             name: "KrillHarnessTests",
             dependencies: ["KrillHarness", "KrillTooling", "KrillObs"],
-            swiftSettings: kreachSettings
+            swiftSettings: selfHostedIndexSettings
         ),
         .testTarget(
             name: "KrillRegistryTests",

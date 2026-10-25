@@ -182,7 +182,7 @@ public enum ToolCalling {
         // When the caller brought no system prompt of its own, add a short
         // agentic directive so models that tend to over-call (Mistral, Ornith)
         // stop once they have results instead of looping. Clients that supply
-        // their own system prompt (deepkrill, reef) keep full control.
+        // their own system prompt keep full control.
         guard !hadSystem else { return injected }
         return appendingAgenticDirective(to: injected)
     }
