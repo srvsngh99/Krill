@@ -7,6 +7,16 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.27.2 - 2026-10-27
+**`krill code` finishes the fix-and-retest loop.** When the agent fixes a bug and re-runs
+the test, the re-run now goes through, even in the same turn as the edit; before, the
+session could stop silently right after the fix. A model that really loops is still
+stopped, with a note that says why. `krill code --plan` without a terminal now returns a
+plan instead of an unknown-tool error. Both fixes apply to local models and to
+`--provider codex`.
+
+---
+
 ## v0.27.1 - 2026-10-22
 **Neural Engine packages you can just download.** The faster Neural Engine versions of
 the embedders and bge-reranker-base are now published, so `krill pull bge-base-en-ane-fp16`

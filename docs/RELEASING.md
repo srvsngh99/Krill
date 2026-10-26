@@ -17,7 +17,6 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| 2026-10-26 | #354 | Docs: self-restart exits 75 by design; EmbeddingGemma 2 ANE table row | Docs only; no binary change |
 
 ### Known-open, NOT yet merged
 

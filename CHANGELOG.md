@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.27.2] - 2026-10-27
+
 ### Fixed
 
 - `krill code` no longer ends a task silently when the model re-runs a command
