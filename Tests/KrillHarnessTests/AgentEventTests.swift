@@ -140,4 +140,21 @@ final class AgentEventTests: XCTestCase {
         XCTAssertEqual(t.steps.count, 2)
         XCTAssertEqual(t.steps[0].toolCalls.first?.result.content, "FILE")
     }
+
+    func testRepeatGuardStopIsANoteNotModelText() async {
+        let sink = EventSink()
+        let call = hermesCall("bash", #"{"x":"loop"}"#)
+        let loop = AgentLoop(
+            generator: EventScriptGen([call, call]),
+            tools: ToolRegistry([EchoTool(name: "bash", isReadOnly: false, reply: "ok")]))
+        let t = await loop.run(user: "go", onEvent: sink.sink)
+
+        let reason = "the model repeated tool calls it had already made, with nothing changed since"
+        XCTAssertEqual(t.finalText, "", "harness text must not pose as the model's answer")
+        XCTAssertEqual(sink.events.suffix(2), [.finalAnswer(""), .stopped(reason)])
+        var entries: [AgentEntry] = []
+        var chip = false
+        for event in sink.events { foldAgentEvent(event, into: &entries, chipShown: &chip) }
+        XCTAssertEqual(entries.last, .note("[stopped: \(reason)]"))
+    }
 }
