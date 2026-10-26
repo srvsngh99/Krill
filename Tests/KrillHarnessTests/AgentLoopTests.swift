@@ -235,6 +235,35 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertTrue(t.steps[1].toolCalls.isEmpty)
     }
 
+    func testRepeatGuardAllowsRerunAfterASuccessfulEdit() async {
+        // Run the test, edit the file, re-run the same test: the re-run follows
+        // a mutation, so it is progress and must execute (found driving
+        // `krill code --provider codex`, which stopped silently here).
+        let test = hermesCall("bash", #"{"command":"python3 test.py"}"#)
+        let gen = MockGenerator(responses: [
+            test, hermesCall("edit_file", #"{"command":"fix"}"#), test, "fixed",
+        ])
+        let loop = AgentLoop(
+            generator: gen,
+            tools: ToolRegistry([StubTool(), StubTool(name: "edit_file", isFileEdit: true)]))
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps.map { $0.toolCalls.map(\.name) }, [["bash"], ["edit_file"], ["bash"], []])
+        XCTAssertEqual(t.finalText, "fixed")
+    }
+
+    func testRepeatGuardStillTripsAfterOnlyReadOnlyCalls() async {
+        let read = hermesCall("read_file", #"{"command":"a"}"#)
+        let gen = MockGenerator(responses: [read, hermesCall("read_file", #"{"command":"b"}"#), read])
+        let loop = AgentLoop(
+            generator: gen, tools: ToolRegistry([StubTool(name: "read_file", isReadOnly: true)]))
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps.count, 3)
+        XCTAssertTrue(t.steps[2].toolCalls.isEmpty)
+        XCTAssertTrue(t.finalText.contains("repeated a tool call"), "the stop must not be silent")
+    }
+
     func testRunawayGuardCapsCallsInOneTurn() async {
         // One turn emitting many distinct calls is clamped by the total budget
         // (maxIterations * 4), so a spam generation cannot run unbounded.

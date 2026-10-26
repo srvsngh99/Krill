@@ -33,8 +33,14 @@ public enum AgentEnvironment {
     /// The anti-over-calling directive appropriate to `mode`. Surfaces that
     /// synthesize their own system turn must use this rather than
     /// `toolDirective` directly, or planning runs stop before they promote.
-    public static func toolDirective(for mode: PermissionMode) -> String {
-        mode.initialEffective == .plan ? planningToolDirective : toolDirective
+    ///
+    /// `interactive: false` describes a surface with no user to answer, where
+    /// `AgentInteractionTools` offers no `ask_user` and offers `request_execute`
+    /// only to adaptive mode. Plain plan mode there must end in prose: steering
+    /// it to call `request_execute` produced an unknown-tool error every run.
+    public static func toolDirective(for mode: PermissionMode, interactive: Bool = true) -> String {
+        guard mode.initialEffective == .plan else { return toolDirective }
+        return interactive || mode == .adaptive ? planningToolDirective : toolDirective
     }
 
     /// Always-on guidance: clarification is available in every permission
@@ -58,16 +64,37 @@ public enum AgentEnvironment {
         + "emit the call itself; do not merely say you are about to ask for permission. "
         + "Do not edit files or run commands.)"
 
+    /// Plan steer for a surface with no user: no `ask_user`, no `request_execute`.
+    public static let unattendedPlanSteer =
+        "You are in PLAN MODE (read-only) and no user is present to approve execution. You may read "
+        + "and search files with the read-only tools, but you must NOT write files, edit files, or run "
+        + "shell commands - those are denied. Investigate as needed, then reply with a concrete, "
+        + "step-by-step plan as your final answer."
+
+    /// Adaptive steer for a surface with no user: `request_execute` self-promotes,
+    /// but there is no `ask_user`.
+    public static let unattendedAdaptiveSteer =
+        "You are in PLAN MODE (read-only). You may read and search files with the read-only tools, "
+        + "but you must NOT write files, edit files, or run shell commands - those are denied. When the "
+        + "plan is ready, call request_execute with a concise summary; do not merely stop at a plan."
+
     public static let adaptivePlanTail =
         "This is ADAPTIVE mode: begin by planning read-only, then call request_execute when you decide "
         + "the plan is sufficient. It will enter guarded execution without asking the user."
 
     /// Pure prompt fragments for a posture. Builders append these to their own
-    /// environment/project/user-system parts; `askUserDirective` is unconditional.
-    public static func permissionDirectives(for mode: PermissionMode) -> [String] {
-        var directives = [askUserDirective]
+    /// environment/project/user-system parts. Every directive names only tools
+    /// the surface offers (see `toolDirective(for:interactive:)`).
+    public static func permissionDirectives(
+        for mode: PermissionMode, interactive: Bool = true
+    ) -> [String] {
+        var directives = interactive ? [askUserDirective] : []
         if mode.initialEffective == .plan {
-            directives.append(planSystemSteer)
+            if interactive {
+                directives.append(planSystemSteer)
+            } else {
+                directives.append(mode == .adaptive ? unattendedAdaptiveSteer : unattendedPlanSteer)
+            }
             if mode == .adaptive { directives.append(adaptivePlanTail) }
         }
         return directives

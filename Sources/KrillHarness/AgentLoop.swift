@@ -249,11 +249,17 @@ public struct AgentLoop: Sendable {
             }
             let remaining = maxToolCalls - executedToolCalls
             if freshCalls.isEmpty || remaining <= 0 {
-                finalText = visible
-                steps.append(AgentStep(assistantText: visible, toolCalls: []))
-                recorder?.assistant(visible)
+                // A call-only turn has no visible text; say why the run ended
+                // instead of stopping silently.
+                finalText = visible.isEmpty
+                    ? (freshCalls.isEmpty
+                        ? "Stopped: the model repeated a tool call that had already run with the same arguments."
+                        : "Stopped: the tool-call budget for this task is spent.")
+                    : visible
+                steps.append(AgentStep(assistantText: finalText, toolCalls: []))
+                recorder?.assistant(finalText)
                 recorder?.stop(reason: freshCalls.isEmpty ? "repeat_guard" : "tool_budget")
-                onEvent?(.finalAnswer(visible))
+                onEvent?(.finalAnswer(finalText))
                 break
             }
             let toRun = Array(freshCalls.prefix(remaining))
@@ -268,6 +274,7 @@ public struct AgentLoop: Sendable {
             // come with the richer multi-turn work in a later PR).
             messages.append(["role": "assistant", "content": output])
             var invocations: [ToolInvocation] = []
+            var mutated = false
             for rawCall in toRun {
                 // Resolve the name BEFORE anything records or reports it, so the
                 // permission gate, the observation fed back, and the emitted event
@@ -332,8 +339,16 @@ public struct AgentLoop: Sendable {
                 let t0 = DispatchTime.now().uptimeNanoseconds
                 let result = await tool.run(argumentsJSON: argsJSON)
                 record(args: argsJSON, result, ms: Int((DispatchTime.now().uptimeNanoseconds &- t0) / 1_000_000))
+                if !tool.isReadOnly && !result.isError { mutated = true }
             }
             steps.append(AgentStep(assistantText: visible, toolCalls: invocations))
+            // A successful mutating call (an edit, a shell command) can change
+            // what an earlier call would return, so re-running a test after a
+            // fix is progress, not a loop. Forget earlier turns' signatures but
+            // keep this turn's, so an immediate re-emit is still caught.
+            if mutated {
+                executedSignatures = Set(toRun.map { toolSignature($0, posture: posture) })
+            }
         }
 
         if cancelled { recorder?.stop(reason: "cancelled"); onEvent?(.cancelled) }

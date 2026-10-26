@@ -72,4 +72,27 @@ final class AgentEnvironmentPromptTests: XCTestCase {
     func testPlanTurnPrefixDemandsTheCallNotAnAnnouncement() {
         XCTAssertTrue(AgentEnvironment.planTurnPrefix.contains("emit the call itself"))
     }
+
+    /// With no terminal, `AgentInteractionTools` offers no `ask_user` and offers
+    /// `request_execute` only to adaptive mode. The prompt must not name a tool
+    /// the loop will reject (found driving `krill code --provider codex --plan`).
+    func testUnattendedPromptsNameOnlyOfferedTools() {
+        for mode in PermissionMode.allCases {
+            let prompt = (AgentEnvironment.permissionDirectives(for: mode, interactive: false)
+                + [AgentEnvironment.toolDirective(for: mode, interactive: false)])
+                .joined(separator: "\n")
+            XCTAssertFalse(prompt.lowercased().contains("use ask_user"), mode.rawValue)
+            let offersRequestExecute = !AgentInteractionTools.make(
+                mode: mode, permissionBox: PermissionBox(mode: mode), questionGate: nil
+            ).isEmpty
+            if !offersRequestExecute {
+                XCTAssertFalse(prompt.contains("call request_execute"), mode.rawValue)
+                XCTAssertFalse(prompt.contains("calling request_execute"), mode.rawValue)
+            }
+        }
+        XCTAssertTrue(AgentEnvironment.permissionDirectives(for: .plan, interactive: false)
+            .contains(AgentEnvironment.unattendedPlanSteer))
+        XCTAssertTrue(AgentEnvironment.toolDirective(for: .adaptive, interactive: false)
+            .contains("request_execute"))
+    }
 }

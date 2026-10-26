@@ -184,8 +184,11 @@ extension CodeCommand {
     ) -> String {
         var parts = [AgentEnvironment.contextLine(modelName: modelName)]
         if let brief = AgentEnvironment.projectBrief() { parts.append(brief) }
-        parts.append(contentsOf: AgentEnvironment.permissionDirectives(for: mode))
-        parts.append(userSystem ?? AgentEnvironment.toolDirective(for: mode))
+        // Mirrors `remoteTools`: without a terminal there is no question gate.
+        let interactive = RawTerminal.isInteractive
+        parts.append(contentsOf: AgentEnvironment.permissionDirectives(
+            for: mode, interactive: interactive))
+        parts.append(userSystem ?? AgentEnvironment.toolDirective(for: mode, interactive: interactive))
         return parts.joined(separator: "\n\n")
     }
 
