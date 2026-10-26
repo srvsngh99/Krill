@@ -313,13 +313,33 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(t.finalText, "", "harness text must not pose as the model's answer")
         XCTAssertEqual(box.events.suffix(2), [
             .finalAnswer(""),
-            .stopped("the model repeated a tool call that had already run with the same arguments"),
+            .stopped("the model repeated tool calls it had already made, with nothing changed since"),
         ])
         var entries: [AgentEntry] = []
         var chip = false
         for event in box.events { foldAgentEvent(event, into: &entries, chipShown: &chip) }
         XCTAssertEqual(entries.last, .note(
-            "[stopped: the model repeated a tool call that had already run with the same arguments]"))
+            "[stopped: the model repeated tool calls it had already made, with nothing changed since]"))
+    }
+
+    func testDeniedEditRetriedAfterSameTurnPromotionRuns() async {
+        let box = PermissionBox(mode: .plan)
+        let gate = LoopQuestionGate([UserAnswer(optionIndex: 0)])
+        let write = hermesCall("write_file", #"{"command":"content"}"#)
+        let loop = AgentLoop(
+            generator: MockGenerator(responses: [
+                write + hermesCall("request_execute", #"{"summary":"Write it"}"#) + write, "done",
+            ]),
+            tools: ToolRegistry([
+                RequestExecuteTool(box: box, gate: gate),
+                StubTool(name: "write_file", reply: "WROTE", isFileEdit: true),
+            ]),
+            permission: PermissionPolicy(mode: .plan),
+            permissionBox: box)
+        let t = await loop.run(user: "go")
+
+        XCTAssertTrue(t.steps[0].toolCalls[0].result.content.contains("Permission denied"))
+        XCTAssertEqual(t.steps[0].toolCalls[2].result.content, "WROTE")
     }
 
     func testRunawayGuardCapsCallsInOneTurn() async {

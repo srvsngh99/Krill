@@ -249,7 +249,7 @@ public struct AgentLoop: Sendable {
                 recorder?.stop(reason: freshCalls.isEmpty ? "repeat_guard" : "tool_budget")
                 onEvent?(.finalAnswer(visible))
                 onEvent?(.stopped(freshCalls.isEmpty
-                    ? "the model repeated a tool call that had already run with the same arguments"
+                    ? "the model repeated tool calls it had already made, with nothing changed since"
                     : "the tool-call budget for this task is spent"))
                 break
             }
@@ -289,10 +289,10 @@ public struct AgentLoop: Sendable {
                     }
                 }
 
-                let signature = toolSignature(rawCall, posture: posture)
+                let signature = toolSignature(rawCall, posture: effectiveBeforeCall)
                 guard executedSignatures.insert(signature).inserted else {
                     record(args: call.argumentsJSON, ToolResult(
-                        content: "Skipped: this exact call already ran and nothing has changed since.",
+                        content: "Skipped: this exact call was already made and nothing has changed since.",
                         isError: true))
                     continue
                 }
