@@ -51,6 +51,20 @@ private struct StubTool: Tool {
     }
 }
 
+/// An edit tool whose first call fails and every later call succeeds.
+private final class FailsOnceEditTool: Tool, @unchecked Sendable {
+    let name = "edit_file"
+    let description = "test stub"
+    let parametersJSON = #"{"type":"object","properties":{"command":{"type":"string"}}}"#
+    let isReadOnly = false
+    let isFileEdit = true
+    private var calls = 0
+    func run(argumentsJSON: String) async -> ToolResult {
+        calls += 1
+        return ToolResult(content: calls == 1 ? "failed" : "ok", isError: calls == 1)
+    }
+}
+
 private func hermesCall(_ name: String, _ argsJSON: String) -> String {
     "<tool_call>{\"name\": \"\(name)\", \"arguments\": \(argsJSON)}</tool_call>"
 }
@@ -267,6 +281,19 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(t.steps.map { $0.toolCalls.map(\.name) },
                        [["edit_file", "bash"], ["edit_file", "bash"], []])
         XCTAssertTrue(t.steps[1].toolCalls.allSatisfy { !$0.result.isError })
+    }
+
+    func testFirstSuccessAfterAFailedEditStillCountsAsProgress() async {
+        let editE = hermesCall("edit_file", #"{"command":"E"}"#)
+        let test = hermesCall("bash", #"{"command":"pytest"}"#)
+        let gen = MockGenerator(responses: [
+            editE, hermesCall("edit_file", #"{"command":"F"}"#), test, editE, test, "done",
+        ])
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([StubTool(), FailsOnceEditTool()]))
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps.map(\.toolCalls.count), [1, 1, 1, 1, 1, 0])
+        XCTAssertEqual(t.steps[4].toolCalls.first?.result.content, "ok")
     }
 
     func testSameTurnRepeatGetsASkippedResult() async {

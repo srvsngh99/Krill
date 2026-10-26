@@ -184,10 +184,10 @@ public struct AgentLoop: Sendable {
         var hitLimit = false
         var cancelled = false
 
-        // Runaway guard: signatures of calls already executed (to drop exact
-        // repeats a looping model re-emits) and a total tool-call budget.
+        // Runaway guard: calls to skip until the next new mutation, mutations that
+        // already succeeded once, and a total tool-call budget.
         var executedSignatures = Set<String>()
-        var everExecuted = Set<String>()
+        var succeededMutations = Set<String>()
         var executedToolCalls = 0
         let maxToolCalls = maxIterations * 4
 
@@ -340,7 +340,7 @@ public struct AgentLoop: Sendable {
                 record(args: argsJSON, result, ms: Int((DispatchTime.now().uptimeNanoseconds &- t0) / 1_000_000))
                 // A first-time successful mutation makes earlier calls worth re-running
                 // (test, fix, re-test), even later in this same turn.
-                if everExecuted.insert(signature).inserted && !tool.isReadOnly && !result.isError {
+                if !tool.isReadOnly && !result.isError && succeededMutations.insert(signature).inserted {
                     executedSignatures = [signature]
                 }
             }
