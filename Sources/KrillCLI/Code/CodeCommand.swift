@@ -244,7 +244,9 @@ struct CodeCommand: AsyncParsableCommand {
         // Surface the posture inline.
         switch mode {
         case .plan:
-            print("Plan mode: read-only. The agent can inspect files and request approval to execute.")
+            print(RawTerminal.isInteractive
+                ? "Plan mode: read-only. The agent can inspect files and request approval to execute."
+                : "Plan mode: read-only. The agent can inspect files and will reply with a plan.")
         case .adaptive:
             print("Adaptive mode: starts read-only, then may self-promote to edits; commands still ask.")
         case .ask:

@@ -133,7 +133,8 @@ public struct PermissionPolicy: Sendable {
     /// `isFileEdit` only matters in `.acceptEdits`: a file edit auto-applies
     /// while a command (bash) still defers to the gate.
     public func decision(
-        toolName: String, isReadOnly: Bool, isFileEdit: Bool = false
+        toolName: String, isReadOnly: Bool, isFileEdit: Bool = false,
+        canRequestExecute: Bool = true
     ) -> PermissionDecision {
         if deny.contains(toolName) {
             return .deny(reason: "tool '\(toolName)' is on the deny list")
@@ -150,7 +151,9 @@ public struct PermissionPolicy: Sendable {
         case .plan, .adaptive:
             return .deny(reason:
                 "planning is read-only; '\(toolName)' would change files or run commands. "
-                + "Investigate with read-only tools, then call request_execute before implementing.")
+                + (canRequestExecute
+                    ? "Investigate with read-only tools, then call request_execute before implementing."
+                    : "Investigate with read-only tools and give the plan as your final answer."))
         }
     }
 }

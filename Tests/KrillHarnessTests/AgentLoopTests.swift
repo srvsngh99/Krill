@@ -261,7 +261,37 @@ final class AgentLoopTests: XCTestCase {
 
         XCTAssertEqual(t.steps.count, 3)
         XCTAssertTrue(t.steps[2].toolCalls.isEmpty)
-        XCTAssertTrue(t.finalText.contains("repeated a tool call"), "the stop must not be silent")
+    }
+
+    func testRepeatGuardStillTripsOnAlternatingSuccessfulCommands() async {
+        let a = hermesCall("bash", #"{"command":"ls"}"#)
+        let b = hermesCall("bash", #"{"command":"git status"}"#)
+        let gen = MockGenerator(responses: Array(repeating: [a, b], count: 10).flatMap { $0 })
+        let loop = AgentLoop(
+            generator: gen, tools: ToolRegistry([StubTool()]), maxIterations: 12)
+        let t = await loop.run(user: "go")
+
+        XCTAssertFalse(t.hitIterationLimit)
+        XCTAssertEqual(t.steps.map(\.toolCalls.count), [1, 1, 1, 0])
+    }
+
+    func testRepeatGuardStopIsANoteNotModelText() async {
+        let call = hermesCall("bash", #"{"command":"loop"}"#)
+        let gen = MockGenerator(responses: [call, call])
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([StubTool()]))
+        let box = EventBox()
+        let t = await loop.run(user: "go", onEvent: { box.append($0) })
+
+        XCTAssertEqual(t.finalText, "", "harness text must not pose as the model's answer")
+        XCTAssertEqual(box.events.suffix(2), [
+            .finalAnswer(""),
+            .stopped("the model repeated a tool call that had already run with the same arguments"),
+        ])
+        var entries: [AgentEntry] = []
+        var chip = false
+        for event in box.events { foldAgentEvent(event, into: &entries, chipShown: &chip) }
+        XCTAssertEqual(entries.last, .note(
+            "[stopped: the model repeated a tool call that had already run with the same arguments]"))
     }
 
     func testRunawayGuardCapsCallsInOneTurn() async {
@@ -615,4 +645,11 @@ final class AgentLoopTests: XCTestCase {
         let calls = await gen.recordedConstrainedCalls()
         XCTAssertEqual(calls, 0, "--no-constrain-args must opt out of the re-pick too")
     }
+}
+
+private final class EventBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [AgentEvent] = []
+    var events: [AgentEvent] { lock.lock(); defer { lock.unlock() }; return stored }
+    func append(_ event: AgentEvent) { lock.lock(); stored.append(event); lock.unlock() }
 }

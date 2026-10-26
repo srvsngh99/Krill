@@ -81,13 +81,15 @@ final class AgentEnvironmentPromptTests: XCTestCase {
             let prompt = (AgentEnvironment.permissionDirectives(for: mode, interactive: false)
                 + [AgentEnvironment.toolDirective(for: mode, interactive: false)])
                 .joined(separator: "\n")
-            XCTAssertFalse(prompt.lowercased().contains("use ask_user"), mode.rawValue)
+            XCTAssertFalse(prompt.contains("ask_user"), mode.rawValue)
             let offersRequestExecute = !AgentInteractionTools.make(
                 mode: mode, permissionBox: PermissionBox(mode: mode), questionGate: nil
             ).isEmpty
-            if !offersRequestExecute {
-                XCTAssertFalse(prompt.contains("call request_execute"), mode.rawValue)
-                XCTAssertFalse(prompt.contains("calling request_execute"), mode.rawValue)
+            XCTAssertEqual(prompt.contains("request_execute"), offersRequestExecute, mode.rawValue)
+            let denial = PermissionPolicy(mode: mode.initialEffective).decision(
+                toolName: "bash", isReadOnly: false, canRequestExecute: offersRequestExecute)
+            if case .deny(let reason) = denial {
+                XCTAssertEqual(reason.contains("request_execute"), offersRequestExecute, mode.rawValue)
             }
         }
         XCTAssertTrue(AgentEnvironment.permissionDirectives(for: .plan, interactive: false)

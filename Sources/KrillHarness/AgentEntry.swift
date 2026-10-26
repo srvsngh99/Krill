@@ -39,6 +39,8 @@ public func foldAgentEvent(
         entries.append(.assistant(text))
     case .iterationLimitReached:
         entries.append(.note("[stopped at the iteration limit without a final answer]"))
+    case .stopped(let reason):
+        entries.append(.note("[stopped: \(reason)]"))
     case .cancelled:
         entries.append(.note("(cancelled)"))
     }
