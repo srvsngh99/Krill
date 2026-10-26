@@ -38,9 +38,7 @@ public enum AgentEnvironment {
         + "(office-holders, prices, versions, news), verify with web_search "
         + "instead of answering from memory."
 
-    /// The anti-over-calling directive appropriate to `mode`. Surfaces that
-    /// synthesize their own system turn must use this rather than
-    /// `toolDirective` directly, or planning runs stop before they promote.
+    /// The anti-over-calling directive for `mode`; synthesized system turns must use it.
     /// `interactive: false`: no `ask_user`, and `request_execute` only in adaptive
     /// (see `AgentInteractionTools`), so plain plan mode ends in prose.
     public static func toolDirective(for mode: PermissionMode, interactive: Bool = true) -> String {

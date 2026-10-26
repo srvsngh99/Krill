@@ -234,21 +234,12 @@ public struct AgentLoop: Sendable {
                 break
             }
 
-            // Runaway guard: drop calls whose (name, args) was already executed
-            // - a model re-emitting them is looping, not progressing. If a whole
-            // turn is repeats, or the total budget is spent, stop and take the
-            // visible text as the final answer instead of generating forever.
-            //
-            // The signature is scoped to the CURRENT posture: a call denied under
-            // `.plan` and the same call retried after `request_execute` promoted
-            // the run are different attempts, not a loop. Without this the first
-            // denial poisons the cache, the post-promotion retry is silently
-            // dropped, and the turn ends having changed nothing.
+            // Runaway guard: a turn of only repeats (same call, no new mutation since)
+            // or a spent budget ends the run. Signatures carry the posture, so a retry
+            // after `request_execute` promotes the run is not a repeat.
             let posture = permissionBox?.effective ?? permission.mode
-            var freshCalls: [ToolCalling.ParsedToolCall] = []
-            for call in calls
-            where executedSignatures.insert(toolSignature(call, posture: posture)).inserted {
-                freshCalls.append(call)
+            let freshCalls = calls.filter {
+                !executedSignatures.contains(toolSignature($0, posture: posture))
             }
             let remaining = maxToolCalls - executedToolCalls
             if freshCalls.isEmpty || remaining <= 0 {
@@ -262,7 +253,7 @@ public struct AgentLoop: Sendable {
                     : "the tool-call budget for this task is spent"))
                 break
             }
-            let toRun = Array(freshCalls.prefix(remaining))
+            let toRun = Array(calls.prefix(remaining))
             executedToolCalls += toRun.count
 
             recorder?.assistant(visible, toolCalls: toRun.count)
@@ -274,7 +265,6 @@ public struct AgentLoop: Sendable {
             // come with the richer multi-turn work in a later PR).
             messages.append(["role": "assistant", "content": output])
             var invocations: [ToolInvocation] = []
-            var mutated = false
             for rawCall in toRun {
                 // Resolve the name BEFORE anything records or reports it, so the
                 // permission gate, the observation fed back, and the emitted event
@@ -297,6 +287,14 @@ public struct AgentLoop: Sendable {
                     if case .permissionMode(let mode)? = result.effect {
                         onEvent?(.permissionChanged(from: effectiveBeforeCall, to: mode))
                     }
+                }
+
+                let signature = toolSignature(rawCall, posture: posture)
+                guard executedSignatures.insert(signature).inserted else {
+                    record(args: call.argumentsJSON, ToolResult(
+                        content: "Skipped: this exact call already ran and nothing has changed since.",
+                        isError: true))
+                    continue
                 }
 
                 guard let tool = tools.tool(named: call.name), let spec = tools.spec(named: call.name) else {
@@ -340,18 +338,13 @@ public struct AgentLoop: Sendable {
                 let t0 = DispatchTime.now().uptimeNanoseconds
                 let result = await tool.run(argumentsJSON: argsJSON)
                 record(args: argsJSON, result, ms: Int((DispatchTime.now().uptimeNanoseconds &- t0) / 1_000_000))
-                if !tool.isReadOnly && !result.isError
-                    && !everExecuted.contains(toolSignature(rawCall, posture: posture)) {
-                    mutated = true
+                // A first-time successful mutation makes earlier calls worth re-running
+                // (test, fix, re-test), even later in this same turn.
+                if everExecuted.insert(signature).inserted && !tool.isReadOnly && !result.isError {
+                    executedSignatures = [signature]
                 }
             }
             steps.append(AgentStep(assistantText: visible, toolCalls: invocations))
-            // A first-time successful mutation makes re-running earlier calls
-            // progress (test, fix, re-test), so forget earlier turns' signatures.
-            // Replayed mutations (`ls`, `git status`, `ls`) do not count.
-            let turnSignatures = Set(toRun.map { toolSignature($0, posture: posture) })
-            everExecuted.formUnion(turnSignatures)
-            if mutated { executedSignatures = turnSignatures }
         }
 
         if cancelled { recorder?.stop(reason: "cancelled"); onEvent?(.cancelled) }

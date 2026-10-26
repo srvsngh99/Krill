@@ -252,6 +252,34 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(t.finalText, "fixed")
     }
 
+    func testRepeatGuardAllowsRerunAfterAnEditInTheSameTurn() async {
+        let test = hermesCall("bash", #"{"command":"pytest"}"#)
+        let gen = MockGenerator(responses: [
+            hermesCall("edit_file", #"{"command":"fix1"}"#) + test,
+            hermesCall("edit_file", #"{"command":"fix2"}"#) + test,
+            "done",
+        ])
+        let loop = AgentLoop(
+            generator: gen,
+            tools: ToolRegistry([StubTool(), StubTool(name: "edit_file", isFileEdit: true)]))
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps.map { $0.toolCalls.map(\.name) },
+                       [["edit_file", "bash"], ["edit_file", "bash"], []])
+        XCTAssertTrue(t.steps[1].toolCalls.allSatisfy { !$0.result.isError })
+    }
+
+    func testSameTurnRepeatGetsASkippedResult() async {
+        let read = hermesCall("read_file", #"{"command":"a"}"#)
+        let gen = MockGenerator(responses: [read + read, "done"])
+        let loop = AgentLoop(
+            generator: gen, tools: ToolRegistry([StubTool(name: "read_file", isReadOnly: true)]))
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps[0].toolCalls.count, 2)
+        XCTAssertTrue(t.steps[0].toolCalls[1].result.content.hasPrefix("Skipped:"))
+    }
+
     func testRepeatGuardStillTripsAfterOnlyReadOnlyCalls() async {
         let read = hermesCall("read_file", #"{"command":"a"}"#)
         let gen = MockGenerator(responses: [read, hermesCall("read_file", #"{"command":"b"}"#), read])
