@@ -9,6 +9,16 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Fixed
+
+- `krill code` no longer ends a task silently when the model re-runs a command
+  after changing files (run the test, fix, run the test again), even within
+  one turn. The runaway guard skips a repeat only when nothing has changed
+  since, tells the model it skipped it, and says why when it stops a run.
+- `krill code --plan` without a terminal no longer tells the model to call
+  `request_execute` or `ask_user`, which that surface does not offer. It now
+  asks for the plan as the final answer.
+
 ### Changed
 
 - The optional self-hosted search index backend (compiled only into local

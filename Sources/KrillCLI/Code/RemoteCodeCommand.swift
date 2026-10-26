@@ -184,15 +184,19 @@ extension CodeCommand {
     ) -> String {
         var parts = [AgentEnvironment.contextLine(modelName: modelName)]
         if let brief = AgentEnvironment.projectBrief() { parts.append(brief) }
-        parts.append(contentsOf: AgentEnvironment.permissionDirectives(for: mode))
-        parts.append(userSystem ?? AgentEnvironment.toolDirective(for: mode))
+        let interactive = RawTerminal.isInteractive
+        parts.append(contentsOf: AgentEnvironment.permissionDirectives(
+            for: mode, interactive: interactive))
+        parts.append(userSystem ?? AgentEnvironment.toolDirective(for: mode, interactive: interactive))
         return parts.joined(separator: "\n\n")
     }
 
     private func printPermissionMode(_ mode: PermissionMode) {
         switch mode {
         case .plan:
-            print("Plan mode: read-only. The agent can inspect files and request approval to execute.")
+            print(RawTerminal.isInteractive
+                ? "Plan mode: read-only. The agent can inspect files and request approval to execute."
+                : "Plan mode: read-only. The agent can inspect files and will reply with a plan.")
         case .adaptive:
             print("Adaptive mode: starts read-only, then may self-promote to edits; commands still ask.")
         case .ask:

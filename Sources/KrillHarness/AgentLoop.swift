@@ -83,6 +83,8 @@ public enum AgentEvent: Sendable, Equatable {
     case finalAnswer(String)
     /// The loop stopped at the iteration cap without a final answer.
     case iterationLimitReached
+    /// The runaway guard ended the run. Harness text for a note, not model output.
+    case stopped(String)
     /// The run was cancelled (its Task was cancelled, e.g. Ctrl-C in the TUI).
     case cancelled
 }
@@ -182,9 +184,10 @@ public struct AgentLoop: Sendable {
         var hitLimit = false
         var cancelled = false
 
-        // Runaway guard: signatures of calls already executed (to drop exact
-        // repeats a looping model re-emits) and a total tool-call budget.
+        // Runaway guard: calls to skip until the next new mutation, mutations that
+        // already succeeded once, and a total tool-call budget.
         var executedSignatures = Set<String>()
+        var succeededMutations = Set<String>()
         var executedToolCalls = 0
         let maxToolCalls = maxIterations * 4
 
@@ -231,21 +234,12 @@ public struct AgentLoop: Sendable {
                 break
             }
 
-            // Runaway guard: drop calls whose (name, args) was already executed
-            // - a model re-emitting them is looping, not progressing. If a whole
-            // turn is repeats, or the total budget is spent, stop and take the
-            // visible text as the final answer instead of generating forever.
-            //
-            // The signature is scoped to the CURRENT posture: a call denied under
-            // `.plan` and the same call retried after `request_execute` promoted
-            // the run are different attempts, not a loop. Without this the first
-            // denial poisons the cache, the post-promotion retry is silently
-            // dropped, and the turn ends having changed nothing.
+            // Runaway guard: a turn of only repeats (same call, no new mutation since)
+            // or a spent budget ends the run. Signatures carry the posture, so a retry
+            // after `request_execute` promotes the run is not a repeat.
             let posture = permissionBox?.effective ?? permission.mode
-            var freshCalls: [ToolCalling.ParsedToolCall] = []
-            for call in calls
-            where executedSignatures.insert(toolSignature(call, posture: posture)).inserted {
-                freshCalls.append(call)
+            let freshCalls = calls.filter {
+                !executedSignatures.contains(toolSignature($0, posture: posture))
             }
             let remaining = maxToolCalls - executedToolCalls
             if freshCalls.isEmpty || remaining <= 0 {
@@ -254,9 +248,12 @@ public struct AgentLoop: Sendable {
                 recorder?.assistant(visible)
                 recorder?.stop(reason: freshCalls.isEmpty ? "repeat_guard" : "tool_budget")
                 onEvent?(.finalAnswer(visible))
+                onEvent?(.stopped(freshCalls.isEmpty
+                    ? "the model repeated tool calls it had already made, with nothing changed since"
+                    : "the tool-call budget for this task is spent"))
                 break
             }
-            let toRun = Array(freshCalls.prefix(remaining))
+            let toRun = Array(calls.prefix(remaining))
             executedToolCalls += toRun.count
 
             recorder?.assistant(visible, toolCalls: toRun.count)
@@ -292,6 +289,14 @@ public struct AgentLoop: Sendable {
                     }
                 }
 
+                let signature = toolSignature(rawCall, posture: effectiveBeforeCall)
+                guard executedSignatures.insert(signature).inserted else {
+                    record(args: call.argumentsJSON, ToolResult(
+                        content: "Skipped: this exact call was already made and nothing has changed since.",
+                        isError: true))
+                    continue
+                }
+
                 guard let tool = tools.tool(named: call.name), let spec = tools.spec(named: call.name) else {
                     recorder?.permission(tool: call.name, decision: "unknown_tool")
                     record(args: call.argumentsJSON,
@@ -305,7 +310,8 @@ public struct AgentLoop: Sendable {
                 // tool costs no extra generation. A denial is fed back so the
                 // model can adapt (e.g. switch to read-only investigation).
                 let decision = (permissionBox?.policy ?? permission).decision(
-                    toolName: call.name, isReadOnly: tool.isReadOnly, isFileEdit: tool.isFileEdit)
+                    toolName: call.name, isReadOnly: tool.isReadOnly, isFileEdit: tool.isFileEdit,
+                    canRequestExecute: tools.tool(named: "request_execute") != nil)
                 if case .deny(let reason) = decision {
                     recorder?.permission(tool: call.name, decision: "deny", reason: reason)
                     record(args: call.argumentsJSON,
@@ -332,6 +338,11 @@ public struct AgentLoop: Sendable {
                 let t0 = DispatchTime.now().uptimeNanoseconds
                 let result = await tool.run(argumentsJSON: argsJSON)
                 record(args: argsJSON, result, ms: Int((DispatchTime.now().uptimeNanoseconds &- t0) / 1_000_000))
+                // A first-time successful mutation makes earlier calls worth re-running
+                // (test, fix, re-test), even later in this same turn.
+                if !tool.isReadOnly && !result.isError && succeededMutations.insert(signature).inserted {
+                    executedSignatures = [signature]
+                }
             }
             steps.append(AgentStep(assistantText: visible, toolCalls: invocations))
         }

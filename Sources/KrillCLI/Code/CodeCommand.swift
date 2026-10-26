@@ -202,11 +202,13 @@ struct CodeCommand: AsyncParsableCommand {
         // never fires — carry it explicitly when the user supplied no prompt.
         var systemParts = [AgentEnvironment.contextLine(modelName: model)]
         if let brief = AgentEnvironment.projectBrief() { systemParts.append(brief) }
-        systemParts.append(contentsOf: AgentEnvironment.permissionDirectives(for: mode))
+        let interactive = questionAsker != nil
+        systemParts.append(contentsOf: AgentEnvironment.permissionDirectives(
+            for: mode, interactive: interactive))
         if let userSystem = nonEmpty(system) {
             systemParts.append(userSystem)
         } else {
-            systemParts.append(AgentEnvironment.toolDirective(for: mode))
+            systemParts.append(AgentEnvironment.toolDirective(for: mode, interactive: interactive))
         }
         let effectiveSystem = systemParts.joined(separator: "\n\n")
 
@@ -242,7 +244,9 @@ struct CodeCommand: AsyncParsableCommand {
         // Surface the posture inline.
         switch mode {
         case .plan:
-            print("Plan mode: read-only. The agent can inspect files and request approval to execute.")
+            print(RawTerminal.isInteractive
+                ? "Plan mode: read-only. The agent can inspect files and request approval to execute."
+                : "Plan mode: read-only. The agent can inspect files and will reply with a plan.")
         case .adaptive:
             print("Adaptive mode: starts read-only, then may self-promote to edits; commands still ask.")
         case .ask:

@@ -456,6 +456,8 @@ final class RemoteAgentSession: @unchecked Sendable {
             emit(["type": "assistant_final", "text": text])
         case .iterationLimitReached:
             emit(["type": "note", "text": "Stopped at the iteration limit without a final answer."])
+        case .stopped(let reason):
+            emit(["type": "note", "text": "Stopped: \(reason)."])
         case .cancelled:
             emit(["type": "note", "text": "Run cancelled."])
         }

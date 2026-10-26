@@ -16,6 +16,14 @@ public enum AgentEnvironment {
         + "(office-holders, prices, versions, news), verify with web_search "
         + "instead of answering from memory."
 
+    /// `toolDirective` without naming tools an unattended surface does not offer.
+    public static let unattendedToolDirective =
+        "Use tools only when needed. Once you have the tool results, "
+        + "reply with the final answer and do not call any more tools. "
+        + "Your training data has a cutoff: for facts that change over time "
+        + "(office-holders, prices, versions, news), verify with web_search "
+        + "instead of answering from memory."
+
     /// Planning variant. `toolDirective`'s "stop once you have the tool results"
     /// is simply WRONG while planning, where the turn's correct terminal action
     /// is a `request_execute` CALL rather than prose - and because the directive
@@ -30,11 +38,14 @@ public enum AgentEnvironment {
         + "(office-holders, prices, versions, news), verify with web_search "
         + "instead of answering from memory."
 
-    /// The anti-over-calling directive appropriate to `mode`. Surfaces that
-    /// synthesize their own system turn must use this rather than
-    /// `toolDirective` directly, or planning runs stop before they promote.
-    public static func toolDirective(for mode: PermissionMode) -> String {
-        mode.initialEffective == .plan ? planningToolDirective : toolDirective
+    /// The anti-over-calling directive for `mode`; synthesized system turns must use it.
+    /// `interactive: false`: no `ask_user`, and `request_execute` only in adaptive
+    /// (see `AgentInteractionTools`), so plain plan mode ends in prose.
+    public static func toolDirective(for mode: PermissionMode, interactive: Bool = true) -> String {
+        if mode == .adaptive || (interactive && mode.initialEffective == .plan) {
+            return planningToolDirective
+        }
+        return interactive ? toolDirective : unattendedToolDirective
     }
 
     /// Always-on guidance: clarification is available in every permission
@@ -58,16 +69,35 @@ public enum AgentEnvironment {
         + "emit the call itself; do not merely say you are about to ask for permission. "
         + "Do not edit files or run commands.)"
 
+    /// Plan steer for a surface with no user: no `ask_user`, no `request_execute`.
+    public static let unattendedPlanSteer =
+        "You are in PLAN MODE (read-only) and no user is present to approve execution. You may read "
+        + "and search files with the read-only tools, but you must NOT write files, edit files, or run "
+        + "shell commands - those are denied. Investigate as needed, then reply with a concrete, "
+        + "step-by-step plan as your final answer."
+
+    /// Adaptive steer for a surface with no user: no `ask_user`.
+    public static let unattendedAdaptiveSteer =
+        "You are in PLAN MODE (read-only). You may read and search files with the read-only tools, "
+        + "but you must NOT write files, edit files, or run shell commands - those are denied. When the "
+        + "plan is ready, call request_execute with a concise summary; do not merely stop at a plan."
+
     public static let adaptivePlanTail =
         "This is ADAPTIVE mode: begin by planning read-only, then call request_execute when you decide "
         + "the plan is sufficient. It will enter guarded execution without asking the user."
 
     /// Pure prompt fragments for a posture. Builders append these to their own
-    /// environment/project/user-system parts; `askUserDirective` is unconditional.
-    public static func permissionDirectives(for mode: PermissionMode) -> [String] {
-        var directives = [askUserDirective]
+    /// environment/project/user-system parts, naming only offered tools.
+    public static func permissionDirectives(
+        for mode: PermissionMode, interactive: Bool = true
+    ) -> [String] {
+        var directives = interactive ? [askUserDirective] : []
         if mode.initialEffective == .plan {
-            directives.append(planSystemSteer)
+            if interactive {
+                directives.append(planSystemSteer)
+            } else {
+                directives.append(mode == .adaptive ? unattendedAdaptiveSteer : unattendedPlanSteer)
+            }
             if mode == .adaptive { directives.append(adaptivePlanTail) }
         }
         return directives

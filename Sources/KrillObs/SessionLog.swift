@@ -137,7 +137,7 @@ public final class SessionRecorder: @unchecked Sendable {
         transcript.append(LogEvent("error", [("turn", .int(turnNumber)), ("message", .string(ObsText.cap(message, limit: 2000).text))]))
     }
 
-    /// reason: final_answer | iteration_limit | cancelled | repeat_guard | error
+    /// reason: final_answer | iteration_limit | cancelled | repeat_guard | tool_budget | error
     public func stop(reason: String) {
         transcript.append(LogEvent("stop", [("turn", .int(turnNumber)), ("reason", .string(reason))]))
     }
