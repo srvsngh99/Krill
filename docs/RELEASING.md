@@ -82,11 +82,14 @@ git checkout -b release/vX.Y.Z
 10. **The tap bumps itself** — `homebrew-krill` runs its own `auto-bump.yml`,
     which reads the latest Krill release, re-derives the sha256 from the
     published asset, and commits the formula with the built-in `GITHUB_TOKEN`.
-    It polls every 6 hours, so trigger it instead of waiting:
+    On a macOS runner it also builds a bottle and publishes it as a
+    `krill-X.Y.Z` release in the tap. Without the bottle, `brew` treats the
+    install as a source build and refuses Macs whose Xcode tools are older
+    than their macOS. It polls every 6 hours, so trigger it instead of waiting:
     ```bash
     gh workflow run auto-bump.yml -R srvsngh99/homebrew-krill
     # then confirm it landed and agrees with the release:
-    brew update && brew info krill      # must show the new version
+    brew update && brew info krill      # must show the new version and "(bottled)"
     ```
     Do **not** hand-copy the formula unless the workflow has failed — a manual
     commit races the bot. If you must, the tap's `main` is hook-protected and
