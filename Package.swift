@@ -56,6 +56,7 @@ let package = Package(
                 "KrillRuntime",
                 "KrillCache",
                 "KrillKernels",
+                "KrillTokenizer",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXFast", package: "mlx-swift"),
@@ -116,7 +117,7 @@ let package = Package(
         // lives in KrillCLI where InferenceEngine is wired.
         .target(
             name: "KrillHarness",
-            dependencies: ["KrillTooling", "KrillObs"],
+            dependencies: ["KrillTooling", "KrillObs", "KrillRegistry"],
             swiftSettings: selfHostedIndexSettings
         ),
         .target(
@@ -165,6 +166,7 @@ let package = Package(
                 "KrillServer",
                 "KrillTooling",
                 "KrillHarness",
+                "KrillTokenizer",
                 "CEditLine",
                 "KrillTUI",
                 "KrillLaunch",
@@ -181,6 +183,7 @@ let package = Package(
                 "KrillRuntime",
                 "KrillRegistry",
                 "KrillKernels",
+                "KrillTokenizer",
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             resources: [.copy("Fixtures")]
@@ -207,6 +210,8 @@ let package = Package(
                 "KrillEngine",
                 "KrillRegistry",
                 "KrillSampler",
+                "KrillCache",
+                "KrillHarness",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),

@@ -301,6 +301,8 @@ public struct WebFetchTool: Tool {
     /// simple (no DOM): good enough to feed a model, with no extra dependency.
     static func htmlToText(_ html: String) -> String {
         var s = html
+        let title = firstMatch(in: html, "(?is)<title\\b[^>]*>(.*?)</title>")
+            .map { decodeEntities(regexReplace($0, "\\s+", " ")).trimmingCharacters(in: .whitespaces) }
         for tag in ["script", "style", "head", "noscript", "svg", "template"] {
             s = regexReplace(s, "(?is)<\(tag)\\b[^>]*>.*?</\(tag)>", " ")
         }
@@ -311,7 +313,16 @@ public struct WebFetchTool: Tool {
         s = regexReplace(s, "[ \\t\\x{00A0}]+", " ") // collapse spaces (incl. nbsp)
         s = regexReplace(s, "\\n[ \\t]*", "\n")      // trim line leads
         s = regexReplace(s, "\\n{3,}", "\n\n")       // collapse blank runs
-        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+        s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let title, !title.isEmpty else { return s }
+        return "Title: \(title)\n\n" + s
+    }
+
+    private static func firstMatch(in s: String, _ pattern: String) -> String? {
+        guard let re = try? NSRegularExpression(pattern: pattern),
+              let m = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
+              let r = Range(m.range(at: 1), in: s) else { return nil }
+        return String(s[r])
     }
 
     private static func regexReplace(_ s: String, _ pattern: String, _ repl: String) -> String {

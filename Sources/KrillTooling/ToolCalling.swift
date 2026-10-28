@@ -333,7 +333,8 @@ public enum ToolCalling {
               let name = obj["name"] as? String else { return nil }
         let argsValue = obj["arguments"] ?? [String: Any]()
         let argsJSON: String
-        if let argsData = try? JSONSerialization.data(withJSONObject: argsValue),
+        if let argsData = try? JSONSerialization.data(
+            withJSONObject: argsValue, options: .withoutEscapingSlashes),
            let str = String(data: argsData, encoding: .utf8) {
             argsJSON = str
         } else {
@@ -425,7 +426,7 @@ public enum ToolCalling {
         let objStr = String(s[lo...hi])
         guard let data = objStr.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let out = try? JSONSerialization.data(withJSONObject: obj),
+              let out = try? JSONSerialization.data(withJSONObject: obj, options: .withoutEscapingSlashes),
               let str = String(data: out, encoding: .utf8) else { return nil }
         return str
     }
@@ -923,7 +924,7 @@ public enum ToolCalling {
         let argsString: String
         if let s = argsAny as? String {
             argsString = s
-        } else if let d = try? JSONSerialization.data(withJSONObject: argsAny) {
+        } else if let d = try? JSONSerialization.data(withJSONObject: argsAny, options: .withoutEscapingSlashes) {
             argsString = String(data: d, encoding: .utf8) ?? "{}"
         } else {
             argsString = "{}"
@@ -1053,7 +1054,7 @@ public enum ToolCalling {
             if let str = argsAny as? String {
                 argsString = str
             } else if let a = argsAny,
-                      let d = try? JSONSerialization.data(withJSONObject: a) {
+                      let d = try? JSONSerialization.data(withJSONObject: a, options: .withoutEscapingSlashes) {
                 argsString = String(data: d, encoding: .utf8) ?? "{}"
             } else {
                 argsString = "{}"
@@ -1305,7 +1306,7 @@ public enum ToolCalling {
         if let a = obj["arguments"] ?? obj["parameters"] {
             if let s = a as? String {
                 argsString = s
-            } else if let d = try? JSONSerialization.data(withJSONObject: a) {
+            } else if let d = try? JSONSerialization.data(withJSONObject: a, options: .withoutEscapingSlashes) {
                 argsString = String(data: d, encoding: .utf8) ?? "{}"
             } else {
                 argsString = "{}"
@@ -1593,7 +1594,7 @@ public enum ToolCalling {
 
     /// Encode a string as a JSON string literal (with surrounding quotes).
     private static func jsonStringLiteral(_ s: String) -> String {
-        if let d = try? JSONSerialization.data(withJSONObject: [s]),
+        if let d = try? JSONSerialization.data(withJSONObject: [s], options: .withoutEscapingSlashes),
            let arr = String(data: d, encoding: .utf8) {
             return String(arr.dropFirst().dropLast())   // strip the [ ] of the array
         }

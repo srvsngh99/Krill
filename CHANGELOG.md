@@ -9,6 +9,14 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Fixed
+
+- `krill code` shows a skipped repeat tool call as a plain note instead of a
+  red error, and skipped repeats no longer use up the task's tool-call budget.
+- Krill builds with Xcode 27: every target declares the Krill modules it
+  imports (the new default Swift build system requires it), and the MLX
+  shaders are compiled as Metal 4.0, which Xcode 27's newer default rejects.
+
 ## [0.27.2] - 2026-10-27
 
 ### Fixed

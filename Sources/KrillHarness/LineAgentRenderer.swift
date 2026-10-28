@@ -25,7 +25,7 @@ public final class LineAgentRenderer: @unchecked Sendable {
     /// immediately after the call, so the buffer holds at most one entry.
     private var pendingCall: (name: String, args: String)?
 
-    public init(maxResultLines: Int = 20, emit: @escaping (String) -> Void = { print($0) }) {
+    public init(maxResultLines: Int = 20, emit: @escaping (String) -> Void = { print($0); fflush(stdout) }) {
         self.maxResultLines = maxResultLines
         self.emit = emit
     }

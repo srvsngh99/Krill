@@ -305,6 +305,20 @@ final class AgentLoopTests: XCTestCase {
 
         XCTAssertEqual(t.steps[0].toolCalls.count, 2)
         XCTAssertTrue(t.steps[0].toolCalls[1].result.content.hasPrefix("Skipped:"))
+        XCTAssertFalse(t.steps[0].toolCalls[1].result.isError, "a skip is a note, not a failure")
+    }
+
+    func testSkippedRepeatsDoNotSpendTheBudget() async {
+        let a = hermesCall("bash", #"{"command":"a"}"#)
+        let turn = a + a + a + a + hermesCall("bash", #"{"command":"b"}"#)
+            + hermesCall("bash", #"{"command":"c"}"#)
+        let loop = AgentLoop(
+            generator: MockGenerator(responses: [turn, "done"]),
+            tools: ToolRegistry([StubTool()]), maxIterations: 1)
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps[0].toolCalls.count, 6, "3 runs + 3 skips fit the 1*4 budget")
+        XCTAssertEqual(t.steps[0].toolCalls.filter { $0.result.content.hasPrefix("Skipped:") }.count, 3)
     }
 
     func testRepeatGuardStillTripsAfterOnlyReadOnlyCalls() async {
@@ -700,5 +714,36 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(t.steps[0].toolCalls[0].name, "ReadTheFile")
         let calls = await gen.recordedConstrainedCalls()
         XCTAssertEqual(calls, 0, "--no-constrain-args must opt out of the re-pick too")
+    }
+
+    func testProviderFailureEndsRunWithoutAFinalAnswer() async {
+        let gen = MockGenerator(responses: [HarnessFailure.wrap("Codex CLI failed: boom")])
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([StubTool()]))
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.failure, "Codex CLI failed: boom")
+        XCTAssertEqual(t.finalText, "")
+        XCTAssertTrue(t.steps.isEmpty)
+    }
+
+    func testAskModeWithoutATerminalSaysNoTerminal() async {
+        let gen = MockGenerator(responses: [hermesCall("bash", #"{"command":"ls"}"#), "done"])
+        let loop = AgentLoop(
+            generator: gen, tools: ToolRegistry([StubTool()]),
+            permission: PermissionPolicy(mode: .ask))
+        let t = await loop.run(user: "go")
+
+        let result = t.steps[0].toolCalls[0].result
+        XCTAssertTrue(result.isError)
+        XCTAssertTrue(result.content.contains("no terminal"), result.content)
+        XCTAssertFalse(result.content.contains("the user declined"))
+    }
+
+    func testToolArgumentsKeepSlashesUnescaped() async {
+        let gen = MockGenerator(responses: [hermesCall("bash", #"{"command":"ls /tmp/a"}"#), "done"])
+        let loop = AgentLoop(generator: gen, tools: ToolRegistry([StubTool()]))
+        let t = await loop.run(user: "go")
+
+        XCTAssertEqual(t.steps[0].toolCalls[0].argumentsJSON, #"{"command":"ls /tmp/a"}"#)
     }
 }

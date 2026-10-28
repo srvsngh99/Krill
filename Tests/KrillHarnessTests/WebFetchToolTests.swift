@@ -127,6 +127,13 @@ final class WebFetchToolTests: XCTestCase {
         XCTAssertFalse(r.content.contains("<p>"), "markup stripped")
     }
 
+    func testFetchKeepsThePageTitle() async {
+        let stub = StubFetcher(body: "<html><head><title>Example &amp; Co</title></head><body><p>Hi</p></body></html>")
+        let r = await WebFetchTool(fetcher: stub).run(argumentsJSON: #"{"url":"https://example.com/x"}"#)
+        XCTAssertTrue(r.content.contains("Title: Example & Co"), r.content)
+        XCTAssertTrue(r.content.contains("Hi"))
+    }
+
     func testNon2xxIsError() async {
         let stub = StubFetcher(body: "nope", status: 404, contentType: "text/plain")
         let r = await WebFetchTool(fetcher: stub).run(argumentsJSON: #"{"url":"https://example.com/missing"}"#)

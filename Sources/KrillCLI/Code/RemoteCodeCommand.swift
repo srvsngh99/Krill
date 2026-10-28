@@ -106,7 +106,7 @@ extension CodeCommand {
 
         let effectiveSystem = remoteSystemPrompt(
             modelName: modelName, mode: mode, userSystem: nonEmpty(system))
-        printPermissionMode(mode)
+        printPermissionMode(mode, bash: bash)
         if constrainArgs {
             print("Note: --constrain-args is unavailable for hosted providers; continuing without local grammar constraints.")
         }
@@ -128,10 +128,16 @@ extension CodeCommand {
             recorder: session)
         let renderer = LineAgentRenderer()
         let onEvent: @Sendable (AgentEvent) -> Void = { renderer.handle($0) }
-        let transcript = await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
-        session?.end(outcome: transcript.wasCancelled ? "cancelled"
-            : (transcript.hitIterationLimit ? "iteration_limit" : "completed"))
-        Obs.shutdown()
+        // Ctrl-C cancels the run, which terminates the provider child process.
+        let run = Task { await loop.run(user: task, system: effectiveSystem, onEvent: onEvent) }
+        signal(SIGINT, SIG_IGN)
+        let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+        sigint.setEventHandler { run.cancel() }
+        sigint.resume()
+        let transcript = await run.value
+        sigint.cancel()
+        signal(SIGINT, SIG_DFL)
+        try finishRun(transcript, session: session)
     }
 
     /// Hosted reasoning models need a larger completion allowance than the
@@ -191,29 +197,51 @@ extension CodeCommand {
         return parts.joined(separator: "\n\n")
     }
 
-    private func printPermissionMode(_ mode: PermissionMode) {
-        switch mode {
-        case .plan:
-            print(RawTerminal.isInteractive
-                ? "Plan mode: read-only. The agent can inspect files and request approval to execute."
-                : "Plan mode: read-only. The agent can inspect files and will reply with a plan.")
-        case .adaptive:
-            print("Adaptive mode: starts read-only, then may self-promote to edits; commands still ask.")
-        case .ask:
-            print("Ask mode: you will be prompted to approve each file edit or shell command.")
-        case .acceptEdits:
-            print("Accept-edits mode: file edits apply automatically; you will be prompted before shell commands.")
-        case .acceptAll:
-            if bash {
-                print("Note: the bash tool and file edits run with no sandbox. Use --no-bash to disable shell access, or --plan / --permission-mode ask to gate tools.")
-            }
-        }
-    }
-
     private func nonEmpty(_ value: String?) -> String? {
         guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
         return value
+    }
+}
+
+/// The one-line posture banner shared by local and remote `krill code`.
+func printPermissionMode(_ mode: PermissionMode, bash: Bool) {
+    switch mode {
+    case .plan:
+        print(RawTerminal.isInteractive
+            ? "Plan mode: read-only. The agent can inspect files and request approval to execute."
+            : "Plan mode: read-only. The agent can inspect files and will reply with a plan.")
+    case .adaptive:
+        print("Adaptive mode: starts read-only, then may self-promote to edits; commands still ask.")
+    case .ask:
+        print(RawTerminal.isInteractive
+            ? "Ask mode: you will be prompted to approve each file edit or shell command."
+            : "Ask mode: file edits and shell commands will be declined because there is no terminal to ask.")
+    case .acceptEdits:
+        print(RawTerminal.isInteractive
+            ? "Accept-edits mode: file edits apply automatically; you will be prompted before shell commands."
+            : "Accept-edits mode: file edits apply automatically; shell commands will be declined because there is no terminal to ask.")
+    case .acceptAll:
+        if bash {
+            print("Note: the bash tool and file edits run with no sandbox. Use --no-bash to disable shell access, or --plan / --permission-mode ask to gate tools.")
+        }
+    }
+}
+
+extension CodeCommand {
+    /// Records the outcome and maps it to the exit status: a provider failure or
+    /// an iteration-limit stop exits 1, a cancelled run 130.
+    func finishRun(_ transcript: AgentTranscript, session: SessionRecorder?) throws {
+        let outcome = transcript.failure != nil ? "failed" : transcript.wasCancelled ? "cancelled"
+            : (transcript.hitIterationLimit ? "iteration_limit" : "completed")
+        session?.end(outcome: outcome)
+        Obs.shutdown()
+        if let failure = transcript.failure {
+            FileHandle.standardError.write(Data("Error: \(failure)\n".utf8))
+            throw ExitCode.failure
+        }
+        if transcript.wasCancelled { throw ExitCode(130) }
+        if transcript.hitIterationLimit { throw ExitCode.failure }
     }
 }

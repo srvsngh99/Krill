@@ -35,6 +35,8 @@ public struct AgentTranscript: Sendable {
     /// True when the run stopped because its Task was cancelled (Ctrl-C in the
     /// TUI), as opposed to finishing or hitting the iteration cap.
     public let wasCancelled: Bool
+    /// Set when the provider failed; the run ended without a model answer.
+    public let failure: String?
     public let messages: [[String: String]]
 
     public init(
@@ -42,12 +44,14 @@ public struct AgentTranscript: Sendable {
         finalText: String,
         hitIterationLimit: Bool,
         wasCancelled: Bool = false,
+        failure: String? = nil,
         messages: [[String: String]]
     ) {
         self.steps = steps
         self.finalText = finalText
         self.hitIterationLimit = hitIterationLimit
         self.wasCancelled = wasCancelled
+        self.failure = failure
         self.messages = messages
     }
 }
@@ -183,6 +187,7 @@ public struct AgentLoop: Sendable {
         var finalText = ""
         var hitLimit = false
         var cancelled = false
+        var failure: String?
 
         // Runaway guard: calls to skip until the next new mutation, mutations that
         // already succeeded once, and a total tool-call budget.
@@ -216,6 +221,16 @@ public struct AgentLoop: Sendable {
             let output = constrainToolArgs
                 ? await generator.complete(messages: messages, constrainingToolNames: tools.names)
                 : await generator.complete(messages: messages)
+            if Task.isCancelled {
+                cancelled = true
+                break
+            }
+            if let message = HarnessFailure.message(in: output) {
+                failure = message
+                recorder?.stop(reason: "provider_error")
+                onEvent?(.stopped(message))
+                break
+            }
             let (calls, cleaned) = ToolCalling.extractIfToolsOffered(
                 from: output, hasTools: hasTools, format: format,
                 knownToolNames: specs.map { $0.name })
@@ -253,10 +268,7 @@ public struct AgentLoop: Sendable {
                     : "the tool-call budget for this task is spent"))
                 break
             }
-            let toRun = Array(calls.prefix(remaining))
-            executedToolCalls += toRun.count
-
-            recorder?.assistant(visible, toolCalls: toRun.count)
+            recorder?.assistant(visible, toolCalls: calls.count)
             onEvent?(.assistantTurn(text: visible))
 
             // Record the model's own turn (raw, so it sees the call it made),
@@ -265,7 +277,7 @@ public struct AgentLoop: Sendable {
             // come with the richer multi-turn work in a later PR).
             messages.append(["role": "assistant", "content": output])
             var invocations: [ToolInvocation] = []
-            for rawCall in toRun {
+            for rawCall in calls {
                 // Resolve the name BEFORE anything records or reports it, so the
                 // permission gate, the observation fed back, and the emitted event
                 // all agree on the tool that actually ran.
@@ -293,9 +305,12 @@ public struct AgentLoop: Sendable {
                 guard executedSignatures.insert(signature).inserted else {
                     record(args: call.argumentsJSON, ToolResult(
                         content: "Skipped: this exact call was already made and nothing has changed since.",
-                        isError: true))
+                        isError: false))
                     continue
                 }
+                // Only calls that get past the repeat guard spend the budget.
+                guard executedToolCalls < maxToolCalls else { break }
+                executedToolCalls += 1
 
                 guard let tool = tools.tool(named: call.name), let spec = tools.spec(named: call.name) else {
                     recorder?.permission(tool: call.name, decision: "unknown_tool")
@@ -327,7 +342,9 @@ public struct AgentLoop: Sendable {
                     recorder?.permission(tool: call.name, decision: approved ? "ask_approved" : "ask_declined")
                     if !approved {
                         record(args: argsJSON, ToolResult(
-                            content: "Permission denied: the user declined to run '\(call.name)'.",
+                            content: gate == nil
+                                ? "Permission denied: no terminal was available to ask the user to approve '\(call.name)'."
+                                : "Permission denied: the user declined to run '\(call.name)'.",
                             isError: true))
                         continue
                     }
@@ -352,7 +369,7 @@ public struct AgentLoop: Sendable {
 
         return AgentTranscript(
             steps: steps, finalText: finalText,
-            hitIterationLimit: hitLimit, wasCancelled: cancelled, messages: messages)
+            hitIterationLimit: hitLimit, wasCancelled: cancelled, failure: failure, messages: messages)
     }
 
     /// Stable identity for a parsed call: name + raw arguments. Two calls with

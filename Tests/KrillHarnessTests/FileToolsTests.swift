@@ -36,6 +36,12 @@ final class FileToolsTests: XCTestCase {
         XCTAssertTrue(r.content.contains("3\tthree"))
     }
 
+    func testReadTrailingNewlineAddsNoPhantomLine() async throws {
+        try write("a.txt", "one\ntwo\n")
+        let r = await ReadTool().run(argumentsJSON: args(["path": path("a.txt")]))
+        XCTAssertEqual(r.content, "     1\tone\n     2\ttwo\n")
+    }
+
     func testReadOffsetAndLimit() async throws {
         try write("a.txt", "l1\nl2\nl3\nl4\nl5")
         let r = await ReadTool().run(argumentsJSON: args(["path": path("a.txt"), "offset": 2, "limit": 2]))
