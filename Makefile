@@ -63,7 +63,7 @@ metallib:
 	find "$$METAL_DIR" -type f -name '*.metal' -print | while IFS= read -r f; do \
 		REL=$${f#$$METAL_DIR/}; \
 		AIR=$$(printf '%s' "$$REL" | tr '/.' '__').air; \
-		xcrun -sdk macosx metal -c -fmodules-cache-path="$$AIR_DIR/module-cache" -I"$$METAL_DIR" -I"$$INCLUDE_DIR" "$$f" -o "$$AIR_DIR/$$AIR"; \
+		xcrun -sdk macosx metal -mmacosx-version-min=14.0 -c -fmodules-cache-path="$$AIR_DIR/module-cache" -I"$$METAL_DIR" -I"$$INCLUDE_DIR" "$$f" -o "$$AIR_DIR/$$AIR"; \
 		printf '%s\n' "$$AIR_DIR/$$AIR" >> "$$AIR_DIR/air-files"; \
 	done; \
 	if [ ! -s "$$AIR_DIR/air-files" ]; then \

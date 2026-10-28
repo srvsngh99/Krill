@@ -231,7 +231,9 @@ final class RemoteGeneratorsTests: XCTestCase {
         XCTAssertEqual(executable, "codex")
         let arguments = await runner.arguments()
         XCTAssertEqual(arguments, [
-            "exec", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check", "--ignore-rules", "--color", "never", "-",
+            "exec", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check", "--ignore-rules",
+            "--ignore-user-config", "--disable", "hooks", "-c", "skills.include_instructions=false",
+            "--color", "never", "-",
         ])
         XCTAssertFalse(arguments.contains("--model"), "no explicit model preserves the user's Codex default")
         let prompt = await runner.input()
@@ -244,14 +246,41 @@ final class RemoteGeneratorsTests: XCTestCase {
         let failedRunner = StubCodexRunner(result: .init(stdout: "", stderr: "not logged in", exitStatus: 1))
         let generator = CodexCLIHarnessGenerator(model: "gpt-5.1-codex", runner: failedRunner)
         let failure = await generator.complete(messages: [])
+        XCTAssertNotNil(HarnessFailure.message(in: failure), "a failure must not look like model text")
         XCTAssertTrue(failure.contains("not logged in"))
         XCTAssertTrue(failure.contains("codex login"))
+
+        let busy = StubCodexRunner(result: .init(
+            stdout: "",
+            stderr: "OpenAI Codex v1\n--------\nuser\nthe author got a 401 on login\nERROR: model overloaded",
+            exitStatus: 1))
+        let busyReply = await CodexCLIHarnessGenerator(runner: busy).complete(messages: [])
+        XCTAssertTrue(busyReply.contains("model overloaded"))
+        XCTAssertFalse(busyReply.contains("codex login"), "only auth failures suggest logging in")
         let arguments = await failedRunner.arguments()
         XCTAssertEqual(arguments.suffix(3), ["--model", "gpt-5.1-codex", "-"])
+
+        let missing = StubCodexRunner(result: .init(
+            stdout: "", stderr: "env: codex: No such file or directory", exitStatus: 127))
+        let missingReply = await CodexCLIHarnessGenerator(runner: missing).complete(messages: [])
+        XCTAssertTrue(missingReply.contains("Install Codex"))
 
         let unavailable = CodexCLIHarnessGenerator(runner: ThrowingCodexRunner())
         let unavailableReply = await unavailable.complete(messages: [])
         XCTAssertTrue(unavailableReply.contains("codex not installed"))
         XCTAssertTrue(unavailableReply.contains("codex login"))
+    }
+
+    func testCancellingTheTaskTerminatesTheChildProcess() async throws {
+        let started = Date()
+        let task = Task {
+            try await SystemCodexProcessRunner().run(
+                executable: "/bin/sleep", arguments: ["30"], standardInput: "")
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        task.cancel()
+        let result = try await task.value
+        XCTAssertNotEqual(result.exitStatus, 0)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10)
     }
 }

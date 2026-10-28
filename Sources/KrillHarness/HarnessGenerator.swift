@@ -1,6 +1,18 @@
 import Foundation
 import KrillTooling
 
+/// How a generator, whose `complete` cannot throw, reports a provider failure:
+/// the loop ends the run with the message instead of treating it as model text.
+public enum HarnessFailure {
+    private static let marker = "\u{1}krill-provider-failure\u{1}"
+
+    public static func wrap(_ message: String) -> String { marker + message }
+
+    public static func message(in output: String) -> String? {
+        output.hasPrefix(marker) ? String(output.dropFirst(marker.count)) : nil
+    }
+}
+
 /// The one seam between the agent loop and a model. The loop owns tool
 /// injection and parsing (via `KrillTooling`); the generator only turns a
 /// message history into the model's raw output text.

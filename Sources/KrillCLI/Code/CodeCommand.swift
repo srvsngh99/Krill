@@ -242,22 +242,7 @@ struct CodeCommand: AsyncParsableCommand {
 
         // Classic line renderer (--classic, non-interactive, or tool flags set).
         // Surface the posture inline.
-        switch mode {
-        case .plan:
-            print(RawTerminal.isInteractive
-                ? "Plan mode: read-only. The agent can inspect files and request approval to execute."
-                : "Plan mode: read-only. The agent can inspect files and will reply with a plan.")
-        case .adaptive:
-            print("Adaptive mode: starts read-only, then may self-promote to edits; commands still ask.")
-        case .ask:
-            print("Ask mode: you will be prompted to approve each file edit or shell command.")
-        case .acceptEdits:
-            print("Accept-edits mode: file edits apply automatically; you will be prompted before shell commands.")
-        case .acceptAll:
-            if bash {
-                print("Note: the bash tool and file edits run with no sandbox. Use --no-bash to disable shell access, or --plan / --permission-mode ask to gate tools.")
-            }
-        }
+        printPermissionMode(mode, bash: bash)
 
         guard let task else {
             print("Error: no task. Usage: krill code [<model>] \"<task>\"")
@@ -297,9 +282,7 @@ struct CodeCommand: AsyncParsableCommand {
         let renderer = LineAgentRenderer()
         let onEvent: @Sendable (AgentEvent) -> Void = { renderer.handle($0) }
         let transcript = await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
-        session?.end(outcome: transcript.wasCancelled ? "cancelled"
-            : (transcript.hitIterationLimit ? "iteration_limit" : "completed"))
-        Obs.shutdown()
+        try finishRun(transcript, session: session)
     }
 
     /// Local generations derive their ceiling from the loaded model's context

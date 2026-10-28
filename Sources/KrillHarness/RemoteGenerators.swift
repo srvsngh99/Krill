@@ -212,9 +212,10 @@ public struct OpenAICompatibleHarnessGenerator: HarnessGenerator {
             try OpenCodeZen.validate(response: response, data: data)
             return try parseCompletion(data)
         } catch let error as HostedProviderError {
-            return "Error: OpenCode provider: \(error.localizedDescription)"
+            return HarnessFailure.wrap("OpenCode provider: \(error.localizedDescription)")
         } catch {
-            return "Error: OpenCode provider: \(HostedProviderError.transport(error.localizedDescription).localizedDescription)"
+            return HarnessFailure.wrap(
+                "OpenCode provider: \(HostedProviderError.transport(error.localizedDescription).localizedDescription)")
         }
     }
 
@@ -303,8 +304,42 @@ public protocol CodexProcessRunning: Sendable {
 public struct SystemCodexProcessRunner: CodexProcessRunning {
     public init() {}
 
+    /// Lets task cancellation reach the child, whether it is cancelled before
+    /// or after launch.
+    private final class Child: @unchecked Sendable {
+        private let lock = NSLock()
+        private var process: Process?
+        private var cancelled = false
+
+        func launch(_ process: Process) throws {
+            lock.lock()
+            defer { lock.unlock() }
+            if cancelled { throw CancellationError() }
+            try process.run()
+            self.process = process
+        }
+
+        func cancel() {
+            lock.lock()
+            defer { lock.unlock() }
+            cancelled = true
+            if process?.isRunning == true { process?.terminate() }
+        }
+    }
+
     public func run(
         executable: String, arguments: [String], standardInput: String
+    ) async throws -> CodexProcessResult {
+        let child = Child()
+        return try await withTaskCancellationHandler {
+            try await runChild(child, executable: executable, arguments: arguments, standardInput: standardInput)
+        } onCancel: {
+            child.cancel()
+        }
+    }
+
+    private func runChild(
+        _ child: Child, executable: String, arguments: [String], standardInput: String
     ) async throws -> CodexProcessResult {
         try await Task.detached(priority: nil) {
             // The isolated working directory keeps Codex from discovering the
@@ -335,7 +370,7 @@ public struct SystemCodexProcessRunner: CodexProcessRunning {
             process.standardInput = input
             process.standardOutput = output
             process.standardError = errors
-            try process.run()
+            try child.launch(process)
             // Drain both pipes concurrently with the child. Waiting first can
             // deadlock once either pipe fills its bounded kernel buffer.
             let stdoutTask = Task.detached {
@@ -382,17 +417,26 @@ public struct CodexCLIHarnessGenerator: HarnessGenerator {
                 arguments: arguments(),
                 standardInput: prompt(messages: messages))
             guard result.exitStatus == 0 else {
-                let detail = firstUsefulLine(result.stderr) ?? firstUsefulLine(result.stdout)
+                if result.exitStatus == 127 {
+                    return HarnessFailure.wrap("Codex CLI was not found. Install Codex and run 'codex login'.")
+                }
+                let detail = lastUsefulLine(result.stderr) ?? lastUsefulLine(result.stdout)
                     ?? "exit status \(result.exitStatus)"
-                return "Error: Codex CLI failed: \(detail). Run 'codex login' to connect your subscription."
+                let looksLikeAuth = detail.range(
+                    of: "log(in|ged in)|auth|401|unauthorized", options: [.regularExpression, .caseInsensitive]) != nil
+                return HarnessFailure.wrap("Codex CLI failed: \(detail)"
+                    + (looksLikeAuth ? ". Run 'codex login' to connect your subscription." : ""))
             }
             let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !output.isEmpty else {
-                return "Error: Codex CLI returned no assistant message. Run 'codex login' and retry."
+                return HarnessFailure.wrap("Codex CLI returned no assistant message.")
             }
             return output
+        } catch is CancellationError {
+            return ""
         } catch {
-            return "Error: Could not start Codex CLI (\(error.localizedDescription)). Install Codex and run 'codex login'."
+            return HarnessFailure.wrap(
+                "Could not start Codex CLI (\(error.localizedDescription)). Install Codex and run 'codex login'.")
         }
     }
 
@@ -401,10 +445,11 @@ public struct CodexCLIHarnessGenerator: HarnessGenerator {
     public func arguments() -> [String] {
         var result = [
             "exec", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check",
-            // Ignore Codex execpolicy `.rules`; the isolated temporary working
-            // directory above, not this flag, prevents project discovery. Keep
-            // normal user config for login and model defaults.
-            "--ignore-rules", "--color", "never",
+            // Keep the user's AGENTS.md rules, skills, hooks and config out of the
+            // backend; auth.json (codex login) is unaffected. Global AGENTS.md
+            // still loads: Codex has no off switch short of a different CODEX_HOME.
+            "--ignore-rules", "--ignore-user-config", "--disable", "hooks",
+            "-c", "skills.include_instructions=false", "--color", "never",
         ]
         if let model { result += ["--model", model] }
         result.append("-") // read the transcript from stdin, not the process list
@@ -424,10 +469,10 @@ public struct CodexCLIHarnessGenerator: HarnessGenerator {
         """
     }
 
-    private func firstUsefulLine(_ text: String) -> String? {
+    private func lastUsefulLine(_ text: String) -> String? {
         text.split(whereSeparator: \.isNewline)
             .map { String($0).trimmingCharacters(in: .whitespaces) }
-            .first { !$0.isEmpty }
+            .last { !$0.isEmpty }
     }
 }
 

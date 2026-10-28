@@ -12,7 +12,10 @@ public enum AgentEnvironment {
         "Use tools only when needed. Once you have the tool results, "
         + "reply with the final answer and do not call any more tools - except that an ask_user "
         + "answer, or a granted request_execute, means you keep working instead of stopping. "
-        + "Your training data has a cutoff: for facts that change over time "
+        + cutoffDirective
+
+    private static let cutoffDirective =
+        "Your training data has a cutoff: for facts that change over time "
         + "(office-holders, prices, versions, news), verify with web_search "
         + "instead of answering from memory."
 
@@ -20,9 +23,7 @@ public enum AgentEnvironment {
     public static let unattendedToolDirective =
         "Use tools only when needed. Once you have the tool results, "
         + "reply with the final answer and do not call any more tools. "
-        + "Your training data has a cutoff: for facts that change over time "
-        + "(office-holders, prices, versions, news), verify with web_search "
-        + "instead of answering from memory."
+        + cutoffDirective
 
     /// Planning variant. `toolDirective`'s "stop once you have the tool results"
     /// is simply WRONG while planning, where the turn's correct terminal action
@@ -34,9 +35,7 @@ public enum AgentEnvironment {
         "Use tools only when needed. You are PLANNING: your turn ends by calling request_execute, "
         + "not by replying with prose. Do not stop after the read-only tools return, and do not "
         + "merely say you are about to request permission - emit the request_execute call itself. "
-        + "Your training data has a cutoff: for facts that change over time "
-        + "(office-holders, prices, versions, news), verify with web_search "
-        + "instead of answering from memory."
+        + cutoffDirective
 
     /// The anti-over-calling directive for `mode`; synthesized system turns must use it.
     /// `interactive: false`: no `ask_user`, and `request_execute` only in adaptive

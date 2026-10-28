@@ -57,11 +57,11 @@ git checkout -b release/vX.Y.Z
    ```bash
    swift build -c release --arch arm64
    make metallib CONFIGURATION=release
-   ./.build/arm64-apple-macosx/release/krill version   # MUST print the new number
+   ./.build/release/krill version   # MUST print the new number
    ```
 5. **Gate the public build.** The self-hosted index backend is dev-only and must never ship:
    ```bash
-   strings -a .build/arm64-apple-macosx/release/krill | grep -ic SelfHostedIndex   # must be 0
+   strings -a .build/release/krill | grep -ic SelfHostedIndex   # must be 0
    ```
 6. **Package and stamp.**
    ```bash
