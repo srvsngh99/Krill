@@ -301,7 +301,8 @@ public struct WebFetchTool: Tool {
     /// simple (no DOM): good enough to feed a model, with no extra dependency.
     static func htmlToText(_ html: String) -> String {
         var s = html
-        let title = firstMatch(in: html, "(?is)<title\\b[^>]*>(.*?)</title>")
+        let title = firstMatch(in: html, "(?is)<head\\b[^>]*>(.*?)</head>")
+            .flatMap { firstMatch(in: $0, "(?is)<title\\b[^>]*>(.*?)</title>") }
             .map { decodeEntities(regexReplace($0, "\\s+", " ")).trimmingCharacters(in: .whitespaces) }
         for tag in ["script", "style", "head", "noscript", "svg", "template"] {
             s = regexReplace(s, "(?is)<\(tag)\\b[^>]*>.*?</\(tag)>", " ")

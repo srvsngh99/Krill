@@ -129,10 +129,14 @@ extension CodeCommand {
         let renderer = LineAgentRenderer()
         let onEvent: @Sendable (AgentEvent) -> Void = { renderer.handle($0) }
         // Ctrl-C cancels the run, which terminates the provider child process.
+        // A second one exits at once, e.g. while blocked at an approval prompt.
         let run = Task { await loop.run(user: task, system: effectiveSystem, onEvent: onEvent) }
         signal(SIGINT, SIG_IGN)
         let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
-        sigint.setEventHandler { run.cancel() }
+        sigint.setEventHandler {
+            run.cancel()
+            sigint.setEventHandler { Darwin.exit(130) }
+        }
         sigint.resume()
         let transcript = await run.value
         sigint.cancel()

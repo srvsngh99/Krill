@@ -228,7 +228,6 @@ public struct AgentLoop: Sendable {
             if let message = HarnessFailure.message(in: output) {
                 failure = message
                 recorder?.stop(reason: "provider_error")
-                onEvent?(.stopped(message))
                 break
             }
             let (calls, cleaned) = ToolCalling.extractIfToolsOffered(
@@ -268,7 +267,7 @@ public struct AgentLoop: Sendable {
                     : "the tool-call budget for this task is spent"))
                 break
             }
-            recorder?.assistant(visible, toolCalls: calls.count)
+            recorder?.assistant(visible, toolCalls: min(calls.count, remaining))
             onEvent?(.assistantTurn(text: visible))
 
             // Record the model's own turn (raw, so it sees the call it made),
@@ -278,6 +277,7 @@ public struct AgentLoop: Sendable {
             messages.append(["role": "assistant", "content": output])
             var invocations: [ToolInvocation] = []
             for rawCall in calls {
+                if Task.isCancelled { break }
                 // Resolve the name BEFORE anything records or reports it, so the
                 // permission gate, the observation fed back, and the emitted event
                 // all agree on the tool that actually ran.
@@ -339,6 +339,7 @@ public struct AgentLoop: Sendable {
                 if case .ask = decision {
                     let approved = await (gate?.approve(
                         toolName: call.name, argumentsJSON: argsJSON) ?? false)
+                    if Task.isCancelled { break }
                     recorder?.permission(tool: call.name, decision: approved ? "ask_approved" : "ask_declined")
                     if !approved {
                         record(args: argsJSON, ToolResult(

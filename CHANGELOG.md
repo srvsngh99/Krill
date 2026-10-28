@@ -16,8 +16,10 @@ reverse chronological order. Versioning follows
 - `krill code --provider codex`: Ctrl-C now stops the `codex exec` child
   instead of leaving it running. A provider failure ends the run with an error
   on stderr and exit 1 instead of printing as the answer; a cancelled run exits
-  130 and a run stopped at the iteration limit exits 1. The `codex login` hint
-  appears only for sign-in failures.
+  130 and a run stopped at the iteration limit exits 1 (local classic
+  `krill code` follows the same exit codes). A second Ctrl-C exits at once.
+  The `codex login` hint appears only for sign-in failures, and a missing
+  `codex` executable says to install Codex.
 - Codex no longer loads the user's Codex config, skills or hooks into Krill's
   backend calls. The user's global `AGENTS.md` still loads; Codex has no flag
   to turn it off.
@@ -30,8 +32,11 @@ reverse chronological order. Versioning follows
 - Tool arguments show paths with plain slashes instead of `\/`.
 - `web_fetch` keeps the page title.
 - Krill builds with Xcode 27: every target declares the Krill modules it
-  imports (the new default Swift build system requires it), and the MLX
-  shaders are compiled as Metal 4.0, which Xcode 27's newer default rejects.
+  imports (the new default Swift build system requires it).
+- The MLX shader library is built for macOS 14 and later
+  (`-mmacosx-version-min=14.0`). The v0.27.2 library was built with Xcode
+  26.4 defaults and targets macOS 26.4, so GPU shaders could fail to load on
+  macOS 14 and 15.
 
 ## [0.27.2] - 2026-10-27
 

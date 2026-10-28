@@ -39,7 +39,7 @@ public struct ReadTool: Tool {
         var allLines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         if allLines.last == "" { allLines.removeLast() }
         let start = max(0, ((obj["offset"] as? Int) ?? 1) - 1)
-        guard start < allLines.count else {
+        guard start == 0 || start < allLines.count else {
             return ToolResult(content: "(file has \(allLines.count) lines; offset \(start + 1) is past the end)", isError: false)
         }
         let limit = (obj["limit"] as? Int) ?? defaultLimit

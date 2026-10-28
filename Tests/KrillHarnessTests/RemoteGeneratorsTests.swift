@@ -251,12 +251,19 @@ final class RemoteGeneratorsTests: XCTestCase {
         XCTAssertTrue(failure.contains("codex login"))
 
         let busy = StubCodexRunner(result: .init(
-            stdout: "", stderr: "OpenAI Codex v1\n--------\nERROR: model overloaded", exitStatus: 1))
+            stdout: "",
+            stderr: "OpenAI Codex v1\n--------\nuser\nthe author got a 401 on login\nERROR: model overloaded",
+            exitStatus: 1))
         let busyReply = await CodexCLIHarnessGenerator(runner: busy).complete(messages: [])
         XCTAssertTrue(busyReply.contains("model overloaded"))
         XCTAssertFalse(busyReply.contains("codex login"), "only auth failures suggest logging in")
         let arguments = await failedRunner.arguments()
         XCTAssertEqual(arguments.suffix(3), ["--model", "gpt-5.1-codex", "-"])
+
+        let missing = StubCodexRunner(result: .init(
+            stdout: "", stderr: "env: codex: No such file or directory", exitStatus: 127))
+        let missingReply = await CodexCLIHarnessGenerator(runner: missing).complete(messages: [])
+        XCTAssertTrue(missingReply.contains("Install Codex"))
 
         let unavailable = CodexCLIHarnessGenerator(runner: ThrowingCodexRunner())
         let unavailableReply = await unavailable.complete(messages: [])

@@ -417,9 +417,12 @@ public struct CodexCLIHarnessGenerator: HarnessGenerator {
                 arguments: arguments(),
                 standardInput: prompt(messages: messages))
             guard result.exitStatus == 0 else {
+                if result.exitStatus == 127 {
+                    return HarnessFailure.wrap("Codex CLI was not found. Install Codex and run 'codex login'.")
+                }
                 let detail = lastUsefulLine(result.stderr) ?? lastUsefulLine(result.stdout)
                     ?? "exit status \(result.exitStatus)"
-                let looksLikeAuth = (result.stderr + result.stdout).range(
+                let looksLikeAuth = detail.range(
                     of: "log(in|ged in)|auth|401|unauthorized", options: [.regularExpression, .caseInsensitive]) != nil
                 return HarnessFailure.wrap("Codex CLI failed: \(detail)"
                     + (looksLikeAuth ? ". Run 'codex login' to connect your subscription." : ""))

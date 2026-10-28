@@ -36,6 +36,12 @@ final class FileToolsTests: XCTestCase {
         XCTAssertTrue(r.content.contains("3\tthree"))
     }
 
+    func testReadEmptyFileSaysEmpty() async throws {
+        try write("e.txt", "")
+        let r = await ReadTool().run(argumentsJSON: args(["path": path("e.txt")]))
+        XCTAssertEqual(r.content, "(empty file)")
+    }
+
     func testReadTrailingNewlineAddsNoPhantomLine() async throws {
         try write("a.txt", "one\ntwo\n")
         let r = await ReadTool().run(argumentsJSON: args(["path": path("a.txt")]))

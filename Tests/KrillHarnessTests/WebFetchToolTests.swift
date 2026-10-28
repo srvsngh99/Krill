@@ -134,6 +134,12 @@ final class WebFetchToolTests: XCTestCase {
         XCTAssertTrue(r.content.contains("Hi"))
     }
 
+    func testFetchIgnoresAnInlineSvgTitle() async {
+        let stub = StubFetcher(body: "<html><head></head><body><svg><title>Icon</title></svg><p>Hi</p></body></html>")
+        let r = await WebFetchTool(fetcher: stub).run(argumentsJSON: #"{"url":"https://example.com/x"}"#)
+        XCTAssertFalse(r.content.contains("Title:"), r.content)
+    }
+
     func testNon2xxIsError() async {
         let stub = StubFetcher(body: "nope", status: 404, contentType: "text/plain")
         let r = await WebFetchTool(fetcher: stub).run(argumentsJSON: #"{"url":"https://example.com/missing"}"#)
