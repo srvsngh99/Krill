@@ -7,6 +7,17 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.27.3 - 2026-10-28
+**GPU shaders are built for macOS 14 and later, and `krill code --provider codex` is sturdier.**
+The shader library is now built for macOS 14 and later; the v0.27.2 library targeted
+macOS 26.4, so GPU inference could fail on older macOS. With Codex as the provider, Ctrl-C
+stops the Codex process instead of leaving it running, a Codex failure ends the run with
+an error and a non-zero exit instead of printing as the answer, and your own Codex config,
+skills and hooks stay out of Krill's calls. `read_file` no longer adds a phantom last line
+that broke the next edit, piped output shows progress as it happens, skipped repeat calls
+show as notes and no longer use up the tool budget, and `web_fetch` keeps the page title.
+Krill also builds with Xcode 27.
+
 ## v0.27.2 - 2026-10-27
 **`krill code` finishes the fix-and-retest loop.** When the agent fixes a bug and re-runs
 the test, the re-run now goes through, even in the same turn as the edit; before, the

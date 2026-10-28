@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.27.3] - 2026-10-28
+
 ### Fixed
 
 - `krill code` shows a skipped repeat tool call as a plain note instead of a
