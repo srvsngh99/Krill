@@ -13,6 +13,22 @@ reverse chronological order. Versioning follows
 
 - `krill code` shows a skipped repeat tool call as a plain note instead of a
   red error, and skipped repeats no longer use up the task's tool-call budget.
+- `krill code --provider codex`: Ctrl-C now stops the `codex exec` child
+  instead of leaving it running. A provider failure ends the run with an error
+  on stderr and exit 1 instead of printing as the answer; a cancelled run exits
+  130 and a run stopped at the iteration limit exits 1. The `codex login` hint
+  appears only for sign-in failures.
+- Codex no longer loads the user's Codex config, skills or hooks into Krill's
+  backend calls. The user's global `AGENTS.md` still loads; Codex has no flag
+  to turn it off.
+- `read_file` no longer shows an extra empty line at the end of a file that
+  ends in a newline, which made the next edit's match fail.
+- Line output is flushed as it is written, so a redirected or piped run shows
+  progress instead of nothing for minutes.
+- Ask mode without a terminal says edits and commands will be declined, and
+  the denial says no terminal was available to ask, not that the user declined.
+- Tool arguments show paths with plain slashes instead of `\/`.
+- `web_fetch` keeps the page title.
 - Krill builds with Xcode 27: every target declares the Krill modules it
   imports (the new default Swift build system requires it), and the MLX
   shaders are compiled as Metal 4.0, which Xcode 27's newer default rejects.
