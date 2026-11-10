@@ -9,6 +9,15 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Fixed
+
+- **Switching `/agent` on or off no longer loses the conversation.** In the
+  full-screen TUI, agent mode and plain chat kept separate histories: a plan made
+  in agent mode was invisible after `/agent` turned it off, and chat turns made
+  after the agent's first turn never reached the agent. Both now see every turn.
+  The "Agent mode OFF" note also says chat has no tools, and that Shift+Tab in
+  agent mode is how to allow edits.
+
 ## [0.27.3] - 2026-10-28
 
 ### Fixed
