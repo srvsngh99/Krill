@@ -1013,7 +1013,8 @@ final class ChatTUI {
                     + "Permissions: \(permissions.label) (\(permissions.summary)). "
                     + "Shift+Tab cycles permissions; /agent to exit.")
             } else {
-                note("Agent mode OFF - back to plain chat.")
+                note("Agent mode OFF - plain chat, no tools. To let the agent edit files, "
+                    + "/agent back on and Shift+Tab to a posture that allows edits.")
             }
         case "/drop": pendingImages.removeAll(); pendingAudio = nil; note("Dropped pending attachments.")
         case "/clear", "/reset":   // /reset kept as an alias for clearing the chat
@@ -1718,6 +1719,11 @@ final class ChatTUI {
         if let st = agentStats.take() { recordTurnStats(st) }
         let transcript = await bgTask.value
         agentMessages = transcript.messages
+        // Mirrored into chat history so a plan made here survives /agent off.
+        modelTurns.append((role: "user", content: modelTask))
+        if !transcript.finalText.isEmpty {
+            modelTurns.append((role: "assistant", content: transcript.finalText))
+        }
         lastStatus = transcript.wasCancelled ? "cancelled"
             : (transcript.hitIterationLimit ? "iteration limit" : "")
         render()
@@ -2442,6 +2448,11 @@ final class ChatTUI {
             obsSession?.assistant(assistant)
             obsSession?.stop(reason: assistant.isEmpty ? "empty_reply" : "final_answer")
             modelTurns.append((role: "assistant", content: assistant))
+            // The agent was seeded once; later chat turns must reach it too.
+            if agentSeeded {
+                agentMessages.append(["role": "user", "content": modelPrompt])
+                agentMessages.append(["role": "assistant", "content": assistant])
+            }
             if let st = gen.stats() { recordTurnStats(st) }
             lastStatus = ""
             // Read the reply aloud when speaking is on (voice phase 2). Cleaned of
