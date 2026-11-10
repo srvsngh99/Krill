@@ -241,6 +241,7 @@ public struct AgentLoop: Sendable {
 
             if calls.isEmpty {
                 finalText = visible
+                messages.append(["role": "assistant", "content": visible])
                 steps.append(AgentStep(assistantText: visible, toolCalls: []))
                 recorder?.assistant(visible)
                 recorder?.stop(reason: "final_answer")
@@ -258,6 +259,7 @@ public struct AgentLoop: Sendable {
             let remaining = maxToolCalls - executedToolCalls
             if freshCalls.isEmpty || remaining <= 0 {
                 finalText = visible
+                messages.append(["role": "assistant", "content": visible])
                 steps.append(AgentStep(assistantText: visible, toolCalls: []))
                 recorder?.assistant(visible)
                 recorder?.stop(reason: freshCalls.isEmpty ? "repeat_guard" : "tool_budget")

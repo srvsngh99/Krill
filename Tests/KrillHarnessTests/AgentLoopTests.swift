@@ -527,6 +527,8 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertTrue(
             t2.messages.contains { ($0["content"] ?? "").contains("first task") },
             "continuation must retain the prior user turn")
+        XCTAssertEqual(t1.messages.last, ["role": "assistant", "content": "First answer."],
+            "a final answer must stay in the history the next turn sees")
         XCTAssertTrue(
             t2.messages.contains { ($0["content"] ?? "").contains("second task") },
             "continuation must include the new user turn")

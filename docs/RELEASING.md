@@ -17,7 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| 2026-11-11 | #361 | `/agent` toggle keeps one shared history | Fixes issue #280; close it on release |
+| 2026-11-11 | #361 | Agents keep their final answers; `/agent` toggle keeps one shared history | Issue #280 closes on merge; its reply says the fix ships in the next release |
 
 ### Known-open, NOT yet merged
 
