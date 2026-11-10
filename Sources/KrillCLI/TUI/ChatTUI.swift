@@ -1744,7 +1744,6 @@ final class ChatTUI {
         let (backend, backendNote) = WebSearchTool.resolveBackend()
         if let backendNote { note(backendNote) }
         view.append(Msg(role: .user, text: "/research \(question)"))
-        modelTurns.append((role: "user", content: question))
         scrollOffset = 0
         note("Researching: \(question)")
         render()
@@ -1817,6 +1816,7 @@ final class ChatTUI {
         // emit its own, so this neither duplicates nor relies on a fragile match.
         let finalText = report.text + "\n\n" + DeepResearch.sourcesList(report.sources)
         view.append(Msg(role: .assistant, text: finalText))
+        modelTurns.append((role: "user", content: question))
         modelTurns.append((role: "assistant", content: finalText))
         mirrorToAgent(user: question, assistant: finalText)
         lastStatus = "researched \(report.sources.count) source\(report.sources.count == 1 ? "" : "s")"
@@ -2447,6 +2447,7 @@ final class ChatTUI {
         if cancelled {
             synth.stop()                       // hush any in-flight speech
             view.append(Msg(role: .note, text: "(cancelled)"))
+            modelTurns.removeLast()            // no unanswered user turn in history
             obsSession?.assistant(assistant)
             obsSession?.stop(reason: "cancelled")
         } else {
