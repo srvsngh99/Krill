@@ -233,14 +233,14 @@ public struct AgentLoop: Sendable {
             let (calls, cleaned) = ToolCalling.extractIfToolsOffered(
                 from: output, hasTools: hasTools, format: format,
                 knownToolNames: specs.map { $0.name })
-            // Strip reasoning (`<think>`/`<thinking>`/Gemma channels) from the
-            // text we DISPLAY. The raw `output` still goes into the message
-            // history below, so the model keeps its own context and tool-call
-            // markers are untouched - this is display-only cleanup.
+            // Reasoning (`<think>`, Gemma channels) is stripped for display and for a
+            // stored final answer; a tool-call turn keeps the raw `output` in history
+            // so the model sees the calls it made.
             let visible = strippedForDisplay(cleaned)
 
             if calls.isEmpty {
                 finalText = visible
+                messages.append(["role": "assistant", "content": visible])
                 steps.append(AgentStep(assistantText: visible, toolCalls: []))
                 recorder?.assistant(visible)
                 recorder?.stop(reason: "final_answer")
@@ -258,6 +258,7 @@ public struct AgentLoop: Sendable {
             let remaining = maxToolCalls - executedToolCalls
             if freshCalls.isEmpty || remaining <= 0 {
                 finalText = visible
+                messages.append(["role": "assistant", "content": visible])
                 steps.append(AgentStep(assistantText: visible, toolCalls: []))
                 recorder?.assistant(visible)
                 recorder?.stop(reason: freshCalls.isEmpty ? "repeat_guard" : "tool_budget")

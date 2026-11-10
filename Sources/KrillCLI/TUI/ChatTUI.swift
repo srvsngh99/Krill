@@ -48,12 +48,9 @@ final class ChatTUI {
     private var view: [Msg] = []
     private var modelTurns: [(role: String, content: String)] = []
 
-    // Agent mode: the same surface with tools + file edits turned on. `surface`
-    // is the chat/agent toggle (`/agent`); `permissions` is the leash
-    // cycled with Shift+Tab. The agent thread keeps its own model-facing history
-    // (`agentMessages`, carried across turns via AgentLoop's priorMessages seam),
-    // separate from chat's `modelTurns`. The on-screen `view` is shared so the
-    // transcript reads continuously across both modes.
+    // `surface` is the `/agent` toggle; `permissions` cycles with Shift+Tab. The agent
+    // keeps its own tool-formatted history (`agentMessages`); every finished turn is
+    // mirrored into both it and chat's `modelTurns`, so neither mode forgets the other.
     private enum Surface { case chat, agent }
     private var surface: Surface = .chat
     private var permissionBox: PermissionBox
@@ -1013,7 +1010,8 @@ final class ChatTUI {
                     + "Permissions: \(permissions.label) (\(permissions.summary)). "
                     + "Shift+Tab cycles permissions; /agent to exit.")
             } else {
-                note("Agent mode OFF - back to plain chat.")
+                note("Agent mode OFF - plain chat, no tools. To let the agent edit files, "
+                    + "/agent back on and Shift+Tab to a posture that allows edits.")
             }
         case "/drop": pendingImages.removeAll(); pendingAudio = nil; note("Dropped pending attachments.")
         case "/clear", "/reset":   // /reset kept as an alias for clearing the chat
@@ -1616,6 +1614,13 @@ final class ChatTUI {
     }
     private let agentStats = AgentStatsBox()
 
+    /// The agent is seeded once, so chat turns finished after that must reach it here.
+    private func mirrorToAgent(user: String, assistant: String) {
+        guard agentSeeded else { return }
+        agentMessages.append(["role": "user", "content": user])
+        agentMessages.append(["role": "assistant", "content": assistant])
+    }
+
     /// Prime the agent thread once, carrying the chat so far so context is not
     /// lost when hands turn on. Injects the tool system over `[system] + chat
     /// history`; subsequent turns continue from the loop's returned transcript.
@@ -1718,6 +1723,11 @@ final class ChatTUI {
         if let st = agentStats.take() { recordTurnStats(st) }
         let transcript = await bgTask.value
         agentMessages = transcript.messages
+        // Mirrored into chat history so a plan made here survives /agent off.
+        if !transcript.finalText.isEmpty {
+            modelTurns.append((role: "user", content: modelTask))
+            modelTurns.append((role: "assistant", content: transcript.finalText))
+        }
         lastStatus = transcript.wasCancelled ? "cancelled"
             : (transcript.hitIterationLimit ? "iteration limit" : "")
         render()
@@ -1734,7 +1744,6 @@ final class ChatTUI {
         let (backend, backendNote) = WebSearchTool.resolveBackend()
         if let backendNote { note(backendNote) }
         view.append(Msg(role: .user, text: "/research \(question)"))
-        modelTurns.append((role: "user", content: question))
         scrollOffset = 0
         note("Researching: \(question)")
         render()
@@ -1807,7 +1816,9 @@ final class ChatTUI {
         // emit its own, so this neither duplicates nor relies on a fragile match.
         let finalText = report.text + "\n\n" + DeepResearch.sourcesList(report.sources)
         view.append(Msg(role: .assistant, text: finalText))
+        modelTurns.append((role: "user", content: question))
         modelTurns.append((role: "assistant", content: finalText))
+        mirrorToAgent(user: question, assistant: finalText)
         lastStatus = "researched \(report.sources.count) source\(report.sources.count == 1 ? "" : "s")"
         scrollOffset = 0
         render()
@@ -2436,12 +2447,14 @@ final class ChatTUI {
         if cancelled {
             synth.stop()                       // hush any in-flight speech
             view.append(Msg(role: .note, text: "(cancelled)"))
+            modelTurns.removeLast()            // no unanswered user turn in history
             obsSession?.assistant(assistant)
             obsSession?.stop(reason: "cancelled")
         } else {
             obsSession?.assistant(assistant)
             obsSession?.stop(reason: assistant.isEmpty ? "empty_reply" : "final_answer")
             modelTurns.append((role: "assistant", content: assistant))
+            mirrorToAgent(user: modelPrompt, assistant: assistant)
             if let st = gen.stats() { recordTurnStats(st) }
             lastStatus = ""
             // Read the reply aloud when speaking is on (voice phase 2). Cleaned of
