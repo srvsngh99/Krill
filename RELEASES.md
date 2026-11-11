@@ -7,6 +7,15 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.27.4 - 2026-11-11
+**Agents remember their plans.**
+An agent's final answer was never kept in the history its next turn sees, so a plan made
+in plan mode was gone by the time you asked the agent to carry it out. That affected
+`krill code`, background agents and the server's agent sessions. In the full-screen TUI,
+agent mode and plain chat now share one history, so switching `/agent` off or on no longer
+loses the conversation, and the "Agent mode OFF" note says chat has no tools and that
+Shift+Tab in agent mode is how to allow edits.
+
 ## v0.27.3 - 2026-10-28
 **GPU shaders are built for macOS 14 and later, and `krill code --provider codex` is sturdier.**
 The shader library is now built for macOS 14 and later; the v0.27.2 library targeted

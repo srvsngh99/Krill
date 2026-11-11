@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.27.4] - 2026-11-11
+
 ### Fixed
 
 - **Agents remember their own answers.** The agent loop never kept a turn's final
