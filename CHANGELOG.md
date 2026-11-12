@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.27.5] - 2026-11-12
+
 ### Changed
 
 - **Plan mode can run read-only shell commands.** `find . -name '*.swift' | wc -l`,

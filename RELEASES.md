@@ -7,6 +7,19 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.27.5 - 2026-11-12
+**Plan mode can read with the shell, and Ctrl-C works the same everywhere.**
+Plan and adaptive mode now run shell commands that only read, such as
+`find . -name '*.swift' | wc -l` or `git log --oneline -5`. Anything that could write,
+run another program or expand (`>`, `;`, `$(...)`, `sed`, `find -exec`) is still denied,
+and the denial says why. In `krill code <task>`, Ctrl-C now cancels a local run the same
+way it does with a hosted provider, a second press exits at once, and a running `bash`
+command is stopped instead of finishing first. With `--provider codex`, your global Codex
+AGENTS.md no longer reaches Krill's calls, and your sign-in keeps working. A running
+server now survives `brew upgrade krill` until its automatic restart; the upgrade after
+this one is the first to benefit, because the server being upgraded must already have
+the fix.
+
 ## v0.27.4 - 2026-11-11
 **Agents remember their plans.**
 An agent's final answer was never kept in the history its next turn sees, so a plan made

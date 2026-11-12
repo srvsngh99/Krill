@@ -4,10 +4,10 @@
 class Krill < Formula
   desc "Local LLM engine and coding agent in one Mac-native binary"
   homepage "https://github.com/srvsngh99/Krill"
-  url "https://github.com/srvsngh99/Krill/releases/download/v0.27.4/krill-0.27.4-arm64-apple-macos.tar.gz"
-  sha256 "35c13c550c2d9d34fc4e81bd7c1f3da0026fcc50b942a78a5c5c6277efa56389"
+  url "https://github.com/srvsngh99/Krill/releases/download/v0.27.5/krill-0.27.5-arm64-apple-macos.tar.gz"
+  sha256 "f5fed05c8751403c34478ab1c554d60f8adf5d0e05a09720889ee3fc10e66558"
   license "MIT"
-  version "0.27.4"
+  version "0.27.5"
 
   depends_on :macos
   depends_on arch: :arm64
