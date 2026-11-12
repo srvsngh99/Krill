@@ -344,13 +344,32 @@ public struct SystemCodexProcessRunner: CodexProcessRunning {
     static func linkAuth(
         into home: URL, environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws {
-        let real = URL(fileURLWithPath: environment["CODEX_HOME"] ?? NSHomeDirectory() + "/.codex", isDirectory: true)
+        let real = realHome(environment)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
         for name in ["auth.json", "auth.json.lock", "auth.lock"]
         where FileManager.default.fileExists(atPath: real.appendingPathComponent(name).path) {
             try FileManager.default.createSymbolicLink(
                 at: home.appendingPathComponent(name), withDestinationURL: real.appendingPathComponent(name))
         }
+    }
+
+    private static func realHome(_ environment: [String: String]) -> URL {
+        URL(fileURLWithPath: environment["CODEX_HOME"] ?? NSHomeDirectory() + "/.codex", isDirectory: true)
+    }
+
+    /// If a newer Codex saves auth.json by rename, the symlink became a regular
+    /// file holding the rotated tokens; write them over the real file in place.
+    static func restoreAuth(
+        from home: URL, environment: [String: String] = ProcessInfo.processInfo.environment
+    ) {
+        let file = home.appendingPathComponent("auth.json")
+        guard (try? FileManager.default.destinationOfSymbolicLink(atPath: file.path)) == nil,
+              let data = try? Data(contentsOf: file),
+              let target = try? FileHandle(forWritingTo: realHome(environment).appendingPathComponent("auth.json"))
+        else { return }
+        try? target.truncate(atOffset: 0)
+        try? target.write(contentsOf: data)
+        try? target.close()
     }
 
     private func runChild(
@@ -400,6 +419,7 @@ public struct SystemCodexProcessRunner: CodexProcessRunning {
             input.fileHandleForWriting.write(Data(standardInput.utf8))
             try input.fileHandleForWriting.close()
             process.waitUntilExit()
+            Self.restoreAuth(from: codexHome)
             let stdout = String(decoding: await stdoutTask.value, as: UTF8.self)
             let stderr = String(decoding: await stderrTask.value, as: UTF8.self)
             return CodexProcessResult(stdout: stdout, stderr: stderr, exitStatus: process.terminationStatus)

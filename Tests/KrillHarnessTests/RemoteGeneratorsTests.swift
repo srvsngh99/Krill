@@ -299,6 +299,26 @@ final class RemoteGeneratorsTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: real.appendingPathComponent("auth.json"), encoding: .utf8), "y")
     }
 
+    func testRenamedAuthFileIsWrittenBackToTheRealFileInPlace() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("krill-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let real = root.appendingPathComponent("real")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try "old".write(to: real.appendingPathComponent("auth.json"), atomically: true, encoding: .utf8)
+        let env = ["CODEX_HOME": real.path]
+        let home = root.appendingPathComponent("home")
+        try SystemCodexProcessRunner.linkAuth(into: home, environment: env)
+        SystemCodexProcessRunner.restoreAuth(from: home, environment: env)
+        XCTAssertEqual(try String(contentsOf: real.appendingPathComponent("auth.json"), encoding: .utf8), "old")
+        let link = home.appendingPathComponent("auth.json")
+        try FileManager.default.removeItem(at: link)
+        try "new".write(to: link, atomically: true, encoding: .utf8)
+        SystemCodexProcessRunner.restoreAuth(from: home, environment: env)
+        let realFile = real.appendingPathComponent("auth.json")
+        XCTAssertEqual(try String(contentsOf: realFile, encoding: .utf8), "new")
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: realFile.path)[.type] as? FileAttributeType, .typeRegular)
+    }
+
     func testRunnerGivesChildAnIsolatedHomeAndRemovesIt() async throws {
         let result = try await SystemCodexProcessRunner().run(
             executable: "/bin/sh", arguments: ["-c", "echo $CODEX_HOME"], standardInput: "")
