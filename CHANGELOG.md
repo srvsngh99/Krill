@@ -14,7 +14,7 @@ reverse chronological order. Versioning follows
 - **A running server survives `brew upgrade krill`.** Homebrew deletes the old
   version's folder, including MLX's Metal library, as soon as the new version is
   installed. A server that had not used MLX yet then crashed on its next
-  `/v1/status` call, and one that had returned 503 on its next model load, until
+  `/v1/status` call, and one that had used it returned 503 on its next model load, until
   the upgrade watcher restarted it. `krill serve` now loads the Metal library at
   startup, so both keep working until the restart.
 
