@@ -363,6 +363,14 @@ public struct AgentLoop: Sendable {
                     executedSignatures = [signature]
                 }
             }
+            // A cancel or spent budget can leave calls unanswered; answer them so the
+            // next turn never sees a call without a result.
+            for call in calls.dropFirst(invocations.count) {
+                messages.append([
+                    "role": "user",
+                    "content": "Tool result (\(call.name)):\nNot run: the turn was stopped before this call.",
+                ])
+            }
             steps.append(AgentStep(assistantText: visible, toolCalls: invocations))
         }
 

@@ -11,6 +11,16 @@ reverse chronological order. Versioning follows
 
 ### Fixed
 
+- **Ctrl-C in `krill code <task>` now works the same locally and with hosted
+  providers.** The first press cancels the run and records it as cancelled; a second
+  press, or two arriving together, exits at once and still closes the session record.
+  Local runs previously died with no "(cancelled)" and no session outcome. A running
+  `bash` tool command is now stopped on cancel instead of finishing first.
+- **Output order when piping `krill code`.** With output redirected to a file, the
+  `Error:` line no longer appears above the banner.
+- **A cancelled turn leaves no unanswered tool calls.** Calls that did not run get a
+  short "not run" result, so the next turn sees a consistent history.
+- **`web_fetch` keeps the page title on pages without `<head>` tags.**
 - **A running server survives `brew upgrade krill`.** Homebrew deletes the old
   version's folder, including MLX's Metal library, as soon as the new version is
   installed. A server that had not used MLX yet then crashed on its next

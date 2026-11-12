@@ -8,6 +8,15 @@ final class BashToolTests: XCTestCase {
         XCTAssertTrue(r.content.contains("hello-krill"), "got: \(r.content)")
     }
 
+    func testCancellationStopsTheChildPromptly() async {
+        let start = Date()
+        let task = Task { await BashTool().run(argumentsJSON: #"{"command":"sleep 30"}"#) }
+        try? await Task.sleep(for: .milliseconds(300))
+        task.cancel()
+        _ = await task.value
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+    }
+
     func testMissingCommandIsAnError() async {
         let r = await BashTool().run(argumentsJSON: #"{}"#)
         XCTAssertTrue(r.isError)
