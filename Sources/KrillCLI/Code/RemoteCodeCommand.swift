@@ -225,8 +225,6 @@ func printPermissionMode(_ mode: PermissionMode, bash: Bool) {
 }
 
 extension CodeCommand {
-    /// Records the outcome and maps it to the exit status: a provider failure or
-    /// an iteration-limit stop exits 1, a cancelled run 130.
     /// Ctrl-C cancels the run (and its provider or tool child). A second one, or
     /// two coalesced into one event, records the session and exits at once.
     func runUntilInterrupted(
@@ -257,6 +255,8 @@ extension CodeCommand {
         return transcript
     }
 
+    /// Records the outcome and maps it to the exit status: a provider failure or
+    /// an iteration-limit stop exits 1, a cancelled run 130.
     func finishRun(_ transcript: AgentTranscript, session: SessionRecorder?) throws {
         let outcome = transcript.failure != nil ? "failed" : transcript.wasCancelled ? "cancelled"
             : (transcript.hitIterationLimit ? "iteration_limit" : "completed")

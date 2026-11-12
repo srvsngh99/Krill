@@ -116,11 +116,7 @@ public struct BashTool: Tool {
         timeoutQueue.asyncAfter(deadline: .now() + timeout) { [weak proc] in
             guard let proc, proc.isRunning else { return }
             timedOut.set()
-            let pid = proc.processIdentifier
-            proc.terminate()  // SIGTERM
-            timeoutQueue.asyncAfter(deadline: .now() + 1) { [weak proc] in
-                if let proc, proc.isRunning { kill(pid, SIGKILL) }
-            }
+            terminateThenKill(proc, on: timeoutQueue)
         }
 
         proc.waitUntilExit()
@@ -167,18 +163,21 @@ private final class StopSignal: @unchecked Sendable {
 
     func attach(_ p: Process) {
         lock.lock(); proc = p; let kill = fired; lock.unlock()
-        if kill { terminate(p) }
+        if kill { terminateThenKill(p, on: .global()) }
     }
 
     func fire() {
         lock.lock(); fired = true; let p = proc; lock.unlock()
-        if let p { terminate(p) }
+        if let p { terminateThenKill(p, on: .global()) }
     }
+}
 
-    private func terminate(_ p: Process) {
-        let pid = p.processIdentifier
-        p.terminate()
-        DispatchQueue.global().asyncAfter(deadline: .now() + 1) { if p.isRunning { kill(pid, SIGKILL) } }
+/// SIGTERM now, SIGKILL a second later if the process is still running.
+private func terminateThenKill(_ proc: Process, on queue: DispatchQueue) {
+    let pid = proc.processIdentifier
+    proc.terminate()
+    queue.asyncAfter(deadline: .now() + 1) { [weak proc] in
+        if let proc, proc.isRunning { kill(pid, SIGKILL) }
     }
 }
 
