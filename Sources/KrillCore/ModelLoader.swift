@@ -131,6 +131,14 @@ public struct LoadedModel: @unchecked Sendable {
     }
 }
 
+/// `brew upgrade` deletes the old Cellar, metallib included, minutes before the server restarts.
+/// MLX reads it lazily, so a long-running server loads it up front.
+public func preloadMLXMetalLibrary() {
+    guard (try? MLXMetalRuntime.validateForNativeInference()) != nil else { return }
+    _ = MLX.Memory.activeMemory
+    MLXMetalRuntime.libraryLoaded = true
+}
+
 /// Detect the model family and load the appropriate architecture.
 ///
 /// Reads config.json from the model directory, detects the architecture,

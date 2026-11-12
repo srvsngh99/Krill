@@ -117,7 +117,11 @@ public struct MLXMetalResourceLocator: Sendable {
 }
 
 public enum MLXMetalRuntime {
+    /// Set once MLX holds the metallib in memory; the file on disk is not needed after that.
+    nonisolated(unsafe) public static var libraryLoaded = false
+
     public static func validateForNativeInference() throws {
+        if libraryLoaded { return }
         #if canImport(Metal)
         guard !MTLCopyAllDevices().isEmpty else {
             throw MLXMetalRuntimeError.noMetalDevice
