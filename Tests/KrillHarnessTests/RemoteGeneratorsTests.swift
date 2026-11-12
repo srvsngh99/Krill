@@ -283,4 +283,27 @@ final class RemoteGeneratorsTests: XCTestCase {
         XCTAssertNotEqual(result.exitStatus, 0)
         XCTAssertLessThan(Date().timeIntervalSince(started), 10)
     }
+
+    func testIsolatedCodexHomeLinksOnlyAuthAndHonoursCodexHomeEnv() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("krill-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let real = root.appendingPathComponent("real")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        for name in ["auth.json", "AGENTS.md", "config.toml"] {
+            try "x".write(to: real.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        let home = root.appendingPathComponent("home")
+        try SystemCodexProcessRunner.linkAuth(into: home, environment: ["CODEX_HOME": real.path])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: home.path), ["auth.json"])
+        try "y".write(to: home.appendingPathComponent("auth.json"), atomically: false, encoding: .utf8)
+        XCTAssertEqual(try String(contentsOf: real.appendingPathComponent("auth.json"), encoding: .utf8), "y")
+    }
+
+    func testRunnerGivesChildAnIsolatedHomeAndRemovesIt() async throws {
+        let result = try await SystemCodexProcessRunner().run(
+            executable: "/bin/sh", arguments: ["-c", "echo $CODEX_HOME"], standardInput: "")
+        let home = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertTrue(home.hasSuffix("/codex-home"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home))
+    }
 }
