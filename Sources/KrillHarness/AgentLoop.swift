@@ -326,7 +326,7 @@ public struct AgentLoop: Sendable {
                 // tool costs no extra generation. A denial is fed back so the
                 // model can adapt (e.g. switch to read-only investigation).
                 // bash is the exception: its read-only check must see the repaired command.
-                let isBash = call.name == "bash"
+                let isBash = tool is BashTool
                 var argsJSON = isBash
                     ? await repairedArgs(for: call, spec: spec, history: messages) : call.argumentsJSON
                 let decision = (permissionBox?.policy ?? permission).decision(
@@ -451,11 +451,6 @@ public struct AgentLoop: Sendable {
         return ToolCalling.ParsedToolCall(name: name, argumentsJSON: call.argumentsJSON)
     }
 
-    /// Selective, fail-open two-pass arg repair: if the model's free-form args
-    /// already satisfy the schema (the common case for capable models), use
-    /// them unchanged. Otherwise ask the model to re-emit ONLY the args object,
-    /// grammar-constrained to the schema so required fields cannot be omitted,
-    /// and accept the regenerated args only if they now satisfy the schema.
     private static func command(in argumentsJSON: String) -> String {
         guard let data = argumentsJSON.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -463,6 +458,11 @@ public struct AgentLoop: Sendable {
         return obj["command"] as? String ?? ""
     }
 
+    /// Selective, fail-open two-pass arg repair: if the model's free-form args
+    /// already satisfy the schema (the common case for capable models), use
+    /// them unchanged. Otherwise ask the model to re-emit ONLY the args object,
+    /// grammar-constrained to the schema so required fields cannot be omitted,
+    /// and accept the regenerated args only if they now satisfy the schema.
     private func repairedArgs(
         for call: ToolCalling.ParsedToolCall,
         spec: ServerToolSpec,

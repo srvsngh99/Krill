@@ -38,7 +38,7 @@ enum ReadOnlyShell {
     private static let gitLongs = [
         "--output", "--ext-diff", "--textconv", "--open-files-in-pager", "--exec-path",
     ]
-    private static let forbiddenUnquoted = Set("$`\\;&<>(){}*?[")
+    private static let forbiddenUnquoted = Set("$`\\;&<>(){}*?[".unicodeScalars)
 
     /// Nil when `command` is read-only; otherwise why it was rejected.
     static func violation(_ command: String) -> String? {
@@ -58,22 +58,23 @@ enum ReadOnlyShell {
         }
         var stages: [[String]] = []
         var words: [String] = []
-        var word = ""
+        var word = String.UnicodeScalarView()
         var inWord = false
-        var quote: Character?
-        func flush() { if inWord { words.append(word); word = ""; inWord = false } }
+        var quote: Unicode.Scalar?
+        func flush() { if inWord { words.append(String(word)); word = .init(); inWord = false } }
         func endStage() throws {
             flush()
             if words.isEmpty { throw Rejected(why: "empty command or pipeline stage") }
             stages.append(words)
             words = []
         }
-        for ch in command {
+        // Scalars, not Characters: sh sees bytes, and a combining mark would hide a quote.
+        for ch in command.unicodeScalars {
             if quote == "'" {
                 if ch == "'" { quote = nil } else { word.append(ch) }
             } else if quote == "\"" {
                 if ch == "\"" { quote = nil }
-                else if "$`\\".contains(ch) { throw Rejected(why: "'\(ch)' is not allowed in double quotes") }
+                else if "$`\\".unicodeScalars.contains(ch) { throw Rejected(why: "'\(ch)' is not allowed in double quotes") }
                 else { word.append(ch) }
             } else if ch == "'" || ch == "\"" {
                 quote = ch
@@ -100,10 +101,10 @@ enum ReadOnlyShell {
         switch name {
         case "git": return checkGit(args)
         case "date":
-            for t in args where !t.hasPrefix("-") && !t.hasPrefix("+") {
+            for t in args where t.unicodeScalars.first != "-" && t.unicodeScalars.first != "+" {
                 return "'date \(t)' could set the clock; only +FORMAT is allowed"
             }
-            return flagViolation("date", args, Rule(clusters: "s", longs: ["--set"]))
+            return flagViolation("date", args, Rule(clusters: "sf", longs: ["--set"]))
         default:
             guard let rule = rules[name] else { return "'\(name)' is not an allowed read-only command" }
             return flagViolation(name, args, rule)
@@ -124,12 +125,13 @@ enum ReadOnlyShell {
     private static func flagViolation(_ name: String, _ args: [String], _ rule: Rule) -> String? {
         for t in args {
             if rule.exact.contains(t) { return "'\(name) \(t)' can run commands or write files" }
-            if t.hasPrefix("--") {
-                let flag = String(t.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)[0])
-                if flag.count > 2, rule.longs.contains(where: { $0.hasPrefix(flag) }) {
+            let scalars = Array(t.unicodeScalars)
+            if scalars.starts(with: "--".unicodeScalars) {
+                let flag = String(String.UnicodeScalarView(scalars.prefix { $0 != "=" }))
+                if flag.unicodeScalars.count > 2, rule.longs.contains(where: { $0.hasPrefix(flag) }) {
                     return "'\(name) \(flag)' can run commands or write files"
                 }
-            } else if t.hasPrefix("-"), t.dropFirst().contains(where: { rule.clusters.contains($0) }) {
+            } else if scalars.first == "-", scalars.dropFirst().contains(where: { rule.clusters.unicodeScalars.contains($0) }) {
                 return "'\(name) \(t)' can run commands or write files"
             }
         }

@@ -153,7 +153,7 @@ public struct PermissionPolicy: Sendable {
             return .ask
         case .plan, .adaptive:
             var why = "'\(toolName)' would change files or run commands. "
-            if toolName == "bash", let command = bashCommand {
+            if let command = bashCommand {
                 guard let violation = ReadOnlyShell.violation(command) else { return .allow }
                 why = "bash is limited to read-only commands in plan mode: \(violation). "
             }

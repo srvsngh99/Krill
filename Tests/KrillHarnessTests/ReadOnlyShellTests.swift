@@ -19,7 +19,13 @@ final class ReadOnlyShellTests: XCTestCase {
             "tee f", "curl example.com", "python3 -c 'print(1)'", "/bin/ls", "./ls", "env ls", "time ls",
             "file -C", "", "   ", "echo 'unbalanced", "echo \"unbalanced",
         ]
-        for c in denied { XCTAssertNotNil(ReadOnlyShell.violation(c), "must deny: \(c)") }
+        // Regression: a combining mark must not hide a quote or metacharacter from the scanner (sh sees bytes).
+        let hidden = [
+            "echo '" + "'\u{301}" + " ; touch PWNED ; echo '" + "'\u{301}",
+            "echo hi >\u{301} PWNED2", "ls ;\u{301}", "ls ;\u{200D} rm x", "ls ;\u{FE0F} rm x",
+            "ls '\u{200D}' ; rm x", "date -f -%Y -- -2020",
+        ]
+        for c in denied + hidden { XCTAssertNotNil(ReadOnlyShell.violation(c), "must deny: \(c)") }
     }
 
     func testAllowed() {
@@ -53,10 +59,6 @@ final class ReadOnlyShellTests: XCTestCase {
         XCTAssertEqual(d(PermissionPolicy(mode: .acceptEdits), "ls"), .ask)
         guard case .deny = d(PermissionPolicy(mode: .plan, deny: ["bash"]), "ls") else {
             return XCTFail("deny list must win")
-        }
-        guard case .deny = plan.decision(
-            toolName: "write_file", isReadOnly: false, bashCommand: "ls") else {
-            return XCTFail("bashCommand must only matter for bash")
         }
     }
 }
