@@ -57,7 +57,8 @@ public enum AgentEnvironment {
     /// Shared system-level planning steer for CLI and remote builders.
     public static let planSystemSteer =
         "You are in PLAN MODE (read-only). You may read and search files with the read-only tools, "
-        + "but you must NOT write files, edit files, or run shell commands - those are denied. "
+        + "but you must NOT write or edit files - those are denied. "
+        + "Shell commands must be read-only (no redirects, `;`, `$(...)` or commands that write). "
         + "Investigate as needed and use ask_user when a user choice affects the plan. When the plan "
         + "is ready, call request_execute with a concise summary; do not merely stop at a plan."
 
@@ -66,20 +67,22 @@ public enum AgentEnvironment {
         "(Plan mode: read-only. Investigate with the read-only tools and propose a clear, step-by-step "
         + "plan. You may use ask_user for clarification. Call request_execute when ready to implement - "
         + "emit the call itself; do not merely say you are about to ask for permission. "
-        + "Do not edit files or run commands.)"
+        + "Do not edit files; shell commands must be read-only.)"
 
     /// Plan steer for a surface with no user: no `ask_user`, no `request_execute`.
     public static let unattendedPlanSteer =
         "You are in PLAN MODE (read-only) and no user is present to approve execution. You may read "
-        + "and search files with the read-only tools, but you must NOT write files, edit files, or run "
-        + "shell commands - those are denied. Investigate as needed, then reply with a concrete, "
-        + "step-by-step plan as your final answer."
+        + "and search files with the read-only tools, but you must NOT write or edit files - those are "
+        + "denied. Shell commands must be read-only (no redirects, `;`, `$(...)` or commands that "
+        + "write). Investigate as needed, then reply with a concrete, step-by-step plan as your final "
+        + "answer."
 
     /// Adaptive steer for a surface with no user: no `ask_user`.
     public static let unattendedAdaptiveSteer =
         "You are in PLAN MODE (read-only). You may read and search files with the read-only tools, "
-        + "but you must NOT write files, edit files, or run shell commands - those are denied. When the "
-        + "plan is ready, call request_execute with a concise summary; do not merely stop at a plan."
+        + "but you must NOT write or edit files - those are denied. Shell commands must be read-only "
+        + "(no redirects, `;`, `$(...)` or commands that write). When the plan is ready, call "
+        + "request_execute with a concise summary; do not merely stop at a plan."
 
     public static let adaptivePlanTail =
         "This is ADAPTIVE mode: begin by planning read-only, then call request_execute when you decide "
