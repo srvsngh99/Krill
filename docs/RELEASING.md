@@ -18,18 +18,12 @@ section, then delete the rows.
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
 | 2026-11-12 | #363 | `krill serve` loads the Metal library at startup | Servers no longer crash or 503 between `brew upgrade` and their auto-restart. The release after this one is the first upgrade that benefits, because the server being upgraded must already have this fix. |
+| 2026-11-12 | #PRNUM | Plan and adaptive mode run provably read-only `bash` commands | Security boundary: `ReadOnlyShell` is an allowlist; a release note must say plan mode still denies everything not on it (writes, redirects, expansions, `sed`, `xargs`). Repo-local git config (`diff.external`, `core.fsmonitor`) is trusted as before. |
 
 ### Known-open, NOT yet merged
 
 Tracked so a release note does not claim more than shipped.
 
-- **Plan mode denies `bash` wholesale.** `Permission.decision(toolName:isReadOnly:isFileEdit:)`
-  never sees the tool arguments, so a read-only command (`find . | wc -l`) is
-  denied by the same rule as `rm -rf`. Fixing it means a per-call read-only
-  classifier for shell commands — a security boundary, since plan mode's whole
-  promise is "read-only". Needs an adversarial test suite (`find -delete`,
-  `find -exec`, `git diff > f`, backticks, `$( )`, `;`, `&&`, `sed -i`) before it
-  can be trusted. See the trap table in the PR discussion.
 - **`reasoning_effort` has no `krill config` knob.** `KRILL_REASONING_EFFORT` is
   the only surface. Wiring the config key without the TUI toggle would create a
   dead setting, so both land together or neither does.

@@ -9,6 +9,14 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Changed
+
+- **Plan mode can run read-only shell commands.** `find . -name '*.swift' | wc -l`,
+  `git log --oneline -5` and similar are now allowed in plan and adaptive mode;
+  anything that could write, run another program or expand (`>`, `;`, `$(...)`,
+  `sed`, `find -exec`) is still denied, and the denial says why. Ask and
+  accept modes are unchanged.
+
 ### Fixed
 
 - **A running server survives `brew upgrade krill`.** Homebrew deletes the old
