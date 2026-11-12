@@ -2,6 +2,7 @@ import ArgumentParser
 import Foundation
 import KrillObs
 import KrillEngine
+import KrillCore
 import KrillCache
 import KrillServer
 import KrillRegistry
@@ -193,6 +194,7 @@ struct ServeCommand: AsyncParsableCommand {
                                auxKeepAliveSeconds: KeepAliveParse.duration(config.keepAlive) ?? 300,
                                embedDevice: config.embedDevice,
                                autoRestartOnUpgrade: config.autoRestartOnUpgrade)
+        preloadMLXMetalLibrary()
         do {
             try await server.start()
         } catch {
