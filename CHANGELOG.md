@@ -21,6 +21,10 @@ reverse chronological order. Versioning follows
 - **A cancelled turn leaves no unanswered tool calls.** Calls that did not run get a
   short "not run" result, so the next turn sees a consistent history.
 - **`web_fetch` keeps the page title on pages without `<head>` tags.**
+- **The Codex backend ignores your global Codex instructions.** `krill code --provider
+  codex` still let Codex load the AGENTS.md in your Codex home, which could steer
+  Krill's replies. Each call now runs Codex in a throwaway home that only links your
+  login files, so your sign-in and token refreshes keep working.
 - **A running server survives `brew upgrade krill`.** Homebrew deletes the old
   version's folder, including MLX's Metal library, as soon as the new version is
   installed. A server that had not used MLX yet then crashed on its next

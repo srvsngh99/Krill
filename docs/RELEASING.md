@@ -18,6 +18,7 @@ section, then delete the rows.
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
 | 2026-11-12 | #363 | `krill serve` loads the Metal library at startup | Servers no longer crash or 503 between `brew upgrade` and their auto-restart. The release after this one is the first upgrade that benefits, because the server being upgraded must already have this fix. |
+| 2026-11-12 | #364 | Codex backend runs in a temporary CODEX_HOME that only symlinks the login files | Global Codex AGENTS.md no longer leaks into `--provider codex`. Check on the release build that `krill code --provider codex` still works and the real `auth.json` stays valid after a token refresh. |
 | 2026-11-12 | #365 | Ctrl-C handling in `krill code` (shared local and hosted), unanswered tool calls after a cancel, `bash` child stops on cancel, head-less page titles | Check Ctrl-C and double Ctrl-C on a local run before tagging; session files should show a cancelled outcome. |
 
 ### Known-open, NOT yet merged
