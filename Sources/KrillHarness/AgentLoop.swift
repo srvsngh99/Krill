@@ -322,12 +322,16 @@ public struct AgentLoop: Sendable {
                     continue
                 }
 
-                // Permission gate: decide BEFORE repairing/running so a denied
-                // tool costs no extra generation. A denial is fed back so the
-                // model can adapt (e.g. switch to read-only investigation).
+                // Decide before repairing so a denied tool costs no extra generation;
+                // the denial is fed back so the model can adapt. bash is the exception:
+                // its read-only check must see the repaired command.
+                let isBash = tool is BashTool
+                var argsJSON = isBash
+                    ? await repairedArgs(for: call, spec: spec, history: messages) : call.argumentsJSON
                 let decision = (permissionBox?.policy ?? permission).decision(
                     toolName: call.name, isReadOnly: tool.isReadOnly, isFileEdit: tool.isFileEdit,
-                    canRequestExecute: tools.tool(named: "request_execute") != nil)
+                    canRequestExecute: tools.tool(named: "request_execute") != nil,
+                    bashCommand: isBash ? Self.command(in: argsJSON) : nil)
                 if case .deny(let reason) = decision {
                     recorder?.permission(tool: call.name, decision: "deny", reason: reason)
                     record(args: call.argumentsJSON,
@@ -335,7 +339,7 @@ public struct AgentLoop: Sendable {
                     continue
                 }
 
-                let argsJSON = await repairedArgs(for: call, spec: spec, history: messages)
+                if !isBash { argsJSON = await repairedArgs(for: call, spec: spec, history: messages) }
 
                 if case .ask = decision {
                     let approved = await (gate?.approve(
@@ -452,6 +456,13 @@ public struct AgentLoop: Sendable {
         }
         recorder?.retry(kind: "tool_name_repair", tool: call.name, detail: "repicked as \(name)")
         return ToolCalling.ParsedToolCall(name: name, argumentsJSON: call.argumentsJSON)
+    }
+
+    private static func command(in argumentsJSON: String) -> String {
+        guard let data = argumentsJSON.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return "" }
+        return obj["command"] as? String ?? ""
     }
 
     /// Selective, fail-open two-pass arg repair: if the model's free-form args

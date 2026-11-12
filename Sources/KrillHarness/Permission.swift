@@ -130,11 +130,14 @@ public struct PermissionPolicy: Sendable {
     ///   4. mode       -> accept-all: allow / accept-edits: edits allow, commands ask
     ///                    / ask: ask / plan: deny
     ///
+    /// In plan/adaptive, a `bash` call whose `bashCommand` (the arguments that
+    /// will execute; "" if unreadable) is provably read-only is allowed.
+    ///
     /// `isFileEdit` only matters in `.acceptEdits`: a file edit auto-applies
     /// while a command (bash) still defers to the gate.
     public func decision(
         toolName: String, isReadOnly: Bool, isFileEdit: Bool = false,
-        canRequestExecute: Bool = true
+        canRequestExecute: Bool = true, bashCommand: String? = nil
     ) -> PermissionDecision {
         if deny.contains(toolName) {
             return .deny(reason: "tool '\(toolName)' is on the deny list")
@@ -149,8 +152,13 @@ public struct PermissionPolicy: Sendable {
         case .ask:
             return .ask
         case .plan, .adaptive:
+            var why = "'\(toolName)' would change files or run commands. "
+            if let command = bashCommand {
+                guard let violation = ReadOnlyShell.violation(command) else { return .allow }
+                why = "bash is limited to read-only commands in plan mode: \(violation). "
+            }
             return .deny(reason:
-                "planning is read-only; '\(toolName)' would change files or run commands. "
+                "planning is read-only; " + why
                 + (canRequestExecute
                     ? "Investigate with read-only tools, then call request_execute before implementing."
                     : "Investigate with read-only tools and give the plan as your final answer."))
