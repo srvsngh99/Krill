@@ -67,7 +67,7 @@ struct CodeCommand: AsyncParsableCommand {
     var constrainArgs: Bool = true
 
     @Flag(name: .long,
-          help: "Read-only plan mode: the agent may inspect files but cannot edit them or run commands; it proposes a plan. Shorthand for --permission-mode plan.")
+          help: "Read-only plan mode: the agent may inspect files and run read-only commands but cannot edit anything; it proposes a plan. Shorthand for --permission-mode plan.")
     var plan: Bool = false
 
     @Flag(name: .long,
