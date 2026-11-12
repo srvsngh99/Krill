@@ -17,6 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
+| 2026-11-12 | #363 | `krill serve` loads the Metal library at startup | Servers no longer crash or 503 between `brew upgrade` and their auto-restart. The release after this one is the first upgrade that benefits, because the server being upgraded must already have this fix. |
 
 ### Known-open, NOT yet merged
 
