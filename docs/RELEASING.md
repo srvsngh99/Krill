@@ -18,7 +18,7 @@ section, then delete the rows.
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
 | 2026-11-12 | #363 | `krill serve` loads the Metal library at startup | Servers no longer crash or 503 between `brew upgrade` and their auto-restart. The release after this one is the first upgrade that benefits, because the server being upgraded must already have this fix. |
-| 2026-11-12 | #PRNUM | Plan and adaptive mode run provably read-only `bash` commands | Security boundary: `ReadOnlyShell` is an allowlist; a release note must say plan mode still denies everything not on it (writes, redirects, expansions, `sed`, `xargs`). Repo-local git config (`diff.external`, `core.fsmonitor`) is trusted as before. |
+| 2026-11-12 | #366 | Plan and adaptive mode run provably read-only `bash` commands | Security boundary: `ReadOnlyShell` is an allowlist; a release note must say plan mode still denies everything not on it (writes, redirects, expansions, `sed`, `xargs`). Repo-local git config (`diff.external`, `core.fsmonitor`) is trusted as before. |
 
 ### Known-open, NOT yet merged
 
