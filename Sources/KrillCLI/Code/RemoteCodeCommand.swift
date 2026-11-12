@@ -8,6 +8,7 @@ import KrillEngine
 
 extension CodeCommand {
     func runRemote(model requestedModel: String?, task: String?, config: KrillConfig) async throws {
+        setvbuf(stdout, nil, _IOLBF, 0)
         guard provider != .local else { return }
 
         if provider == .codex, let raw = nonEmpty(baseURL) {
@@ -128,19 +129,9 @@ extension CodeCommand {
             recorder: session)
         let renderer = LineAgentRenderer()
         let onEvent: @Sendable (AgentEvent) -> Void = { renderer.handle($0) }
-        // Ctrl-C cancels the run, which terminates the provider child process.
-        // A second one exits at once, e.g. while blocked at an approval prompt.
-        let run = Task { await loop.run(user: task, system: effectiveSystem, onEvent: onEvent) }
-        signal(SIGINT, SIG_IGN)
-        let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
-        sigint.setEventHandler {
-            run.cancel()
-            sigint.setEventHandler { Darwin.exit(130) }
+        let transcript = await runUntilInterrupted(session: session) {
+            await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
         }
-        sigint.resume()
-        let transcript = await run.value
-        sigint.cancel()
-        signal(SIGINT, SIG_DFL)
         try finishRun(transcript, session: session)
     }
 
@@ -234,6 +225,36 @@ func printPermissionMode(_ mode: PermissionMode, bash: Bool) {
 }
 
 extension CodeCommand {
+    /// Ctrl-C cancels the run (and its provider or tool child). A second one, or
+    /// two coalesced into one event, records the session and exits at once.
+    func runUntilInterrupted(
+        session: SessionRecorder?, _ body: @escaping @Sendable () async -> AgentTranscript
+    ) async -> AgentTranscript {
+        let run = Task { await body() }
+        signal(SIGINT, SIG_IGN)
+        let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+        let hardExit: @Sendable () -> Void = {
+            let done = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async {
+                session?.end(outcome: "cancelled")
+                Obs.shutdown()
+                done.signal()
+            }
+            _ = done.wait(timeout: .now() + 1)
+            Darwin.exit(130)
+        }
+        sigint.setEventHandler {
+            if sigint.data >= 2 { hardExit() }
+            run.cancel()
+            sigint.setEventHandler(handler: hardExit)
+        }
+        sigint.resume()
+        let transcript = await run.value
+        sigint.cancel()
+        signal(SIGINT, SIG_DFL)
+        return transcript
+    }
+
     /// Records the outcome and maps it to the exit status: a provider failure or
     /// an iteration-limit stop exits 1, a cancelled run 130.
     func finishRun(_ transcript: AgentTranscript, session: SessionRecorder?) throws {

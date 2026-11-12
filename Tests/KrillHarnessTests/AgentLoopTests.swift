@@ -756,6 +756,21 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertFalse(ran.value, "a tool approved after Ctrl-C must not run")
     }
 
+    func testCancelledTurnAnswersEveryUnrunToolCall() async {
+        let two = hermesCall("bash", #"{"command":"a"}"#) + hermesCall("bash", #"{"command":"b"}"#)
+        let gen = MockGenerator(responses: [two, "done"])
+        let loop = AgentLoop(
+            generator: gen, tools: ToolRegistry([StubTool()]),
+            permission: PermissionPolicy(mode: .ask), gate: ApproveAfterCancelGate())
+        let task = Task { await loop.run(user: "go") }
+        try? await Task.sleep(for: .milliseconds(200))
+        task.cancel()
+        let t = await task.value
+
+        let answers = t.messages.filter { $0["content"]?.hasPrefix("Tool result (bash)") == true }
+        XCTAssertEqual(answers.count, 2, "each call needs a result: \(t.messages)")
+    }
+
     func testProviderFailureEndsRunWithoutAFinalAnswer() async {
         let gen = MockGenerator(responses: [HarnessFailure.wrap("Codex CLI failed: boom")])
         let loop = AgentLoop(generator: gen, tools: ToolRegistry([StubTool()]))
