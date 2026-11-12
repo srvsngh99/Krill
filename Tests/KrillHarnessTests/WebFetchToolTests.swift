@@ -93,6 +93,11 @@ final class WebFetchToolTests: XCTestCase {
         XCTAssertFalse(text.contains("<"), "no residual tags")
     }
 
+    func testHtmlToTextKeepsTitleWhenHeadTagsAreOmitted() {
+        let html = "<!doctype html><title>Bare page</title><p>Hello</p><body><svg><title>icon</title></svg>"
+        XCTAssertTrue(WebFetchTool.htmlToText(html).hasPrefix("Title: Bare page"))
+    }
+
     func testDecodesNumericEntities() {
         XCTAssertEqual(WebFetchTool.decodeEntities("A&#66;&#x43;"), "ABC")
     }

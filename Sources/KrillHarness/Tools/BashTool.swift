@@ -57,14 +57,17 @@ public struct BashTool: Tool {
         // Offload the blocking Process work to a background thread so it never
         // blocks the cooperative executor (and so the synchronous semaphore wait
         // is legal).
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: execute(command, workspace: workspace))
+        let stop = StopSignal()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    continuation.resume(returning: execute(command, workspace: workspace, stop: stop))
+                }
             }
-        }
+        } onCancel: { stop.fire() }
     }
 
-    private func execute(_ command: String, workspace: URL?) -> ToolResult {
+    private func execute(_ command: String, workspace: URL?, stop: StopSignal) -> ToolResult {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/sh")
         proc.arguments = ["-c", command]
@@ -87,6 +90,8 @@ public struct BashTool: Tool {
                 content: "Error: failed to launch command: \(error.localizedDescription)",
                 isError: true)
         }
+
+        stop.attach(proc)
 
         // Collect output incrementally off a background queue so we never have
         // to block on pipe EOF (a SIGTERM-ignoring child or an orphaned
@@ -111,11 +116,7 @@ public struct BashTool: Tool {
         timeoutQueue.asyncAfter(deadline: .now() + timeout) { [weak proc] in
             guard let proc, proc.isRunning else { return }
             timedOut.set()
-            let pid = proc.processIdentifier
-            proc.terminate()  // SIGTERM
-            timeoutQueue.asyncAfter(deadline: .now() + 1) { [weak proc] in
-                if let proc, proc.isRunning { kill(pid, SIGKILL) }
-            }
+            terminateThenKill(proc, on: timeoutQueue)
         }
 
         proc.waitUntilExit()
@@ -151,6 +152,32 @@ public struct BashTool: Tool {
             return ToolResult(content: "Exit code \(code).\n\(output)", isError: true)
         }
         return ToolResult(content: output, isError: false)
+    }
+}
+
+/// Lets Task cancellation kill the running child (SIGTERM, then SIGKILL).
+private final class StopSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var proc: Process?
+    private var fired = false
+
+    func attach(_ p: Process) {
+        lock.lock(); proc = p; let kill = fired; lock.unlock()
+        if kill { terminateThenKill(p, on: .global()) }
+    }
+
+    func fire() {
+        lock.lock(); fired = true; let p = proc; lock.unlock()
+        if let p { terminateThenKill(p, on: .global()) }
+    }
+}
+
+/// SIGTERM now, SIGKILL a second later if the process is still running.
+private func terminateThenKill(_ proc: Process, on queue: DispatchQueue) {
+    let pid = proc.processIdentifier
+    proc.terminate()
+    queue.asyncAfter(deadline: .now() + 1) { [weak proc] in
+        if let proc, proc.isRunning { kill(pid, SIGKILL) }
     }
 }
 

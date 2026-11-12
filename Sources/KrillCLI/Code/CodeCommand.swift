@@ -242,6 +242,7 @@ struct CodeCommand: AsyncParsableCommand {
 
         // Classic line renderer (--classic, non-interactive, or tool flags set).
         // Surface the posture inline.
+        setvbuf(stdout, nil, _IOLBF, 0)
         printPermissionMode(mode, bash: bash)
 
         guard let task else {
@@ -281,7 +282,9 @@ struct CodeCommand: AsyncParsableCommand {
         // once rather than only in this command's hand-rolled switch.
         let renderer = LineAgentRenderer()
         let onEvent: @Sendable (AgentEvent) -> Void = { renderer.handle($0) }
-        let transcript = await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
+        let transcript = await runUntilInterrupted(session: session) {
+            await loop.run(user: task, system: effectiveSystem, onEvent: onEvent)
+        }
         try finishRun(transcript, session: session)
     }
 
