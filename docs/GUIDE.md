@@ -151,6 +151,7 @@ Type these inside the chat TUI:
 | `/attach` · `/remove <n>` · `/drop` | List · drop one · drop all attachments |
 | `/voice-mode <type\|dictate\|handsfree\|send>` · `/voice` · `/speak` | Voice posture · state · TTS |
 | `/think` | Toggle the model's reasoning channel (also `Ctrl-T`) |
+| `/effort <xhigh\|medium\|low\|default>` | Reasoning depth for models whose template supports it (Qwen3.8-class) |
 | `/cd <path>` · `/add-dir <path>` · `/diff` | Working dir · extra dir · git diff |
 | `/config [key=value]` · `/init` | Show/set config · generate a `Krill.md` for the repo |
 | `/quit` (`/exit`, `/q`) | Exit |
@@ -540,6 +541,7 @@ Common keys (each has a `KRILL_…` env equivalent):
 | `kv_cache_dtype` | `fp16` | KV cache precision (`fp16` / `int8`) |
 | `context_length` | model max | Prompt token limit |
 | `thinking` | `true` | Reasoning channel on/off |
+| `reasoning_effort` | unset | `xhigh`, `medium` or `low`; unset uses the model template's default. Only models whose template supports it (Qwen3.8-class). A per-request value and `KRILL_REASONING_EFFORT` win over it |
 | `shell_output_to_model` | `true` | Whether a `!<command>` shell escape's output is handed to the model with your next message (`!!<command>` is always private) |
 | `search_backend` | `auto` | `auto` \| `brave` \| `tavily` \| `searxng` |
 | `brave_api_key` / `tavily_api_key` | — | BYOK search keys (redacted in output) |

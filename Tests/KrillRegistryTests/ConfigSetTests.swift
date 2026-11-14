@@ -188,3 +188,36 @@ final class ConfiguredRegistryTests: XCTestCase {
         XCTAssertEqual(r.blobsDir.path, "/tmp/krill-test-env/models/blobs")
     }
 }
+
+final class ReasoningEffortConfigTests: XCTestCase {
+    func testDefaultIsNil() {
+        XCTAssertNil(KrillConfig().reasoningEffort)
+    }
+
+    func testTOMLKeySetsLevelLowercased() {
+        var c = KrillConfig()
+        c.mergeFromTOML("reasoning_effort = \"Medium\"\n")
+        XCTAssertEqual(c.reasoningEffort, "medium")
+    }
+
+    func testInvalidTOMLValueIsIgnored() {
+        var c = KrillConfig()
+        c.mergeFromTOML("reasoning_effort = \"low\"\nreasoning_effort = \"high\"\n")
+        XCTAssertEqual(c.reasoningEffort, "low", "bad value keeps the earlier one")
+    }
+
+    func testEmptyValueClearsToTemplateDefault() {
+        var c = KrillConfig()
+        c.mergeFromTOML("reasoning_effort = \"low\"\nreasoning_effort = \"\"\n")
+        XCTAssertNil(c.reasoningEffort)
+    }
+
+    func testIsWritableDisplayedAndSetRejectsInvalid() {
+        XCTAssertTrue(KrillConfig.writableKeys.contains("reasoning_effort"))
+        var c = KrillConfig()
+        XCTAssertEqual(c.displayPairs().first { $0.key == "reasoning_effort" }?.value, "(template default)")
+        c.reasoningEffort = "low"
+        XCTAssertEqual(c.displayPairs().first { $0.key == "reasoning_effort" }?.value, "low")
+        XCTAssertThrowsError(try KrillConfig.set(key: "reasoning_effort", value: "high"))
+    }
+}

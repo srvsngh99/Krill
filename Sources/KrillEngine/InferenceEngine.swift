@@ -856,27 +856,23 @@ public final class InferenceEngine: @unchecked Sendable {
     /// against this SAME list — Krill does not map OpenAI's own values
     /// (`"high"`, `"minimal"`) onto it; an unrecognized level is ignored, not
     /// guessed at (see `resolveReasoningEffort` below).
-    static let supportedReasoningEffortLevels: Set<String> = ["xhigh", "medium", "low"]
+    static let supportedReasoningEffortLevels = KrillConfig.reasoningEffortLevels
 
-    /// Resolve the reasoning-depth level for templates that expose one.
-    /// `explicit` (a per-request `reasoning_effort` value, docs/LOGPROBS_
-    /// PLAN.md's sibling per-request thinking-switch work) wins over `env`
-    /// (`KRILL_REASONING_EFFORT`) when it is itself one of the recognized
-    /// levels — mirroring `resolveThinking`'s explicit-wins-over-env
-    /// precedence. An unrecognized value, in EITHER source, resolves to nil
-    /// rather than erroring (falling through to `env`, then to nil), so the
-    /// template's own default (`xhigh`) applies — the chat template would
-    /// `raise_exception` on a bad level, and a typo'd request/env value
-    /// should not fail a request.
-    public static func resolveReasoningEffort(explicit: String? = nil, env: String?) -> String? {
-        if let level = explicit?.lowercased().trimmingCharacters(in: .whitespaces),
-           supportedReasoningEffortLevels.contains(level) {
-            return level
+    /// Precedence: per-request > `KRILL_REASONING_EFFORT` > config `reasoning_effort` >
+    /// nil (template default). An unrecognized value at any level is skipped, never an
+    /// error: the chat template would `raise_exception` on a bad level.
+    public static func resolveReasoningEffort(
+        explicit: String? = nil, env: String?, config: String? = nil
+    ) -> String? {
+        for raw in [explicit, env, config] {
+            if let level = raw?.lowercased().trimmingCharacters(in: .whitespaces),
+               supportedReasoningEffortLevels.contains(level) { return level }
         }
-        guard let level = env?.lowercased().trimmingCharacters(in: .whitespaces),
-              supportedReasoningEffortLevels.contains(level) else { return nil }
-        return level
+        return nil
     }
+
+    /// Whether the loaded model's chat template honours `reasoning_effort`.
+    public var supportsReasoningEffort: Bool { tokenizer?.supportsReasoningEffort ?? false }
 
     public func generate(
         prompt: String,
@@ -1047,7 +1043,8 @@ public final class InferenceEngine: @unchecked Sendable {
                     env: ProcessInfo.processInfo.environment["KRILL_ENABLE_THINKING"]),
                 reasoningEffort: Self.resolveReasoningEffort(
                     explicit: reasoningEffort,
-                    env: ProcessInfo.processInfo.environment["KRILL_REASONING_EFFORT"]),
+                    env: ProcessInfo.processInfo.environment["KRILL_REASONING_EFFORT"],
+                    config: KrillConfig.load().reasoningEffort),
                 wantLogprobs: wantLogprobs,
                 topLogprobs: topLogprobs)
         }

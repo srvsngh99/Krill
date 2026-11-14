@@ -163,6 +163,13 @@ public struct KrillConfig: Sendable {
     /// toggle it per session; this is the starting value.
     public var thinking: Bool
 
+    /// Reasoning depth (`xhigh`, `medium`, `low`) for templates with a `reasoning_effort`
+    /// variable (Qwen3.8-class); nil = template default. A per-request value and
+    /// `KRILL_REASONING_EFFORT` both win; TUI `/effort` overrides it per session.
+    public var reasoningEffort: String?
+
+    public static let reasoningEffortLevels: Set<String> = ["xhigh", "medium", "low"]
+
     /// Whether a `!<command>` shell escape typed at the chat prompt hands its
     /// output to the model with your next message. ON by default: you usually
     /// run a command so the model can see the result. Turn it off to keep every
@@ -239,6 +246,7 @@ public struct KrillConfig: Sendable {
         self.selfHostedURL = nil
         #endif
         self.thinking = true
+        self.reasoningEffort = nil
         self.shellOutputToModel = true
         self.embedDevice = .gpu
     }
@@ -350,6 +358,14 @@ public struct KrillConfig: Sendable {
             #endif
             case "thinking", "enable_thinking":
                 thinking = value == "true" || value == "1" || value == "on" || value == "yes"
+            case "reasoning_effort":
+                let level = value.lowercased()
+                if level.isEmpty { reasoningEffort = nil } else if Self.reasoningEffortLevels.contains(level) {
+                    reasoningEffort = level
+                } else {
+                    FileHandle.standardError.write(Data(
+                        "warning: config reasoning_effort = \"\(value)\" is not one of xhigh | medium | low; ignored\n".utf8))
+                }
             case "shell_output_to_model":
                 shellOutputToModel = Self.parseBool(value)
             case "keep_alive":
@@ -404,7 +420,7 @@ public struct KrillConfig: Sendable {
             "default_model", "default_quant", "default_mode", "default_agent_permissions",
             "default_agent_posture",  // legacy alias, still settable
             "search_backend", "searxng_url", "brave_api_key", "tavily_api_key",
-            "kv_cache_dtype", "context_length", "thinking", "shell_output_to_model",
+            "kv_cache_dtype", "context_length", "thinking", "reasoning_effort", "shell_output_to_model",
             "voice_mode", "speak_replies", "voice_engine", "voice_language",
             "voice_identifier", "voice_rate", "voice_whisper_model",
             "voice_orb",
@@ -439,6 +455,9 @@ public struct KrillConfig: Sendable {
             throw ConfigError.invalidValue(key: key, value: value)
         }
         if key == EmbedDevice.configKey, EmbedDevice.parse(value) == nil {
+            throw ConfigError.invalidValue(key: key, value: value)
+        }
+        if key == "reasoning_effort", !value.isEmpty, !reasoningEffortLevels.contains(value.lowercased()) {
             throw ConfigError.invalidValue(key: key, value: value)
         }
         let url = configPath()
@@ -507,6 +526,7 @@ public struct KrillConfig: Sendable {
             "kv_cache_dtype": kvCacheDtype,
             "context_length": contextLength.map { "\($0)" } ?? "(model default)",
             "thinking": b(thinking),
+            "reasoning_effort": reasoningEffort ?? "(template default)",
             "shell_output_to_model": b(shellOutputToModel),
             "voice_mode": voiceMode,
             "speak_replies": b(speakReplies),
@@ -554,6 +574,7 @@ public struct KrillConfig: Sendable {
                     + KrillConfig.writableKeys.joined(separator: ", ")
             case .invalidValue(let k, _):
                 if k == EmbedDevice.configKey { return "embed_device must be one of: \(EmbedDevice.validValues)." }
+                if k == "reasoning_effort" { return "reasoning_effort must be one of: xhigh | medium | low (or empty for the template default)." }
                 return "value for '\(k)' may not contain a quote, backslash, or newline."
             }
         }

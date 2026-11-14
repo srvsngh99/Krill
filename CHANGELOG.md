@@ -9,6 +9,16 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Added
+
+- **Set the reasoning depth once, in config or in chat.** `krill config set
+  reasoning_effort medium` (`xhigh`, `medium` or `low`; empty for the model's
+  own default) now applies to `krill serve`, `krill run` and `krill code` for
+  models that support it (Qwen3.8-class). In the full-screen chat, `/effort
+  xhigh|medium|low|default` changes it for the session and tells you when the
+  loaded model ignores it. A per-request value and `KRILL_REASONING_EFFORT`
+  still win over the config.
+
 ## [0.27.5] - 2026-11-12
 
 ### Changed

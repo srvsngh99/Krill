@@ -533,7 +533,9 @@ already maps (`xhigh`/`medium`/`low`, on Qwen3.8-class checkpoints that
 expose the template variable) — an unrecognized value, including OpenAI's
 own `"high"`/`"minimal"` (which Krill has no mapping for), is silently
 ignored rather than erroring or guessed at, exactly like an unrecognized
-`KRILL_REASONING_EFFORT` env value is today.
+`KRILL_REASONING_EFFORT` env value is today. When a request omits it, the
+`KRILL_REASONING_EFFORT` env value applies, then the `reasoning_effort` key in
+`~/.krill/config.toml`.
 
 ```bash
 curl http://127.0.0.1:57455/v1/chat/completions -d '{
