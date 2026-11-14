@@ -2169,7 +2169,7 @@ final class ChatTUI {
     /// loaded model's template has no `reasoning_effort` control.
     private func setEffort(_ level: String?) {
         reasoningEffort = level
-        let shown = level ?? "the template default"
+        let shown = level ?? "default (KRILL_REASONING_EFFORT or config, else the model's own)"
         note(engine.supportsReasoningEffort
             ? "Reasoning effort: \(shown). Applies to chat turns while thinking is on."
             : "Reasoning effort: \(shown). The current model ignores it (its template has no reasoning_effort control).")

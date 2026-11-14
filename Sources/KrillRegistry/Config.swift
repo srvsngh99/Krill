@@ -163,11 +163,9 @@ public struct KrillConfig: Sendable {
     /// toggle it per session; this is the starting value.
     public var thinking: Bool
 
-    /// Reasoning depth (`xhigh`, `medium` or `low`) for checkpoints whose chat
-    /// template exposes a `reasoning_effort` variable (Qwen3.8-class); nil uses
-    /// the template's own default. `reasoning_effort` in config. A per-request
-    /// value and `KRILL_REASONING_EFFORT` env both win. The TUI `/effort` sets
-    /// it per session; this is the starting value.
+    /// Reasoning depth (`xhigh`, `medium`, `low`) for templates with a `reasoning_effort`
+    /// variable (Qwen3.8-class); nil = template default. A per-request value and
+    /// `KRILL_REASONING_EFFORT` both win; TUI `/effort` overrides it per session.
     public var reasoningEffort: String?
 
     public static let reasoningEffortLevels: Set<String> = ["xhigh", "medium", "low"]

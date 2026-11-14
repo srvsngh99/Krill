@@ -858,11 +858,9 @@ public final class InferenceEngine: @unchecked Sendable {
     /// guessed at (see `resolveReasoningEffort` below).
     static let supportedReasoningEffortLevels = KrillConfig.reasoningEffortLevels
 
-    /// Resolve the reasoning-depth level for templates that expose one.
-    /// Precedence: `explicit` (per-request) > `env` (`KRILL_REASONING_EFFORT`)
-    /// > `config` (the `reasoning_effort` config key) > nil (template default).
-    /// An unrecognized value at any level is skipped, never an error: the chat
-    /// template would `raise_exception` on a bad level.
+    /// Precedence: per-request > `KRILL_REASONING_EFFORT` > config `reasoning_effort` >
+    /// nil (template default). An unrecognized value at any level is skipped, never an
+    /// error: the chat template would `raise_exception` on a bad level.
     public static func resolveReasoningEffort(
         explicit: String? = nil, env: String?, config: String? = nil
     ) -> String? {
