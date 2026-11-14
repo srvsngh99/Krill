@@ -17,7 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| 2026-11-15 | #TBD | `reasoning_effort` config key + `/effort` TUI toggle | Mention in the notes together: precedence is request > `KRILL_REASONING_EFFORT` > config > template default |
+| 2026-11-15 | #368 | `reasoning_effort` config key + `/effort` TUI toggle | Mention in the notes together: precedence is request > `KRILL_REASONING_EFFORT` > config > template default |
 
 ### Known-open, NOT yet merged
 
