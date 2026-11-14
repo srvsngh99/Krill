@@ -232,6 +232,7 @@ struct CodeCommand: AsyncParsableCommand {
                 voiceRateSetting: config.voiceRate,
                 voiceWhisperModelSetting: config.voiceWhisperModel,
                 thinkingSetting: config.thinking,
+                reasoningEffortSetting: config.reasoningEffort,
                 shellOutputToModelSetting: config.shellOutputToModel,
                 modeSetting: "agent", agentPermissionsSetting: mode.rawValue,
                 initialAgentTask: task)

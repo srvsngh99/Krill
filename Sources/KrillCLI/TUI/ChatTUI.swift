@@ -139,6 +139,9 @@ final class ChatTUI {
     // Ctrl-T, seeded from the `thinking` config key. Passed to each generate()
     // so the model reasons before answering when on.
     private var thinkingOn = true
+    // Reasoning depth for templates with a `reasoning_effort` variable; nil =
+    // template default. Seeded from `reasoning_effort` config, set by `/effort`.
+    private var reasoningEffort: String?
     // `!<command>` shell escapes. When `shellOutputToModel` is on, a single-bang
     // run's output rides along with the next message so the model can see what
     // happened; `!!<command>` always stays local. Seeded from the
@@ -224,7 +227,8 @@ final class ChatTUI {
          voiceEngineSetting: String = "apple", voiceLanguageSetting: String = "auto",
          voiceIdentifierSetting: String = "", voiceRateSetting: Float = AppleSpeechSettings.systemRate,
          voiceWhisperModelSetting: String = WhisperModelManager.defaultSKU,
-         thinkingSetting: Bool = true, shellOutputToModelSetting: Bool = true,
+         thinkingSetting: Bool = true, reasoningEffortSetting: String? = nil,
+         shellOutputToModelSetting: Bool = true,
          modeSetting: String = "chat", agentPermissionsSetting: String = "plan",
          initialAgentTask: String? = nil) {
         self.engine = engine
@@ -249,6 +253,7 @@ final class ChatTUI {
         self.speech = SpeechRecognizer(language: voiceLanguageSetting)
         self.whisperSKU = WhisperModelManager.sku(voiceWhisperModelSetting)?.id ?? WhisperModelManager.defaultSKU
         self.thinkingOn = thinkingSetting
+        self.reasoningEffort = reasoningEffortSetting
         self.shellOutputToModel = shellOutputToModelSetting
         self.surface = modeSetting.lowercased() == "agent" ? .agent : .chat
         self.initialAgentTask = initialAgentTask
@@ -1112,6 +1117,17 @@ final class ChatTUI {
             case "off": setThinking(false)
             case "", "toggle": setThinking(!thinkingOn)
             default: note("Usage: /think on|off  (reason before answering; Ctrl-T to toggle)")
+            }
+        case "/effort", "/reasoning-effort":
+            let level = arg.lowercased().trimmingCharacters(in: .whitespaces)
+            if level.isEmpty {
+                note("Reasoning effort: \(reasoningEffort ?? "default"). Usage: /effort xhigh|medium|low|default")
+            } else if level == "default" {
+                setEffort(nil)
+            } else if KrillConfig.reasoningEffortLevels.contains(level) {
+                setEffort(level)
+            } else {
+                note("Usage: /effort xhigh|medium|low|default")
             }
         case "/voice":
             let parts = arg.lowercased().split(separator: " ").map(String.init)
@@ -2149,6 +2165,16 @@ final class ChatTUI {
             : "Thinking: OFF. The model answers directly.")
     }
 
+    /// Set the reasoning depth for the rest of the session. Says so when the
+    /// loaded model's template has no `reasoning_effort` control.
+    private func setEffort(_ level: String?) {
+        reasoningEffort = level
+        let shown = level ?? "the template default"
+        note(engine.supportsReasoningEffort
+            ? "Reasoning effort: \(shown). Applies to chat turns while thinking is on."
+            : "Reasoning effort: \(shown). The current model ignores it (its template has no reasoning_effort control).")
+    }
+
     /// Advance to the next posture, the Ctrl-V action. The cycle starts and ends
     /// at `.type` (voice off) so one key both enables voice and turns it back off:
     /// off -> dictate -> handsfree -> send -> off.
@@ -2376,7 +2402,7 @@ final class ChatTUI {
         let gen = engine.generate(
             messages: messages, params: params, maxTokens: maxTokens,
             imageData: imgs.first, audioData: pendingAudio?.data, imagesData: imgs,
-            enableThinking: thinkingOn)
+            enableThinking: thinkingOn, reasoningEffort: reasoningEffort)
         var stream: AsyncStream<TokenEvent>? = gen.stream
         let filter = StreamingReasoningFilter()
         var assistant = ""
@@ -2675,7 +2701,7 @@ final class ChatTUI {
         defer { GenerationGate.shared.release() }
         let gen = engine.generate(
             messages: messages, params: params, maxTokens: maxTokens,
-            imageData: nil, audioData: nil, imagesData: [], enableThinking: thinkingOn)
+            imageData: nil, audioData: nil, imagesData: [], enableThinking: thinkingOn, reasoningEffort: reasoningEffort)
         let filter = StreamingReasoningFilter()
         var summary = ""
         for await event in gen.stream {
@@ -2797,7 +2823,7 @@ final class ChatTUI {
         let gen = engine.generate(
             messages: [["role": "user", "content": instruction]],
             params: params, maxTokens: min(maxTokens, 256),
-            imageData: nil, audioData: wav, imagesData: [], enableThinking: thinkingOn)
+            imageData: nil, audioData: wav, imagesData: [], enableThinking: thinkingOn, reasoningEffort: reasoningEffort)
         var raw = ""
         for await event in gen.stream {
             if event.isEnd { break }

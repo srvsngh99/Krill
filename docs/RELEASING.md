@@ -17,14 +17,13 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
+| 2026-11-15 | #TBD | `reasoning_effort` config key + `/effort` TUI toggle | Mention in the notes together: precedence is request > `KRILL_REASONING_EFFORT` > config > template default |
 
 ### Known-open, NOT yet merged
 
 Tracked so a release note does not claim more than shipped.
 
-- **`reasoning_effort` has no `krill config` knob.** `KRILL_REASONING_EFFORT` is
-  the only surface. Wiring the config key without the TUI toggle would create a
-  dead setting, so both land together or neither does.
+None.
 
 ---
 
