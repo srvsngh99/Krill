@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.27.6] - 2026-11-15
+
 ### Added
 
 - **Set the reasoning depth once, in config or in chat.** `krill config set
@@ -19,13 +21,15 @@ reverse chronological order. Versioning follows
   loaded model ignores it. A per-request value and `KRILL_REASONING_EFFORT`
   still win over the config.
 
-## [0.27.5] - 2026-11-12
-
 ### Changed
 
 - **Agent turns honour `/think` and `/effort`.** Agent mode, `/research` and
   `/bg` now follow a session `/think` or Ctrl-T toggle and the `/effort` level.
   Thinking stays off for agents unless toggled or `KRILL_ENABLE_THINKING` is set.
+
+## [0.27.5] - 2026-11-12
+
+### Changed
 
 - **Plan mode can run read-only shell commands.** `find . -name '*.swift' | wc -l`,
   `git log --oneline -5` and similar are now allowed in plan and adaptive mode;
