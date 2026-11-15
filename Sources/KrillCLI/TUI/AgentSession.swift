@@ -32,6 +32,8 @@ final class AgentSession {
     private(set) var lastStats: GenerationStats?
     /// Shared local transcript of the TUI run this agent belongs to (nil = not recording).
     var recorder: SessionRecorder?
+    var enableThinking: Bool?
+    var reasoningEffort: String?
 
     private final class StatsBox: @unchecked Sendable {
         private let lock = NSLock()
@@ -99,6 +101,8 @@ final class AgentSession {
         let steered = (turnDirectives + [task]).joined(separator: "\n\n")
 
         var generator = EngineGenerator(engine: engine, maxTokens: maxTokens)
+        generator.enableThinking = enableThinking
+        generator.reasoningEffort = reasoningEffort
         generator.onStats = { [statsBox] in statsBox.put($0) }
         let loop = AgentLoop(
             generator: generator,

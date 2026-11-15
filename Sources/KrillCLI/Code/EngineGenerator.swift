@@ -18,6 +18,8 @@ struct EngineGenerator: HarnessGenerator {
     /// the model keeps seeing them across tool rounds (the engine's media-
     /// hashed prefix cache absorbs the repeat prefill).
     var imageData: [Data] = []
+    var enableThinking: Bool? = nil
+    var reasoningEffort: String? = nil
 
     var toolFormat: ToolCalling.ToolFormat {
         ToolCalling.ToolFormat.forFamily(engine.family)
@@ -43,7 +45,8 @@ struct EngineGenerator: HarnessGenerator {
         defer { GenerationGate.shared.release() }
         let (stream, stats) = engine.generate(
             messages: messages, params: .greedy, maxTokens: maxTokens,
-            imageData: imageData.first, imagesData: imageData)
+            imageData: imageData.first, imagesData: imageData,
+            enableThinking: enableThinking, reasoningEffort: reasoningEffort)
         let text = await collect(stream)
         let s = stats()
         if let s { onStats?(s) }
@@ -70,7 +73,8 @@ struct EngineGenerator: HarnessGenerator {
                 sentinels: sentinels,
                 nameKey: ToolCallSentinels.nameKey(for: toolFormat),
                 names: toolNames),
-            imagesData: imageData)
+            imagesData: imageData,
+            enableThinking: enableThinking, reasoningEffort: reasoningEffort)
         let text = await collect(stream)
         let s = stats()
         if let s { onStats?(s) }
@@ -80,13 +84,15 @@ struct EngineGenerator: HarnessGenerator {
     func completeConstrained(messages: [[String: String]], jsonSchema: String) async -> String {
         // Grammar-constrain decoding to a JSON object matching the tool's
         // parameter schema, so a small model cannot omit required fields.
+        // No thinking: the grammar forces JSON from the first token.
         await GenerationGate.shared.acquire()
         defer { GenerationGate.shared.release() }
         let (stream, stats) = engine.generate(
             messages: messages, params: .greedy, maxTokens: 256,
             imageData: imageData.first,
             format: .jsonSchemaCompact(jsonSchema),
-            imagesData: imageData)
+            imagesData: imageData,
+            enableThinking: false)
         let text = await collect(stream)
         let s = stats()
         if let s { onStats?(s) }

@@ -139,6 +139,8 @@ final class ChatTUI {
     // Ctrl-T, seeded from the `thinking` config key. Passed to each generate()
     // so the model reasons before answering when on.
     private var thinkingOn = true
+    // Agent turns think only after an explicit Ctrl-T or /think, not the default.
+    private var thinkingChosen = false
     // Reasoning depth for templates with a `reasoning_effort` variable; nil =
     // template default. Seeded from `reasoning_effort` config, set by `/effort`.
     private var reasoningEffort: String?
@@ -1688,6 +1690,8 @@ final class ChatTUI {
             : modelTask
 
         var generator = EngineGenerator(engine: engine, maxTokens: maxTokens)
+        generator.enableThinking = thinkingChosen ? thinkingOn : nil
+        generator.reasoningEffort = reasoningEffort
         generator.onStats = { [agentStats] in agentStats.put($0) }
         generator.imageData = images
         let loop = AgentLoop(
@@ -1765,6 +1769,8 @@ final class ChatTUI {
         render()
 
         var configuredGenerator = EngineGenerator(engine: engine, maxTokens: maxTokens)
+        configuredGenerator.enableThinking = thinkingChosen ? thinkingOn : nil
+        configuredGenerator.reasoningEffort = reasoningEffort
         configuredGenerator.onStats = { [agentStats] in agentStats.put($0) }
         let gen = configuredGenerator
         let webFetch = WebFetchTool()
@@ -2011,6 +2017,8 @@ final class ChatTUI {
             id: nextSessionID, title: title, engine: engine,
             maxTokens: maxTokens, permissions: permissionBox.origin,
             effectivePolicy: permissionBox.policy)
+        s.enableThinking = thinkingChosen ? thinkingOn : nil
+        s.reasoningEffort = reasoningEffort
         s.configureTools(agentTools(
             asker: s.asker, permissionBox: s.permissionBox, todoTool: s.todoTool))
         s.recorder = obsSession
@@ -2160,6 +2168,7 @@ final class ChatTUI {
     /// channel. Toggled with `/think` or Ctrl-T.
     private func setThinking(_ on: Bool) {
         thinkingOn = on
+        thinkingChosen = true
         note(on
             ? "Thinking: ON. The model reasons before answering (no-op if the model has no thinking channel). /think off or Ctrl-T to stop."
             : "Thinking: OFF. The model answers directly.")
@@ -2171,7 +2180,7 @@ final class ChatTUI {
         reasoningEffort = level
         let shown = level ?? "default (KRILL_REASONING_EFFORT or config, else the model's own)"
         note(engine.supportsReasoningEffort
-            ? "Reasoning effort: \(shown). Applies to chat turns while thinking is on."
+            ? "Reasoning effort: \(shown). Applies to chat and agent turns while thinking is on."
             : "Reasoning effort: \(shown). The current model ignores it (its template has no reasoning_effort control).")
     }
 

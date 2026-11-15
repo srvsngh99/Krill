@@ -150,7 +150,7 @@ Type these inside the chat TUI:
 | `/image <path>` (`/img`) · `/audio <path>` · `/mic` | Attach image · audio · record |
 | `/attach` · `/remove <n>` · `/drop` | List · drop one · drop all attachments |
 | `/voice-mode <type\|dictate\|handsfree\|send>` · `/voice` · `/speak` | Voice posture · state · TTS |
-| `/think` | Toggle the model's reasoning channel (also `Ctrl-T`) |
+| `/think` | Toggle the model's reasoning channel (also `Ctrl-T`). Agent turns think only once you toggle it, or if `KRILL_ENABLE_THINKING` is set |
 | `/effort <xhigh\|medium\|low\|default>` | Reasoning depth for models whose template supports it (Qwen3.8-class) |
 | `/cd <path>` · `/add-dir <path>` · `/diff` | Working dir · extra dir · git diff |
 | `/config [key=value]` · `/init` | Show/set config · generate a `Krill.md` for the repo |
