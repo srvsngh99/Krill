@@ -23,6 +23,10 @@ reverse chronological order. Versioning follows
 
 ### Changed
 
+- **Agent turns honour `/think` and `/effort`.** Agent mode, `/research` and
+  `/bg` now follow a session `/think` or Ctrl-T toggle and the `/effort` level.
+  Thinking stays off for agents unless toggled or `KRILL_ENABLE_THINKING` is set.
+
 - **Plan mode can run read-only shell commands.** `find . -name '*.swift' | wc -l`,
   `git log --oneline -5` and similar are now allowed in plan and adaptive mode;
   anything that could write, run another program or expand (`>`, `;`, `$(...)`,
