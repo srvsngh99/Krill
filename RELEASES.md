@@ -7,6 +7,15 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.27.6 - 2026-11-15
+**Set the reasoning depth once, and agents follow your thinking toggle.**
+`krill config set reasoning_effort medium` (`xhigh`, `medium` or `low`) now sets how hard
+Qwen3.8-class models think, for `krill serve`, `krill run` and `krill code`. In the
+full-screen chat, `/effort` changes it for the session and tells you when the loaded model
+ignores it. A per-request value or `KRILL_REASONING_EFFORT` still wins. Agent mode,
+`/research` and `/bg` now follow a `/think` or Ctrl-T toggle and the `/effort` level made
+in the session; without a toggle they keep answering without a reasoning pass, as before.
+
 ## v0.27.5 - 2026-11-12
 **Plan mode can read with the shell, and Ctrl-C works the same everywhere.**
 Plan and adaptive mode now run shell commands that only read, such as
