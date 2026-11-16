@@ -17,7 +17,6 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
-| 2026-11-16 | #371 | Decision models (`krill decide`, `POST /v1/decide`, `ModelFamily.decision`) | Experimental, no alias or `krill pull` entry, so notes must not say it can be pulled. The shared ModernBERT encoder changed too (fused layer norm, finite mask fill); check `gte-modernbert-base` embeddings on the release build. |
 
 ### Known-open, NOT yet merged
 

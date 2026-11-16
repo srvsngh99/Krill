@@ -9,6 +9,8 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.28.0] - 2026-11-16
+
 ### Added
 
 - **Decision models.** A new model type that picks one option (or "none of
