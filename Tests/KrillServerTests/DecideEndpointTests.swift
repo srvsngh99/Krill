@@ -31,25 +31,15 @@ final class DecideEndpointTests: XCTestCase {
     private func startServer(apiKey: String?) async throws {
         group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let registry = self.registry!
-        var lastError: Error?
-        for port in 9300 ... 9399 {
-            let bootstrap = ServerBootstrap(group: group).childChannelInitializer { ch in
-                ch.pipeline.configureHTTPServerPipeline().flatMap {
-                    ch.pipeline.addHandler(KrillServer._makeHTTPHandlerForTesting(
-                        engine: InferenceEngine(modelDirectory: registry.baseDir.appendingPathComponent("none")),
-                        registry: registry, decisionEngine: Self.engine, apiKey: apiKey))
-                }
-            }
-            do {
-                channel = try await bootstrap.bind(host: "127.0.0.1", port: port).get()
-                base = URL(string: "http://127.0.0.1:\(port)")!
-                return
-            } catch let error as IOError where error.errnoCode == EADDRINUSE {
-                lastError = error
+        let bootstrap = ServerBootstrap(group: group).childChannelInitializer { ch in
+            ch.pipeline.configureHTTPServerPipeline().flatMap {
+                ch.pipeline.addHandler(KrillServer._makeHTTPHandlerForTesting(
+                    engine: InferenceEngine(modelDirectory: registry.baseDir.appendingPathComponent("none")),
+                    registry: registry, decisionEngine: Self.engine, apiKey: apiKey))
             }
         }
-        throw NSError(domain: "DecideEndpointTests", code: 1, userInfo: [
-            NSLocalizedDescriptionKey: "no free scratch port in 9300-9399: \(String(describing: lastError))"])
+        channel = try await bootstrap.bind(host: "127.0.0.1", port: 0).get()
+        base = URL(string: "http://127.0.0.1:\(try XCTUnwrap(channel.localAddress?.port))")!
     }
 
     private static let fixtures = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
@@ -151,7 +141,7 @@ final class DecideEndpointTests: XCTestCase {
     func testMatchesTinyGolden() async throws {
         try installTiny()
         let checked = try await checkGolden("golden_tiny.json", model: "decider")
-        XCTAssertEqual(checked, 35)
+        XCTAssertEqual(checked, 37)
     }
 
     func testMatchesRealBundleGolden() async throws {
@@ -206,6 +196,14 @@ final class DecideEndpointTests: XCTestCase {
         XCTAssertTrue((option.json["error"] as? String)?.contains("limit is 32") ?? false)
     }
 
+    func testLongYesNoQuestionHasItsOwnError() async throws {
+        try installTiny()
+        let r = try await post("/v1/decide", [
+            "model": "decider", "text": "hi", "yes_no": String(repeating: "is it late ", count: 40)])
+        XCTAssertEqual(r.status, 400)
+        XCTAssertTrue((r.json["error"] as? String)?.contains("the yes_no question") ?? false, "\(r.json)")
+    }
+
     func testMalformedRequestsAreBadRequest() async throws {
         let bad = try await post("/v1/decide", raw: Data("{nope".utf8))
         XCTAssertEqual(bad.status, 400)
@@ -219,6 +217,7 @@ final class DecideEndpointTests: XCTestCase {
             ["model": "m", "texts": [], "options": ["a"]],
             ["model": "m", "text": "hi", "options": ["a"], "allow_none": "yes"],
             ["model": "m", "text": "hi", "yes_no": ""],
+            ["model": "m", "text": "hi", "yes_no": "Is it?", "question": "Which?"],
             ["model": "m", "text": "hi", "options": ["a", 2]],
         ]
         for body in cases {
@@ -233,6 +232,9 @@ final class DecideEndpointTests: XCTestCase {
         let tooMany = try await post("/v1/decide", [
             "model": "decider", "texts": Array(repeating: "hi", count: 257), "options": options])
         XCTAssertEqual(tooMany.status, 400)
+        let tooManyYesNo = try await post("/v1/decide", [
+            "model": "decider", "texts": Array(repeating: "hi", count: 257), "yes_no": "Is it?"])
+        XCTAssertEqual(tooManyYesNo.status, 400)
         let tooManyOptions = try await post("/v1/decide", [
             "model": "decider", "text": "hi", "options": (0 ..< 129).map { "option \($0)" }])
         XCTAssertEqual(tooManyOptions.status, 400)

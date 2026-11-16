@@ -54,8 +54,8 @@ final class DecisionModelBenchmarkTests: XCTestCase {
         _ = try model.choose([long], options: ten)
         let c = try time(50) { _ = try model.choose([long], options: ten) }
         print("~500-token text, 10 options: median \(c.median) ms, p90 \(c.p90) ms")
-        _ = try model.yesNo(text: short, question: "is this about billing?")
-        let y = try time(50) { _ = try model.yesNo(text: short, question: "is this about billing?") }
+        _ = try model.yesNo(texts: [short], question: "is this about billing?")[0]
+        let y = try time(50) { _ = try model.yesNo(texts: [short], question: "is this about billing?")[0] }
         print("yes / no: median \(y.median) ms, p90 \(y.p90) ms")
         print("MLX peak memory: \(GPU.peakMemory / 1_048_576) MB")
     }

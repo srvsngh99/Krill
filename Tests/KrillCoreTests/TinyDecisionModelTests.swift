@@ -41,12 +41,11 @@ final class TinyDecisionModelTests: XCTestCase {
         }
     }
 
-    func testDecisionsAndProbabilitiesMatchReference() async throws {
-        let (model, golden) = try await fixture()
+    private func assertMatchesReference(_ model: DecisionModel, _ golden: Golden) throws -> Int {
         var none = 0
         for c in golden.cases {
             if c.kind == "yesno" {
-                let r = try model.yesNo(text: c.text, question: c.question!)
+                let r = try model.yesNo(texts: [c.text], question: c.question!)[0]
                 XCTAssertEqual(r.answer, c.answer, c.id)
                 XCTAssertEqual(r.pYes, c.pYes!, accuracy: 1e-4, c.id)
                 continue
@@ -57,7 +56,27 @@ final class TinyDecisionModelTests: XCTestCase {
             for (a, b) in zip(r.scores, c.scores!) { XCTAssertEqual(a, b, accuracy: 1e-4, c.id) }
             if r.index == nil { none += 1 }
         }
-        XCTAssertGreaterThan(none, 0)
+        return none
+    }
+
+    func testDecisionsAndProbabilitiesMatchReference() async throws {
+        let (model, golden) = try await fixture()
+        XCTAssertTrue(golden.cases.contains { $0.options?.count == 1 })
+        XCTAssertGreaterThan(try assertMatchesReference(model, golden), 0)
+    }
+
+    func testClsPoolingMatchesReference() async throws {
+        _ = try await fixture()
+        let copy = FileManager.default.temporaryDirectory.appendingPathComponent("krill-cls-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: copy) }
+        try FileManager.default.copyItem(at: bundle, to: copy)
+        let raw = try Data(contentsOf: copy.appendingPathComponent("config.json"))
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+        json["pooling"] = "cls"
+        try JSONSerialization.data(withJSONObject: json).write(to: copy.appendingPathComponent("config.json"))
+        let golden = try JSONDecoder().decode(
+            Golden.self, from: Data(contentsOf: fixtures.appendingPathComponent("golden_tiny_cls.json")))
+        _ = try assertMatchesReference(try await DecisionModel.load(directory: copy), golden)
     }
 
     func testBatchEqualsSingle() async throws {
@@ -88,10 +107,11 @@ final class TinyDecisionModelTests: XCTestCase {
         let (model, _) = try await fixture()
         XCTAssertThrowsError(try model.choose(Array(repeating: "hi", count: DecisionModel.maxTexts + 1), options: ["a"]))
         XCTAssertThrowsError(try model.choose(["hi"], options: (0 ... DecisionModel.maxOptions).map { "option \($0)" }))
+        XCTAssertThrowsError(try model.yesNo(texts: Array(repeating: "hi", count: DecisionModel.maxTexts + 1), question: "Is it?"))
         XCTAssertThrowsError(try model.choose([], options: ["a"]))
         XCTAssertThrowsError(try model.choose([""], options: ["a", "b"]))
         XCTAssertThrowsError(try model.choose(["hi"], options: ["a", ""]))
-        XCTAssertThrowsError(try model.yesNo(text: "", question: "Is it?"))
+        XCTAssertThrowsError(try model.yesNo(texts: [""], question: "Is it?"))
         XCTAssertNoThrow(try model.choose(["hi"], options: (0 ..< DecisionModel.maxOptions).map { "option \($0)" }))
         XCTAssertThrowsError(try model.choose([String(repeating: "word ", count: 3000)], options: ["a", "b"]))
     }
@@ -159,13 +179,18 @@ final class TinyDecisionModelTests: XCTestCase {
         XCTAssertLessThan(MLX.abs(out - expected).max().item(Float.self), 1e-4)
     }
 
-    func testPaddedMaskStaysFiniteInFp16() throws {
+    func testPaddedMaskMatchesUnpaddedInFp16() throws {
         guard MLXMetalRuntime.canInitializeMLXForTests else { throw XCTSkip("MLX Metal runtime is not available") }
         let (model, _) = try reader()
         model.update(parameters: model.parameters().mapValues { $0.asType(.float16) })
-        let tokens = MLXArray([Int32](repeating: 5, count: 3 * 40), [3, 40])
-        let mask = MLXArray(0 ..< Int32(40)).reshaped(1, 40) .< MLXArray([40, 20, 3] as [Int32]).reshaped(-1, 1)
-        let out = model.hiddenStates(tokens, attentionMask: mask).asType(.float32)
-        XCTAssertFalse(MLX.isNaN(out).any().item(Bool.self))
+        let tokens = MLXArray((0 ..< 3 * 40).map { Int32(5 + $0 % 37) }, [3, 40])
+        let lengths = [40, 20, 3]
+        let mask = MLXArray(0 ..< Int32(40)).reshaped(1, 40) .< MLXArray(lengths.map(Int32.init)).reshaped(-1, 1)
+        let padded = model.hiddenStates(tokens, attentionMask: mask).asType(.float32)
+        XCTAssertFalse(MLX.isNaN(padded).any().item(Bool.self))
+        for (row, n) in lengths.enumerated() {
+            let alone = model.hiddenStates(tokens[row ..< row + 1, 0 ..< n]).asType(.float32)[0]
+            XCTAssertLessThan(MLX.abs(padded[row, 0 ..< n] - alone).max().item(Float.self), 0.1, "row \(row)")
+        }
     }
 }

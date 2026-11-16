@@ -17,6 +17,13 @@ reverse chronological order. Versioning follows
   model family, keep-alive and idle unload. Experimental: no model alias or
   `krill pull` entry yet. See `docs/DECISION_MODELS.md`.
 
+### Changed
+
+- The ModernBERT encoder behind the embedder now uses a fused layer norm, a
+  finite mask fill (so fp16 padding cannot produce NaN) and reads the RoPE
+  thetas from `rope_parameters` when the flat keys are missing. Embeddings from
+  `gte-modernbert-base` are unchanged beyond float noise.
+
 ## [0.27.6] - 2026-11-15
 
 ### Added

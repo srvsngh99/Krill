@@ -30,24 +30,24 @@ public final class AuxKeepAlive: Sendable {
     /// Unload whichever slot is resident, idle and past its deadline. Returns
     /// the names of what was unloaded (for logging).
     public func evictExpired(embedEngine: EmbeddingEngine, rerankEngine: RerankEngine,
-                             decisionEngine: DecisionEngine = DecisionEngine(), now: Date = Date()) async -> [String] {
-        var out: [String] = []
+                             decisionEngine: DecisionEngine, now: Date = Date()) async -> [(name: String, kind: String)] {
+        var out: [(name: String, kind: String)] = []
         // Check-and-unload is one actor step (see KeepAliveController.evictIfDue):
         // a request that begins in between can never lose its model.
         await embed.evictIfDue(now: now) {
-            if let name = embedEngine.loadedModelName, embedEngine.unload() { out.append(name) }
+            if let name = embedEngine.loadedModelName, embedEngine.unload() { out.append((name, "embed_rerank")) }
         }
         await rerank.evictIfDue(now: now) {
-            if let name = rerankEngine.loadedModelName, rerankEngine.unload() { out.append(name) }
+            if let name = rerankEngine.loadedModelName, rerankEngine.unload() { out.append((name, "embed_rerank")) }
         }
         await decide.evictIfDue(now: now) {
-            if let name = decisionEngine.loadedModelName, decisionEngine.unload() { out.append(name) }
+            if let name = decisionEngine.loadedModelName, decisionEngine.unload() { out.append((name, "decide")) }
         }
         await vision.evictIfDue(now: now) {
-            if embedEngine.unloadVisionTower() { out.append("vision tower") }
+            if embedEngine.unloadVisionTower() { out.append(("vision tower", "embed_rerank")) }
         }
         await audio.evictIfDue(now: now) {
-            if embedEngine.unloadAudioTower() { out.append("audio tower") }
+            if embedEngine.unloadAudioTower() { out.append(("audio tower", "embed_rerank")) }
         }
         return out
     }

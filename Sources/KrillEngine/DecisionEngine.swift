@@ -42,7 +42,7 @@ public final class DecisionEngine: @unchecked Sendable {
     }
 
     public func yesNo(_ model: DecisionModel, _ texts: [String], question: String) throws -> [DecisionYesNo] {
-        try serialized { try texts.map { try model.yesNo(text: $0, question: question) } }
+        try serialized { try model.yesNo(texts: texts, question: question) }
     }
 
     private func serialized<T>(_ body: () throws -> T) throws -> T {

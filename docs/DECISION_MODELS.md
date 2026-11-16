@@ -60,7 +60,7 @@ Errors are `{"error": "..."}`, like the embeddings and rerank routes:
 
 | Status | When |
 |---|---|
-| 400 | malformed JSON; missing `model`; no `text` / `texts` (or both); no `options` / `yes_no` (or both); empty `options`; wrong field types; an empty text or option; more than 256 texts or 128 options; text over 2,048 or an option over 32 tokens; `model` is not a decision model |
+| 400 | malformed JSON; missing `model`; no `text` / `texts` (or both); no `options` / `yes_no` (or both); empty `options`; wrong field types; an empty text or option; more than 256 texts or 128 options; text or option over the bundle's token limit; a `yes_no` question with `question`; `model` is not a decision model |
 | 401 | missing or wrong bearer key, when the server has one |
 | 404 | unknown model name |
 | 500 | the model failed to load or run (the body says only "decide failed"; details go to the server log) |
@@ -71,11 +71,16 @@ models, and a registered decision model shows up in `/v1/models` and `/v1/status
 
 ## Input limits
 
-The text (with its question) may be 2,048 tokens and each option 32 tokens; a request may carry up
-to 256 texts and 128 options (`DecisionModel.maxTexts`, `maxOptions`). Longer input is an error that
-names the count and the limit; nothing is truncated. Texts go through the reader 8 at a time, so memory
-does not grow with the number of texts. Empty texts and options are rejected. The option cache holds at
-most 512 options in total.
+A request may carry up to 256 texts and 128 options (`DecisionModel.maxTexts`, `maxOptions`); both
+are checked before the model loads, for `options` and `yes_no` alike. The token limits are not fixed:
+each bundle sets `state_max_tokens` (the text with its question) and `option_max_tokens` in its
+`config.json` (2,048 and 32 for the tiny test bundle). For `yes_no` the question is scored as the
+options `no: <question>` and `yes: <question>`, so it must fit `option_max_tokens` including the
+prefix and special tokens; a longer one is a 400 that says "the yes_no question". Longer input is an
+error that names the count and the limit; nothing is truncated. Texts go through the reader 8 at a
+time and each chunk is evaluated before the next is read, so only the pooled rows and option scores of
+earlier chunks stay alive; one chunk can still hold 8 texts of the full token limit. Empty or
+whitespace-only texts and options are rejected. The option cache holds at most 512 options in total.
 
 ## Parity
 
@@ -84,11 +89,12 @@ repository:
 
 - **Tiny bundle, runs in CI with no download.** `Tests/KrillCoreTests/Fixtures/decision/tiny` is a
   random-weight bundle of the same architecture (3 layers, hidden size 32, mean pooling, a 400-token
-  tokenizer, 188 KB) and `golden_tiny.json` holds the reference output for 35 cases (the same
-  inputs as below). `TinyDecisionModelTests` checks token ids, every decision, probabilities within
+  tokenizer, 188 KB) and `golden_tiny.json` holds the reference output for 37 cases (the 35 inputs
+  below plus two one-option lists), and `golden_tiny_cls.json` nine more for the same weights read
+  with `cls` pooling. `TinyDecisionModelTests` checks token ids, every decision, probabilities within
   1e-4, batch equals single, the request limits and empty inputs, config validation, the fused layer norm
   against the explicit formula (fp32 and fp16), and the encoder's per-token states against the reference.
-  `DecideEndpointTests` repeats the 35 cases over HTTP. This covers masking, MaxSim, the head, the
+  `DecideEndpointTests` repeats the cases over HTTP. This covers masking, MaxSim, the head, the
   "none" rules and yes / no, but with random weights it says nothing about the quality of a real model.
 - **Real bundle, needs the weights (not public).** `golden.json` holds 35 hand-written cases:
   support, intent, spam, moderation, tool choice, sentiment, 2- to 77-option lists, with and without
@@ -121,3 +127,4 @@ held 776 MB (physical footprint) after a few calls, against 8 MB idle; one readi
 
 - Model aliases and `krill pull`: the model repository does not exist yet.
 - A benchmark gate. Texts are read in padded chunks of 8 but scored one at a time.
+- Loading is not single-flight: two cold requests can load two copies (same as the rerank engine).

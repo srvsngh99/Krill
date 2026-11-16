@@ -158,7 +158,6 @@ public final class DecisionModel: @unchecked Sendable {
     private static let readChunk = 8
     private static let cacheOptionLimit = 512
 
-    /// True when a config.json has `reader` and `head` sections and a `pooling` entry.
     public static func isDecisionConfig(_ json: [String: Any]) -> Bool {
         json["reader"] is [String: Any] && json["head"] is [String: Any] && json["pooling"] != nil
     }
@@ -214,7 +213,7 @@ public final class DecisionModel: @unchecked Sendable {
     {
         let ids = texts.map { tokenizer.encode($0) }
         let lengths = ids.map(\.count)
-        guard !lengths.contains(0), !texts.contains(where: \.isEmpty) else {
+        guard !texts.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
             throw DecisionError.invalid("\(what) must not be empty")
         }
         let longest = lengths.max() ?? 0
@@ -253,13 +252,13 @@ public final class DecisionModel: @unchecked Sendable {
         return head.options(maxsim: maxsim, extra: extra, interaction: optionPooled * statePooled)
     }
 
+    public static func checkCounts(texts: Int, options: Int) throws {
+        guard (1 ... maxTexts).contains(texts) else { throw DecisionError.invalid("provide 1 to \(maxTexts) texts") }
+        guard options <= maxOptions else { throw DecisionError.invalid("at most \(maxOptions) options") }
+    }
+
     private func score(_ texts: [String], options: [String]) throws -> (logits: [MLXArray], pooled: MLXArray) {
-        guard !texts.isEmpty, texts.count <= Self.maxTexts else {
-            throw DecisionError.invalid("provide 1 to \(Self.maxTexts) texts")
-        }
-        guard options.count <= Self.maxOptions else {
-            throw DecisionError.invalid("at most \(Self.maxOptions) options")
-        }
+        try Self.checkCounts(texts: texts.count, options: options.count)
         let opts = try optionStates(options)
         var logits: [MLXArray] = []
         var pooledRows: [MLXArray] = []
@@ -270,6 +269,8 @@ public final class DecisionModel: @unchecked Sendable {
                 logits.append(optionLogits(opts, state: states[i, 0 ..< lengths[i]], pooled: pooled[i]))
                 pooledRows.append(pooled[i])
             }
+            // Evaluating per chunk frees its states before the next chunk is read.
+            eval(Array(logits.suffix(chunk.count)) + Array(pooledRows.suffix(chunk.count)))
         }
         return (logits, stacked(pooledRows))
     }
@@ -292,9 +293,18 @@ public final class DecisionModel: @unchecked Sendable {
         }
     }
 
-    public func yesNo(text: String, question: String) throws -> DecisionYesNo {
-        let lg = try score([text], options: ["no: \(question)", "yes: \(question)"]).logits[0].asArray(Float.self)
-        let pYes = 1 / (1 + exp(-(lg[1] - lg[0] + yesNoOffset)))
-        return DecisionYesNo(answer: pYes > 0.5 ? "yes" : "no", pYes: pYes)
+    public func yesNo(texts: [String], question: String) throws -> [DecisionYesNo] {
+        try Self.checkCounts(texts: texts.count, options: 2)
+        let options = ["no: \(question)", "yes: \(question)"]
+        let longest = options.map { tokenizer.encode($0).count }.max() ?? 0
+        guard longest <= config.optionMaxTokens else {
+            throw DecisionError.tooLong(what: "the yes_no question with its prefix", tokens: longest,
+                                        limit: config.optionMaxTokens)
+        }
+        return try score(texts, options: options).logits.map { row in
+            let lg = row.asArray(Float.self)
+            let pYes = 1 / (1 + exp(-(lg[1] - lg[0] + yesNoOffset)))
+            return DecisionYesNo(answer: pYes > 0.5 ? "yes" : "no", pYes: pYes)
+        }
     }
 }

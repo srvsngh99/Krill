@@ -71,14 +71,14 @@ public struct ModernBertConfig: Decodable, Sendable {
     }
 }
 
+/// Finite so a sum of two masks still fits fp16 (-inf rows would turn into NaN).
+private let maskFill: Float = -30000
+
 // MARK: - Weight-only LayerNorm
 
 /// LayerNorm with a scale but no bias (`norm_bias: false`). A plain `weight`
 /// MLXArray property is auto-registered as the `weight` parameter, matching the
 /// checkpoint's `*.norm.weight` / `final_norm.weight` keys.
-/// Finite so a sum of two masks still fits fp16 (-inf rows would turn into NaN).
-private let maskFill: Float = -30000
-
 final class ModernBertNorm: Module {
     let weight: MLXArray
     let eps: Float

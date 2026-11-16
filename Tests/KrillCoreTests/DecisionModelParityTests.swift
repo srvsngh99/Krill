@@ -4,10 +4,8 @@ import KrillRuntime
 import KrillTokenizer
 @testable import KrillCore
 
-/// Golden parity of the native decision model against the Python reference.
-/// Needs a decision-model bundle:
-///
-///     KRILL_DECISION_MODEL_PATH=/path/to/bundle swift test --filter DecisionModelParityTests
+/// Golden parity of the native decision model against the Python reference. Needs a bundle:
+/// `KRILL_DECISION_MODEL_PATH=/path/to/bundle swift test --filter DecisionModelParityTests`
 final class DecisionModelParityTests: XCTestCase {
     struct Case: Decodable {
         let id: String
@@ -65,7 +63,7 @@ final class DecisionModelParityTests: XCTestCase {
         var matched = 0
         for c in golden.cases {
             if c.kind == "yesno" {
-                let r = try model.yesNo(text: c.text, question: c.question!)
+                let r = try model.yesNo(texts: [c.text], question: c.question!)[0]
                 XCTAssertEqual(r.answer, c.answer, c.id)
                 worst = max(worst, abs(r.pYes - c.pYes!))
                 if r.answer == c.answer { matched += 1 }

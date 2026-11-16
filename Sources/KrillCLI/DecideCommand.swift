@@ -66,7 +66,10 @@ struct DecideCommand: AsyncParsableCommand {
         guard let text else { throw DecisionError.invalid("text is required") }
         let result: [String: Any]
         if let yesNo {
-            let r = try decider.yesNo(text: text, question: yesNo)
+            guard options.isEmpty, question == nil else {
+                throw DecisionError.invalid("yes_no takes no options and no question")
+            }
+            let r = try decider.yesNo(texts: [text], question: yesNo)[0]
             result = ["answer": r.answer, "p_yes": r.pYes]
         } else {
             let r = try decider.choose([text], options: options, question: question, allowNone: allowNone)[0]

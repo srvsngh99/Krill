@@ -210,9 +210,9 @@ public final class KrillServer: Sendable {
                     embedEngine: self.embedEngine, rerankEngine: self.rerankEngine,
                     decisionEngine: self.decisionEngine)
                 if !auxEvicted.isEmpty {
-                    self.logger.info("[KrillServer] auto-unloaded idle embed/rerank/decide model(s): \(auxEvicted.joined(separator: ", "))")
+                    self.logger.info("[KrillServer] auto-unloaded idle embed/rerank/decide model(s): \(auxEvicted.map(\.name).joined(separator: ", "))")
                     for name in auxEvicted {
-                        Obs.emit("keepalive_unload", [("model", .string(name)), ("kind", .string("embed_rerank")),
+                        Obs.emit("keepalive_unload", [("model", .string(name.name)), ("kind", .string(name.kind)),
                                                       ("rss_mb", .int(ProcessStats.physFootprintBytes() / 1_048_576))])
                     }
                 }
@@ -2973,6 +2973,12 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return fail(.badRequest, "Provide 'options' or 'yes_no', not both")
         }
         if let q = json["question"], !(q is String) { return fail(.badRequest, "'question' must be a string") }
+        if yesNo != nil, json["question"] != nil {
+            return fail(.badRequest, "'question' goes with 'options'; for 'yes_no' the question is its value")
+        }
+        do { try DecisionModel.checkCounts(texts: texts.count, options: options?.count ?? 2) } catch {
+            return fail(.badRequest, String(describing: error))
+        }
         if let a = json["allow_none"], !(a is Bool) { return fail(.badRequest, "'allow_none' must be a boolean") }
         let question = json["question"] as? String
         let allowNone = json["allow_none"] as? Bool ?? true
