@@ -1,0 +1,53 @@
+{
+ "version": "tiny",
+ "dtype": "float32",
+ "pooling": "mean",
+ "reader": {
+  "vocab_size": 400,
+  "hidden_size": 32,
+  "intermediate_size": 48,
+  "num_hidden_layers": 3,
+  "num_attention_heads": 2,
+  "max_position_embeddings": 8192,
+  "norm_eps": 1e-05,
+  "pad_token_id": 0,
+  "bos_token_id": 1,
+  "cls_token_id": 1,
+  "eos_token_id": 2,
+  "sep_token_id": 2,
+  "local_attention": 8,
+  "global_attn_every_n_layers": 3,
+  "attention_bias": false,
+  "mlp_bias": false,
+  "norm_bias": false,
+  "hidden_activation": "gelu",
+  "model_type": "modernbert",
+  "rope_parameters": {
+   "sliding_attention": {
+    "rope_type": "default",
+    "rope_theta": 10000.0
+   },
+   "full_attention": {
+    "rope_type": "default",
+    "rope_theta": 160000.0
+   }
+  }
+ },
+ "state_max_tokens": 2048,
+ "option_max_tokens": 32,
+ "head": {
+  "mlp_hidden": 8,
+  "interaction_dim": 4
+ },
+ "none": {
+  "long_list": 16,
+  "short": {
+   "rule": "p_none",
+   "tau": 0.3
+  },
+  "long": {
+   "rule": "margin",
+   "tau": -0.5
+  }
+ }
+}

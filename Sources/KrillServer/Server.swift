@@ -3,6 +3,7 @@ import Foundation
 @preconcurrency import NIOPosix
 @preconcurrency import NIOHTTP1
 import Logging
+import KrillCore
 import KrillEngine
 import KrillRegistry
 import KrillSampler
@@ -34,6 +35,7 @@ public final class KrillServer: Sendable {
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
+    private let decisionEngine: DecisionEngine
     private let auxKeepAlive: AuxKeepAlive
     private let embedDevice: EmbedDevice
     let autoRestartOnUpgrade: Bool
@@ -53,6 +55,7 @@ public final class KrillServer: Sendable {
                 fallbackEngine: InferenceEngine, registry: Registry,
                 embedEngine: EmbeddingEngine = EmbeddingEngine(),
                 rerankEngine: RerankEngine = RerankEngine(),
+                decisionEngine: DecisionEngine = DecisionEngine(),
                 apiKey: String? = nil,
                 corsOrigins: [String] = ["http://localhost", "http://127.0.0.1", "https://localhost"],
                 defaultContextLimit: Int? = nil,
@@ -74,6 +77,7 @@ public final class KrillServer: Sendable {
         self.registry = registry
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
+        self.decisionEngine = decisionEngine
         self.defaultContextLimit = defaultContextLimit
         self.genQueue = GenerationQueue(numParallel: numParallel, maxQueue: maxQueue)
     }
@@ -84,6 +88,7 @@ public final class KrillServer: Sendable {
         compat: CompatMode = .both,
         embedEngine: EmbeddingEngine = EmbeddingEngine(),
         rerankEngine: RerankEngine = RerankEngine(),
+        decisionEngine: DecisionEngine = DecisionEngine(),
         apiKey: String? = nil,
         maxBodySizeOverride: Int? = nil,
         trace: RequestTrace = RequestTrace()
@@ -98,6 +103,7 @@ public final class KrillServer: Sendable {
                     fallbackEngine: engine, registry: registry, compat: compat,
                     embedEngine: embedEngine,
                     rerankEngine: rerankEngine,
+                    decisionEngine: decisionEngine,
                     apiKey: apiKey,
                     genQueue: GenerationQueue(numParallel: 1, maxQueue: 512),
                     maxBodySizeOverride: maxBodySizeOverride,
@@ -121,6 +127,7 @@ public final class KrillServer: Sendable {
                                     fallbackEngine: self.fallbackEngine, registry: self.registry,
                                     compat: self.compat, embedEngine: self.embedEngine,
                                     rerankEngine: self.rerankEngine,
+                                    decisionEngine: self.decisionEngine,
                                     auxKeepAlive: self.auxKeepAlive,
                                     embedDevice: self.embedDevice,
                                     apiKey: self.apiKey,
@@ -200,11 +207,12 @@ public final class KrillServer: Sendable {
                     }
                 }
                 let auxEvicted = await self.auxKeepAlive.evictExpired(
-                    embedEngine: self.embedEngine, rerankEngine: self.rerankEngine)
+                    embedEngine: self.embedEngine, rerankEngine: self.rerankEngine,
+                    decisionEngine: self.decisionEngine)
                 if !auxEvicted.isEmpty {
-                    self.logger.info("[KrillServer] auto-unloaded idle embed/rerank model(s): \(auxEvicted.joined(separator: ", "))")
+                    self.logger.info("[KrillServer] auto-unloaded idle embed/rerank/decide model(s): \(auxEvicted.map(\.name).joined(separator: ", "))")
                     for name in auxEvicted {
-                        Obs.emit("keepalive_unload", [("model", .string(name)), ("kind", .string("embed_rerank")),
+                        Obs.emit("keepalive_unload", [("model", .string(name.name)), ("kind", .string(name.kind)),
                                                       ("rss_mb", .int(ProcessStats.physFootprintBytes() / 1_048_576))])
                     }
                 }
@@ -252,6 +260,7 @@ public final class KrillServer: Sendable {
             await engines.unloadAll()
             _ = embedEngine.unload()
             _ = rerankEngine.unload()
+            _ = decisionEngine.unload()
         } else {
             drained = false
             logger.info("[KrillServer] shutdown grace expired with requests in flight; exiting without unload")
@@ -322,6 +331,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     private let compat: CompatMode
     private let embedEngine: EmbeddingEngine
     private let rerankEngine: RerankEngine
+    private let decisionEngine: DecisionEngine
     private let auxKeepAlive: AuxKeepAlive
     private let embedDevice: EmbedDevice
     private let logger = KrillLogging.makeLogger("krill.http")
@@ -357,6 +367,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
          fallbackEngine: InferenceEngine, registry: Registry,
          compat: CompatMode = .both, embedEngine: EmbeddingEngine = EmbeddingEngine(),
          rerankEngine: RerankEngine = RerankEngine(),
+         decisionEngine: DecisionEngine = DecisionEngine(),
          auxKeepAlive: AuxKeepAlive = AuxKeepAlive(defaultSeconds: 300),
          embedDevice: EmbedDevice = .gpu,
          apiKey: String? = nil,
@@ -374,6 +385,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         self.compat = compat
         self.embedEngine = embedEngine
         self.rerankEngine = rerankEngine
+        self.decisionEngine = decisionEngine
         self.auxKeepAlive = auxKeepAlive
         self.embedDevice = embedDevice
         self.apiKey = apiKey
@@ -564,6 +576,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 return
             }
             handleRerank(context: context, body: body)
+        case (.POST, "/v1/decide"):
+            guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleDecide(context: context, body: body)
         case (.POST, "/v1/embeddings"):
             guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleEmbeddings(context: context, body: body, style: .openAI)
@@ -2920,6 +2935,100 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     context: ctx, eventLoop: eventLoop,
                     status: .internalServerError,
                     body: ["error": "rerank failed: \(msg)"])
+            }
+        }
+    }
+
+    // MARK: - Decisions: POST /v1/decide
+
+    /// Pick one option (or none), or answer yes/no, for each text. `model` is the name of an installed
+    /// decision model. Body: `text` | `texts`, then `options` (+ `question`, `allow_none`) or `yes_no`.
+    private func handleDecide(context: ChannelHandlerContext, body: ByteBuffer) {
+        func fail(_ status: HTTPResponseStatus, _ message: String) {
+            sendJSON(context: context, status: status, body: ["error": message])
+        }
+        guard let json = parseJSON(body) else { return fail(.badRequest, "Invalid JSON") }
+        guard let name = ollamaModelName(json) else { return fail(.badRequest, "Missing 'model' field") }
+
+        let texts: [String]
+        if let one = json["text"] as? String, json["texts"] == nil {
+            texts = [one]
+        } else if let many = json["texts"] as? [String], !many.isEmpty, json["text"] == nil {
+            texts = many
+        } else {
+            return fail(.badRequest, "Provide 'text' (string) or 'texts' (non-empty array of strings)")
+        }
+        if let raw = json["options"], !(raw is [String]) {
+            return fail(.badRequest, "'options' must be an array of strings")
+        }
+        let yesNo = json["yes_no"] as? String
+        let options = json["options"] as? [String]
+        if json["yes_no"] != nil, yesNo?.isEmpty != false {
+            return fail(.badRequest, "'yes_no' must be a non-empty question string")
+        }
+        if yesNo == nil, options?.isEmpty != false {
+            return fail(.badRequest, "Provide 'options' (non-empty array of strings) or 'yes_no' (question string)")
+        }
+        if yesNo != nil, options != nil {
+            return fail(.badRequest, "Provide 'options' or 'yes_no', not both")
+        }
+        if let q = json["question"], !(q is String) { return fail(.badRequest, "'question' must be a string") }
+        if yesNo != nil, json["question"] != nil {
+            return fail(.badRequest, "'question' goes with 'options'; for 'yes_no' the question is its value")
+        }
+        do { try DecisionModel.checkCounts(texts: texts.count, options: options?.count ?? 2) } catch {
+            return fail(.badRequest, String(describing: error))
+        }
+        if let a = json["allow_none"], !(a is Bool) { return fail(.badRequest, "'allow_none' must be a boolean") }
+        let question = json["question"] as? String
+        let allowNone = json["allow_none"] as? Bool ?? true
+
+        guard let manifest = registry.getModel(name) else { return fail(.notFound, "decision model not found") }
+        guard manifest.family == .decision else {
+            return fail(.badRequest, "'\(name)' (family \(manifest.family.rawValue)) is not a decision model")
+        }
+        let dir = registry.modelPath(name)
+        let modelName = manifest.name
+
+        let eventLoop = context.eventLoop
+        nonisolated(unsafe) let ctx = context
+        let decide = decisionEngine
+        let keepAlive = auxKeepAlive.decide
+        let keepAliveOverride = KeepAliveParse.seconds(from: json["keep_alive"])
+        trace.setModel(modelName)
+
+        Task {
+            guard await self.enterQueueOr503(ctx, eventLoop) else { return }
+            defer { self.leaveQueue() }
+            await keepAlive.beginRequest()
+            defer {
+                Task {
+                    await keepAlive.endRequest()
+                    await keepAlive.touch(override: keepAliveOverride)
+                    await keepAlive.evictIfDue { decide.unload() }
+                }
+            }
+            do {
+                let model = try await decide.load(directory: dir)
+                let results: [[String: Any]]
+                if let yesNo {
+                    results = try decide.yesNo(model, texts, question: yesNo).map { ["answer": $0.answer, "p_yes": $0.pYes] }
+                } else {
+                    results = try decide.choose(model, texts, options: options ?? [], question: question, allowNone: allowNone)
+                        .map {
+                            ["label": $0.label as Any? ?? NSNull(), "index": $0.index as Any? ?? NSNull(),
+                             "scores": $0.scores, "p_none": $0.pNone]
+                        }
+                }
+                self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok,
+                                    body: ["model": modelName, "results": results])
+            } catch let e as DecisionError {
+                self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .badRequest,
+                                    body: ["error": e.description])
+            } catch {
+                self.logger.error("[decide] failed: \(String(describing: error).prefix(300))")
+                self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .internalServerError,
+                                    body: ["error": "decide failed"])
             }
         }
     }

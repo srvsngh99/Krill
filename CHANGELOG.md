@@ -9,6 +9,21 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Added
+
+- **Decision models.** A new model type that picks one option (or "none of
+  these") or answers yes / no instead of generating text. `krill decide` runs a
+  bundle from the command line and `POST /v1/decide` serves it, with its own
+  model family, keep-alive and idle unload. Experimental: no model alias or
+  `krill pull` entry yet. See `docs/DECISION_MODELS.md`.
+
+### Changed
+
+- The ModernBERT encoder behind the embedder now uses a fused layer norm, a
+  finite mask fill (so fp16 padding cannot produce NaN) and reads the RoPE
+  thetas from `rope_parameters` when the flat keys are missing. Embeddings from
+  `gte-modernbert-base` are unchanged beyond float noise.
+
 ## [0.27.6] - 2026-11-15
 
 ### Added

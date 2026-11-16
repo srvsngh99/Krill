@@ -159,6 +159,11 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
         throw ModelLoadError.invalidConfig("Cannot parse config.json")
     }
 
+    if DecisionModel.isDecisionConfig(configJSON) {
+        throw ModelLoadError.unsupportedArchitecture(
+            "A decision model is not a causal LM. Use POST /v1/decide instead.")
+    }
+
     // Detect the architecture and dispatch to the matching family loader.
     // Detection is a declarative, ordered table (`architectureRules`): the
     // first rule whose matcher claims the (arch, model_type) pair wins, so the

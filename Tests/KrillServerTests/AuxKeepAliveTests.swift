@@ -17,10 +17,28 @@ final class AuxKeepAliveTests: XCTestCase {
         XCTAssertTrue(ev)
         // nothing resident: nothing reported, state reset
         let names = await aux.evictExpired(embedEngine: EmbeddingEngine(), rerankEngine: RerankEngine(),
-                                           now: now.addingTimeInterval(30))
+                                           decisionEngine: DecisionEngine(), now: now.addingTimeInterval(30))
         XCTAssertTrue(names.isEmpty)
         let after = await aux.embed.shouldEvict(now: now.addingTimeInterval(1000))
         XCTAssertFalse(after, "markEvicted clears the stale deadline")
+    }
+
+    func testDecisionModelIsUnloadedAfterTTLAndAfterKeepAliveZero() async throws {
+        let tiny = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("KrillCoreTests/Fixtures/decision/tiny")
+        let aux = AuxKeepAlive(defaultSeconds: 300)
+        let engine = DecisionEngine()
+        for override in [5, 0] {
+            _ = try await engine.load(directory: tiny)
+            await aux.decide.beginRequest()
+            await aux.decide.endRequest()
+            await aux.decide.touch(override: override)
+            let names = await aux.evictExpired(embedEngine: EmbeddingEngine(), rerankEngine: RerankEngine(),
+                                               decisionEngine: engine, now: Date().addingTimeInterval(6))
+            XCTAssertEqual(names.map(\.name), ["tiny"])
+            XCTAssertEqual(names.map(\.kind), ["decide"])
+            XCTAssertNil(engine.loadedModelName)
+        }
     }
 
     func testNeverEvictsWhileInFlight() async {
@@ -107,7 +125,8 @@ final class AuxKeepAliveRaceTests: XCTestCase {
         let engine = EmbeddingEngine()
         XCTAssertFalse(engine.unloadVisionTower())   // nothing resident: no-op
         XCTAssertFalse(engine.unloadAudioTower())
-        let names = await aux.evictExpired(embedEngine: engine, rerankEngine: RerankEngine(), now: later)
+        let names = await aux.evictExpired(embedEngine: engine, rerankEngine: RerankEngine(),
+                                           decisionEngine: DecisionEngine(), now: later)
         XCTAssertTrue(names.isEmpty)
     }
 

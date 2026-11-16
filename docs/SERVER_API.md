@@ -259,7 +259,7 @@ split, which never changes a vector:
 
 | Knob | Where | Effect |
 |---|---|---|
-| `keep_alive` | request field + `KRILL_KEEP_ALIVE` / `OLLAMA_KEEP_ALIVE` | Same semantics as chat models (see [Model Lifecycle](#model-lifecycle-keep-alive)). The embedding and rerank model are unloaded, weights and MLX buffer cache both, once idle past the TTL (default `5m`); `0` unloads right after the request; negative pins. The next request reloads transparently. |
+| `keep_alive` | request field + `KRILL_KEEP_ALIVE` / `OLLAMA_KEEP_ALIVE` | Same semantics as chat models (see [Model Lifecycle](#model-lifecycle-keep-alive)). The embedding, rerank and decision model are unloaded, weights and MLX buffer cache both, once idle past the TTL (default `5m`); `0` unloads right after the request; negative pins. The next request reloads transparently. |
 | `KRILL_EMBED_MAX_BATCH_TOKENS` | env | A request is split into sub-batches of at most this many padded tokens (sequences x padded length); default 512 (2,048 for the full-precision EmbeddingGemma 2 build, which is faster at that size and already past 1 GB). Peak transient memory follows this number, not the request size. Per-item vectors do not depend on the split. Applies to EmbeddingGemma 2 batching and to `/v1/rerank`. |
 | `KRILL_EMBED_ATTN_BLOCK` / `KRILL_EMBED_ATTN_MIN` | env | EmbeddingGemma 2 attention on inputs of `KRILL_EMBED_ATTN_MIN` (default 1,024) or more tokens runs in blocks of this many query rows (default 512, `0` = off); sliding layers read only their +-512 window. Identical output; an 8,192-token input peaks ~1.2 GB instead of ~5 GB (4-bit). |
 | tower `keep_alive` | request field + `KRILL_KEEP_ALIVE` | EmbeddingGemma 2's vision and audio towers load on the first image/video or audio request and unload on their own idle clock (armed only by requests carrying that modality), independently of the text tower. A text-only server that once served an image returns to its text-only footprint after the TTL while text requests keep the text tower warm. |
@@ -296,6 +296,19 @@ tokens. `/api/embeddings` (legacy) stays text-only. Details and numbers:
 
 Requesting embeddings against a non-embedding (chat) model returns `400`;
 an uninstalled model returns `404` with a `krill pull` hint.
+
+## Decisions
+
+### POST /v1/decide
+
+Decision models (`decision` family) pick one option, or "none of these", or answer yes / no
+instead of generating text. Body: `{"model": "decider", "text": "..." | "texts": [...],`
+`"options": [...], "question": "...", "allow_none": true}` or `"yes_no": "question"` in place
+of `options` (`question` is not accepted with `yes_no`). Returns `{"model", "results": [...]}`, one
+result per text: `{"label", "index", "scores", "p_none"}` (`label` and `index` are `null` when
+"none" wins) or `{"answer", "p_yes"}`. At most 256 texts and 128 options; token limits come from the
+bundle and over-limit input is `400`, never truncated. An unknown model is `404`, a non-decision
+model `400`. Details: [DECISION_MODELS.md](DECISION_MODELS.md).
 
 ## Anthropic Messages API
 

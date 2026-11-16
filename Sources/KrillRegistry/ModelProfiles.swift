@@ -199,6 +199,14 @@ public enum ModelProfiles {
                 strengths: ["Fast vector embeddings", "Reranking / retrieval scoring"],
                 weaknesses: ["Cannot generate text", "Not usable for chat"],
                 goodFor: ["Embeddings", "RAG retrieval", "Reranking"])
+        case .decision:
+            return ModelProfile(
+                displayName: "Decision model", vendor: "Encoder", released: "various",
+                trainingCutoff: "n/a",
+                tagline: "Picks one option (or none) or answers yes/no. Never generates text.",
+                strengths: ["Routing, intent and moderation decisions", "Calibrated option scores"],
+                weaknesses: ["Cannot generate text", "Not usable for chat"],
+                goodFor: ["Routing", "Classification", "Yes/no checks"])
         case .unlimitedOcr:
             return ModelProfile(
                 displayName: "UNLIMITED-OCR", vendor: "DeepSeek-OCR", released: "2025",

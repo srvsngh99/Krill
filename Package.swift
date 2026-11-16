@@ -124,6 +124,7 @@ let package = Package(
             name: "KrillServer",
             dependencies: [
                 "KrillObs",
+                "KrillCore",
                 "KrillEngine",
                 "KrillCache",
                 "KrillRegistry",
@@ -213,6 +214,7 @@ let package = Package(
                 "KrillCache",
                 "KrillHarness",
                 .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ]

@@ -44,6 +44,12 @@ public struct ModernBertConfig: Decodable, Sendable {
         case globalAttnEveryNLayers = "global_attn_every_n_layers"
         case localAttention = "local_attention"
         case maxPositionEmbeddings = "max_position_embeddings"
+        case ropeParameters = "rope_parameters"
+    }
+
+    private struct RopeEntry: Decodable {
+        let ropeTheta: Float
+        enum CodingKeys: String, CodingKey { case ropeTheta = "rope_theta" }
     }
 
     public init(from decoder: Decoder) throws {
@@ -54,13 +60,19 @@ public struct ModernBertConfig: Decodable, Sendable {
         intermediateSize = try c.decode(Int.self, forKey: .intermediateSize)
         vocabSize = try c.decode(Int.self, forKey: .vocabSize)
         normEps = (try? c.decode(Float.self, forKey: .normEps)) ?? 1e-5
-        globalRopeTheta = (try? c.decode(Float.self, forKey: .globalRopeTheta)) ?? 160000
-        localRopeTheta = (try? c.decode(Float.self, forKey: .localRopeTheta)) ?? 10000
+        let rope = try? c.decode([String: RopeEntry].self, forKey: .ropeParameters)
+        globalRopeTheta = (try? c.decode(Float.self, forKey: .globalRopeTheta))
+            ?? rope?["full_attention"]?.ropeTheta ?? 160000
+        localRopeTheta = (try? c.decode(Float.self, forKey: .localRopeTheta))
+            ?? rope?["sliding_attention"]?.ropeTheta ?? 10000
         globalAttnEveryNLayers = (try? c.decode(Int.self, forKey: .globalAttnEveryNLayers)) ?? 3
         localAttention = (try? c.decode(Int.self, forKey: .localAttention)) ?? 128
         maxTokens = min((try? c.decode(Int.self, forKey: .maxPositionEmbeddings)) ?? 8192, 8192)
     }
 }
+
+/// Finite so a sum of two masks still fits fp16 (-inf rows would turn into NaN).
+private let maskFill: Float = -30000
 
 // MARK: - Weight-only LayerNorm
 
@@ -77,9 +89,7 @@ final class ModernBertNorm: Module {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let mu = MLX.mean(x, axis: -1, keepDims: true)
-        let v = MLX.variance(x, axis: -1, keepDims: true)
-        return weight * (x - mu) * MLX.rsqrt(v + eps)
+        MLXFast.layerNorm(x, weight: weight, bias: nil, eps: eps)
     }
 }
 
@@ -190,21 +200,32 @@ public final class ModernBertEmbeddingModel: Module, SentenceEmbeddingEncoder {
             wrappedValue: ModernBertNorm(cfg.hiddenSize, eps: cfg.normEps), key: "final_norm")
     }
 
-    /// Additive `[1, 1, T, T]` mask, 0 within +/- window, -inf outside. Cast to
+    /// Additive `[1, 1, T, T]` mask, 0 within +/- window, `maskFill` outside. Cast to
     /// `dtype` so scaled_dot_product_attention can promote it to the q/k/v type.
     private func slidingWindowMask(_ T: Int, dtype: DType) -> MLXArray {
         let rows = MLXArray(Int32(0) ..< Int32(T))
         let dist = MLX.abs(rows.reshaped(T, 1) - rows.reshaped(1, T))
         let allowed = dist .<= MLXArray(Int32(config.localWindow))
-        return MLX.where(allowed, MLXArray(Float(0)), MLXArray(Float(-1e9)))
+        return MLX.where(allowed, MLXArray(Float(0)), MLXArray(maskFill))
             .reshaped(1, 1, T, T).asType(dtype)
     }
 
     public func lastHiddenState(_ tokens: MLXArray) -> MLXArray {
+        hiddenStates(tokens)
+    }
+
+    /// Per-token states for a right-padded batch. `attentionMask` is `[B, T]`
+    /// (1 real, 0 padding) and masks padded keys in global and local layers.
+    public func hiddenStates(_ tokens: MLXArray, attentionMask: MLXArray? = nil) -> MLXArray {
         var h = embeddings(tokens)
-        let localMask = slidingWindowMask(tokens.dim(1), dtype: h.dtype)
+        let pad = attentionMask.map {
+            MLX.where($0 .== 1, MLXArray(Float(0)), MLXArray(maskFill))
+                .reshaped($0.dim(0), 1, 1, $0.dim(1)).asType(h.dtype)
+        }
+        var localMask = slidingWindowMask(tokens.dim(1), dtype: h.dtype)
+        if let pad { localMask = localMask + pad }
         for (i, layer) in layers.enumerated() {
-            h = layer(h, mask: config.isGlobal(i) ? nil : localMask)
+            h = layer(h, mask: config.isGlobal(i) ? pad : localMask)
         }
         return finalNorm(h)
     }
