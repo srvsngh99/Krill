@@ -7,6 +7,14 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.28.0 - 2026-11-16
+**Krill can now run decision models.**
+A decision model picks one option (or "none of these") or answers yes / no instead of
+generating text. `krill decide` runs a model bundle from the command line and `POST /v1/decide`
+serves it, with its own keep-alive and idle unload. This is Experimental: there is no model
+alias or `krill pull` entry yet. The embedder's ModernBERT encoder also got a fused layer norm
+and a finite mask fill, so fp16 padding cannot produce NaN.
+
 ## v0.27.6 - 2026-11-15
 **Set the reasoning depth once, and agents follow your thinking toggle.**
 `krill config set reasoning_effort medium` (`xhigh`, `medium` or `low`) now sets how hard
