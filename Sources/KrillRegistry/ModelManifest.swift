@@ -229,6 +229,9 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
     /// endpoint land in follow-up PRs (see
     /// docs/workstreams/WS7_SPECIALIZED_MODEL_TYPES.md).
     case reranker
+    /// Decision model: a ModernBERT reader plus a decision head that picks one
+    /// option (or none), or answers yes/no. Served by `POST /v1/decide`.
+    case decision
     /// Nanbeige 4.2: a LOOPED dense text decoder (`NanbeigeForCausalLM`,
     /// model_type "nanbeige"). Its blocks are Llama-shaped - no-bias q/k/v/o,
     /// SwiGLU MLP, two-RMSNorm pre-norm sandwich - but the whole stack is
@@ -250,6 +253,9 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
 
     /// Detect model family from HuggingFace config.json's `architectures` field.
     public static func detect(from configJSON: [String: Any]) -> ModelFamily? {
+        if configJSON["reader"] is [String: Any], configJSON["head"] is [String: Any], configJSON["pooling"] != nil {
+            return .decision
+        }
         guard let architectures = configJSON["architectures"] as? [String],
               let arch = architectures.first else {
             // Fallback: try model_type

@@ -1,0 +1,123 @@
+# Decision models
+
+Tier: **Experimental** (served over HTTP and checked against golden fixtures; no alias, pull or benchmark gate yet).
+
+A decision model reads a text and returns a typed answer instead of generating text: one of
+several options (or "none of these") with probabilities, or yes / no. It is a ModernBERT
+reader plus a small decision head. The type has its own runtime path (`DecisionModel` in
+`KrillCore`, `DecisionEngine` in `KrillEngine`) and its own route, `POST /v1/decide`; it does not
+go through the chat, embedding or rerank engines.
+
+A bundle is recognised as a decision model when its `config.json` has a `reader` and a
+`head` section (both objects) and a `pooling` entry; its `ModelFamily` is `decision`.
+
+## CLI
+
+`--model` is a bundle directory (`config.json`, `reader.safetensors`, `head.safetensors`,
+`tokenizer.json`, `calibration.json`) or the name of an installed one. There is no model alias and
+no `krill pull` entry yet.
+
+```sh
+krill decide --model <bundle> --text "My card was charged twice." \
+  --option "billing question" --option "password reset" --option "shipping delay"
+# {"index":0,"label":"billing question","p_none":0.0016,"scores":[0.998,0.00002,0.0003]}
+
+krill decide --model <bundle> --text "The invoice was paid in full." --yes-no "Is the invoice paid?"
+# {"answer":"yes","p_yes":0.97}
+```
+
+- `--question <q>` is appended to the text (`text + "\n\n" + question`).
+- `--no-none` always picks an option; otherwise `label` and `index` are `null` when "none of these" wins.
+- `--json-in <file|->` reads JSON lines (`text`, `question`, `options`, `allow_none`, `yes_no`)
+  and prints one result per line, loading the model once.
+
+## HTTP: `POST /v1/decide`
+
+`model` is the name of an installed decision model, as for embeddings and rerank; a path is not
+accepted over HTTP (the CLI takes one). Send
+`text` (one string) or `texts` (a non-empty array, one result each), and either `options` (with an
+optional `question` and `allow_none`, default `true`) or `yes_no` (the question).
+
+```sh
+curl -s http://127.0.0.1:57455/v1/decide -H 'Content-Type: application/json' -d '{
+  "model": "decider",
+  "texts": ["My card was charged twice.", "Where is my parcel? It is a week late."],
+  "options": ["billing question", "password reset", "shipping delay"]
+}'
+# {"model":"decider","results":[
+#   {"label":"billing question","index":0,"scores":[0.998,0.00002,0.0003],"p_none":0.0016},
+#   {"label":"shipping delay","index":2,"scores":[0.001,0.0002,0.99],"p_none":0.005}]}
+
+curl -s http://127.0.0.1:57455/v1/decide -H 'Content-Type: application/json' -d '{
+  "model": "decider", "text": "The invoice was paid in full.", "yes_no": "Is the invoice paid?"}'
+# {"model":"decider","results":[{"answer":"yes","p_yes":0.97}]}
+```
+
+When "none of these" wins, `label` and `index` are `null` (`scores` and `p_none` are still given);
+`allow_none: false` always picks an option.
+
+Errors are `{"error": "..."}`, like the embeddings and rerank routes:
+
+| Status | When |
+|---|---|
+| 400 | malformed JSON; missing `model`; no `text` / `texts` (or both); no `options` / `yes_no` (or both); empty `options`; wrong field types; an empty text or option; more than 256 texts or 128 options; text over 2,048 or an option over 32 tokens; `model` is not a decision model |
+| 401 | missing or wrong bearer key, when the server has one |
+| 404 | unknown model name |
+| 500 | the model failed to load or run (the body says only "decide failed"; details go to the server log) |
+
+A decision model sent to chat, embeddings or rerank is refused with a message that says so. It
+shares the server's request queue, `keep_alive` field and idle unload with the embedding and rerank
+models, and a registered decision model shows up in `/v1/models` and `/v1/status`.
+
+## Input limits
+
+The text (with its question) may be 2,048 tokens and each option 32 tokens; a request may carry up
+to 256 texts and 128 options (`DecisionModel.maxTexts`, `maxOptions`). Longer input is an error that
+names the count and the limit; nothing is truncated. Texts go through the reader 8 at a time, so memory
+does not grow with the number of texts. Empty texts and options are rejected. The option cache holds at
+most 512 options in total.
+
+## Parity
+
+Two golden fixtures, both produced by the Python reference runtime (CPU, fp32), which is not in this
+repository:
+
+- **Tiny bundle, runs in CI with no download.** `Tests/KrillCoreTests/Fixtures/decision/tiny` is a
+  random-weight bundle of the same architecture (3 layers, hidden size 32, mean pooling, a 400-token
+  tokenizer, 188 KB) and `golden_tiny.json` holds the reference output for 35 cases (the same
+  inputs as below). `TinyDecisionModelTests` checks token ids, every decision, probabilities within
+  1e-4, batch equals single, the request limits and empty inputs, config validation, the fused layer norm
+  against the explicit formula (fp32 and fp16), and the encoder's per-token states against the reference.
+  `DecideEndpointTests` repeats the 35 cases over HTTP. This covers masking, MaxSim, the head, the
+  "none" rules and yes / no, but with random weights it says nothing about the quality of a real model.
+- **Real bundle, needs the weights (not public).** `golden.json` holds 35 hand-written cases:
+  support, intent, spam, moderation, tool choice, sentiment, 2- to 77-option lists, with and without
+  a question, "none" and `allow_none=false`, a 1,470-token text, a padded batch, four yes / no.
+  `DecisionModelParityTests` and `testMatchesRealBundleGolden` run it with
+  `KRILL_DECISION_MODEL_PATH=<bundle> swift test --filter Decision` and skip when it is unset, so
+  CI never runs them. Verified locally on one machine: 35 of 35 decisions identical, probabilities
+  within 1e-3.
+
+## Speed and memory
+
+Manual measurements on one machine (M4 Pro), not run in CI. The in-process numbers come from
+`DecisionModelBenchmarkTests` (opt-in with `KRILL_DECISION_BENCH=1`, release build, 50 warm calls,
+medians). The comparison column is a Python reference runtime on MPS (fp32, same calls) that is not in
+this repository, so it cannot be reproduced from here. Other jobs may have shared the machine.
+
+| Call | Krill | Python reference | Ratio |
+|---|---|---|---|
+| short text, 3 options | 6.7 ms | 10.0 ms | 0.7 |
+| short text, 77 options, first call (options not cached) | 58 ms | 76 ms | 0.75 |
+| short text, 77 options, repeat calls | 6.5 ms | 10.0 ms | 0.65 |
+| 99-token text, 4 options | 13.3 ms | 15.1 ms | 0.9 |
+| 451-token text, 10 options | 46.0 ms | 39.2 ms | 1.15 |
+| yes / no | 6.6 ms | 9.9 ms | 0.65 |
+
+The reader's layer norm runs as one fused kernel (`MLXFast.layerNorm`). A server with the model loaded
+held 776 MB (physical footprint) after a few calls, against 8 MB idle; one reading, one machine.
+
+## Not there yet
+
+- Model aliases and `krill pull`: the model repository does not exist yet.
+- A benchmark gate. Texts are read in padded chunks of 8 but scored one at a time.

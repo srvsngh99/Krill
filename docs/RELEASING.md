@@ -22,7 +22,8 @@ section, then delete the rows.
 
 Tracked so a release note does not claim more than shipped.
 
-None.
+- Decision models (`krill decide`, `POST /v1/decide`, `ModelFamily.decision`): experimental, no PR
+  yet. No alias or `krill pull` entry, so notes must not say it can be pulled.
 
 ---
 

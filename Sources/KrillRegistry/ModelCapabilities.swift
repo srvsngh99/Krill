@@ -35,6 +35,9 @@ public enum Capability: String, Sendable, CaseIterable, Codable {
 
     /// Reranker (cross-encoder) scoring head.
     case reranker
+
+    /// Decision head: pick one option (or none) or answer yes/no.
+    case decision
 }
 
 /// How well-supported a model family is in this build.
@@ -184,6 +187,8 @@ public enum ModelCapabilities {
             // refuse them. The `/v1/rerank` endpoint that consumes
             // this capability ships in the follow-up runtime PR.
             return [.reranker]
+        case .decision:
+            return [.decision]
         }
     }
 
@@ -291,6 +296,8 @@ public enum ModelCapabilities {
             // lands and the parity smoke matches a reference model
             // within tolerance.
             return .experimental
+        case .decision:
+            return .experimental
         case .gemma4Unified:
             // Encoder-free Gemma 4 12B: native Swift+MLX load+run path
             // reusing the dense Gemma 4 text backbone, with encoder-free
@@ -342,6 +349,7 @@ public extension Capability {
         case .structuredOutput: return "structured_output"
         case .moe: return "moe"
         case .reranker: return "reranker"
+        case .decision: return "decision"
         }
     }
 }

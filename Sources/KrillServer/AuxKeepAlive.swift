@@ -1,8 +1,8 @@
 import Foundation
 import KrillEngine
 
-/// Idle-unload bookkeeping for the two auxiliary model slots, embedding and
-/// rerank. They use the SAME ``KeepAliveController`` semantics, defaults
+/// Idle-unload bookkeeping for the auxiliary model slots (embedding, rerank,
+/// decision). They use the SAME ``KeepAliveController`` semantics, defaults
 /// (`KRILL_KEEP_ALIVE` / `OLLAMA_KEEP_ALIVE`) and per-request `keep_alive`
 /// field as chat models: a positive value sets the idle TTL, `0` unloads once
 /// the request drains, a negative value pins. After expiry the weights AND
@@ -11,6 +11,7 @@ import KrillEngine
 public final class AuxKeepAlive: Sendable {
     public let embed: KeepAliveController
     public let rerank: KeepAliveController
+    public let decide: KeepAliveController
     /// EmbeddingGemma 2 modality towers load lazily and expire on their own
     /// clocks, armed ONLY by requests that carry that modality. A text-only
     /// server that once served an image drops back to the text-only footprint
@@ -21,6 +22,7 @@ public final class AuxKeepAlive: Sendable {
     public init(defaultSeconds: Int) {
         embed = KeepAliveController(defaultSeconds: defaultSeconds)
         rerank = KeepAliveController(defaultSeconds: defaultSeconds)
+        decide = KeepAliveController(defaultSeconds: defaultSeconds)
         vision = KeepAliveController(defaultSeconds: defaultSeconds)
         audio = KeepAliveController(defaultSeconds: defaultSeconds)
     }
@@ -28,7 +30,7 @@ public final class AuxKeepAlive: Sendable {
     /// Unload whichever slot is resident, idle and past its deadline. Returns
     /// the names of what was unloaded (for logging).
     public func evictExpired(embedEngine: EmbeddingEngine, rerankEngine: RerankEngine,
-                             now: Date = Date()) async -> [String] {
+                             decisionEngine: DecisionEngine = DecisionEngine(), now: Date = Date()) async -> [String] {
         var out: [String] = []
         // Check-and-unload is one actor step (see KeepAliveController.evictIfDue):
         // a request that begins in between can never lose its model.
@@ -37,6 +39,9 @@ public final class AuxKeepAlive: Sendable {
         }
         await rerank.evictIfDue(now: now) {
             if let name = rerankEngine.loadedModelName, rerankEngine.unload() { out.append(name) }
+        }
+        await decide.evictIfDue(now: now) {
+            if let name = decisionEngine.loadedModelName, decisionEngine.unload() { out.append(name) }
         }
         await vision.evictIfDue(now: now) {
             if embedEngine.unloadVisionTower() { out.append("vision tower") }
