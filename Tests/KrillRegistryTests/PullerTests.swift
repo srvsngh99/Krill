@@ -279,6 +279,42 @@ final class PullerTests: XCTestCase {
         XCTAssertTrue(Puller.isEssentialFile("generation_config.json"))
     }
 
+    func testPullDetectsDecisionPrecisionAndDownloadsCalibration() async throws {
+        let cases = [("float16", "fp16"), ("bf16", "bf16"), ("float32", "fp32"), ("unknown", "fp16")]
+
+        for (dtype, expectedQuant) in cases {
+            let tempDir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: tempDir) }
+            let registry = Registry(baseDir: tempDir)
+            let config = #"{"reader":{},"head":{},"pooling":"cls","dtype":"\#(dtype)"}"#
+            let listing = #"{"siblings":[{"rfilename":"config.json","size":\#(config.utf8.count)},{"rfilename":"calibration.json","size":2}]}"#
+            let client = MockPullerHTTPClient(
+                tempDir: tempDir,
+                dataResponses: [.init(statusCode: 200, body: Data(listing.utf8))],
+                downloadResponses: [
+                    .init(statusCode: 200, body: Data(config.utf8)),
+                    .init(statusCode: 200, body: Data("{}".utf8)),
+                ]
+            )
+            let puller = Puller(
+                registry: registry, httpClient: client, tokenProvider: { nil }, sleeper: { _ in }
+            )
+            let resolved = ResolvedModel(
+                repo: "org/decider", name: "decider", family: .bert,
+                params: "1B", quant: "4bit", context: 4096
+            )
+
+            let manifest = try await puller.pull(resolved)
+
+            XCTAssertEqual(manifest.family, .decision)
+            XCTAssertEqual(manifest.quant, expectedQuant)
+            XCTAssertTrue(manifest.files.contains { $0.path == "calibration.json" })
+            XCTAssertTrue(FileManager.default.fileExists(
+                atPath: registry.modelPath("decider").appendingPathComponent("calibration.json").path
+            ))
+        }
+    }
+
     func testIsEssentialFileAcceptsAllTokenizerArtifacts() {
         // Merged tokenizer form.
         XCTAssertTrue(Puller.isEssentialFile("tokenizer.json"))

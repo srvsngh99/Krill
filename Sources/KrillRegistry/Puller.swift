@@ -128,18 +128,28 @@ public final class Puller: @unchecked Sendable {
         // Detect actual family from config.json if available
         var family = resolved.family
         let configURL = destDir.appendingPathComponent("config.json")
-        if let configData = try? Data(contentsOf: configURL),
-           let configJSON = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
-           let detected = ModelFamily.detect(from: configJSON) {
+        let configJSON = (try? Data(contentsOf: configURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        if let detected = configJSON.flatMap(ModelFamily.detect(from:)) {
             family = detected
         }
 
         // Detect context length from config
         var context = resolved.context
-        if let configData = try? Data(contentsOf: configURL),
-           let configJSON = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
-           let maxPos = configJSON["max_position_embeddings"] as? Int {
+        if let maxPos = configJSON?["max_position_embeddings"] as? Int {
             context = maxPos
+        }
+
+        let quant: String
+        if family == .decision {
+            switch (configJSON?["dtype"] as? String)?.lowercased() {
+            case "float16", "fp16": quant = "fp16"
+            case "bfloat16", "bf16": quant = "bf16"
+            case "float32", "fp32": quant = "fp32"
+            default: quant = "fp16"
+            }
+        } else {
+            quant = resolved.quant
         }
 
         // Build the manifest that will be staged alongside the blob.
@@ -147,7 +157,7 @@ public final class Puller: @unchecked Sendable {
             name: resolved.name,
             family: family,
             params: resolved.params,
-            quant: resolved.quant,
+            quant: quant,
             source: resolved.repo,
             context: context,
             files: modelFiles,
@@ -309,7 +319,7 @@ extension Puller {
         if name == "model.safetensors.index.json" { return true }
         switch name {
         // Core model + generation config.
-        case "config.json", "generation_config.json":
+        case "config.json", "generation_config.json", "calibration.json":
             return true
         // Tokenizer payloads. `tokenizer.json` is the merged HF form;
         // `vocab.json` + `merges.txt` is the older BPE form some
