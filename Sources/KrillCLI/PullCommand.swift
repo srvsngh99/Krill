@@ -76,6 +76,10 @@ struct PullCommand: AsyncParsableCommand {
         print(Ansi.bold("Done.") + " \(manifest.name) installed.")
         print(Ansi.dim(String(format: "   %.0f MB \u{00B7} %.1fs", sizeMB, elapsed)))
         print(Ansi.dim("   \(registry.modelPath(manifest.name).path)"))
-        print("\nRun with: " + Ansi.bold("krill run \(manifest.name)"))
+        if manifest.family == .decision {
+            print("\nRun with: " + Ansi.bold("krill decide --model \(manifest.name) --text \"...\" --option \"...\" --option \"...\""))
+        } else {
+            print("\nRun with: " + Ansi.bold("krill run \(manifest.name)"))
+        }
     }
 }

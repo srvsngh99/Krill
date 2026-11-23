@@ -161,7 +161,7 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
 
     if DecisionModel.isDecisionConfig(configJSON) {
         throw ModelLoadError.unsupportedArchitecture(
-            "A decision model is not a causal LM. Use POST /v1/decide instead.")
+            "A decision model is not a causal LM. Use `krill decide` or POST /v1/decide instead.")
     }
 
     // Detect the architecture and dispatch to the matching family loader.
