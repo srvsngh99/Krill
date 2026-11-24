@@ -9,6 +9,17 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.28.1] - 2026-11-24
+
+### Fixed
+
+- `krill pull` of a decision model now finishes with a `krill decide` example
+  instead of a `krill run` hint, reports the model's real precision from its
+  `config.json` (fp16, bf16 or fp32) instead of a quantization guess, and
+  downloads `calibration.json` with the rest of the bundle. Loading a decision
+  model through the chat path now points to `krill decide` or
+  `POST /v1/decide`.
+
 ## [0.28.0] - 2026-11-16
 
 ### Added

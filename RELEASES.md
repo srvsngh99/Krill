@@ -7,6 +7,10 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.28.1 - 2026-11-24
+**Pulling a decision model now shows the right next step.**
+`krill pull` of a decision model from Hugging Face now ends with a ready-to-run `krill decide` example, shows the model's real precision, and also downloads its `calibration.json`.
+
 ## v0.28.0 - 2026-11-16
 **Krill can now run decision models.**
 A decision model picks one option (or "none of these") or answers yes / no instead of
