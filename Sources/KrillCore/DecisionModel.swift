@@ -128,6 +128,7 @@ public struct DecisionChoice: Sendable {
 public struct DecisionYesNo: Sendable {
     public let answer: String
     public let pYes: Float
+    public let inputTokens: Int
 }
 
 private func l2Normalized(_ x: MLXArray) -> MLXArray {
@@ -143,6 +144,7 @@ public final class DecisionModel: @unchecked Sendable {
         let mask: MLXArray
         let pooled: MLXArray
         let tokenFraction: MLXArray
+        let tokenCount: Int
     }
 
     private let config: DecisionConfig
@@ -155,6 +157,7 @@ public final class DecisionModel: @unchecked Sendable {
 
     public static let maxTexts = 256
     public static let maxOptions = 128
+    public static let maxSystemOneOptions = 255
     private static let readChunk = 8
     private static let cacheOptionLimit = 512
 
@@ -236,7 +239,8 @@ public final class DecisionModel: @unchecked Sendable {
             .< MLXArray(lengths.map(Int32.init)).reshaped(-1, 1)).asType(.float32)
         let built = OptionStates(
             tokens: l2Normalized(states), mask: mask, pooled: pooled,
-            tokenFraction: MLX.log(mask.sum(axis: 1) + 1) / log(Float(limit + 1)))
+            tokenFraction: MLX.log(mask.sum(axis: 1) + 1) / log(Float(limit + 1)),
+            tokenCount: lengths.reduce(0, +))
         if cachedOptions + options.count > Self.cacheOptionLimit { optionCache.removeAll(); cachedOptions = 0 }
         optionCache[options] = built
         cachedOptions += options.count
@@ -253,18 +257,25 @@ public final class DecisionModel: @unchecked Sendable {
     }
 
     public static func checkCounts(texts: Int, options: Int) throws {
-        guard (1 ... maxTexts).contains(texts) else { throw DecisionError.invalid("provide 1 to \(maxTexts) texts") }
-        guard options <= maxOptions else { throw DecisionError.invalid("at most \(maxOptions) options") }
+        try checkCounts(texts: texts, options: options, optionLimit: maxOptions)
     }
 
-    private func score(_ texts: [String], options: [String]) throws -> (logits: [MLXArray], pooled: MLXArray) {
-        try Self.checkCounts(texts: texts.count, options: options.count)
+    private static func checkCounts(texts: Int, options: Int, optionLimit: Int) throws {
+        guard (1 ... maxTexts).contains(texts) else { throw DecisionError.invalid("provide 1 to \(maxTexts) texts") }
+        guard options <= optionLimit else { throw DecisionError.invalid("at most \(optionLimit) options") }
+    }
+
+    private func score(_ texts: [String], options: [String]) throws
+        -> (logits: [MLXArray], pooled: MLXArray, inputTokens: [Int])
+    {
         let opts = try optionStates(options)
         var logits: [MLXArray] = []
         var pooledRows: [MLXArray] = []
+        var inputTokens: [Int] = []
         for start in stride(from: 0, to: texts.count, by: Self.readChunk) {
             let chunk = Array(texts[start ..< min(start + Self.readChunk, texts.count)])
             let (states, lengths, pooled) = try read(chunk, limit: config.stateMaxTokens, what: "the text")
+            inputTokens.append(contentsOf: lengths.map { $0 + opts.tokenCount })
             for i in chunk.indices {
                 logits.append(optionLogits(opts, state: states[i, 0 ..< lengths[i]], pooled: pooled[i]))
                 pooledRows.append(pooled[i])
@@ -272,14 +283,15 @@ public final class DecisionModel: @unchecked Sendable {
             // Evaluating per chunk frees its states before the next chunk is read.
             eval(Array(logits.suffix(chunk.count)) + Array(pooledRows.suffix(chunk.count)))
         }
-        return (logits, stacked(pooledRows))
+        return (logits, stacked(pooledRows), inputTokens)
     }
 
     public func choose(_ texts: [String], options: [String], question: String? = nil,
                        allowNone: Bool = true) throws -> [DecisionChoice] {
         guard !options.isEmpty else { throw DecisionError.invalid("options must not be empty") }
-        let states = texts.map { text in question.map { "\(text)\n\n\($0)" } ?? text }
-        let (logits, pooled) = try score(states, options: options)
+        try Self.checkCounts(texts: texts.count, options: options.count)
+        let states = question.map { q in texts.map { Self.condition($0, on: q) } } ?? texts
+        let (logits, pooled, _) = try score(states, options: options)
         let t = options.count > config.none.longList ? config.none.long : config.none.short
         return logits.enumerated().map { i, lg in
             let all = concatenated([lg, head.none(lg, statePooled: pooled[i]).reshaped(1)])
@@ -293,6 +305,17 @@ public final class DecisionModel: @unchecked Sendable {
         }
     }
 
+    private static func condition(_ text: String, on question: String) -> String { "\(text)\n\n\(question)" }
+
+    public func candidateProbabilities(text: String, questions: [String], options: [String]) throws
+        -> (probabilities: [[Float]], inputTokens: Int)
+    {
+        guard options.count >= 2 else { throw DecisionError.invalid("provide at least two options") }
+        try Self.checkCounts(texts: questions.count, options: options.count, optionLimit: Self.maxSystemOneOptions)
+        let result = try score(questions.map { Self.condition(text, on: $0) }, options: options)
+        return (result.logits.map { softmax($0, axis: -1).asArray(Float.self) }, result.inputTokens.reduce(0, +))
+    }
+
     public func yesNo(texts: [String], question: String) throws -> [DecisionYesNo] {
         try Self.checkCounts(texts: texts.count, options: 2)
         let options = ["no: \(question)", "yes: \(question)"]
@@ -301,10 +324,11 @@ public final class DecisionModel: @unchecked Sendable {
             throw DecisionError.tooLong(what: "the yes_no question with its prefix", tokens: longest,
                                         limit: config.optionMaxTokens)
         }
-        return try score(texts, options: options).logits.map { row in
+        let result = try score(texts, options: options)
+        return zip(result.logits, result.inputTokens).map { row, inputTokens in
             let lg = row.asArray(Float.self)
             let pYes = 1 / (1 + exp(-(lg[1] - lg[0] + yesNoOffset)))
-            return DecisionYesNo(answer: pYes > 0.5 ? "yes" : "no", pYes: pYes)
+            return DecisionYesNo(answer: pYes > 0.5 ? "yes" : "no", pYes: pYes, inputTokens: inputTokens)
         }
     }
 }

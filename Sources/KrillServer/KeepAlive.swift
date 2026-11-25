@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 /// Parse an Ollama `keep_alive` value: a number of seconds, a duration
 /// string ("5m", "30s", "1h", "1h30m"), `0` (unload right after), or a
@@ -9,8 +10,9 @@ import Foundation
 public enum KeepAliveParse {
     public static func seconds(from any: Any?) -> Int? {
         guard let any else { return nil }
+        if let n = any as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() { return nil }
         if let i = any as? Int { return i }
-        if let d = any as? Double { return Int(d) }
+        if let d = any as? Double { return Int(exactly: d.rounded(.towardZero)) }
         if let s = any as? String { return duration(s) }
         return nil
     }
@@ -18,28 +20,30 @@ public enum KeepAliveParse {
     public static func duration(_ s: String) -> Int? {
         let t = s.trimmingCharacters(in: .whitespaces).lowercased()
         if let i = Int(t) { return i }
-        if t == "0" { return 0 }
         var total = 0
         var num = ""
-        var matched = false
+        guard !t.isEmpty else { return nil }
         for ch in t {
             if ch.isNumber || ch == "-" {
                 num.append(ch)
             } else {
-                guard let n = Int(num) else { return matched ? total : nil }
+                guard let n = Int(num) else { return nil }
+                let multiplier: Int
                 switch ch {
-                case "s": total += n
-                case "m": total += n * 60
-                case "h": total += n * 3600
-                case "d": total += n * 86400
-                default: return matched ? total : nil
+                case "s": multiplier = 1
+                case "m": multiplier = 60
+                case "h": multiplier = 3600
+                case "d": multiplier = 86400
+                default: return nil
                 }
-                matched = true
+                let (seconds, overflow) = n.multipliedReportingOverflow(by: multiplier)
+                let (sum, sumOverflow) = total.addingReportingOverflow(seconds)
+                guard !overflow, !sumOverflow else { return nil }
+                total = sum
                 num = ""
             }
         }
-        if let trailing = Int(num), !matched { return trailing }
-        return matched ? total : nil
+        return num.isEmpty ? total : nil
     }
 }
 

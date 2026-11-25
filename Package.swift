@@ -206,6 +206,7 @@ let package = Package(
             name: "KrillServerTests",
             dependencies: [
                 "KrillServer",
+                "KrillRuntime",
                 "KrillObs",
                 "KrillTooling",
                 "KrillEngine",

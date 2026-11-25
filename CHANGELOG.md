@@ -9,6 +9,11 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Added
+
+- `POST /v1/systemone`, an Ollama-compatible endpoint for scoring choice,
+  yes/no, and ordinal questions with installed Krill decision bundles.
+
 ## [0.28.1] - 2026-11-24
 
 ### Fixed

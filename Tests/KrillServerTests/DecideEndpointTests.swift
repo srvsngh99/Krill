@@ -1,52 +1,48 @@
 import XCTest
 import NIOCore
+import NIOEmbedded
 import NIOHTTP1
-import NIOPosix
 import KrillEngine
 import KrillRegistry
+import KrillRuntime
 @testable import KrillServer
 
-/// `POST /v1/decide` over a real in-process server. Most tests register the tiny fixture bundle
-/// under a model name; `testMatchesRealBundleGolden` needs `KRILL_DECISION_MODEL_PATH` and skips without it.
+/// Decision requests through the in-process HTTP handler with registered fixture bundles.
 final class DecideEndpointTests: XCTestCase {
     private static let engine = DecisionEngine()
-    private var group: MultiThreadedEventLoopGroup!
-    private var channel: Channel!
-    private var base: URL!
+    private var channel: NIOAsyncTestingChannel!
     private var root: URL!
     private var registry: Registry!
 
     override func setUp() async throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent("krill-decide-\(UUID().uuidString)")
         registry = Registry(baseDir: root)
-        try await startServer(apiKey: nil)
+        channel = await makeChannel()
     }
 
     override func tearDown() async throws {
-        try? await channel?.close()
-        try? await group?.shutdownGracefully()
+        _ = try? await channel?.finish(acceptAlreadyClosed: true)
         try? FileManager.default.removeItem(at: root)
     }
 
-    private func startServer(apiKey: String?) async throws {
-        group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        let registry = self.registry!
-        let bootstrap = ServerBootstrap(group: group).childChannelInitializer { ch in
-            ch.pipeline.configureHTTPServerPipeline().flatMap {
-                ch.pipeline.addHandler(KrillServer._makeHTTPHandlerForTesting(
-                    engine: InferenceEngine(modelDirectory: registry.baseDir.appendingPathComponent("none")),
-                    registry: registry, decisionEngine: Self.engine, apiKey: apiKey))
-            }
-        }
-        channel = try await bootstrap.bind(host: "127.0.0.1", port: 0).get()
-        base = URL(string: "http://127.0.0.1:\(try XCTUnwrap(channel.localAddress?.port))")!
+    private func makeChannel(apiKey: String? = nil, compat: CompatMode = .both) async -> NIOAsyncTestingChannel {
+        await NIOAsyncTestingChannel(handler: KrillServer._makeHTTPHandlerForTesting(
+            engine: InferenceEngine(modelDirectory: root.appendingPathComponent("none")),
+            registry: registry, compat: compat, decisionEngine: Self.engine, apiKey: apiKey))
     }
 
     private static let fixtures = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         .appendingPathComponent("KrillCoreTests/Fixtures/decision")
 
     private func installTiny(named name: String = "decider") throws {
+        try requireMetal()
         try installDecisionModel(named: name, linkingTo: Self.fixtures.appendingPathComponent("tiny").path)
+    }
+
+    private func requireMetal() throws {
+        guard MLXMetalRuntime.canInitializeMLXForTests else {
+            throw XCTSkip("MLX Metal runtime is not available in this test process")
+        }
     }
 
     private func post(_ path: String, _ body: [String: Any], bearer: String? = nil) async throws
@@ -58,14 +54,24 @@ final class DecideEndpointTests: XCTestCase {
     private func post(_ path: String, raw: Data, bearer: String? = nil) async throws
         -> (status: Int, json: [String: Any])
     {
-        var request = URLRequest(url: base.appendingPathComponent(path))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let bearer { request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
-        request.httpBody = raw
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        return ((response as! HTTPURLResponse).statusCode, json)
+        var head = HTTPRequestHead(version: .http1_1, method: .POST, uri: path)
+        head.headers.add(name: "Content-Type", value: "application/json")
+        if let bearer { head.headers.add(name: "Authorization", value: "Bearer \(bearer)") }
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        try await channel.writeInbound(HTTPServerRequestPart.body(ByteBuffer(bytes: raw)))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
+        return try await readResponse()
+    }
+
+    private func readResponse() async throws -> (status: Int, json: [String: Any]) {
+        guard case .head(let response) = try await channel.waitForOutboundWrite(as: HTTPServerResponsePart.self),
+              case .body(.byteBuffer(let bytes)) = try await channel.waitForOutboundWrite(as: HTTPServerResponsePart.self),
+              case .end = try await channel.waitForOutboundWrite(as: HTTPServerResponsePart.self) else {
+            XCTFail("Expected one JSON response")
+            return (-1, [:])
+        }
+        let json = try JSONSerialization.jsonObject(with: Data(bytes.readableBytesView)) as? [String: Any]
+        return (Int(response.status.code), try XCTUnwrap(json))
     }
 
     private func installDecisionModel(named name: String, linkingTo bundle: String?) throws {
@@ -148,6 +154,7 @@ final class DecideEndpointTests: XCTestCase {
         guard let path = ProcessInfo.processInfo.environment["KRILL_DECISION_MODEL_PATH"], !path.isEmpty else {
             throw XCTSkip("KRILL_DECISION_MODEL_PATH not set; skipping real-bundle endpoint test")
         }
+        try requireMetal()
         try installDecisionModel(named: "real", linkingTo: path)
         let checked = try await checkGolden("golden.json", model: "real")
         XCTAssertEqual(checked, 35)
@@ -283,9 +290,8 @@ final class DecideEndpointTests: XCTestCase {
     }
 
     func testRequiresBearerKeyWhenConfigured() async throws {
-        try? await channel.close()
-        try? await group.shutdownGracefully()
-        try await startServer(apiKey: "secret")
+        _ = try await channel.finish()
+        channel = await makeChannel(apiKey: "secret")
         let body: [String: Any] = ["model": "m", "text": "hi", "options": ["a"]]
         let denied = try await post("/v1/decide", body)
         XCTAssertEqual(denied.status, 401)
@@ -296,14 +302,247 @@ final class DecideEndpointTests: XCTestCase {
     // MARK: - Helpers
 
     private func get(_ path: String) async throws -> (status: Int, json: [String: Any]) {
-        let (data, response) = try await URLSession.shared.data(from: base.appendingPathComponent(path))
-        let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        return ((response as! HTTPURLResponse).statusCode, json)
+        try await channel.writeInbound(HTTPServerRequestPart.head(HTTPRequestHead(version: .http1_1, method: .GET, uri: path)))
+        try await channel.writeInbound(HTTPServerRequestPart.end(nil))
+        return try await readResponse()
     }
 
     private static func golden(_ name: String) throws -> [[String: Any]] {
         let file = fixtures.appendingPathComponent(name)
         let json = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any]
         return try XCTUnwrap(json?["cases"] as? [[String: Any]])
+    }
+}
+
+extension DecideEndpointTests {
+    private func systemOneAnswers(_ response: (status: Int, json: [String: Any])) throws -> [String: [String: Any]] {
+        XCTAssertEqual(response.status, 200, "\(response.json)")
+        XCTAssertEqual(response.json["model"] as? String, "decider")
+        return try XCTUnwrap(response.json["answers"] as? [String: [String: Any]])
+    }
+
+    private func checkProbabilities(_ answer: [String: Any], keys: [String]) throws -> [Double] {
+        let probabilities = try XCTUnwrap(answer["probabilities"] as? [String: Double])
+        XCTAssertEqual(Set(probabilities.keys), Set(keys))
+        let p = try keys.map { try XCTUnwrap(probabilities[$0]) }
+        XCTAssertTrue(p.allSatisfy { (0 ... 1).contains($0) })
+        XCTAssertEqual(p.reduce(0, +), 1, accuracy: 1e-12)
+        let entropy = -p.filter { $0 > 0 }.reduce(0) { $0 + $1 * log($1) }
+        XCTAssertEqual(try XCTUnwrap(answer["confidence"] as? Double), 1 - entropy / log(Double(p.count)),
+                       accuracy: 1e-12)
+        return p
+    }
+
+    func testSystemOneChoiceKeepsWireOrderOnTie() async throws {
+        try installTiny()
+        let raw = #"""
+        {"state":[{"criteria":{"same":0,"z-option":1},"text":"[\"}]"}],
+         "questions":{"best":{"criteria":{"z\u002doption":"same","same":null},
+                              "instructions":"Which fits?","type":"choice"}},
+         "model":"decider"}
+        """#
+        let response = try await post("/v1/systemone", raw: Data(raw.utf8))
+        let answer = try XCTUnwrap(systemOneAnswers(response)["best"])
+        XCTAssertEqual(Set(answer.keys), ["type", "choice", "probabilities", "confidence"])
+        XCTAssertEqual(answer["type"] as? String, "choice")
+        XCTAssertEqual(answer["choice"] as? String, "z-option")
+        XCTAssertEqual(try checkProbabilities(answer, keys: ["z-option", "same"]), [0.5, 0.5])
+    }
+
+    func testSystemOneChoiceAccepts255Criteria() async throws {
+        try installTiny()
+        let keys = (0 ..< 255).reversed().map { "option-\($0)" }
+        let criteria = keys.map { "\"\($0)\":\"same\"" }.joined(separator: ",")
+        let raw = """
+        {"model":"decider","state":"hi","questions":{"best":{
+          "type":"choice","instructions":"Which fits?","criteria":{\(criteria)}}}}
+        """
+        let response = try await post("/v1/systemone", raw: Data(raw.utf8))
+        let answer = try XCTUnwrap(systemOneAnswers(response)["best"])
+        XCTAssertEqual(answer["choice"] as? String, keys.first)
+        XCTAssertEqual(try checkProbabilities(answer, keys: keys).count, 255)
+    }
+
+    func testSystemOneNoulUsesYesNoAndSupportsCriteria() async throws {
+        try installTiny()
+        let text = "The invoice was paid in full on Monday."
+        let question = "Is the invoice fully paid?"
+        let response = try await post("/v1/systemone", [
+            "model": "decider", "state": text, "questions": [
+                "paid": ["type": "noul", "instructions": question],
+                "custom": ["type": "noul", "instructions": question, "criteria": ["true": "paid"]],
+            ],
+        ])
+        let answers = try systemOneAnswers(response)
+        let paid = try XCTUnwrap(answers["paid"])
+        let custom = try XCTUnwrap(answers["custom"])
+        XCTAssertEqual(Set(paid.keys), ["type", "noul"])
+        XCTAssertEqual(paid["type"] as? String, "noul")
+        XCTAssertEqual(Set(custom.keys), ["type", "noul"])
+        XCTAssertEqual(custom["type"] as? String, "noul")
+
+        let yesNo = try await post("/v1/decide", ["model": "decider", "text": text, "yes_no": question])
+        let native = try XCTUnwrap((yesNo.json["results"] as? [[String: Any]])?.first?["p_yes"] as? Double)
+        XCTAssertEqual(try XCTUnwrap(paid["noul"] as? Double), native, accuracy: 1e-6)
+        let choice = try await post("/v1/decide", [
+            "model": "decider", "text": text, "question": question, "options": ["paid", "false"], "allow_none": false,
+        ])
+        let scores = try XCTUnwrap((choice.json["results"] as? [[String: Any]])?.first?["scores"] as? [Double])
+        XCTAssertEqual(try XCTUnwrap(custom["noul"] as? Double), scores[0] / scores.reduce(0, +), accuracy: 1e-6)
+    }
+
+    func testSystemOneScoreReturnsExpectationAndLegend() async throws {
+        try installTiny()
+        let criteria = ["low", "medium", "high"]
+        let body: [String: Any] = ["model": "decider", "state": "The checkout is failing.", "questions": [
+            "severity": ["type": "score", "instructions": "How severe is it?", "criteria": criteria],
+        ]]
+        let response = try await post("/v1/systemone", body)
+        let answer = try XCTUnwrap(systemOneAnswers(response)["severity"])
+        XCTAssertEqual(Set(answer.keys), ["type", "score", "legend", "probabilities", "confidence"])
+        XCTAssertEqual(answer["type"] as? String, "score")
+        XCTAssertEqual(answer["legend"] as? [String: String], ["0": "low", "1": "medium", "2": "high"])
+        let p = try checkProbabilities(answer, keys: ["0", "1", "2"])
+        XCTAssertEqual(try XCTUnwrap(answer["score"] as? Double), p[1] + 2 * p[2], accuracy: 1e-12)
+    }
+
+    func testSystemOneMixedQuestionsAndUsage() async throws {
+        try installTiny()
+        let questions: [String: [String: Any]] = [
+            "category": ["type": "choice", "instructions": "Which category?", "criteria": ["a": "low", "b": "high"]],
+            "urgent": ["type": "noul", "instructions": "Is it urgent?"],
+            "severity.1": ["type": "score", "instructions": "How severe?", "criteria": ["low", "high"]],
+        ]
+        let body: [String: Any] = ["model": "decider", "state": ["message": "Checkout is down"]]
+        let response = try await post("/v1/systemone", body.merging([
+            "questions": questions, "images": [], "keep_alive": "5m",
+        ]) { $1 })
+        let answers = try systemOneAnswers(response)
+        XCTAssertEqual(Set(answers.keys), Set(questions.keys))
+        let usage = try XCTUnwrap(response.json["usage"] as? [String: Int])
+        XCTAssertEqual(usage["output_tokens"], 3)
+        var expectedTokens = 0
+        for (name, question) in questions {
+            let single = try await post("/v1/systemone", body.merging(["questions": [name: question]]) { $1 })
+            let answer = try XCTUnwrap(systemOneAnswers(single)[name])
+            XCTAssertEqual(answers[name]?["type"] as? String, answer["type"] as? String)
+            let singleUsage = try XCTUnwrap(single.json["usage"] as? [String: Int])
+            let tokens = try XCTUnwrap(singleUsage["input_tokens"])
+            XCTAssertGreaterThan(tokens, 0)
+            XCTAssertEqual(singleUsage["output_tokens"], 1)
+            expectedTokens += tokens
+        }
+        XCTAssertEqual(usage["input_tokens"], expectedTokens)
+    }
+
+    func testSystemOneRejectsInvalidRequests() async throws {
+        let choice: [String: Any] = ["type": "choice", "instructions": "Which?", "criteria": ["a": "A", "b": "B"]]
+        let valid: [String: Any] = ["model": "m", "state": "hi", "questions": ["q": choice]]
+        let bad: [[String: Any]] = [
+            ["model": " \n"], ["model": 1], ["state": " \n"], ["state": true],
+            ["images": ["aGVsbG8="]], ["images": "text"], ["keep_alive": true],
+            ["keep_alive": 1e30], ["keep_alive": "\(Int.max)d"], ["keep_alive": "5min"],
+            ["questions": [:]], ["questions": [choice]], ["questions": ["q\n": choice]],
+            ["questions": [String(repeating: "a", count: 101): choice]],
+            ["questions": Dictionary(uniqueKeysWithValues: (0 ..< 65).map { ("q\($0)", choice) })],
+        ]
+        let badQuestions: [[String: Any]] = [
+            ["type": "other", "instructions": "Which?"],
+            ["type": "choice", "instructions": " \n", "criteria": ["a": "A", "b": "B"]],
+            ["type": "choice", "instructions": "Which?", "criteria": [" ": "A", "b": "B"]],
+            ["type": "choice", "instructions": "Which?", "criteria": ["a": "A", "b": 1]],
+            ["type": "choice", "instructions": "Which?", "criteria": ["a": "A"]],
+            ["type": "choice", "instructions": "Which?",
+             "criteria": Dictionary(uniqueKeysWithValues: (0 ..< 256).map { ("k\($0)", "A") })],
+            ["type": "noul", "instructions": "Is it?", "criteria": ["yes": "A"]],
+            ["type": "noul", "instructions": "Is it?", "criteria": ["true": NSNull()]],
+            ["type": "score", "instructions": "How?", "criteria": ["low", " "]],
+            ["type": "score", "instructions": "How?", "criteria": Array(repeating: "low", count: 11)],
+        ]
+        for fields in bad + badQuestions.map({ ["questions": ["q": $0]] }) {
+            let response = try await post("/v1/systemone", valid.merging(fields) { $1 })
+            XCTAssertEqual(response.status, 400, "\(fields)")
+            XCTAssertNotNil(response.json["error"] as? String)
+        }
+        let images = try await post("/v1/systemone", valid.merging(["images": ["aGVsbG8="]]) { $1 })
+        XCTAssertTrue((images.json["error"] as? String)?.contains("text-only") ?? false)
+        let malformed = try await post("/v1/systemone", raw: Data("{nope".utf8))
+        XCTAssertEqual(malformed.status, 400)
+        for key in ["model", "state", "questions"] {
+            let response = try await post("/v1/systemone", valid.filter { $0.key != key })
+            XCTAssertEqual(response.status, 400, "Missing \(key)")
+        }
+    }
+
+    func testSystemOneModelLookup() async throws {
+        try registry.saveManifest(ServerTests.fixtureManifest(name: "chat"))
+        let questions = ["q": ["type": "noul", "instructions": "Is it?"]]
+        for (name, expected) in [("unknown", 404), ("chat", 400)] {
+            let response = try await post("/v1/systemone", ["model": name, "state": "hi", "questions": questions])
+            XCTAssertEqual(response.status, expected, "\(response.json)")
+            XCTAssertNotNil(response.json["error"] as? String)
+        }
+        let validChoice = #"""
+        {"model":"unknown","state":{"criteria":{"other":0},"text":"[\"}]"},
+         "questions":{"best":{"criteria":{"z\u002doption":"same","same":null},
+                              "instructions":"Which fits?","type":"choice"}}}
+        """#
+        let response = try await post("/v1/systemone", raw: Data(validChoice.utf8))
+        XCTAssertEqual(response.status, 404, "\(response.json)")
+    }
+
+    func testSystemOneLoadFailureAndReaderLimit() async throws {
+        try installTiny()
+        try installDecisionModel(named: "broken", linkingTo: nil)
+        let questions: [String: [String: Any]] = [
+            "q": ["type": "score", "instructions": "How severe?", "criteria": ["low", "high"]],
+        ]
+        let broken = try await post("/v1/systemone", ["model": "broken", "state": "hi", "questions": questions])
+        XCTAssertEqual(broken.status, 500)
+        XCTAssertEqual(broken.json["error"] as? String, "systemone failed")
+        let response = try await post("/v1/systemone", [
+            "model": "decider", "state": String(repeating: "word ", count: 2_200), "questions": questions,
+        ])
+        XCTAssertEqual(response.status, 400)
+        XCTAssertTrue((response.json["error"] as? String)?.contains("limit is 2048") ?? false)
+    }
+
+    func testSystemOneTextLimitUsesUTF8AndIncludesQuestions() async throws {
+        let questions = ["q": ["type": "noul", "instructions": "Is it?"]]
+        let schemaSize = try JSONSerialization.data(withJSONObject: questions).count
+        let state = String(repeating: "é", count: (64 * 1024 - schemaSize) / 2)
+        let valid: [String: Any] = ["model": "unknown", "state": state, "questions": questions]
+        let atLimit = try await post("/v1/systemone", valid)
+        XCTAssertEqual(atLimit.status, 404)
+        let overLimit = try await post("/v1/systemone", valid.merging(["state": state + "é"]) { $1 })
+        XCTAssertEqual(overLimit.status, 413)
+        XCTAssertEqual(overLimit.json["error"] as? String, "text and schema must not exceed 64 KiB")
+    }
+
+    func testSystemOneBodyLimit() async throws {
+        let head = HTTPRequestHead(version: .http1_1, method: .POST, uri: "/v1/systemone")
+        try await channel.writeInbound(HTTPServerRequestPart.head(head))
+        var bytes = channel.allocator.buffer(capacity: 32 * 1024 * 1024 + 1)
+        bytes.writeRepeatingByte(0x20, count: 32 * 1024 * 1024)
+        try await channel.writeInbound(HTTPServerRequestPart.body(bytes))
+        let pending = try await channel.readOutbound(as: HTTPServerResponsePart.self)
+        XCTAssertNil(pending)
+        try await channel.writeInbound(HTTPServerRequestPart.body(ByteBuffer(string: " ")))
+        let response = try await readResponse()
+        XCTAssertEqual(response.status, 413)
+        XCTAssertEqual(response.json["error"] as? String, "request body must not exceed 32 MiB")
+    }
+
+    func testSystemOneWorksInOllamaModeWithBearerKey() async throws {
+        _ = try await channel.finish()
+        channel = await makeChannel(apiKey: "secret", compat: .ollama)
+        let body: [String: Any] = [
+            "model": "unknown", "state": "hi", "questions": ["q": ["type": "noul", "instructions": "Is it?"]],
+        ]
+        let denied = try await post("/v1/systemone", body)
+        XCTAssertEqual(denied.status, 401)
+        let allowed = try await post("/v1/systemone", body, bearer: "secret")
+        XCTAssertEqual(allowed.status, 404)
+        XCTAssertEqual(allowed.json["error"] as? String, "decision model not found")
     }
 }
