@@ -351,7 +351,6 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private var requestHead: HTTPRequestHead?
     private var body: ByteBuffer = ByteBuffer()
-    private var discardingUnauthorizedRequest = false
 
     private let corsOrigins: [String]
     private let defaultContextLimit: Int?
@@ -458,7 +457,6 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             requestHead = head
             body.clear()
             currentOrigin = head.headers.first(name: "Origin")
-            discardingUnauthorizedRequest = false
             // Upgrade-watcher quiet period; liveness/status polls must not count as activity.
             if head.method != .GET || !["/healthz", "/v1/status"].contains(where: { head.uri.hasPrefix($0) }) {
                 RequestActivity.note()
@@ -487,24 +485,28 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     extraHeaders: [("WWW-Authenticate", "Bearer")]
                 )
                 requestHead = nil
-                discardingUnauthorizedRequest = true
             }
         case .body(var buf):
-            guard !discardingUnauthorizedRequest else { return }
-            body.writeBuffer(&buf)
-            if body.readableBytes > maxBodySize {
-                let head = HTTPResponseHead(version: .http1_1, status: .payloadTooLarge)
-                context.write(wrapOutboundOut(.head(head)), promise: nil)
-                context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+            guard let head = requestHead else { return }
+            let systemOne = head.method == .POST
+                && head.uri.split(separator: "?", maxSplits: 1).first == Substring(SystemOneRequest.path)
+            let limit = systemOne ? SystemOneRequest.maxBodySize : maxBodySize
+            if buf.readableBytes > limit - body.readableBytes {
+                if systemOne {
+                    sendJSON(context: context, status: .payloadTooLarge,
+                             body: ["error": "request body must not exceed 32 MiB"],
+                             extraHeaders: [("Connection", "close")])
+                } else {
+                    let response = HTTPResponseHead(version: .http1_1, status: .payloadTooLarge)
+                    context.write(wrapOutboundOut(.head(response)), promise: nil)
+                    context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+                }
                 context.close(promise: nil)
                 requestHead = nil
                 return
             }
+            body.writeBuffer(&buf)
         case .end:
-            if discardingUnauthorizedRequest {
-                discardingUnauthorizedRequest = false
-                return
-            }
             guard let head = requestHead else { return }
             handleRequest(context: context, head: head, body: body)
             requestHead = nil
@@ -579,6 +581,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         case (.POST, "/v1/decide"):
             guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleDecide(context: context, body: body)
+        case (.POST, SystemOneRequest.path):
+            guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleSystemOne(context: context, body: body)
         case (.POST, "/v1/embeddings"):
             guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleEmbeddings(context: context, body: body, style: .openAI)
@@ -2939,7 +2944,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    // MARK: - Decisions: POST /v1/decide
+    // MARK: - Decisions: POST /v1/decide and /v1/systemone
 
     /// Pick one option (or none), or answer yes/no, for each text. `model` is the name of an installed
     /// decision model. Body: `text` | `texts`, then `options` (+ `question`, `allow_none`) or `yes_no`.
@@ -2983,9 +2988,49 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let question = json["question"] as? String
         let allowNone = json["allow_none"] as? Bool ?? true
 
-        guard let manifest = registry.getModel(name) else { return fail(.notFound, "decision model not found") }
+        runDecision(context: context, name: name, route: "decide",
+                    keepAliveOverride: KeepAliveParse.seconds(from: json["keep_alive"])) { decide, model, modelName in
+            let results: [[String: Any]]
+            if let yesNo {
+                results = try decide.yesNo(model, texts, question: yesNo).map { ["answer": $0.answer, "p_yes": $0.pYes] }
+            } else {
+                results = try decide.choose(model, texts, options: options ?? [], question: question, allowNone: allowNone)
+                    .map {
+                        ["label": $0.label as Any? ?? NSNull(), "index": $0.index as Any? ?? NSNull(),
+                         "scores": $0.scores, "p_none": $0.pNone]
+                    }
+            }
+            return ["model": modelName, "results": results]
+        }
+    }
+
+    private func handleSystemOne(context: ChannelHandlerContext, body: ByteBuffer) {
+        do {
+            let request = try SystemOneRequest(body)
+            runDecision(context: context, name: request.model, route: "systemone",
+                        keepAliveOverride: request.keepAlive) { decide, model, _ in
+                try request.response(using: decide, model: model)
+            }
+        } catch SystemOneRequest.ParseError.textTooLarge {
+            sendJSON(context: context, status: .payloadTooLarge,
+                     body: ["error": "text and schema must not exceed 64 KiB"])
+        } catch SystemOneRequest.ParseError.invalid(let message) {
+            sendJSON(context: context, status: .badRequest, body: ["error": message])
+        } catch {
+            sendJSON(context: context, status: .badRequest, body: ["error": "Invalid JSON"])
+        }
+    }
+
+    private func runDecision(
+        context: ChannelHandlerContext, name: String, route: String, keepAliveOverride: Int?,
+        score: @escaping @Sendable (DecisionEngine, DecisionModel, String) throws -> [String: Any]
+    ) {
+        guard let manifest = registry.getModel(name) else {
+            return sendJSON(context: context, status: .notFound, body: ["error": "decision model not found"])
+        }
         guard manifest.family == .decision else {
-            return fail(.badRequest, "'\(name)' (family \(manifest.family.rawValue)) is not a decision model")
+            return sendJSON(context: context, status: .badRequest,
+                            body: ["error": "'\(name)' (family \(manifest.family.rawValue)) is not a decision model"])
         }
         let dir = registry.modelPath(name)
         let modelName = manifest.name
@@ -2994,7 +3039,6 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         nonisolated(unsafe) let ctx = context
         let decide = decisionEngine
         let keepAlive = auxKeepAlive.decide
-        let keepAliveOverride = KeepAliveParse.seconds(from: json["keep_alive"])
         trace.setModel(modelName)
 
         Task {
@@ -3010,25 +3054,16 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             do {
                 let model = try await decide.load(directory: dir)
-                let results: [[String: Any]]
-                if let yesNo {
-                    results = try decide.yesNo(model, texts, question: yesNo).map { ["answer": $0.answer, "p_yes": $0.pYes] }
-                } else {
-                    results = try decide.choose(model, texts, options: options ?? [], question: question, allowNone: allowNone)
-                        .map {
-                            ["label": $0.label as Any? ?? NSNull(), "index": $0.index as Any? ?? NSNull(),
-                             "scores": $0.scores, "p_none": $0.pNone]
-                        }
-                }
+                let response = try score(decide, model, modelName)
                 self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok,
-                                    body: ["model": modelName, "results": results])
+                                    body: response)
             } catch let e as DecisionError {
                 self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .badRequest,
                                     body: ["error": e.description])
             } catch {
-                self.logger.error("[decide] failed: \(String(describing: error).prefix(300))")
+                self.logger.error("[\(route)] failed: \(String(describing: error).prefix(300))")
                 self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .internalServerError,
-                                    body: ["error": "decide failed"])
+                                    body: ["error": "\(route) failed"])
             }
         }
     }

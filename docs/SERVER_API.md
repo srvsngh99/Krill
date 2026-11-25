@@ -8,7 +8,7 @@ This build is a release-readiness baseline, not a production release. The HTTP s
 - 1 image per request maximum (Gemma 4 supports a single image per turn).
 - 1 audio clip per request.
 - 25 MB per decoded media item.
-- 10 MB total HTTP body (`ServerLimits.maxBodySize`).
+- 10 MiB total HTTP body (`ServerLimits.maxBodySize`). System One accepts up to 32 MiB.
 
 ## Starting the Server
 
@@ -40,8 +40,8 @@ unless the operator explicitly passes `--allow-remote-unauthenticated`.
 `krill serve` accepts `--compat ollama|openai|both` (default `both`):
 
 - `both` — `/api/*` and `/v1/*` are both served (default).
-- `ollama` — only `/api/*` + `/healthz` + `/metrics`.
-- `openai` — only `/v1/*` + `/healthz` + `/metrics`.
+- `ollama` — `/api/*`, `/v1/systemone`, `/healthz`, and `/metrics`.
+- `openai` — OpenAI-compatible `/v1/*`, `/healthz`, and `/metrics`.
 
 Endpoints disabled by the compat mode return `404` with an explanatory
 `error` body, so client protocol-probing behaves as if the server simply
@@ -309,6 +309,51 @@ result per text: `{"label", "index", "scores", "p_none"}` (`label` and `index` a
 "none" wins) or `{"answer", "p_yes"}`. At most 256 texts and 128 options; token limits come from the
 bundle and over-limit input is `400`, never truncated. An unknown model is `404`, a non-decision
 model `400`. Details: [DECISION_MODELS.md](DECISION_MODELS.md).
+
+### POST /v1/systemone
+
+The [Ollama-compatible System One API](https://docs.ollama.com/api/systemone) scores
+named questions about a shared state. It serves installed Krill decision bundles only.
+Krill cannot load Ollama's Nimble, Tev1, or Clef weights.
+
+```bash
+curl http://127.0.0.1:57455/v1/systemone -H 'Content-Type: application/json' -d '{
+  "model": "decider",
+  "state": {"ticket": "Checkout has returned errors since 9am."},
+  "questions": {
+    "category": {"type": "choice", "instructions": "Which category fits?",
+                 "criteria": {"billing": "Payments and refunds", "bug": "Software errors"}},
+    "urgent": {"type": "noul", "instructions": "Does this need immediate attention?"},
+    "severity": {"type": "score", "instructions": "How severe is the issue?",
+                 "criteria": ["Minor", "Moderate", "Critical"]}
+  }
+}'
+```
+
+Send a non-blank string, an object, or an array as `state`. Objects and arrays are read as
+JSON text. Send 1–64 questions with names of 1–100 ASCII letters, digits, underscores,
+periods, or hyphens. Each question takes an `instructions` string.
+
+| Type | Criteria | Answer fields besides `type` |
+|---|---|---|
+| `choice` | Object with 2–255 keys, each mapped to a description or `null` to use the key as the option text. Ties follow request key order. | `choice`, `probabilities`, `confidence` |
+| `noul` | Omit criteria for calibrated yes/no. An object can supply `true` and/or `false` descriptions, with missing descriptions defaulting to the corresponding keys. | `noul`, the probability of true |
+| `score` | Array of 2–10 descriptions from lowest to highest. | `score`, `legend`, `probabilities`, `confidence`. The score is the probability-weighted mean of the zero-based indices, which also key the legend and probabilities. |
+
+The server returns one JSON object with `model`, `answers` keyed by question name, and
+`usage`. Choice and score probabilities sum to 1. Confidence is `1 - H(p)/ln(N)` for
+`N` candidates. `input_tokens` counts the reader tokens for each question's state and
+candidate texts, summed across questions. `output_tokens` is the number of questions
+scored.
+
+Send `keep_alive` in seconds or as a duration such as `"5m"`. Zero unloads the model
+after the request. A negative value keeps it loaded. The same bearer key as
+`/v1/decide` applies when configured.
+
+Errors use `{"error":"..."}`. Invalid input, non-empty `images`, non-decision models,
+and input beyond a bundle's token limits return `400`. Unknown models return `404`.
+State text plus question schema over 64 KiB or a body over 32 MiB returns `413`.
+Load and scoring failures return `500`.
 
 ## Anthropic Messages API
 

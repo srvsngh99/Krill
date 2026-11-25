@@ -5,8 +5,8 @@ Tier: **Experimental** (served over HTTP and checked against golden fixtures; no
 A decision model reads a text and returns a typed answer instead of generating text: one of
 several options (or "none of these") with probabilities, or yes / no. It is a ModernBERT
 reader plus a small decision head. The type has its own runtime path (`DecisionModel` in
-`KrillCore`, `DecisionEngine` in `KrillEngine`) and its own route, `POST /v1/decide`; it does not
-go through the chat, embedding or rerank engines.
+`KrillCore`, `DecisionEngine` in `KrillEngine`) and serves both `POST /v1/decide` and
+the Ollama-compatible `POST /v1/systemone`. Both endpoints use the same runtime.
 
 A bundle is recognised as a decision model when its `config.json` has a `reader` and a
 `head` section (both objects) and a `pooling` entry; its `ModelFamily` is `decision`.
@@ -69,9 +69,13 @@ A decision model sent to chat, embeddings or rerank is refused with a message th
 shares the server's request queue, `keep_alive` field and idle unload with the embedding and rerank
 models, and a registered decision model shows up in `/v1/models` and `/v1/status`.
 
+The [Ollama-compatible System One endpoint](SERVER_API.md#post-v1systemone)
+scores named choice, yes/no, and ordinal questions about one shared state. It serves
+Krill decision bundles only. Krill cannot load Ollama's Nimble, Tev1, or Clef weights.
+
 ## Input limits
 
-A request may carry up to 256 texts and 128 options (`DecisionModel.maxTexts`, `maxOptions`); both
+A `/v1/decide` request may carry up to 256 texts and 128 options (`DecisionModel.maxTexts`, `maxOptions`); both
 are checked before the model loads, for `options` and `yes_no` alike. The token limits are not fixed:
 each bundle sets `state_max_tokens` (the text with its question) and `option_max_tokens` in its
 `config.json` (2,048 and 32 for the tiny test bundle). For `yes_no` the question is scored as the

@@ -45,6 +45,12 @@ public final class DecisionEngine: @unchecked Sendable {
         try serialized { try model.yesNo(texts: texts, question: question) }
     }
 
+    public func candidateProbabilities(_ model: DecisionModel, text: String, questions: [String], options: [String]) throws
+        -> (probabilities: [[Float]], inputTokens: Int)
+    {
+        try serialized { try model.candidateProbabilities(text: text, questions: questions, options: options) }
+    }
+
     private func serialized<T>(_ body: () throws -> T) throws -> T {
         run.lock(); defer { run.unlock() }
         return try body()
