@@ -3,16 +3,18 @@
 Tier: **Experimental** (served over HTTP and checked against golden fixtures).
 
 A decision model reads a text and returns a typed answer instead of generating text: one of
-several options (or "none of these") with probabilities, or yes / no. It is a ModernBERT
-reader plus a small decision head. The type has its own runtime path (`DecisionModel` in
+several options (or "none of these") with probabilities, or yes / no. It uses a text
+encoder and a decision head. The type has its own runtime path (`DecisionModel` in
 `KrillCore`, `DecisionEngine` in `KrillEngine`) and serves both `POST /v1/decide` and
 the Ollama-compatible `POST /v1/systemone`. Both endpoints use the same runtime.
 
 A bundle is recognised as a decision model when its `config.json` has a `reader` and a
 `head` section (both objects) and a `pooling` entry. Amber 0.4B v2 uses `uni_config.json`,
 `model.safetensors`, and the tokenizer and encoder config under `encoder/`. GLiDE 0.4B uses
-`decision_config.json`, `readout.safetensors`, and a sharded ModernBERT encoder. All three formats
-register as the `decision` model family.
+`decision_config.json`, `readout.safetensors`, and a sharded ModernBERT encoder. Espresso 380M uses
+an fp32 UltraBERT encoder from `model.safetensors`, `heads.safetensors`, `tokenizer.json`,
+`decision_rule.json`, and `config.json` (or `espresso_config.json`). All four formats register
+as the `decision` model family.
 
 ## CLI
 
@@ -28,12 +30,27 @@ krill pull fastino/GLiDE-0.4B
 krill decide --model glide-0.4b --text "My card was charged twice." \
   --question "Classify the banking intent." \
   --option "duplicate charge" --option "password reset"
+
+krill pull diakrisis/espresso-380m
+krill decide --model espresso-380m --text "My card was charged twice." \
+  --question "Classify the banking intent." \
+  --option "duplicate charge" --option "password reset"
 ```
 
 Amber and GLiDE read the question, text and options together. Their probabilities sum to one
 across the given options, and `p_none` is zero. Use `amber-0.4b-v2` or `glide-0.4b` as the model
 name on either HTTP endpoint. GLiDE's System One prompt includes both the criterion key and its
 description in the order they appear in the request.
+
+Espresso also reads the question, text, and options together. System One renders structured state
+as compact JSON in wire order and includes criterion keys and descriptions. A description containing
+`out of scope` (case-insensitive) uses Espresso's `none_of_these` key while the response retains the
+original key. System One uses the highest-probability answer even when Espresso's rule calls for
+review. In `krill decide` and `/v1/decide`, an explicit `none_of_these` option enables Espresso's
+review rule on lists of at least 50 options. When the calibrated best score is below 0.88 and
+abstention is enabled, the response has a null choice, scores for every option, and the explicit
+none option's probability in `p_none`.
+
 The examples below show the reader-based bundle format and its optional abstention.
 
 ```sh
@@ -94,7 +111,7 @@ Krill decision bundles only. Krill cannot load Ollama's Nimble, Tev1, or Clef we
 
 ## Input limits
 
-A `/v1/decide` request may carry up to 256 texts and 128 options, or 255 options with GLiDE.
+A `/v1/decide` request may carry up to 256 texts and 128 options, or 255 options with GLiDE or Espresso.
 A `/v1/systemone` choice may carry up to 255 options. Amber allows up to 7,999 tokens per
 question, including the instructions, state, options and markers. Its yes/no options are
 `yes` and `no`.
@@ -102,6 +119,9 @@ question, including the instructions, state, options and markers. Its yes/no opt
 GLiDE runs in bf16 and reads the final prompt token before `[SEP]`. Prompts that exceed 7,999
 encoder tokens keep the first 1,024 prompt tokens and the tail, including the answer cue, with
 room for `[CLS]` and `[SEP]`.
+
+Espresso accepts up to 32,768 tokens per question, including markers. Its yes/no options are
+`no` and `yes`, in that order.
 
 Reader-based bundles set `state_max_tokens` (the text with its question) and `option_max_tokens` in their
 `config.json` (2,048 and 32 for the tiny test bundle). For `yes_no` the question is scored as the
@@ -123,6 +143,12 @@ GLiDE's gate requires at least 198 matching choices out of 200 and reports the m
 probability difference and median native scoring latency. Set `KRILL_GLIDE_MODEL_PATH`,
 `KRILL_GLIDE_INPUTS`, and `KRILL_GLIDE_RESULTS` to the local bundle and benchmark JSONL files.
 Build the release tests and Metal library, then run `python3 scripts/glide_parity.py`.
+
+Espresso's gate uses 200 Banking77 and CLINC questions and requires at least 198 matching choices.
+It reports the maximum absolute probability difference and median native scoring latency. Set
+`KRILL_ESPRESSO_MODEL_PATH`, `KRILL_ESPRESSO_INPUTS`, and `KRILL_ESPRESSO_RESULTS` to the local
+bundle and benchmark JSONL files. Build the release tests and Metal library, then run
+`python3 scripts/espresso_parity.py`.
 
 Two reader-based golden fixtures, both produced by the Python reference runtime (CPU, fp32), which is not in this
 repository:

@@ -15,16 +15,31 @@ struct SystemOneRequest: Sendable {
 
     private enum Kind: String, Sendable { case choice, noul, score }
 
+    private struct ScoringOptions: Hashable {
+        let values: [String]
+        var choiceKeys: [String]? = nil
+    }
+
     private struct Question: Sendable {
         let kind: Kind
         let instructions: String
         let keys: [String]
         let options: [String]
         let glideNoulDescriptions: [String]?
+        let espressoChoiceDescriptions: [String]?
 
-        func scoringOptions(isGlide: Bool) -> [String] {
-            guard isGlide else { return options }
-            return zip(keys, glideNoulDescriptions ?? options).map { key, option in key == option ? key : "\(key): \(option)" }
+        func scoringOptions(using model: DecisionModel) -> ScoringOptions {
+            if model.isEspresso {
+                if let descriptions = espressoChoiceDescriptions {
+                    return ScoringOptions(values: descriptions, choiceKeys: keys)
+                }
+                if kind == .noul { return ScoringOptions(values: []) }
+            }
+            guard model.isGlide else { return ScoringOptions(values: options) }
+            let rendered = zip(keys, glideNoulDescriptions ?? options).map { key, option in
+                key == option ? key : "\(key): \(option)"
+            }
+            return ScoringOptions(values: rendered)
         }
 
         func answer(_ scores: [Float]) throws -> [String: Any] {
@@ -56,6 +71,7 @@ struct SystemOneRequest: Sendable {
     private let state: String
     let amberState: String?
     let glideState: String?
+    let espressoState: String?
     private let questions: [String: Question]
 
     init(_ body: ByteBuffer) throws {
@@ -90,10 +106,11 @@ struct SystemOneRequest: Sendable {
         let schema = try JSONSerialization.data(withJSONObject: rawQuestions, options: [.withoutEscapingSlashes])
         guard state.utf8.count + schema.count <= Self.maxTextSize else { throw ParseError.textTooLarge }
         let choiceNames = Set(rawQuestions.keys.filter { rawQuestions[$0]?["type"] as? String == Kind.choice.rawValue })
-        let (orderedKeys, amberState, glideState) = try Self.orderedFields(
+        let (orderedKeys, amberState, glideState, espressoState) = try Self.orderedFields(
             in: body.readableBytesView, names: choiceNames, structuredState: structuredState)
         self.amberState = amberState
         self.glideState = glideState
+        self.espressoState = espressoState
         var questions: [String: Question] = [:]
         for (name, raw) in rawQuestions {
             guard name.wholeMatch(of: #/[A-Za-z0-9_.-]{1,100}/#) != nil else {
@@ -117,6 +134,7 @@ struct SystemOneRequest: Sendable {
         let keys: [String]
         let options: [String]
         var glideNoulDescriptions: [String]?
+        var espressoChoiceDescriptions: [String]?
         switch kind {
         case .choice:
             let maxOptions = DecisionModel.maxSystemOneOptions
@@ -132,6 +150,7 @@ struct SystemOneRequest: Sendable {
                 }
                 return option
             }
+            espressoChoiceDescriptions = keys.map { criteria[$0] as? String ?? "" }
         case .noul:
             keys = ["true", "false"]
             if let value = raw["criteria"] {
@@ -153,15 +172,16 @@ struct SystemOneRequest: Sendable {
             keys = options.indices.map { String($0) }
         }
         return Question(kind: kind, instructions: instructions, keys: keys, options: options,
-                        glideNoulDescriptions: glideNoulDescriptions)
+                        glideNoulDescriptions: glideNoulDescriptions, espressoChoiceDescriptions: espressoChoiceDescriptions)
     }
 
     func response(using engine: DecisionEngine, model loaded: DecisionModel) throws -> [String: Any] {
-        let state = (loaded.isAmber ? amberState : loaded.isGlide ? glideState : nil) ?? self.state
+        let state = (loaded.isEspresso ? espressoState : loaded.isAmber ? amberState : loaded.isGlide ? glideState : nil)
+            ?? self.state
         var answers: [String: [String: Any]] = [:]
         var inputTokens = 0
-        for (options, group) in Dictionary(grouping: questions, by: { $0.value.scoringOptions(isGlide: loaded.isGlide) }) {
-            if options.isEmpty {
+        for (options, group) in Dictionary(grouping: questions, by: { $0.value.scoringOptions(using: loaded) }) {
+            if options.values.isEmpty {
                 for (instructions, sameQuestion) in Dictionary(grouping: group, by: { $0.value.instructions }) {
                     let result = try engine.yesNo(loaded, [state], question: instructions)[0]
                     guard (0 ... 1).contains(result.pYes) else { throw ScoreError.invalidProbabilities }
@@ -170,7 +190,8 @@ struct SystemOneRequest: Sendable {
                 }
             } else {
                 let scored = try engine.candidateProbabilities(
-                    loaded, text: state, questions: group.map { $0.value.instructions }, options: options)
+                    loaded, text: state, questions: group.map { $0.value.instructions }, options: options.values,
+                    choiceKeys: options.choiceKeys)
                 inputTokens += scored.inputTokens
                 for ((name, question), p) in zip(group, scored.probabilities) {
                     answers[name] = try question.answer(p)
@@ -182,17 +203,20 @@ struct SystemOneRequest: Sendable {
     }
 
     private static func orderedFields(in bytes: ByteBufferView, names: Set<String>, structuredState: Bool) throws
-        -> (keys: [String: [String]], amberState: String?, glideState: String?)
+        -> (keys: [String: [String]], amberState: String?, glideState: String?, espressoState: String?)
     {
-        guard structuredState || !names.isEmpty else { return ([:], nil, nil) }
+        guard structuredState || !names.isEmpty else { return ([:], nil, nil, nil) }
         var scanner = JSONMemberScanner(bytes)
         var keys: [String: [String]] = [:]
         var amberState: String?
         var glideState: String?
+        var espressoState: String?
         try scanner.object(uniqueKeys: !names.isEmpty) { key, root in
             if key == "state", structuredState {
                 var value = root
                 glideState = try value.renderJSON()
+                value = root
+                espressoState = try value.renderJSON(compact: true)
                 amberState = try root.renderState()
                 return
             }
@@ -211,7 +235,7 @@ struct SystemOneRequest: Sendable {
                 }
             }
         }
-        return (keys, amberState, glideState)
+        return (keys, amberState, glideState, espressoState)
     }
 }
 
@@ -267,7 +291,7 @@ private struct JSONMemberScanner {
         return array == "[]" ? "" : array
     }
 
-    mutating func renderJSON() throws -> String {
+    mutating func renderJSON(compact: Bool = false) throws -> String {
         skipWhitespace()
         let start = index
         skipValue()
@@ -286,7 +310,7 @@ private struct JSONMemberScanner {
                 index += 1
             default:
                 rendered.append(byte)
-                if byte == UInt8(ascii: ",") || byte == UInt8(ascii: ":") { rendered.append(32) }
+                if !compact, byte == UInt8(ascii: ",") || byte == UInt8(ascii: ":") { rendered.append(32) }
                 index += 1
             }
         }

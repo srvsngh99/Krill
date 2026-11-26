@@ -11,6 +11,8 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- Native Espresso 380M text decisions. Install with `krill pull diakrisis/espresso-380m` and score up to
+  255 choices with `krill decide`, `POST /v1/decide`, or `POST /v1/systemone`.
 - Native GLiDE 0.4B text decisions. Install with `krill pull fastino/GLiDE-0.4B` and score up to
   255 choices with `krill decide`, `POST /v1/decide`, or `POST /v1/systemone`.
 - Native support for Amber 0.4B v2. Install it with `krill pull MLukauskas/amber-0.4b-v2`

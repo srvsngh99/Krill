@@ -134,7 +134,7 @@ public struct DecisionYesNo: Sendable {
     public let inputTokens: Int
 }
 
-private func l2Normalized(_ x: MLXArray) -> MLXArray {
+func l2Normalized(_ x: MLXArray) -> MLXArray {
     x / MLX.maximum(MLX.sqrt((x * x).sum(axis: -1, keepDims: true)), 1e-12)
 }
 
@@ -155,13 +155,16 @@ public final class DecisionModel: @unchecked Sendable {
 
     public var isAmber: Bool { scorer is AmberDecisionModel }
     public var isGlide: Bool { scorer is GlideDecisionModel }
+    public var isEspresso: Bool { scorer is EspressoDecisionModel }
 
     public static func isDecisionConfig(_ json: [String: Any]) -> Bool {
         json["reader"] is [String: Any] && json["head"] is [String: Any] && json["pooling"] != nil
     }
 
     public static func isBundle(_ directory: URL) -> Bool {
-        if AmberDecisionModel.isBundle(directory) || isGlideBundle(directory) { return true }
+        if AmberDecisionModel.isBundle(directory) || isGlideBundle(directory) || EspressoDecisionModel.isBundle(directory) {
+            return true
+        }
         guard let data = try? Data(contentsOf: directory.appendingPathComponent("config.json")),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
         return isDecisionConfig(json)
@@ -169,12 +172,19 @@ public final class DecisionModel: @unchecked Sendable {
 
     public static func isGlideBundle(_ directory: URL) -> Bool { GlideDecisionModel.isBundle(directory) }
 
+    public static func choiceOptionLimit(for directory: URL) -> Int {
+        isGlideBundle(directory) || EspressoDecisionModel.isBundle(directory) ? maxSystemOneOptions : maxOptions
+    }
+
     public static func load(directory: URL) async throws -> DecisionModel {
         if AmberDecisionModel.isBundle(directory) {
             return DecisionModel(scorer: try await AmberDecisionModel.load(directory: directory))
         }
         if isGlideBundle(directory) {
             return DecisionModel(scorer: try await GlideDecisionModel.load(directory: directory))
+        }
+        if EspressoDecisionModel.isBundle(directory) {
+            return DecisionModel(scorer: try await EspressoDecisionModel.load(directory: directory))
         }
         return DecisionModel(scorer: try await ReaderDecisionModel.load(directory: directory))
     }
@@ -190,15 +200,19 @@ public final class DecisionModel: @unchecked Sendable {
                        allowNone: Bool = true) throws -> [DecisionChoice] {
         guard !options.isEmpty else { throw DecisionError.invalid("options must not be empty") }
         try Self.checkCounts(texts: texts.count, options: options.count,
-                             optionLimit: isGlide ? Self.maxSystemOneOptions : Self.maxOptions)
+                             optionLimit: isGlide || isEspresso ? Self.maxSystemOneOptions : Self.maxOptions)
         return try scorer.choose(texts, options: options, question: question, allowNone: allowNone)
     }
 
-    public func candidateProbabilities(text: String, questions: [String], options: [String]) throws
+    public func candidateProbabilities(text: String, questions: [String], options: [String], choiceKeys: [String]? = nil) throws
         -> (probabilities: [[Float]], inputTokens: Int)
     {
         guard options.count >= 2 else { throw DecisionError.invalid("provide at least two options") }
         try Self.checkCounts(texts: questions.count, options: options.count, optionLimit: Self.maxSystemOneOptions)
+        if let espresso = scorer as? EspressoDecisionModel, let choiceKeys {
+            return try espresso.candidateProbabilities(text: text, questions: questions, options: options,
+                                                       choiceKeys: choiceKeys)
+        }
         return try scorer.candidateProbabilities(text: text, questions: questions, options: options)
     }
 

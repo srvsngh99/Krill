@@ -110,25 +110,29 @@ private struct ChoiceReference: Decodable {
     let state: String
     let instructions: String
     let options: [String]
+    let choiceKeys: [String]?
     let choice: Int
     let probabilities: [Float]
     let inputTokens: Int?
 }
 
 func checkDecisionReferenceParity(_ model: DecisionModel, name: String, dataPath: String) throws {
+    MLXMemoryConfig.apply(defaultMB: 64)  // DecisionEngine's cap; unbounded, the buffer pool grows per input length
     let decoder = JSONDecoder()
     let rows = try String(contentsOfFile: dataPath, encoding: .utf8).split(separator: "\n").map {
         try decoder.decode(ChoiceReference.self, from: Data($0.utf8))
     }
     XCTAssertEqual(rows.count, 200)
     let warmup = try XCTUnwrap(rows.first)
-    _ = try model.candidateProbabilities(text: warmup.state, questions: [warmup.instructions], options: warmup.options)
+    _ = try model.candidateProbabilities(text: warmup.state, questions: [warmup.instructions], options: warmup.options,
+                                         choiceKeys: warmup.choiceKeys)
     var matched = 0
     var worst: Float = 0
     var milliseconds: [Double] = []
     for (index, row) in rows.enumerated() {
         let start = DispatchTime.now().uptimeNanoseconds
-        let result = try model.candidateProbabilities(text: row.state, questions: [row.instructions], options: row.options)
+        let result = try model.candidateProbabilities(text: row.state, questions: [row.instructions], options: row.options,
+                                                      choiceKeys: row.choiceKeys)
         milliseconds.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6)
         if let expected = row.inputTokens { XCTAssertEqual(result.inputTokens, expected, "row \(index + 1)") }
         let p = try XCTUnwrap(result.probabilities.first)

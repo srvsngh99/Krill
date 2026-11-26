@@ -84,8 +84,12 @@ public final class Puller: @unchecked Sendable {
         // List files in the HF repo
         let fileList = try await listRepoFiles(repo: resolved.repo)
 
-        // Filter to essential files (safetensors, configs, tokenizer).
-        let essentialFiles = fileList.filter { Puller.isEssentialFile($0.name) }
+        let names = Set(fileList.map(\.name))
+        let isEspresso = names.contains("heads.safetensors") && names.contains("decision_rule.json")
+        let espressoConfig = names.contains("config.json") ? "config.json" : "espresso_config.json"
+        let espressoFiles: Set<String> = [espressoConfig, "tokenizer.json", "model.safetensors",
+                                          "heads.safetensors", "decision_rule.json"]
+        let essentialFiles = fileList.filter { isEspresso ? espressoFiles.contains($0.name) : Self.isEssentialFile($0.name) }
 
         let totalSize = essentialFiles.reduce(0) { $0 + $1.size }
         var downloadedBytes: Int64 = 0
@@ -129,20 +133,23 @@ public final class Puller: @unchecked Sendable {
         let isGlide = ["decision_config.json", "readout.safetensors"].allSatisfy {
             fm.fileExists(atPath: destDir.appendingPathComponent($0).path)
         }
-        let configURL = destDir.appendingPathComponent(isAmber ? "encoder/config.json" : "config.json")
+        let configURL = destDir.appendingPathComponent(isEspresso ? espressoConfig : isAmber ? "encoder/config.json" : "config.json")
         let configJSON = (try? Data(contentsOf: configURL))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-        let family: ModelFamily = isAmber || isGlide ? .decision : configJSON.flatMap(ModelFamily.detect(from:)) ?? resolved.family
+        let family: ModelFamily = isAmber || isGlide || isEspresso
+            ? .decision : configJSON.flatMap(ModelFamily.detect(from:)) ?? resolved.family
 
         // Detect context length from config
         var context = resolved.context
-        if let maxPos = configJSON?["max_position_embeddings"] as? Int {
+        if let maxPos = configJSON?[isEspresso ? "max_len" : "max_position_embeddings"] as? Int {
             context = maxPos
         }
 
         let quant: String
         if isAmber || isGlide {
             quant = "bf16"
+        } else if isEspresso {
+            quant = "fp32"
         } else if family == .decision {
             switch (configJSON?["dtype"] as? String)?.lowercased() {
             case "float16", "fp16": quant = "fp16"
