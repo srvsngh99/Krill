@@ -7,6 +7,10 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 
 ---
 
+## v0.29.0 - 2026-11-26
+**Krill now speaks Ollama's System One API.**
+`POST /v1/systemone` answers choice, yes / no and score questions with an installed Krill decision model, in the same request and response shape as Ollama's endpoint, so clients built for it work against Krill unchanged. It serves Krill decision bundles only. Malformed `keep_alive` values now fall back to the default instead of being half-read.
+
 ## v0.28.1 - 2026-11-24
 **Pulling a decision model now shows the right next step.**
 `krill pull` of a decision model from Hugging Face now ends with a ready-to-run `krill decide` example, shows the model's real precision, and also downloads its `calibration.json`.

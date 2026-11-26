@@ -9,10 +9,18 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+## [0.29.0] - 2026-11-26
+
 ### Added
 
 - `POST /v1/systemone`, an Ollama-compatible endpoint for scoring choice,
   yes/no, and ordinal questions with installed Krill decision bundles.
+
+### Changed
+
+- `keep_alive` parsing is stricter: booleans, malformed durations such as
+  `5mx` or `1h30`, and values that overflow now fall back to the default
+  keep-alive instead of being read as a partial duration.
 
 ## [0.28.1] - 2026-11-24
 
