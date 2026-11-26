@@ -17,6 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
+| Pending | Pending | DM-JEPA 1.1 decision model (`krill pull DangerLabs/DM-JEPA`) | The pull includes the ModernBERT-base tokenizer. Run the 200-question fp32 parity gate before release. |
 | 2026-11-26 | #378 | Amber 0.4B v2 decision model (`krill pull MLukauskas/amber-0.4b-v2`) | The shared ModernBERT encoder MLP now runs GELU in fp32 for bf16 activations; check a bf16 ModernBERT embedder on the release build. Amber returns `p_none` 0 (no none check). |
 
 ### Known-open, NOT yet merged

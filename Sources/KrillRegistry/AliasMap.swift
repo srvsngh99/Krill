@@ -22,6 +22,8 @@ public struct AliasMap: Sendable {
     ) -> ResolvedModel? {
         let normalized = name.lowercased().trimmingCharacters(in: .whitespaces)
 
+        if normalized == dmjepa.repo.lowercased() { return dmjepa }
+
         // Direct alias match (built-in, curated map).
         if let entry = aliases[normalized] {
             return entry
@@ -52,6 +54,10 @@ public struct AliasMap: Sendable {
     public static var allAliases: [(shortName: String, model: ResolvedModel)] {
         aliases.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
     }
+
+    static let dmjepa = ResolvedModel(
+        repo: "DangerLabs/DM-JEPA", name: "dm-jepa", family: .decision,
+        params: "0.16B", quant: "fp32", context: 16384)
 }
 
 /// A resolved model reference from the alias map.
@@ -86,6 +92,8 @@ public struct ResolvedModel: Sendable {
 // MARK: - Alias Database
 
 private let aliases: [String: ResolvedModel] = [
+    "dm-jepa": AliasMap.dmjepa,
+
     // Llama 3.2
     "llama-3.2-1b": ResolvedModel(
         repo: "mlx-community/Llama-3.2-1B-Instruct-4bit",

@@ -134,8 +134,18 @@ public struct DecisionYesNo: Sendable {
     public let inputTokens: Int
 }
 
-private func l2Normalized(_ x: MLXArray) -> MLXArray {
+func l2Normalized(_ x: MLXArray) -> MLXArray {
     x / MLX.maximum(MLX.sqrt((x * x).sum(axis: -1, keepDims: true)), 1e-12)
+}
+
+func paddedDecisionTokens(_ ids: [[Int]], lengths: [Int], longest: Int, padId: Int)
+    -> (tokens: MLXArray, mask: MLXArray)
+{
+    let rows = ids.flatMap { $0 + Array(repeating: padId, count: longest - $0.count) }
+    let tokens = MLXArray(rows.map(Int32.init), [ids.count, longest])
+    let mask = MLXArray(0 ..< Int32(longest)).reshaped(1, longest)
+        .< MLXArray(lengths.map(Int32.init)).reshaped(-1, 1)
+    return (tokens, mask)
 }
 
 protocol DecisionScoring {
@@ -154,21 +164,28 @@ public final class DecisionModel: @unchecked Sendable {
     public static let maxSystemOneOptions = 255
 
     public var isAmber: Bool { scorer is AmberDecisionModel }
+    public var isDMJEPA: Bool { scorer is DMJEPADecisionModel }
 
     public static func isDecisionConfig(_ json: [String: Any]) -> Bool {
-        json["reader"] is [String: Any] && json["head"] is [String: Any] && json["pooling"] != nil
+        DMJEPADecisionModel.isConfig(json)
+            || (json["reader"] is [String: Any] && json["head"] is [String: Any] && json["pooling"] != nil)
+    }
+
+    private static func configJSON(in directory: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("config.json")) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
     public static func isBundle(_ directory: URL) -> Bool {
-        if AmberDecisionModel.isBundle(directory) { return true }
-        guard let data = try? Data(contentsOf: directory.appendingPathComponent("config.json")),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
-        return isDecisionConfig(json)
+        AmberDecisionModel.isBundle(directory) || configJSON(in: directory).map(isDecisionConfig) == true
     }
 
     public static func load(directory: URL) async throws -> DecisionModel {
         if AmberDecisionModel.isBundle(directory) {
             return DecisionModel(scorer: try await AmberDecisionModel.load(directory: directory))
+        }
+        if let json = configJSON(in: directory), DMJEPADecisionModel.isConfig(json) {
+            return DecisionModel(scorer: try await DMJEPADecisionModel.load(directory: directory))
         }
         return DecisionModel(scorer: try await ReaderDecisionModel.load(directory: directory))
     }
@@ -191,11 +208,15 @@ public final class DecisionModel: @unchecked Sendable {
         return try scorer.choose(texts, options: options, question: question, allowNone: allowNone)
     }
 
-    public func candidateProbabilities(text: String, questions: [String], options: [String]) throws
+    public func candidateProbabilities(text: String, questions: [String], options: [String],
+                                       optionLabels: [String]? = nil) throws
         -> (probabilities: [[Float]], inputTokens: Int)
     {
         guard options.count >= 2 else { throw DecisionError.invalid("provide at least two options") }
         try Self.checkCounts(texts: questions.count, options: options.count, optionLimit: Self.maxSystemOneOptions)
+        if let optionLabels, let dmjepa = scorer as? DMJEPADecisionModel {
+            return try dmjepa.candidateProbabilities(text: text, questions: questions, options: options, labels: optionLabels)
+        }
         return try scorer.candidateProbabilities(text: text, questions: questions, options: options)
     }
 
@@ -275,9 +296,7 @@ private final class ReaderDecisionModel: DecisionScoring {
         }
         let longest = lengths.max() ?? 0
         guard longest <= limit else { throw DecisionError.tooLong(what: what, tokens: longest, limit: limit) }
-        let rows = ids.flatMap { $0 + Array(repeating: config.padId, count: longest - $0.count) }
-        let tokens = MLXArray(rows.map(Int32.init), [texts.count, longest])
-        let mask = MLXArray(0 ..< Int32(longest)).reshaped(1, longest) .< MLXArray(lengths.map(Int32.init)).reshaped(-1, 1)
+        let (tokens, mask) = paddedDecisionTokens(ids, lengths: lengths, longest: longest, padId: config.padId)
         let hasPadding = lengths.contains { $0 != longest }
         let states = reader.hiddenStates(tokens, attentionMask: hasPadding ? mask : nil)
         if config.pooling == "cls" { return (states, lengths, states[0..., 0, 0...]) }

@@ -11,7 +11,9 @@ the Ollama-compatible `POST /v1/systemone`. Both endpoints use the same runtime.
 A bundle is recognised as a decision model when its `config.json` has a `reader` and a
 `head` section (both objects) and a `pooling` entry. Amber 0.4B v2 uses `uni_config.json`,
 `model.safetensors`, and the tokenizer and encoder config under `encoder/`.
-Both formats register as the `decision` model family.
+DM-JEPA 1.1 uses `model_type: "dm_jepa"` in `config.json`, fp32 `model.safetensors`,
+and the ModernBERT-base tokenizer. The pull fetches its two tokenizer files into the same
+directory. All three formats register as the `decision` model family.
 
 ## CLI
 
@@ -26,6 +28,20 @@ krill decide --model amber-0.4b-v2 --text "My card was charged twice." \
 
 Amber reads the question, text and options together. Its probabilities sum to one across the
 given options, and `p_none` is zero. Use `amber-0.4b-v2` as the model name on either HTTP endpoint.
+
+```sh
+krill pull DangerLabs/DM-JEPA
+krill decide --model dm-jepa --text "My card was charged twice." \
+  --question "Classify the banking intent." \
+  --option "duplicate charge" --option "password reset"
+```
+
+DM-JEPA reads the state and options with a shared ModernBERT-base encoder, then scores the
+options together with four latent prediction steps. It returns one probability per option and
+`p_none: 0`. Use `dm-jepa` on either HTTP endpoint. System One choice requests use both
+the criterion key and its description. Keys prefixed with `option_` or `k_` and digit-only
+keys contribute only the description when one is supplied.
+
 The examples below show the reader-based bundle format and its optional abstention.
 
 ```sh
@@ -65,7 +81,7 @@ curl -s http://127.0.0.1:57455/v1/decide -H 'Content-Type: application/json' -d 
 ```
 
 When "none of these" wins, `label` and `index` are `null` (`scores` and `p_none` are still given);
-`allow_none: false` always picks an option. Amber always picks an option.
+`allow_none: false` always picks an option. Amber and DM-JEPA always pick an option.
 
 Errors are `{"error": "..."}`, like the embeddings and rerank routes:
 
@@ -91,6 +107,9 @@ A `/v1/systemone` choice may carry up to 255 options. Amber allows up to 7,999 t
 question, including the instructions, state, options and markers. Its yes/no options are
 `yes` and `no`.
 
+DM-JEPA allows 16,384 tokens for the rendered state and instructions, and 512 tokens per
+rendered option. These limits include tags and tokenizer special tokens.
+
 Reader-based bundles set `state_max_tokens` (the text with its question) and `option_max_tokens` in their
 `config.json` (2,048 and 32 for the tiny test bundle). For `yes_no` the question is scored as the
 options `no: <question>` and `yes: <question>`, so it must fit `option_max_tokens` including the
@@ -106,6 +125,12 @@ Amber's 200-question parity gate compares options and probabilities and reports 
 scoring latency after a warmup. Set `KRILL_AMBER_MODEL_PATH`, `KRILL_AMBER_INPUTS`, and
 `KRILL_AMBER_RESULTS` to the local bundle and the two JSONL files. Build the release tests and
 Metal library, then run `python3 scripts/amber_parity.py`.
+
+DM-JEPA's parity gate requires at least 198 of 200 reference choices to agree and reports
+the maximum absolute probability difference and median native scoring time after a warmup.
+Set `KRILL_DMJEPA_MODEL_PATH`, `KRILL_DMJEPA_INPUTS`, and `KRILL_DMJEPA_RESULTS`. For a raw
+checkpoint, also set `KRILL_DMJEPA_TOKENIZER_PATH` to the local ModernBERT-base tokenizer
+directory. Build the release tests and Metal library, then run `python3 scripts/dmjepa_parity.py`.
 
 Two reader-based golden fixtures, both produced by the Python reference runtime (CPU, fp32), which is not in this
 repository:
