@@ -46,11 +46,12 @@ public final class DecisionEngine: @unchecked Sendable {
     }
 
     public func candidateProbabilities(_ model: DecisionModel, text: String, questions: [String], options: [String],
-                                       optionLabels: [String]? = nil) throws
+                                       optionLabels: [String]? = nil, choiceKeys: [String]? = nil) throws
         -> (probabilities: [[Float]], inputTokens: Int)
     {
         try serialized {
-            try model.candidateProbabilities(text: text, questions: questions, options: options, optionLabels: optionLabels)
+            try model.candidateProbabilities(text: text, questions: questions, options: options,
+                                             optionLabels: optionLabels, choiceKeys: choiceKeys)
         }
     }
 

@@ -2983,8 +2983,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         let optionCount = options?.count ?? 2
         let optionLimit = optionCount > DecisionModel.maxOptions && Registry.isValidModelName(name)
-            && DecisionModel.isGlideBundle(registry.modelPath(name))
-            ? DecisionModel.maxSystemOneOptions : DecisionModel.maxOptions
+            ? DecisionModel.choiceOptionLimit(for: registry.modelPath(name)) : DecisionModel.maxOptions
         do { try DecisionModel.checkCounts(texts: texts.count, options: optionCount, optionLimit: optionLimit) } catch {
             return fail(.badRequest, String(describing: error))
         }

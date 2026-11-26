@@ -414,6 +414,30 @@ final class PullerTests: XCTestCase {
             .appendingPathComponent("render_tokenizer/chat_template.jinja").path))
     }
 
+    func testPullRegistersEspressoAndKeepsOnlyNativeFiles() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let paths = ["config.json", "tokenizer.json", "model.safetensors", "heads.safetensors", "decision_rule.json"]
+        let excluded = ["espresso_config.json", "encoder_fp32.onnx", "encoder_fp32.onnx.data",
+                        "encoder_w8.onnx", "assets/example.safetensors", "espresso.py"]
+        let listing = try JSONSerialization.data(withJSONObject: ["siblings": (paths + excluded)
+            .map { ["rfilename": $0] }])
+        let config = #"{"base_model":"vllm-sr/vela3-fast","max_len":32768}"#
+        let client = MockPullerHTTPClient(
+            tempDir: tempDir,
+            dataResponses: [.init(statusCode: 200, body: listing)],
+            downloadResponses: paths.map { .init(statusCode: 200, body: Data(($0 == "config.json" ? config : "{}").utf8)) }
+        )
+        let puller = Puller(registry: Registry(baseDir: tempDir), httpClient: client, tokenProvider: { nil }, sleeper: { _ in })
+        let resolved = try XCTUnwrap(AliasMap.resolve("diakrisis/espresso-380m"))
+        let manifest = try await puller.pull(resolved)
+        XCTAssertEqual(manifest.name, "espresso-380m")
+        XCTAssertEqual(manifest.family, .decision)
+        XCTAssertEqual(manifest.quant, "fp32")
+        XCTAssertEqual(manifest.context, 32768)
+        XCTAssertEqual(Set(manifest.files.map(\.path)), Set(paths))
+    }
+
     func testIsEssentialFileAcceptsExternalChatTemplateInBothForms() {
         // Two co-existing on-disk forms today, both must ride along
         // or the tokenizer raises "chat_template is not set":

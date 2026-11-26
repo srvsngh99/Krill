@@ -166,6 +166,7 @@ public final class DecisionModel: @unchecked Sendable {
     public var isAmber: Bool { scorer is AmberDecisionModel }
     public var isGlide: Bool { scorer is GlideDecisionModel }
     public var isDMJEPA: Bool { scorer is DMJEPADecisionModel }
+    public var isEspresso: Bool { scorer is EspressoDecisionModel }
 
     public static func isDecisionConfig(_ json: [String: Any]) -> Bool {
         DMJEPADecisionModel.isConfig(json)
@@ -179,10 +180,15 @@ public final class DecisionModel: @unchecked Sendable {
 
     public static func isBundle(_ directory: URL) -> Bool {
         AmberDecisionModel.isBundle(directory) || isGlideBundle(directory)
+            || EspressoDecisionModel.isBundle(directory)
             || configJSON(in: directory).map(isDecisionConfig) == true
     }
 
     public static func isGlideBundle(_ directory: URL) -> Bool { GlideDecisionModel.isBundle(directory) }
+
+    public static func choiceOptionLimit(for directory: URL) -> Int {
+        isGlideBundle(directory) || EspressoDecisionModel.isBundle(directory) ? maxSystemOneOptions : maxOptions
+    }
 
     public static func load(directory: URL) async throws -> DecisionModel {
         if AmberDecisionModel.isBundle(directory) {
@@ -190,6 +196,9 @@ public final class DecisionModel: @unchecked Sendable {
         }
         if isGlideBundle(directory) {
             return DecisionModel(scorer: try await GlideDecisionModel.load(directory: directory))
+        }
+        if EspressoDecisionModel.isBundle(directory) {
+            return DecisionModel(scorer: try await EspressoDecisionModel.load(directory: directory))
         }
         if let json = configJSON(in: directory), DMJEPADecisionModel.isConfig(json) {
             return DecisionModel(scorer: try await DMJEPADecisionModel.load(directory: directory))
@@ -208,18 +217,22 @@ public final class DecisionModel: @unchecked Sendable {
                        allowNone: Bool = true) throws -> [DecisionChoice] {
         guard !options.isEmpty else { throw DecisionError.invalid("options must not be empty") }
         try Self.checkCounts(texts: texts.count, options: options.count,
-                             optionLimit: isGlide ? Self.maxSystemOneOptions : Self.maxOptions)
+                             optionLimit: isGlide || isEspresso ? Self.maxSystemOneOptions : Self.maxOptions)
         return try scorer.choose(texts, options: options, question: question, allowNone: allowNone)
     }
 
     public func candidateProbabilities(text: String, questions: [String], options: [String],
-                                       optionLabels: [String]? = nil) throws
+                                       optionLabels: [String]? = nil, choiceKeys: [String]? = nil) throws
         -> (probabilities: [[Float]], inputTokens: Int)
     {
         guard options.count >= 2 else { throw DecisionError.invalid("provide at least two options") }
         try Self.checkCounts(texts: questions.count, options: options.count, optionLimit: Self.maxSystemOneOptions)
         if let optionLabels, let dmjepa = scorer as? DMJEPADecisionModel {
             return try dmjepa.candidateProbabilities(text: text, questions: questions, options: options, labels: optionLabels)
+        }
+        if let choiceKeys, let espresso = scorer as? EspressoDecisionModel {
+            return try espresso.candidateProbabilities(text: text, questions: questions, options: options,
+                                                       choiceKeys: choiceKeys)
         }
         return try scorer.candidateProbabilities(text: text, questions: questions, options: options)
     }

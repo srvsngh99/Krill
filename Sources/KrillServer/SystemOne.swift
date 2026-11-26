@@ -18,6 +18,7 @@ struct SystemOneRequest: Sendable {
     private struct Candidates: Hashable, Sendable {
         let options: [String]
         var labels: [String]? = nil
+        var choiceKeys: [String]? = nil
     }
 
     private struct Question: Sendable {
@@ -27,11 +28,19 @@ struct SystemOneRequest: Sendable {
         let options: [String]
         let dmjepa: Candidates
         let glideNoulDescriptions: [String]?
+        let espressoChoiceDescriptions: [String]?
 
         var glideCandidates: Candidates {
             Candidates(options: zip(keys, glideNoulDescriptions ?? options).map { key, option in
                 key == option ? key : "\(key): \(option)"
             })
+        }
+
+        var espressoCandidates: Candidates {
+            if let espressoChoiceDescriptions {
+                return Candidates(options: espressoChoiceDescriptions, choiceKeys: keys)
+            }
+            return Candidates(options: kind == .noul ? [] : options)
         }
 
         func answer(_ scores: [Float], isDMJEPA: Bool) throws -> [String: Any] {
@@ -64,6 +73,7 @@ struct SystemOneRequest: Sendable {
     let amberState: String?
     let glideState: String?
     let dmjepaState: String?
+    let espressoState: String?
     private let questions: [String: Question]
 
     init(_ body: ByteBuffer) throws {
@@ -98,11 +108,12 @@ struct SystemOneRequest: Sendable {
         let schema = try JSONSerialization.data(withJSONObject: rawQuestions, options: [.withoutEscapingSlashes])
         guard state.utf8.count + schema.count <= Self.maxTextSize else { throw ParseError.textTooLarge }
         let choiceNames = Set(rawQuestions.keys.filter { rawQuestions[$0]?["type"] as? String == Kind.choice.rawValue })
-        let (orderedKeys, amberState, glideState, dmjepaState) = try Self.orderedFields(
+        let (orderedKeys, amberState, glideState, dmjepaState, espressoState) = try Self.orderedFields(
             in: body.readableBytesView, names: choiceNames, structuredState: structuredState)
         self.amberState = amberState
         self.glideState = glideState
         self.dmjepaState = dmjepaState
+        self.espressoState = espressoState
         var questions: [String: Question] = [:]
         for (name, raw) in rawQuestions {
             guard name.wholeMatch(of: #/[A-Za-z0-9_.-]{1,100}/#) != nil else {
@@ -127,6 +138,7 @@ struct SystemOneRequest: Sendable {
         let options: [String]
         let dmjepa: Candidates
         var glideNoulDescriptions: [String]?
+        var espressoChoiceDescriptions: [String]?
         switch kind {
         case .choice:
             let maxOptions = DecisionModel.maxSystemOneOptions
@@ -142,7 +154,9 @@ struct SystemOneRequest: Sendable {
                 }
                 return option
             }
-            dmjepa = Candidates(options: keys.map { criteria[$0] as? String ?? "" }, labels: keys)
+            let descriptions = keys.map { criteria[$0] as? String ?? "" }
+            dmjepa = Candidates(options: descriptions, labels: keys)
+            espressoChoiceDescriptions = descriptions
         case .noul:
             keys = ["true", "false"]
             if let value = raw["criteria"] {
@@ -168,7 +182,8 @@ struct SystemOneRequest: Sendable {
             dmjepa = Candidates(options: options, labels: keys)
         }
         return Question(kind: kind, instructions: instructions, keys: keys, options: options,
-                        dmjepa: dmjepa, glideNoulDescriptions: glideNoulDescriptions)
+                        dmjepa: dmjepa, glideNoulDescriptions: glideNoulDescriptions,
+                        espressoChoiceDescriptions: espressoChoiceDescriptions)
     }
 
     func response(using engine: DecisionEngine, model loaded: DecisionModel) throws -> [String: Any] {
@@ -177,6 +192,9 @@ struct SystemOneRequest: Sendable {
         if loaded.isDMJEPA {
             state = dmjepaState ?? self.state
             candidatesFor = { $0.dmjepa }
+        } else if loaded.isEspresso {
+            state = espressoState ?? self.state
+            candidatesFor = { $0.espressoCandidates }
         } else if loaded.isGlide {
             state = glideState ?? self.state
             candidatesFor = { $0.glideCandidates }
@@ -198,7 +216,7 @@ struct SystemOneRequest: Sendable {
             } else {
                 let scored = try engine.candidateProbabilities(
                     loaded, text: state, questions: group.map { $0.value.instructions },
-                    options: candidates.options, optionLabels: candidates.labels)
+                    options: candidates.options, optionLabels: candidates.labels, choiceKeys: candidates.choiceKeys)
                 inputTokens += scored.inputTokens
                 for ((name, question), p) in zip(group, scored.probabilities) {
                     answers[name] = try question.answer(p, isDMJEPA: loaded.isDMJEPA)
@@ -210,20 +228,23 @@ struct SystemOneRequest: Sendable {
     }
 
     private static func orderedFields(in bytes: ByteBufferView, names: Set<String>, structuredState: Bool) throws
-        -> (keys: [String: [String]], amberState: String?, glideState: String?, dmjepaState: String?)
+        -> (keys: [String: [String]], amberState: String?, glideState: String?, dmjepaState: String?, espressoState: String?)
     {
-        guard structuredState || !names.isEmpty else { return ([:], nil, nil, nil) }
+        guard structuredState || !names.isEmpty else { return ([:], nil, nil, nil, nil) }
         var scanner = JSONMemberScanner(bytes)
         var keys: [String: [String]] = [:]
         var amberState: String?
         var glideState: String?
         var dmjepaState: String?
+        var espressoState: String?
         try scanner.object(uniqueKeys: !names.isEmpty) { key, root in
             if key == "state", structuredState {
                 var glide = root
                 glideState = try glide.renderJSON()
                 var dmjepa = root
                 dmjepaState = try dmjepa.renderDMJEPAState()
+                var espresso = root
+                espressoState = try espresso.renderJSON(compact: true)
                 amberState = try root.renderState()
                 return
             }
@@ -242,7 +263,7 @@ struct SystemOneRequest: Sendable {
                 }
             }
         }
-        return (keys, amberState, glideState, dmjepaState)
+        return (keys, amberState, glideState, dmjepaState, espressoState)
     }
 }
 
@@ -303,7 +324,7 @@ private struct JSONMemberScanner {
         return state == "{}" || state == "[]" ? "" : state
     }
 
-    mutating func renderJSON(pretty: Bool = false) throws -> String {
+    mutating func renderJSON(compact: Bool = false, pretty: Bool = false) throws -> String {
         skipWhitespace()
         let start = index
         skipValue()
@@ -355,7 +376,7 @@ private struct JSONMemberScanner {
                 rendered.append(contentsOf: canonical.utf8)
             default:
                 rendered.append(byte)
-                if byte == UInt8(ascii: ",") || byte == UInt8(ascii: ":") { rendered.append(32) }
+                if !compact, byte == UInt8(ascii: ",") || byte == UInt8(ascii: ":") { rendered.append(32) }
                 index += 1
             }
         }

@@ -85,8 +85,14 @@ public final class Puller: @unchecked Sendable {
         let fileList = try await listRepoFiles(repo: resolved.repo)
 
         let isDMJEPA = resolved.repo.caseInsensitiveCompare(AliasMap.dmjepa.repo) == .orderedSame
-        var downloads = fileList.filter { Puller.isEssentialFile($0.name) }
-            .map { (file: $0, repo: resolved.repo, revision: "main") }
+        let names = Set(fileList.map(\.name))
+        let isEspresso = !isDMJEPA && names.contains("heads.safetensors") && names.contains("decision_rule.json")
+        let espressoConfig = names.contains("config.json") ? "config.json" : "espresso_config.json"
+        let espressoFiles: Set<String> = [espressoConfig, "tokenizer.json", "model.safetensors",
+                                          "heads.safetensors", "decision_rule.json"]
+        var downloads = fileList.filter {
+            isEspresso ? espressoFiles.contains($0.name) : Self.isEssentialFile($0.name)
+        }.map { (file: $0, repo: resolved.repo, revision: "main") }
         if isDMJEPA {
             let required: Set<String> = ["config.json", "model.safetensors"]
             downloads = downloads.filter { required.contains($0.file.name) }
@@ -141,23 +147,27 @@ public final class Puller: @unchecked Sendable {
         let isGlide = ["decision_config.json", "readout.safetensors"].allSatisfy {
             fm.fileExists(atPath: destDir.appendingPathComponent($0).path)
         }
-        let configURL = destDir.appendingPathComponent(isAmber ? "encoder/config.json" : "config.json")
+        let configURL = destDir.appendingPathComponent(isEspresso ? espressoConfig : isAmber ? "encoder/config.json" : "config.json")
         let configJSON = (try? Data(contentsOf: configURL))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         if isDMJEPA, configJSON?["model_type"] as? String != "dm_jepa" {
             throw PullerError.invalidResponse("Expected a DM-JEPA config.json")
         }
-        let family: ModelFamily = isAmber || isGlide ? .decision : configJSON.flatMap(ModelFamily.detect(from:)) ?? resolved.family
+        let family: ModelFamily = isAmber || isGlide || isEspresso
+            ? .decision : configJSON.flatMap(ModelFamily.detect(from:)) ?? resolved.family
 
         // Detect context length from config
         var context = resolved.context
-        if let maxPos = configJSON?[isDMJEPA ? "max_state_length" : "max_position_embeddings"] as? Int {
+        let contextKey = isDMJEPA ? "max_state_length" : isEspresso ? "max_len" : "max_position_embeddings"
+        if let maxPos = configJSON?[contextKey] as? Int {
             context = maxPos
         }
 
         let quant: String
         if isAmber || isGlide {
             quant = "bf16"
+        } else if isEspresso {
+            quant = "fp32"
         } else if family == .decision {
             switch (configJSON?[isDMJEPA ? "torch_dtype" : "dtype"] as? String)?.lowercased() {
             case "float16", "fp16": quant = "fp16"

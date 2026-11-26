@@ -152,7 +152,9 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
     MLXMemoryConfig.apply()
 
     let isAmber = AmberDecisionModel.isBundle(directory)
-    let configURL = directory.appendingPathComponent(isAmber ? AmberDecisionModel.configFile : "config.json")
+    let isEspresso = EspressoDecisionModel.isBundle(directory)
+    let configURL = isEspresso ? EspressoDecisionModel.configURL(in: directory)
+        : directory.appendingPathComponent(isAmber ? AmberDecisionModel.configFile : "config.json")
     let configData = try Data(contentsOf: configURL)
 
     // Parse raw JSON to detect architecture
@@ -160,7 +162,7 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
         throw ModelLoadError.invalidConfig("Cannot parse config.json")
     }
 
-    if isAmber || DecisionModel.isGlideBundle(directory) || DecisionModel.isDecisionConfig(configJSON) {
+    if isAmber || isEspresso || DecisionModel.isGlideBundle(directory) || DecisionModel.isDecisionConfig(configJSON) {
         throw ModelLoadError.unsupportedArchitecture(
             "A decision model is not a causal LM. Use `krill decide` or POST /v1/decide instead.")
     }

@@ -340,12 +340,14 @@ extension DecideEndpointTests {
         let request = try SystemOneRequest(ByteBuffer(string: body))
         XCTAssertEqual(request.amberState, "z: line\nnext\na: {\"y\": [1, true, null], \"b\": \"é\"}")
         XCTAssertEqual(request.glideState, #"{"z": "line\nnext", "a": {"y": [1, true, null], "b": "é"}}"#)
+        XCTAssertEqual(request.espressoState, #"{"z":"line\nnext","a":{"y":[1,true,null],"b":"é"}}"#)
 
         for empty in ["{}", "[]"] {
             let body = #"{"model":"amber","state":\#(empty),\#(questions)}"#
             let request = try SystemOneRequest(ByteBuffer(string: body))
             XCTAssertEqual(request.amberState, "")
             XCTAssertEqual(request.glideState, empty)
+            XCTAssertEqual(request.espressoState, empty)
         }
     }
 
