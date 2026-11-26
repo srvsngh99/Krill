@@ -145,7 +145,9 @@ final class ModernBertMLP: Module {
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
         let parts = MLX.split(wi(x), parts: 2, axis: -1)
-        return wo(gelu(parts[0]) * parts[1])
+        let input = parts[0]
+        let activated = input.dtype == .bfloat16 ? gelu(input.asType(.float32)).asType(.bfloat16) : gelu(input)
+        return wo(activated * parts[1])
     }
 }
 

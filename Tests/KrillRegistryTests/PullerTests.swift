@@ -315,6 +315,36 @@ final class PullerTests: XCTestCase {
         }
     }
 
+    func testPullRegistersAmberAndKeepsEncoderFilesNested() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let registry = Registry(baseDir: tempDir)
+        let files = [
+            ("uni_config.json", #"{"layout":"uni","hidden":1024,"width":1024,"orders":1}"#),
+            ("encoder/config.json", #"{"model_type":"modernbert","max_position_embeddings":7999,"dtype":"float32"}"#),
+            ("encoder/tokenizer.json", "{}"),
+            ("encoder/tokenizer_config.json", "{}"),
+            ("model.safetensors", "weights"),
+        ]
+        let listing = try JSONSerialization.data(withJSONObject: ["siblings": (files.map { $0.0 } + ["reference.py"])
+            .map { ["rfilename": $0] }])
+        let client = MockPullerHTTPClient(
+            tempDir: tempDir,
+            dataResponses: [.init(statusCode: 200, body: listing)],
+            downloadResponses: files.map { .init(statusCode: 200, body: Data($0.1.utf8)) }
+        )
+        let puller = Puller(registry: registry, httpClient: client, tokenProvider: { nil }, sleeper: { _ in })
+        let resolved = try XCTUnwrap(AliasMap.resolve("org/amber-0.4b-v2"))
+        let manifest = try await puller.pull(resolved)
+        XCTAssertEqual(manifest.family, .decision)
+        XCTAssertEqual(manifest.quant, "bf16")
+        XCTAssertEqual(manifest.context, 7999)
+        XCTAssertEqual(manifest.name, "amber-0.4b-v2")
+        XCTAssertEqual(Set(manifest.files.map(\.path)), Set(files.map { $0.0 }))
+        let config = registry.modelPath(manifest.name).appendingPathComponent("encoder/config.json")
+        XCTAssertEqual(try String(contentsOf: config, encoding: .utf8), files[1].1)
+    }
+
     func testIsEssentialFileAcceptsAllTokenizerArtifacts() {
         // Merged tokenizer form.
         XCTAssertTrue(Puller.isEssentialFile("tokenizer.json"))

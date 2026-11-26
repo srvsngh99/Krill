@@ -482,6 +482,12 @@ public final class KrillTokenizer: @unchecked Sendable {
         return ids
     }
 
+    public func encodeWithoutSpecialTokens(_ text: String) -> [Int] {
+        tokenizer.encode(text: text, addSpecialTokens: false)
+    }
+
+    public func tokenID(for token: String) -> Int? { tokenizer.convertTokenToId(token) }
+
     /// Encode a (query, document) pair for a cross-encoder reranker.
     ///
     /// Cross-encoders consume the two strings as a single sequence with

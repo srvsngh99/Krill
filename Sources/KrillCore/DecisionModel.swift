@@ -69,7 +69,10 @@ final class DecisionMLP: Module {
         _last = ModuleInfo(wrappedValue: Linear(hidden, 1), key: "last")
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray { last(gelu(first(x))) }
+    func callAsFunction(_ x: MLXArray) -> MLXArray {
+        let hidden = first(x)
+        return last(gelu(hidden.asType(.float32)).asType(hidden.dtype))
+    }
 }
 
 /// Scores options from the MaxSim term, two extra features and a projected
@@ -135,10 +138,74 @@ private func l2Normalized(_ x: MLXArray) -> MLXArray {
     x / MLX.maximum(MLX.sqrt((x * x).sum(axis: -1, keepDims: true)), 1e-12)
 }
 
-/// A reader (ModernBERT) plus a decision head: picks one option or "none of
-/// these", or answers yes/no. Never generates text. Not thread-safe: callers
-/// serialise (`DecisionEngine` does; the CLI is single-threaded).
+protocol DecisionScoring {
+    func choose(_ texts: [String], options: [String], question: String?, allowNone: Bool) throws -> [DecisionChoice]
+    func candidateProbabilities(text: String, questions: [String], options: [String]) throws
+        -> (probabilities: [[Float]], inputTokens: Int)
+    func yesNo(texts: [String], question: String) throws -> [DecisionYesNo]
+}
+
+/// Callers serialize inference. The reader-based model caches option states.
 public final class DecisionModel: @unchecked Sendable {
+    private let scorer: any DecisionScoring
+
+    public static let maxTexts = 256
+    public static let maxOptions = 128
+    public static let maxSystemOneOptions = 255
+
+    public var isAmber: Bool { scorer is AmberDecisionModel }
+
+    public static func isDecisionConfig(_ json: [String: Any]) -> Bool {
+        json["reader"] is [String: Any] && json["head"] is [String: Any] && json["pooling"] != nil
+    }
+
+    public static func isBundle(_ directory: URL) -> Bool {
+        if AmberDecisionModel.isBundle(directory) { return true }
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("config.json")),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return isDecisionConfig(json)
+    }
+
+    public static func load(directory: URL) async throws -> DecisionModel {
+        if AmberDecisionModel.isBundle(directory) {
+            return DecisionModel(scorer: try await AmberDecisionModel.load(directory: directory))
+        }
+        return DecisionModel(scorer: try await ReaderDecisionModel.load(directory: directory))
+    }
+
+    private init(scorer: any DecisionScoring) { self.scorer = scorer }
+
+    public static func checkCounts(texts: Int, options: Int) throws {
+        try checkCounts(texts: texts, options: options, optionLimit: maxOptions)
+    }
+
+    private static func checkCounts(texts: Int, options: Int, optionLimit: Int) throws {
+        guard (1 ... maxTexts).contains(texts) else { throw DecisionError.invalid("provide 1 to \(maxTexts) texts") }
+        guard options <= optionLimit else { throw DecisionError.invalid("at most \(optionLimit) options") }
+    }
+
+    public func choose(_ texts: [String], options: [String], question: String? = nil,
+                       allowNone: Bool = true) throws -> [DecisionChoice] {
+        guard !options.isEmpty else { throw DecisionError.invalid("options must not be empty") }
+        try Self.checkCounts(texts: texts.count, options: options.count)
+        return try scorer.choose(texts, options: options, question: question, allowNone: allowNone)
+    }
+
+    public func candidateProbabilities(text: String, questions: [String], options: [String]) throws
+        -> (probabilities: [[Float]], inputTokens: Int)
+    {
+        guard options.count >= 2 else { throw DecisionError.invalid("provide at least two options") }
+        try Self.checkCounts(texts: questions.count, options: options.count, optionLimit: Self.maxSystemOneOptions)
+        return try scorer.candidateProbabilities(text: text, questions: questions, options: options)
+    }
+
+    public func yesNo(texts: [String], question: String) throws -> [DecisionYesNo] {
+        try Self.checkCounts(texts: texts.count, options: 2)
+        return try scorer.yesNo(texts: texts, question: question)
+    }
+}
+
+private final class ReaderDecisionModel: DecisionScoring {
     private struct OptionStates {
         let tokens: MLXArray
         let mask: MLXArray
@@ -155,23 +222,10 @@ public final class DecisionModel: @unchecked Sendable {
     private var optionCache: [[String]: OptionStates] = [:]
     private var cachedOptions = 0
 
-    public static let maxTexts = 256
-    public static let maxOptions = 128
-    public static let maxSystemOneOptions = 255
     private static let readChunk = 8
     private static let cacheOptionLimit = 512
 
-    public static func isDecisionConfig(_ json: [String: Any]) -> Bool {
-        json["reader"] is [String: Any] && json["head"] is [String: Any] && json["pooling"] != nil
-    }
-
-    public static func isBundle(_ directory: URL) -> Bool {
-        guard let data = try? Data(contentsOf: directory.appendingPathComponent("config.json")),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
-        return isDecisionConfig(json)
-    }
-
-    public static func load(directory: URL) async throws -> DecisionModel {
+    static func load(directory: URL) async throws -> ReaderDecisionModel {
         let config = try JSONDecoder().decode(
             DecisionConfig.self, from: Data(contentsOf: directory.appendingPathComponent("config.json")))
         let reader = ModernBertEmbeddingModel(config.reader)
@@ -197,7 +251,7 @@ public final class DecisionModel: @unchecked Sendable {
 
         let offsets = (try? Data(contentsOf: directory.appendingPathComponent("calibration.json")))
             .flatMap { try? JSONDecoder().decode([String: [String: Float]].self, from: $0) }?["yes_no_logit_offset"]
-        return DecisionModel(
+        return ReaderDecisionModel(
             config: config, reader: reader, head: head,
             tokenizer: try await KrillTokenizer(from: directory), yesNoOffset: offsets?["default"] ?? 0)
     }
@@ -256,15 +310,6 @@ public final class DecisionModel: @unchecked Sendable {
         return head.options(maxsim: maxsim, extra: extra, interaction: optionPooled * statePooled)
     }
 
-    public static func checkCounts(texts: Int, options: Int) throws {
-        try checkCounts(texts: texts, options: options, optionLimit: maxOptions)
-    }
-
-    private static func checkCounts(texts: Int, options: Int, optionLimit: Int) throws {
-        guard (1 ... maxTexts).contains(texts) else { throw DecisionError.invalid("provide 1 to \(maxTexts) texts") }
-        guard options <= optionLimit else { throw DecisionError.invalid("at most \(optionLimit) options") }
-    }
-
     private func score(_ texts: [String], options: [String]) throws
         -> (logits: [MLXArray], pooled: MLXArray, inputTokens: [Int])
     {
@@ -286,10 +331,7 @@ public final class DecisionModel: @unchecked Sendable {
         return (logits, stacked(pooledRows), inputTokens)
     }
 
-    public func choose(_ texts: [String], options: [String], question: String? = nil,
-                       allowNone: Bool = true) throws -> [DecisionChoice] {
-        guard !options.isEmpty else { throw DecisionError.invalid("options must not be empty") }
-        try Self.checkCounts(texts: texts.count, options: options.count)
+    func choose(_ texts: [String], options: [String], question: String?, allowNone: Bool) throws -> [DecisionChoice] {
         let states = question.map { q in texts.map { Self.condition($0, on: q) } } ?? texts
         let (logits, pooled, _) = try score(states, options: options)
         let t = options.count > config.none.longList ? config.none.long : config.none.short
@@ -307,17 +349,14 @@ public final class DecisionModel: @unchecked Sendable {
 
     private static func condition(_ text: String, on question: String) -> String { "\(text)\n\n\(question)" }
 
-    public func candidateProbabilities(text: String, questions: [String], options: [String]) throws
+    func candidateProbabilities(text: String, questions: [String], options: [String]) throws
         -> (probabilities: [[Float]], inputTokens: Int)
     {
-        guard options.count >= 2 else { throw DecisionError.invalid("provide at least two options") }
-        try Self.checkCounts(texts: questions.count, options: options.count, optionLimit: Self.maxSystemOneOptions)
         let result = try score(questions.map { Self.condition(text, on: $0) }, options: options)
         return (result.logits.map { softmax($0, axis: -1).asArray(Float.self) }, result.inputTokens.reduce(0, +))
     }
 
-    public func yesNo(texts: [String], question: String) throws -> [DecisionYesNo] {
-        try Self.checkCounts(texts: texts.count, options: 2)
+    func yesNo(texts: [String], question: String) throws -> [DecisionYesNo] {
         let options = ["no: \(question)", "yes: \(question)"]
         let longest = options.map { tokenizer.encode($0).count }.max() ?? 0
         guard longest <= config.optionMaxTokens else {

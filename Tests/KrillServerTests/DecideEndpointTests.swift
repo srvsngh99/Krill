@@ -333,6 +333,19 @@ extension DecideEndpointTests {
         return p
     }
 
+    func testSystemOneRendersAmberStructuredStateInWireOrder() throws {
+        let questions = #""questions":{"q":{"type":"noul","instructions":"Is it urgent?"}}"#
+        let state = #"{"z":"line\nnext","a":{"y":[1,true,null],"b":"\u00e9"}}"#
+        let body = #"{"model":"amber","state":\#(state),\#(questions)}"#
+        let request = try SystemOneRequest(ByteBuffer(string: body))
+        XCTAssertEqual(request.amberState, "z: line\nnext\na: {\"y\": [1, true, null], \"b\": \"é\"}")
+
+        for empty in ["{}", "[]"] {
+            let body = #"{"model":"amber","state":\#(empty),\#(questions)}"#
+            XCTAssertEqual(try SystemOneRequest(ByteBuffer(string: body)).amberState, "")
+        }
+    }
+
     func testSystemOneChoiceKeepsWireOrderOnTie() async throws {
         try installTiny()
         let raw = #"""

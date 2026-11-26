@@ -48,6 +48,7 @@ struct SystemOneRequest: Sendable {
     let model: String
     let keepAlive: Int?
     private let state: String
+    let amberState: String?
     private let questions: [String: Question]
 
     init(_ body: ByteBuffer) throws {
@@ -56,11 +57,14 @@ struct SystemOneRequest: Sendable {
             throw ParseError.invalid("'model' must be a non-blank string")
         }
         self.model = model
+        let structuredState: Bool
         if let state = Self.nonblank(json["state"]) {
             self.state = state
+            structuredState = false
         } else if let rawState = json["state"], JSONSerialization.isValidJSONObject(rawState) {
             let data = try JSONSerialization.data(withJSONObject: rawState, options: [.sortedKeys, .withoutEscapingSlashes])
             self.state = String(decoding: data, as: UTF8.self)
+            structuredState = true
         } else {
             throw ParseError.invalid("'state' must be a non-blank string, object, or array")
         }
@@ -79,7 +83,9 @@ struct SystemOneRequest: Sendable {
         let schema = try JSONSerialization.data(withJSONObject: rawQuestions, options: [.withoutEscapingSlashes])
         guard state.utf8.count + schema.count <= Self.maxTextSize else { throw ParseError.textTooLarge }
         let choiceNames = Set(rawQuestions.keys.filter { rawQuestions[$0]?["type"] as? String == Kind.choice.rawValue })
-        let orderedKeys = choiceNames.isEmpty ? [:] : try Self.choiceKeys(in: body.readableBytesView, names: choiceNames)
+        let (orderedKeys, amberState) = try Self.orderedFields(
+            in: body.readableBytesView, names: choiceNames, structuredState: structuredState)
+        self.amberState = amberState
         var questions: [String: Question] = [:]
         for (name, raw) in rawQuestions {
             guard name.wholeMatch(of: #/[A-Za-z0-9_.-]{1,100}/#) != nil else {
@@ -140,6 +146,7 @@ struct SystemOneRequest: Sendable {
     }
 
     func response(using engine: DecisionEngine, model loaded: DecisionModel) throws -> [String: Any] {
+        let state = (loaded.isAmber ? amberState : nil) ?? self.state
         var answers: [String: [String: Any]] = [:]
         var inputTokens = 0
         for (options, group) in Dictionary(grouping: questions, by: { $0.value.options }) {
@@ -163,10 +170,19 @@ struct SystemOneRequest: Sendable {
                 "usage": ["input_tokens": inputTokens, "output_tokens": answers.count]]
     }
 
-    private static func choiceKeys(in bytes: ByteBufferView, names: Set<String>) throws -> [String: [String]] {
+    private static func orderedFields(in bytes: ByteBufferView, names: Set<String>, structuredState: Bool) throws
+        -> (keys: [String: [String]], amberState: String?)
+    {
+        guard structuredState || !names.isEmpty else { return ([:], nil) }
         var scanner = JSONMemberScanner(bytes)
         var keys: [String: [String]] = [:]
-        try scanner.object { key, root in
+        var amberState: String?
+        try scanner.object(uniqueKeys: !names.isEmpty) { key, root in
+            if key == "state", structuredState {
+                amberState = try root.renderState()
+                return
+            }
+            guard !names.isEmpty else { return root.skipValue() }
             guard key == "questions" else { return root.skipValue() }
             try root.object { name, questions in
                 guard names.contains(name) else { return questions.skipValue() }
@@ -181,12 +197,11 @@ struct SystemOneRequest: Sendable {
                 }
             }
         }
-        return keys
+        return (keys, amberState)
     }
 }
 
-// Foundation validates the JSON and decodes values. This only walks the objects
-// whose member order matters, skipping the contents of other values.
+// Walks JSON objects in wire order after Foundation validates the payload.
 private struct JSONMemberScanner {
     private let bytes: ByteBufferView
     private var index: Int
@@ -197,7 +212,7 @@ private struct JSONMemberScanner {
         self.index = bytes.startIndex + (bytes.starts(with: [0xef, 0xbb, 0xbf]) ? 3 : 0)
     }
 
-    mutating func object(_ visit: (String, inout Self) throws -> Void) throws {
+    mutating func object(uniqueKeys: Bool = true, _ visit: (String, inout Self) throws -> Void) throws {
         let invalid = SystemOneRequest.ParseError.invalid("Invalid JSON object")
         guard consume("{") else { throw invalid }
         var seen: Set<String> = []
@@ -206,7 +221,7 @@ private struct JSONMemberScanner {
             guard current == UInt8(ascii: "\"") else { throw invalid }
             skipString()
             let key = try JSONDecoder().decode(String.self, from: Data(bytes[start ..< index]))
-            guard seen.insert(key).inserted else {
+            guard !uniqueKeys || seen.insert(key).inserted else {
                 throw SystemOneRequest.ParseError.invalid("Duplicate JSON key '\(key)'")
             }
             guard consume(":") else { throw invalid }
@@ -216,11 +231,62 @@ private struct JSONMemberScanner {
         }
     }
 
+    mutating func renderState() throws -> String {
+        skipWhitespace()
+        if current == UInt8(ascii: "{") {
+            var keys: [String] = []
+            var values: [String: String] = [:]
+            try object(uniqueKeys: false) { key, state in
+                if values[key] == nil { keys.append(key) }
+                state.skipWhitespace()
+                let start = state.index
+                if state.current == UInt8(ascii: "\"") {
+                    state.skipString()
+                    values[key] = try JSONDecoder().decode(String.self, from: Data(state.bytes[start ..< state.index]))
+                } else {
+                    values[key] = try state.renderJSON()
+                }
+            }
+            return keys.map { "\($0): \(values[$0] ?? "")" }.joined(separator: "\n")
+        }
+        let array = try renderJSON()
+        return array == "[]" ? "" : array
+    }
+
+    private mutating func renderJSON() throws -> String {
+        let start = index
+        skipValue()
+        let end = index
+        index = start
+        var rendered: [UInt8] = []
+        while index < end, let byte = current {
+            switch byte {
+            case UInt8(ascii: "\""):
+                let start = index
+                skipString()
+                let string = try JSONDecoder().decode(String.self, from: Data(bytes[start ..< index]))
+                let data = try JSONSerialization.data(withJSONObject: string, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+                rendered.append(contentsOf: data)
+            case 32, 9, 10, 13:
+                index += 1
+            default:
+                rendered.append(byte)
+                if byte == UInt8(ascii: ",") || byte == UInt8(ascii: ":") { rendered.append(32) }
+                index += 1
+            }
+        }
+        return String(decoding: rendered, as: UTF8.self)
+    }
+
     private mutating func consume(_ token: Unicode.Scalar) -> Bool {
-        while let byte = current, byte == 32 || byte == 9 || byte == 10 || byte == 13 { index += 1 }
+        skipWhitespace()
         guard current == UInt8(ascii: token) else { return false }
         index += 1
         return true
+    }
+
+    private mutating func skipWhitespace() {
+        while let byte = current, byte == 32 || byte == 9 || byte == 10 || byte == 13 { index += 1 }
     }
 
     mutating func skipValue() {

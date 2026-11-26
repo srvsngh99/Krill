@@ -125,14 +125,11 @@ public final class Puller: @unchecked Sendable {
 
         progress?(totalSize, totalSize, "done")
 
-        // Detect actual family from config.json if available
-        var family = resolved.family
-        let configURL = destDir.appendingPathComponent("config.json")
+        let isAmber = fm.fileExists(atPath: destDir.appendingPathComponent("uni_config.json").path)
+        let configURL = destDir.appendingPathComponent(isAmber ? "encoder/config.json" : "config.json")
         let configJSON = (try? Data(contentsOf: configURL))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-        if let detected = configJSON.flatMap(ModelFamily.detect(from:)) {
-            family = detected
-        }
+        let family: ModelFamily = isAmber ? .decision : configJSON.flatMap(ModelFamily.detect(from:)) ?? resolved.family
 
         // Detect context length from config
         var context = resolved.context
@@ -141,7 +138,9 @@ public final class Puller: @unchecked Sendable {
         }
 
         let quant: String
-        if family == .decision {
+        if isAmber {
+            quant = "bf16"
+        } else if family == .decision {
             switch (configJSON?["dtype"] as? String)?.lowercased() {
             case "float16", "fp16": quant = "fp16"
             case "bfloat16", "bf16": quant = "bf16"
@@ -320,6 +319,8 @@ extension Puller {
         switch name {
         // Core model + generation config.
         case "config.json", "generation_config.json", "calibration.json":
+            return true
+        case "uni_config.json", "encoder/config.json", "encoder/tokenizer.json", "encoder/tokenizer_config.json":
             return true
         // Tokenizer payloads. `tokenizer.json` is the merged HF form;
         // `vocab.json` + `merges.txt` is the older BPE form some
