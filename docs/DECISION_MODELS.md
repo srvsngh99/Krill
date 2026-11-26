@@ -105,8 +105,8 @@ repository:
   a question, "none" and `allow_none=false`, a 1,470-token text, a padded batch, four yes / no.
   `DecisionModelParityTests` and `testMatchesRealBundleGolden` run it with
   `KRILL_DECISION_MODEL_PATH=<bundle> swift test --filter Decision` and skip when it is unset, so
-  CI never runs them. Verified locally on one machine: 35 of 35 decisions identical, probabilities
-  within 1e-3.
+  CI never runs them. Regenerated for the 1.0 bundle; verified locally on one machine: 35 of 35
+  decisions identical, probabilities within 1.5e-5.
 
 ## Speed and memory
 
