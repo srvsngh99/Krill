@@ -17,6 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
+| Pending | Pending | Amber 0.4B v2 decision model | Native Swift/MLX inference via the existing CLI and decision endpoints. Install with `krill pull MLukauskas/amber-0.4b-v2`. |
 
 ### Known-open, NOT yet merged
 

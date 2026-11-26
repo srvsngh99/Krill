@@ -11,6 +11,8 @@ reverse chronological order. Versioning follows
 
 ### Added
 
+- Native support for Amber 0.4B v2. Install it with `krill pull MLukauskas/amber-0.4b-v2`
+  and score choices or yes/no questions with `krill decide`, `POST /v1/decide`, or `POST /v1/systemone`.
 - `POST /v1/systemone`, an Ollama-compatible endpoint for scoring choice,
   yes/no, and ordinal questions with installed Krill decision bundles.
 
