@@ -84,16 +84,33 @@ public final class Puller: @unchecked Sendable {
         // List files in the HF repo
         let fileList = try await listRepoFiles(repo: resolved.repo)
 
-        // Filter to essential files (safetensors, configs, tokenizer).
-        let essentialFiles = fileList.filter { Puller.isEssentialFile($0.name) }
+        let isDMJEPA = resolved.repo.caseInsensitiveCompare(AliasMap.dmjepa.repo) == .orderedSame
+        let names = Set(fileList.map(\.name))
+        let isEspresso = !isDMJEPA && names.contains("heads.safetensors") && names.contains("decision_rule.json")
+        let espressoConfig = names.contains("config.json") ? "config.json" : "espresso_config.json"
+        let espressoFiles: Set<String> = [espressoConfig, "tokenizer.json", "model.safetensors",
+                                          "heads.safetensors", "decision_rule.json"]
+        var downloads = fileList.filter {
+            isEspresso ? espressoFiles.contains($0.name) : Self.isEssentialFile($0.name)
+        }.map { (file: $0, repo: resolved.repo, revision: "main") }
+        if isDMJEPA {
+            let required: Set<String> = ["config.json", "model.safetensors"]
+            downloads = downloads.filter { required.contains($0.file.name) }
+            guard Set(downloads.map { $0.file.name }) == required else {
+                throw PullerError.invalidResponse("DM-JEPA requires config.json and model.safetensors")
+            }
+            downloads += ["tokenizer.json", "tokenizer_config.json"].map {
+                (HFFileInfo(name: $0, size: 0), "answerdotai/ModernBERT-base", "8949b909ec900327062f0ebf497f51aef5e6f0c86")
+            }
+        }
 
-        let totalSize = essentialFiles.reduce(0) { $0 + $1.size }
+        let totalSize = downloads.reduce(0) { $0 + $1.file.size }
         var downloadedBytes: Int64 = 0
         var actualBytes: Int64 = 0
         var modelFiles: [ModelFile] = []
 
         // Download each file
-        for file in essentialFiles {
+        for (file, repo, revision) in downloads {
             let fileURL = try Self.safeDestination(for: file.name, under: destDir)
 
             // Create subdirectories if needed
@@ -104,7 +121,8 @@ public final class Puller: @unchecked Sendable {
 
             progress?(downloadedBytes, totalSize, file.name)
             let sha256 = try await downloadFile(
-                repo: resolved.repo,
+                repo: repo,
+                revision: revision,
                 filename: file.name,
                 destination: fileURL
             )
@@ -125,24 +143,33 @@ public final class Puller: @unchecked Sendable {
 
         progress?(totalSize, totalSize, "done")
 
-        // Detect actual family from config.json if available
-        var family = resolved.family
-        let configURL = destDir.appendingPathComponent("config.json")
+        let isAmber = fm.fileExists(atPath: destDir.appendingPathComponent("uni_config.json").path)
+        let isGlide = ["decision_config.json", "readout.safetensors"].allSatisfy {
+            fm.fileExists(atPath: destDir.appendingPathComponent($0).path)
+        }
+        let configURL = destDir.appendingPathComponent(isEspresso ? espressoConfig : isAmber ? "encoder/config.json" : "config.json")
         let configJSON = (try? Data(contentsOf: configURL))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-        if let detected = configJSON.flatMap(ModelFamily.detect(from:)) {
-            family = detected
+        if isDMJEPA, configJSON?["model_type"] as? String != "dm_jepa" {
+            throw PullerError.invalidResponse("Expected a DM-JEPA config.json")
         }
+        let family: ModelFamily = isAmber || isGlide || isEspresso
+            ? .decision : configJSON.flatMap(ModelFamily.detect(from:)) ?? resolved.family
 
         // Detect context length from config
         var context = resolved.context
-        if let maxPos = configJSON?["max_position_embeddings"] as? Int {
+        let contextKey = isDMJEPA ? "max_state_length" : isEspresso ? "max_len" : "max_position_embeddings"
+        if let maxPos = configJSON?[contextKey] as? Int {
             context = maxPos
         }
 
         let quant: String
-        if family == .decision {
-            switch (configJSON?["dtype"] as? String)?.lowercased() {
+        if isAmber || isGlide {
+            quant = "bf16"
+        } else if isEspresso {
+            quant = "fp32"
+        } else if family == .decision {
+            switch (configJSON?[isDMJEPA ? "torch_dtype" : "dtype"] as? String)?.lowercased() {
             case "float16", "fp16": quant = "fp16"
             case "bfloat16", "bf16": quant = "bf16"
             case "float32", "fp32": quant = "fp32"
@@ -321,6 +348,11 @@ extension Puller {
         // Core model + generation config.
         case "config.json", "generation_config.json", "calibration.json":
             return true
+        case "uni_config.json", "encoder/config.json", "encoder/tokenizer.json", "encoder/tokenizer_config.json":
+            return true
+        case "decision_config.json", "render_tokenizer/tokenizer.json",
+             "render_tokenizer/tokenizer_config.json", "render_tokenizer/chat_template.jinja":
+            return true
         // Tokenizer payloads. `tokenizer.json` is the merged HF form;
         // `vocab.json` + `merges.txt` is the older BPE form some
         // repos still ship without the merged file. `added_tokens.json`
@@ -406,10 +438,11 @@ extension Puller {
     /// - Incremental SHA256 hashing to avoid loading large files into memory
     func downloadFile(
         repo: String,
+        revision: String = "main",
         filename: String,
         destination: URL
     ) async throws -> String {
-        let urlString = "https://huggingface.co/\(repo)/resolve/main/\(filename)"
+        let urlString = "https://huggingface.co/\(repo)/resolve/\(revision)/\(filename)"
         guard let url = URL(string: urlString) else {
             throw PullerError.invalidRepo(repo)
         }

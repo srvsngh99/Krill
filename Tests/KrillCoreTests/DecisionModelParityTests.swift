@@ -105,3 +105,47 @@ final class DecisionModelParityTests: XCTestCase {
         XCTAssertThrowsError(try model.choose(["hi"], options: [String(repeating: "word ", count: 100)]))
     }
 }
+
+private struct ChoiceReference: Decodable {
+    let state: String
+    let instructions: String
+    let options: [String]
+    let choiceKeys: [String]?
+    let choice: Int
+    let probabilities: [Float]
+    let inputTokens: Int?
+}
+
+func checkDecisionReferenceParity(_ model: DecisionModel, name: String, dataPath: String) throws {
+    MLXMemoryConfig.apply(defaultMB: 64)  // DecisionEngine's cap; unbounded, the buffer pool grows per input length
+    let decoder = JSONDecoder()
+    let rows = try String(contentsOfFile: dataPath, encoding: .utf8).split(separator: "\n").map {
+        try decoder.decode(ChoiceReference.self, from: Data($0.utf8))
+    }
+    XCTAssertEqual(rows.count, 200)
+    let warmup = try XCTUnwrap(rows.first)
+    _ = try model.candidateProbabilities(text: warmup.state, questions: [warmup.instructions], options: warmup.options,
+                                         choiceKeys: warmup.choiceKeys)
+    var matched = 0
+    var worst: Float = 0
+    var milliseconds: [Double] = []
+    for (index, row) in rows.enumerated() {
+        let start = DispatchTime.now().uptimeNanoseconds
+        let result = try model.candidateProbabilities(text: row.state, questions: [row.instructions], options: row.options,
+                                                      choiceKeys: row.choiceKeys)
+        milliseconds.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6)
+        if let expected = row.inputTokens { XCTAssertEqual(result.inputTokens, expected, "row \(index + 1)") }
+        let p = try XCTUnwrap(result.probabilities.first)
+        XCTAssertEqual(p.count, row.options.count)
+        XCTAssertEqual(p.count, row.probabilities.count)
+        XCTAssertTrue(p.allSatisfy { $0.isFinite && (0 ... 1).contains($0) })
+        XCTAssertEqual(p.reduce(0, +), 1, accuracy: 1e-5)
+        let best = p.indices.reduce(0) { p[$1] > p[$0] ? $1 : $0 }
+        if best == row.choice { matched += 1 } else { print("\(name) choice differs on row \(index + 1)") }
+        for (actual, expected) in zip(p, row.probabilities) { worst = max(worst, abs(actual - expected)) }
+    }
+    milliseconds.sort()
+    let median = (milliseconds[(milliseconds.count - 1) / 2] + milliseconds[milliseconds.count / 2]) / 2
+    print("\(name) parity: \(matched)/\(rows.count) choices agree, max absolute probability difference \(worst), median \(median) ms/question")
+    XCTAssertGreaterThanOrEqual(matched, 198)
+}

@@ -68,7 +68,7 @@ public final class KrillTokenizer: @unchecked Sendable {
     private let trimsOneLeadingSpaceOnDecode: Bool
 
     /// Load tokenizer from a model directory containing tokenizer.json.
-    public init(from directory: URL) async throws {
+    public init(from directory: URL, standaloneBPE: Bool = false) async throws {
         let tokenizerConfig = directory.appendingPathComponent("tokenizer.json")
 
         guard FileManager.default.fileExists(atPath: tokenizerConfig.path) else {
@@ -96,7 +96,16 @@ public final class KrillTokenizer: @unchecked Sendable {
         // models and pre/post processors it declares are enough to
         // tokenize correctly without a model-specific wrapper.
         do {
-            self.tokenizer = try await AutoTokenizer.from(modelFolder: loadDir)
+            if standaloneBPE {
+                let data = try Data(contentsOf: loadDir.appendingPathComponent("tokenizer.json"))
+                guard let json = try JSONSerialization.jsonObject(with: data) as? [NSString: Any] else {
+                    throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Invalid tokenizer.json"))
+                }
+                self.tokenizer = try AutoTokenizer.from(
+                    tokenizerConfig: .init(["tokenizer_class": "PreTrainedTokenizer"]), tokenizerData: .init(json))
+            } else {
+                self.tokenizer = try await AutoTokenizer.from(modelFolder: loadDir)
+            }
         } catch {
             // swift-transformers' TokenizerError is an enum without
             // a public Sendable error code; we cannot pattern-match
@@ -481,6 +490,12 @@ public final class KrillTokenizer: @unchecked Sendable {
         }
         return ids
     }
+
+    public func encodeWithoutSpecialTokens(_ text: String) -> [Int] {
+        tokenizer.encode(text: text, addSpecialTokens: false)
+    }
+
+    public func tokenID(for token: String) -> Int? { tokenizer.convertTokenToId(token) }
 
     /// Encode a (query, document) pair for a cross-encoder reranker.
     ///

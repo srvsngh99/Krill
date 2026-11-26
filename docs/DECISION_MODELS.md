@@ -1,21 +1,72 @@
 # Decision models
 
-Tier: **Experimental** (served over HTTP and checked against golden fixtures; no alias, pull or benchmark gate yet).
+Tier: **Experimental** (served over HTTP and checked against golden fixtures).
 
 A decision model reads a text and returns a typed answer instead of generating text: one of
-several options (or "none of these") with probabilities, or yes / no. It is a ModernBERT
-reader plus a small decision head. The type has its own runtime path (`DecisionModel` in
+several options (or "none of these") with probabilities, or yes / no. It uses a text
+encoder and a decision head. The type has its own runtime path (`DecisionModel` in
 `KrillCore`, `DecisionEngine` in `KrillEngine`) and serves both `POST /v1/decide` and
 the Ollama-compatible `POST /v1/systemone`. Both endpoints use the same runtime.
 
 A bundle is recognised as a decision model when its `config.json` has a `reader` and a
-`head` section (both objects) and a `pooling` entry; its `ModelFamily` is `decision`.
+`head` section (both objects) and a `pooling` entry. Amber 0.4B v2 uses `uni_config.json`,
+`model.safetensors`, and the tokenizer and encoder config under `encoder/`.
+GLiDE 0.4B uses `decision_config.json`, `readout.safetensors`, and a sharded ModernBERT encoder.
+DM-JEPA 1.1 uses `model_type: "dm_jepa"` in `config.json`, fp32 `model.safetensors`,
+and the ModernBERT-base tokenizer. The pull fetches its two tokenizer files into the same
+directory. Espresso 380M uses an fp32 UltraBERT encoder from `model.safetensors`,
+`heads.safetensors`, `tokenizer.json`, `decision_rule.json`, and `config.json`
+(or `espresso_config.json`). All five formats register as the `decision` model family.
 
 ## CLI
 
-`--model` is a bundle directory (`config.json`, `reader.safetensors`, `head.safetensors`,
-`tokenizer.json`, `calibration.json`) or the name of an installed one. There is no model alias and
-no `krill pull` entry yet.
+`--model` accepts a bundle directory or the name of an installed model.
+
+```sh
+krill pull MLukauskas/amber-0.4b-v2
+krill decide --model amber-0.4b-v2 --text "My card was charged twice." \
+  --question "Classify the banking intent." \
+  --option "duplicate charge" --option "password reset"
+
+krill pull fastino/GLiDE-0.4B
+krill decide --model glide-0.4b --text "My card was charged twice." \
+  --question "Classify the banking intent." \
+  --option "duplicate charge" --option "password reset"
+
+krill pull diakrisis/espresso-380m
+krill decide --model espresso-380m --text "My card was charged twice." \
+  --question "Classify the banking intent." \
+  --option "duplicate charge" --option "password reset"
+```
+
+Amber and GLiDE read the question, text and options together. Their probabilities sum to one
+across the given options, and `p_none` is zero. Use `amber-0.4b-v2` or `glide-0.4b` as the model
+name on either HTTP endpoint. GLiDE's System One prompt includes both the criterion key and its
+description in the order they appear in the request.
+
+Espresso also reads the question, text, and options together. System One renders structured state
+as compact JSON in wire order and includes criterion keys and descriptions. A description containing
+`out of scope` (case-insensitive) uses Espresso's `none_of_these` key while the response retains the
+original key. System One uses the highest-probability answer even when Espresso's rule calls for
+review. In `krill decide` and `/v1/decide`, an explicit `none_of_these` option enables Espresso's
+review rule on lists of at least 50 options. When the calibrated best score is below 0.88 and
+abstention is enabled, the response has a null choice, scores for every option, and the explicit
+none option's probability in `p_none`.
+
+```sh
+krill pull DangerLabs/DM-JEPA
+krill decide --model dm-jepa --text "My card was charged twice." \
+  --question "Classify the banking intent." \
+  --option "duplicate charge" --option "password reset"
+```
+
+DM-JEPA reads the state and options with a shared ModernBERT-base encoder, then scores the
+options together with four latent prediction steps. It returns one probability per option and
+`p_none: 0`. Use `dm-jepa` on either HTTP endpoint. System One choice requests use both
+the criterion key and its description. Keys prefixed with `option_` or `k_` and digit-only
+keys contribute only the description when one is supplied.
+
+The examples below show the reader-based bundle format and its optional abstention.
 
 ```sh
 krill decide --model <bundle> --text "My card was charged twice." \
@@ -26,7 +77,7 @@ krill decide --model <bundle> --text "The invoice was paid in full." --yes-no "I
 # {"answer":"yes","p_yes":0.97}
 ```
 
-- `--question <q>` is appended to the text (`text + "\n\n" + question`).
+- The reader-based bundle appends `--question <q>` to the text (`text + "\n\n" + question`).
 - `--no-none` always picks an option; otherwise `label` and `index` are `null` when "none of these" wins.
 - `--json-in <file|->` reads JSON lines (`text`, `question`, `options`, `allow_none`, `yes_no`)
   and prints one result per line, loading the model once.
@@ -54,13 +105,13 @@ curl -s http://127.0.0.1:57455/v1/decide -H 'Content-Type: application/json' -d 
 ```
 
 When "none of these" wins, `label` and `index` are `null` (`scores` and `p_none` are still given);
-`allow_none: false` always picks an option.
+`allow_none: false` always picks an option. Amber, GLiDE, and DM-JEPA always pick an option.
 
 Errors are `{"error": "..."}`, like the embeddings and rerank routes:
 
 | Status | When |
 |---|---|
-| 400 | malformed JSON; missing `model`; no `text` / `texts` (or both); no `options` / `yes_no` (or both); empty `options`; wrong field types; an empty text or option; more than 256 texts or 128 options; text or option over the bundle's token limit; a `yes_no` question with `question`; `model` is not a decision model |
+| 400 | malformed JSON; missing `model`; no `text` / `texts` (or both); no `options` / `yes_no` (or both); empty `options`; wrong field types; an empty option; more than 256 texts or more options than the model supports; text or option rejected by the bundle's input limits; a `yes_no` question with `question`; `model` is not a decision model |
 | 401 | missing or wrong bearer key, when the server has one |
 | 404 | unknown model name |
 | 500 | the model failed to load or run (the body says only "decide failed"; details go to the server log) |
@@ -75,9 +126,22 @@ Krill decision bundles only. Krill cannot load Ollama's Nimble, Tev1, or Clef we
 
 ## Input limits
 
-A `/v1/decide` request may carry up to 256 texts and 128 options (`DecisionModel.maxTexts`, `maxOptions`); both
-are checked before the model loads, for `options` and `yes_no` alike. The token limits are not fixed:
-each bundle sets `state_max_tokens` (the text with its question) and `option_max_tokens` in its
+A `/v1/decide` request may carry up to 256 texts and 128 options, or 255 options with GLiDE or Espresso.
+A `/v1/systemone` choice may carry up to 255 options. Amber allows up to 7,999 tokens per
+question, including the instructions, state, options and markers. Its yes/no options are
+`yes` and `no`.
+
+GLiDE runs in bf16 and reads the final prompt token before `[SEP]`. Prompts that exceed 7,999
+encoder tokens keep the first 1,024 prompt tokens and the tail, including the answer cue, with
+room for `[CLS]` and `[SEP]`.
+
+DM-JEPA allows 16,384 tokens for the rendered state and instructions, and 512 tokens per
+rendered option. These limits include tags and tokenizer special tokens.
+
+Espresso accepts up to 32,768 tokens per question, including markers. Its yes/no options are
+`no` and `yes`, in that order.
+
+Reader-based bundles set `state_max_tokens` (the text with its question) and `option_max_tokens` in their
 `config.json` (2,048 and 32 for the tiny test bundle). For `yes_no` the question is scored as the
 options `no: <question>` and `yes: <question>`, so it must fit `option_max_tokens` including the
 prefix and special tokens; a longer one is a 400 that says "the yes_no question". Longer input is an
@@ -88,7 +152,29 @@ whitespace-only texts and options are rejected. The option cache holds at most 5
 
 ## Parity
 
-Two golden fixtures, both produced by the Python reference runtime (CPU, fp32), which is not in this
+Amber's 200-question parity gate compares options and probabilities and reports median native
+scoring latency after a warmup. Set `KRILL_AMBER_MODEL_PATH`, `KRILL_AMBER_INPUTS`, and
+`KRILL_AMBER_RESULTS` to the local bundle and the two JSONL files. Build the release tests and
+Metal library, then run `python3 scripts/amber_parity.py`.
+
+GLiDE's gate requires at least 198 matching choices out of 200 and reports the maximum absolute
+probability difference and median native scoring latency. Set `KRILL_GLIDE_MODEL_PATH`,
+`KRILL_GLIDE_INPUTS`, and `KRILL_GLIDE_RESULTS` to the local bundle and benchmark JSONL files.
+Build the release tests and Metal library, then run `python3 scripts/glide_parity.py`.
+
+DM-JEPA's parity gate requires at least 198 of 200 reference choices to agree and reports
+the maximum absolute probability difference and median native scoring time after a warmup.
+Set `KRILL_DMJEPA_MODEL_PATH`, `KRILL_DMJEPA_INPUTS`, and `KRILL_DMJEPA_RESULTS`. For a raw
+checkpoint, also set `KRILL_DMJEPA_TOKENIZER_PATH` to the local ModernBERT-base tokenizer
+directory. Build the release tests and Metal library, then run `python3 scripts/dmjepa_parity.py`.
+
+Espresso's gate uses 200 Banking77 and CLINC questions and requires at least 198 matching choices.
+It reports the maximum absolute probability difference and median native scoring latency. Set
+`KRILL_ESPRESSO_MODEL_PATH`, `KRILL_ESPRESSO_INPUTS`, and `KRILL_ESPRESSO_RESULTS` to the local
+bundle and benchmark JSONL files. Build the release tests and Metal library, then run
+`python3 scripts/espresso_parity.py`.
+
+Two reader-based golden fixtures, both produced by the Python reference runtime (CPU, fp32), which is not in this
 repository:
 
 - **Tiny bundle, runs in CI with no download.** `Tests/KrillCoreTests/Fixtures/decision/tiny` is a
@@ -129,6 +215,5 @@ held 776 MB (physical footprint) after a few calls, against 8 MB idle; one readi
 
 ## Not there yet
 
-- Model aliases and `krill pull`: the model repository does not exist yet.
-- A benchmark gate. Texts are read in padded chunks of 8 but scored one at a time.
+- A release performance gate. The reader-based model reads texts in padded chunks of 8 and scores them one at a time.
 - Loading is not single-flight: two cold requests can load two copies (same as the rerank engine).

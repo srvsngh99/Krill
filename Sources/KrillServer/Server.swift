@@ -2981,7 +2981,10 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         if yesNo != nil, json["question"] != nil {
             return fail(.badRequest, "'question' goes with 'options'; for 'yes_no' the question is its value")
         }
-        do { try DecisionModel.checkCounts(texts: texts.count, options: options?.count ?? 2) } catch {
+        let optionCount = options?.count ?? 2
+        let optionLimit = optionCount > DecisionModel.maxOptions && Registry.isValidModelName(name)
+            ? DecisionModel.choiceOptionLimit(for: registry.modelPath(name)) : DecisionModel.maxOptions
+        do { try DecisionModel.checkCounts(texts: texts.count, options: optionCount, optionLimit: optionLimit) } catch {
             return fail(.badRequest, String(describing: error))
         }
         if let a = json["allow_none"], !(a is Bool) { return fail(.badRequest, "'allow_none' must be a boolean") }
