@@ -8,8 +8,8 @@ lives in [`CHANGELOG.md`](CHANGELOG.md), and install/usage lives in the
 ---
 
 ## v0.29.0 - 2026-11-26
-**Krill now speaks Ollama's System One API.**
-`POST /v1/systemone` answers choice, yes / no and score questions with an installed Krill decision model, in the same request and response shape as Ollama's endpoint, so clients built for it work against Krill unchanged. It serves Krill decision bundles only. Malformed `keep_alive` values now fall back to the default instead of being half-read.
+**Four more decision models, and Ollama's System One API.**
+Krill now runs Amber 0.4B v2, GLiDE 0.4B, DM-JEPA 1.1 and Espresso 380M natively, alongside its own decision model. Install one with `krill pull` (for example `krill pull MLukauskas/amber-0.4b-v2`) and use it with `krill decide`, `POST /v1/decide` or `POST /v1/systemone`. `POST /v1/systemone` answers choice, yes / no and score questions with an installed Krill decision model, in the same request and response shape as Ollama's endpoint, so clients built for it work against Krill unchanged. Malformed `keep_alive` values now fall back to the default instead of being half-read.
 
 ## v0.28.1 - 2026-11-24
 **Pulling a decision model now shows the right next step.**
