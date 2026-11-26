@@ -154,32 +154,34 @@ public final class DecisionModel: @unchecked Sendable {
     public static let maxSystemOneOptions = 255
 
     public var isAmber: Bool { scorer is AmberDecisionModel }
+    public var isGlide: Bool { scorer is GlideDecisionModel }
 
     public static func isDecisionConfig(_ json: [String: Any]) -> Bool {
         json["reader"] is [String: Any] && json["head"] is [String: Any] && json["pooling"] != nil
     }
 
     public static func isBundle(_ directory: URL) -> Bool {
-        if AmberDecisionModel.isBundle(directory) { return true }
+        if AmberDecisionModel.isBundle(directory) || isGlideBundle(directory) { return true }
         guard let data = try? Data(contentsOf: directory.appendingPathComponent("config.json")),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
         return isDecisionConfig(json)
     }
 
+    public static func isGlideBundle(_ directory: URL) -> Bool { GlideDecisionModel.isBundle(directory) }
+
     public static func load(directory: URL) async throws -> DecisionModel {
         if AmberDecisionModel.isBundle(directory) {
             return DecisionModel(scorer: try await AmberDecisionModel.load(directory: directory))
+        }
+        if isGlideBundle(directory) {
+            return DecisionModel(scorer: try await GlideDecisionModel.load(directory: directory))
         }
         return DecisionModel(scorer: try await ReaderDecisionModel.load(directory: directory))
     }
 
     private init(scorer: any DecisionScoring) { self.scorer = scorer }
 
-    public static func checkCounts(texts: Int, options: Int) throws {
-        try checkCounts(texts: texts, options: options, optionLimit: maxOptions)
-    }
-
-    private static func checkCounts(texts: Int, options: Int, optionLimit: Int) throws {
+    public static func checkCounts(texts: Int, options: Int, optionLimit: Int = maxOptions) throws {
         guard (1 ... maxTexts).contains(texts) else { throw DecisionError.invalid("provide 1 to \(maxTexts) texts") }
         guard options <= optionLimit else { throw DecisionError.invalid("at most \(optionLimit) options") }
     }
@@ -187,7 +189,8 @@ public final class DecisionModel: @unchecked Sendable {
     public func choose(_ texts: [String], options: [String], question: String? = nil,
                        allowNone: Bool = true) throws -> [DecisionChoice] {
         guard !options.isEmpty else { throw DecisionError.invalid("options must not be empty") }
-        try Self.checkCounts(texts: texts.count, options: options.count)
+        try Self.checkCounts(texts: texts.count, options: options.count,
+                             optionLimit: isGlide ? Self.maxSystemOneOptions : Self.maxOptions)
         return try scorer.choose(texts, options: options, question: question, allowNone: allowNone)
     }
 
