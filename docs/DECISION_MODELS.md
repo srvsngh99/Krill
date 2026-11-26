@@ -10,11 +10,13 @@ the Ollama-compatible `POST /v1/systemone`. Both endpoints use the same runtime.
 
 A bundle is recognised as a decision model when its `config.json` has a `reader` and a
 `head` section (both objects) and a `pooling` entry. Amber 0.4B v2 uses `uni_config.json`,
-`model.safetensors`, and the tokenizer and encoder config under `encoder/`. GLiDE 0.4B uses
-`decision_config.json`, `readout.safetensors`, and a sharded ModernBERT encoder. Espresso 380M uses
-an fp32 UltraBERT encoder from `model.safetensors`, `heads.safetensors`, `tokenizer.json`,
-`decision_rule.json`, and `config.json` (or `espresso_config.json`). All four formats register
-as the `decision` model family.
+`model.safetensors`, and the tokenizer and encoder config under `encoder/`.
+GLiDE 0.4B uses `decision_config.json`, `readout.safetensors`, and a sharded ModernBERT encoder.
+DM-JEPA 1.1 uses `model_type: "dm_jepa"` in `config.json`, fp32 `model.safetensors`,
+and the ModernBERT-base tokenizer. The pull fetches its two tokenizer files into the same
+directory. Espresso 380M uses an fp32 UltraBERT encoder from `model.safetensors`,
+`heads.safetensors`, `tokenizer.json`, `decision_rule.json`, and `config.json`
+(or `espresso_config.json`). All five formats register as the `decision` model family.
 
 ## CLI
 
@@ -50,6 +52,19 @@ review. In `krill decide` and `/v1/decide`, an explicit `none_of_these` option e
 review rule on lists of at least 50 options. When the calibrated best score is below 0.88 and
 abstention is enabled, the response has a null choice, scores for every option, and the explicit
 none option's probability in `p_none`.
+
+```sh
+krill pull DangerLabs/DM-JEPA
+krill decide --model dm-jepa --text "My card was charged twice." \
+  --question "Classify the banking intent." \
+  --option "duplicate charge" --option "password reset"
+```
+
+DM-JEPA reads the state and options with a shared ModernBERT-base encoder, then scores the
+options together with four latent prediction steps. It returns one probability per option and
+`p_none: 0`. Use `dm-jepa` on either HTTP endpoint. System One choice requests use both
+the criterion key and its description. Keys prefixed with `option_` or `k_` and digit-only
+keys contribute only the description when one is supplied.
 
 The examples below show the reader-based bundle format and its optional abstention.
 
@@ -90,7 +105,7 @@ curl -s http://127.0.0.1:57455/v1/decide -H 'Content-Type: application/json' -d 
 ```
 
 When "none of these" wins, `label` and `index` are `null` (`scores` and `p_none` are still given);
-`allow_none: false` always picks an option. Amber and GLiDE always pick an option.
+`allow_none: false` always picks an option. Amber, GLiDE, and DM-JEPA always pick an option.
 
 Errors are `{"error": "..."}`, like the embeddings and rerank routes:
 
@@ -120,6 +135,9 @@ GLiDE runs in bf16 and reads the final prompt token before `[SEP]`. Prompts that
 encoder tokens keep the first 1,024 prompt tokens and the tail, including the answer cue, with
 room for `[CLS]` and `[SEP]`.
 
+DM-JEPA allows 16,384 tokens for the rendered state and instructions, and 512 tokens per
+rendered option. These limits include tags and tokenizer special tokens.
+
 Espresso accepts up to 32,768 tokens per question, including markers. Its yes/no options are
 `no` and `yes`, in that order.
 
@@ -143,6 +161,12 @@ GLiDE's gate requires at least 198 matching choices out of 200 and reports the m
 probability difference and median native scoring latency. Set `KRILL_GLIDE_MODEL_PATH`,
 `KRILL_GLIDE_INPUTS`, and `KRILL_GLIDE_RESULTS` to the local bundle and benchmark JSONL files.
 Build the release tests and Metal library, then run `python3 scripts/glide_parity.py`.
+
+DM-JEPA's parity gate requires at least 198 of 200 reference choices to agree and reports
+the maximum absolute probability difference and median native scoring time after a warmup.
+Set `KRILL_DMJEPA_MODEL_PATH`, `KRILL_DMJEPA_INPUTS`, and `KRILL_DMJEPA_RESULTS`. For a raw
+checkpoint, also set `KRILL_DMJEPA_TOKENIZER_PATH` to the local ModernBERT-base tokenizer
+directory. Build the release tests and Metal library, then run `python3 scripts/dmjepa_parity.py`.
 
 Espresso's gate uses 200 Banking77 and CLINC questions and requires at least 198 matching choices.
 It reports the maximum absolute probability difference and median native scoring latency. Set

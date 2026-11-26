@@ -84,20 +84,33 @@ public final class Puller: @unchecked Sendable {
         // List files in the HF repo
         let fileList = try await listRepoFiles(repo: resolved.repo)
 
+        let isDMJEPA = resolved.repo.caseInsensitiveCompare(AliasMap.dmjepa.repo) == .orderedSame
         let names = Set(fileList.map(\.name))
-        let isEspresso = names.contains("heads.safetensors") && names.contains("decision_rule.json")
+        let isEspresso = !isDMJEPA && names.contains("heads.safetensors") && names.contains("decision_rule.json")
         let espressoConfig = names.contains("config.json") ? "config.json" : "espresso_config.json"
         let espressoFiles: Set<String> = [espressoConfig, "tokenizer.json", "model.safetensors",
                                           "heads.safetensors", "decision_rule.json"]
-        let essentialFiles = fileList.filter { isEspresso ? espressoFiles.contains($0.name) : Self.isEssentialFile($0.name) }
+        var downloads = fileList.filter {
+            isEspresso ? espressoFiles.contains($0.name) : Self.isEssentialFile($0.name)
+        }.map { (file: $0, repo: resolved.repo, revision: "main") }
+        if isDMJEPA {
+            let required: Set<String> = ["config.json", "model.safetensors"]
+            downloads = downloads.filter { required.contains($0.file.name) }
+            guard Set(downloads.map { $0.file.name }) == required else {
+                throw PullerError.invalidResponse("DM-JEPA requires config.json and model.safetensors")
+            }
+            downloads += ["tokenizer.json", "tokenizer_config.json"].map {
+                (HFFileInfo(name: $0, size: 0), "answerdotai/ModernBERT-base", "8949b909ec900327062f0ebf497f51aef5e6f0c86")
+            }
+        }
 
-        let totalSize = essentialFiles.reduce(0) { $0 + $1.size }
+        let totalSize = downloads.reduce(0) { $0 + $1.file.size }
         var downloadedBytes: Int64 = 0
         var actualBytes: Int64 = 0
         var modelFiles: [ModelFile] = []
 
         // Download each file
-        for file in essentialFiles {
+        for (file, repo, revision) in downloads {
             let fileURL = try Self.safeDestination(for: file.name, under: destDir)
 
             // Create subdirectories if needed
@@ -108,7 +121,8 @@ public final class Puller: @unchecked Sendable {
 
             progress?(downloadedBytes, totalSize, file.name)
             let sha256 = try await downloadFile(
-                repo: resolved.repo,
+                repo: repo,
+                revision: revision,
                 filename: file.name,
                 destination: fileURL
             )
@@ -136,12 +150,16 @@ public final class Puller: @unchecked Sendable {
         let configURL = destDir.appendingPathComponent(isEspresso ? espressoConfig : isAmber ? "encoder/config.json" : "config.json")
         let configJSON = (try? Data(contentsOf: configURL))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        if isDMJEPA, configJSON?["model_type"] as? String != "dm_jepa" {
+            throw PullerError.invalidResponse("Expected a DM-JEPA config.json")
+        }
         let family: ModelFamily = isAmber || isGlide || isEspresso
             ? .decision : configJSON.flatMap(ModelFamily.detect(from:)) ?? resolved.family
 
         // Detect context length from config
         var context = resolved.context
-        if let maxPos = configJSON?[isEspresso ? "max_len" : "max_position_embeddings"] as? Int {
+        let contextKey = isDMJEPA ? "max_state_length" : isEspresso ? "max_len" : "max_position_embeddings"
+        if let maxPos = configJSON?[contextKey] as? Int {
             context = maxPos
         }
 
@@ -151,7 +169,7 @@ public final class Puller: @unchecked Sendable {
         } else if isEspresso {
             quant = "fp32"
         } else if family == .decision {
-            switch (configJSON?["dtype"] as? String)?.lowercased() {
+            switch (configJSON?[isDMJEPA ? "torch_dtype" : "dtype"] as? String)?.lowercased() {
             case "float16", "fp16": quant = "fp16"
             case "bfloat16", "bf16": quant = "bf16"
             case "float32", "fp32": quant = "fp32"
@@ -420,10 +438,11 @@ extension Puller {
     /// - Incremental SHA256 hashing to avoid loading large files into memory
     func downloadFile(
         repo: String,
+        revision: String = "main",
         filename: String,
         destination: URL
     ) async throws -> String {
-        let urlString = "https://huggingface.co/\(repo)/resolve/main/\(filename)"
+        let urlString = "https://huggingface.co/\(repo)/resolve/\(revision)/\(filename)"
         guard let url = URL(string: urlString) else {
             throw PullerError.invalidRepo(repo)
         }

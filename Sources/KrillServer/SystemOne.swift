@@ -15,8 +15,9 @@ struct SystemOneRequest: Sendable {
 
     private enum Kind: String, Sendable { case choice, noul, score }
 
-    private struct ScoringOptions: Hashable {
-        let values: [String]
+    private struct Candidates: Hashable, Sendable {
+        let options: [String]
+        var labels: [String]? = nil
         var choiceKeys: [String]? = nil
     }
 
@@ -25,28 +26,28 @@ struct SystemOneRequest: Sendable {
         let instructions: String
         let keys: [String]
         let options: [String]
+        let dmjepa: Candidates
         let glideNoulDescriptions: [String]?
         let espressoChoiceDescriptions: [String]?
 
-        func scoringOptions(using model: DecisionModel) -> ScoringOptions {
-            if model.isEspresso {
-                if let descriptions = espressoChoiceDescriptions {
-                    return ScoringOptions(values: descriptions, choiceKeys: keys)
-                }
-                if kind == .noul { return ScoringOptions(values: []) }
-            }
-            guard model.isGlide else { return ScoringOptions(values: options) }
-            let rendered = zip(keys, glideNoulDescriptions ?? options).map { key, option in
+        var glideCandidates: Candidates {
+            Candidates(options: zip(keys, glideNoulDescriptions ?? options).map { key, option in
                 key == option ? key : "\(key): \(option)"
-            }
-            return ScoringOptions(values: rendered)
+            })
         }
 
-        func answer(_ scores: [Float]) throws -> [String: Any] {
+        var espressoCandidates: Candidates {
+            if let espressoChoiceDescriptions {
+                return Candidates(options: espressoChoiceDescriptions, choiceKeys: keys)
+            }
+            return Candidates(options: kind == .noul ? [] : options)
+        }
+
+        func answer(_ scores: [Float], isDMJEPA: Bool) throws -> [String: Any] {
             let total = scores.reduce(0.0) { $0 + Double($1) }
             guard total.isFinite, total > 0 else { throw ScoreError.invalidProbabilities }
-            let p = scores.map { Double($0) / total }
-            if kind == .noul { return ["type": kind.rawValue, "noul": p[0]] }
+            let p = isDMJEPA ? scores.map(Double.init) : scores.map { Double($0) / total }
+            if kind == .noul { return ["type": kind.rawValue, "noul": p[isDMJEPA ? 1 : 0]] }
             let entropy = -p.filter { $0 > 0 }.reduce(0) { $0 + $1 * log($1) }
             var result: [String: Any] = [
                 "type": kind.rawValue,
@@ -71,6 +72,7 @@ struct SystemOneRequest: Sendable {
     private let state: String
     let amberState: String?
     let glideState: String?
+    let dmjepaState: String?
     let espressoState: String?
     private let questions: [String: Question]
 
@@ -106,10 +108,11 @@ struct SystemOneRequest: Sendable {
         let schema = try JSONSerialization.data(withJSONObject: rawQuestions, options: [.withoutEscapingSlashes])
         guard state.utf8.count + schema.count <= Self.maxTextSize else { throw ParseError.textTooLarge }
         let choiceNames = Set(rawQuestions.keys.filter { rawQuestions[$0]?["type"] as? String == Kind.choice.rawValue })
-        let (orderedKeys, amberState, glideState, espressoState) = try Self.orderedFields(
+        let (orderedKeys, amberState, glideState, dmjepaState, espressoState) = try Self.orderedFields(
             in: body.readableBytesView, names: choiceNames, structuredState: structuredState)
         self.amberState = amberState
         self.glideState = glideState
+        self.dmjepaState = dmjepaState
         self.espressoState = espressoState
         var questions: [String: Question] = [:]
         for (name, raw) in rawQuestions {
@@ -133,6 +136,7 @@ struct SystemOneRequest: Sendable {
         }
         let keys: [String]
         let options: [String]
+        let dmjepa: Candidates
         var glideNoulDescriptions: [String]?
         var espressoChoiceDescriptions: [String]?
         switch kind {
@@ -150,7 +154,9 @@ struct SystemOneRequest: Sendable {
                 }
                 return option
             }
-            espressoChoiceDescriptions = keys.map { criteria[$0] as? String ?? "" }
+            let descriptions = keys.map { criteria[$0] as? String ?? "" }
+            dmjepa = Candidates(options: descriptions, labels: keys)
+            espressoChoiceDescriptions = descriptions
         case .noul:
             keys = ["true", "false"]
             if let value = raw["criteria"] {
@@ -159,9 +165,12 @@ struct SystemOneRequest: Sendable {
                     throw ParseError.invalid("Noul '\(name)' criteria must map 'true' and/or 'false' to non-blank descriptions")
                 }
                 options = [criteria["true"] ?? "true", criteria["false"] ?? "false"]
+                dmjepa = criteria.isEmpty ? Candidates(options: []) : Candidates(
+                    options: [criteria["false"] ?? "", criteria["true"] ?? ""], labels: ["false", "true"])
                 glideNoulDescriptions = [criteria["true"] ?? "Yes", criteria["false"] ?? "No"]
             } else {
                 options = []
+                dmjepa = Candidates(options: [])
             }
         case .score:
             guard let criteria = raw["criteria"] as? [String], (2 ... 10).contains(criteria.count),
@@ -170,18 +179,34 @@ struct SystemOneRequest: Sendable {
             }
             options = criteria
             keys = options.indices.map { String($0) }
+            dmjepa = Candidates(options: options, labels: keys)
         }
         return Question(kind: kind, instructions: instructions, keys: keys, options: options,
-                        glideNoulDescriptions: glideNoulDescriptions, espressoChoiceDescriptions: espressoChoiceDescriptions)
+                        dmjepa: dmjepa, glideNoulDescriptions: glideNoulDescriptions,
+                        espressoChoiceDescriptions: espressoChoiceDescriptions)
     }
 
     func response(using engine: DecisionEngine, model loaded: DecisionModel) throws -> [String: Any] {
-        let state = (loaded.isEspresso ? espressoState : loaded.isAmber ? amberState : loaded.isGlide ? glideState : nil)
-            ?? self.state
+        let state: String
+        let candidatesFor: (Question) -> Candidates
+        if loaded.isDMJEPA {
+            state = dmjepaState ?? self.state
+            candidatesFor = { $0.dmjepa }
+        } else if loaded.isEspresso {
+            state = espressoState ?? self.state
+            candidatesFor = { $0.espressoCandidates }
+        } else if loaded.isGlide {
+            state = glideState ?? self.state
+            candidatesFor = { $0.glideCandidates }
+        } else {
+            state = (loaded.isAmber ? amberState : nil) ?? self.state
+            candidatesFor = { Candidates(options: $0.options) }
+        }
         var answers: [String: [String: Any]] = [:]
         var inputTokens = 0
-        for (options, group) in Dictionary(grouping: questions, by: { $0.value.scoringOptions(using: loaded) }) {
-            if options.values.isEmpty {
+        let groups = Dictionary(grouping: questions) { candidatesFor($0.value) }
+        for (candidates, group) in groups {
+            if candidates.options.isEmpty {
                 for (instructions, sameQuestion) in Dictionary(grouping: group, by: { $0.value.instructions }) {
                     let result = try engine.yesNo(loaded, [state], question: instructions)[0]
                     guard (0 ... 1).contains(result.pYes) else { throw ScoreError.invalidProbabilities }
@@ -190,11 +215,11 @@ struct SystemOneRequest: Sendable {
                 }
             } else {
                 let scored = try engine.candidateProbabilities(
-                    loaded, text: state, questions: group.map { $0.value.instructions }, options: options.values,
-                    choiceKeys: options.choiceKeys)
+                    loaded, text: state, questions: group.map { $0.value.instructions },
+                    options: candidates.options, optionLabels: candidates.labels, choiceKeys: candidates.choiceKeys)
                 inputTokens += scored.inputTokens
                 for ((name, question), p) in zip(group, scored.probabilities) {
-                    answers[name] = try question.answer(p)
+                    answers[name] = try question.answer(p, isDMJEPA: loaded.isDMJEPA)
                 }
             }
         }
@@ -203,20 +228,23 @@ struct SystemOneRequest: Sendable {
     }
 
     private static func orderedFields(in bytes: ByteBufferView, names: Set<String>, structuredState: Bool) throws
-        -> (keys: [String: [String]], amberState: String?, glideState: String?, espressoState: String?)
+        -> (keys: [String: [String]], amberState: String?, glideState: String?, dmjepaState: String?, espressoState: String?)
     {
-        guard structuredState || !names.isEmpty else { return ([:], nil, nil, nil) }
+        guard structuredState || !names.isEmpty else { return ([:], nil, nil, nil, nil) }
         var scanner = JSONMemberScanner(bytes)
         var keys: [String: [String]] = [:]
         var amberState: String?
         var glideState: String?
+        var dmjepaState: String?
         var espressoState: String?
         try scanner.object(uniqueKeys: !names.isEmpty) { key, root in
             if key == "state", structuredState {
-                var value = root
-                glideState = try value.renderJSON()
-                value = root
-                espressoState = try value.renderJSON(compact: true)
+                var glide = root
+                glideState = try glide.renderJSON()
+                var dmjepa = root
+                dmjepaState = try dmjepa.renderDMJEPAState()
+                var espresso = root
+                espressoState = try espresso.renderJSON(compact: true)
                 amberState = try root.renderState()
                 return
             }
@@ -235,7 +263,7 @@ struct SystemOneRequest: Sendable {
                 }
             }
         }
-        return (keys, amberState, glideState, espressoState)
+        return (keys, amberState, glideState, dmjepaState, espressoState)
     }
 }
 
@@ -291,13 +319,20 @@ private struct JSONMemberScanner {
         return array == "[]" ? "" : array
     }
 
-    mutating func renderJSON(compact: Bool = false) throws -> String {
+    mutating func renderDMJEPAState() throws -> String {
+        let state = try renderJSON(pretty: true)
+        return state == "{}" || state == "[]" ? "" : state
+    }
+
+    mutating func renderJSON(compact: Bool = false, pretty: Bool = false) throws -> String {
         skipWhitespace()
         let start = index
         skipValue()
         let end = index
         index = start
         var rendered: [UInt8] = []
+        var depth = 0
+        func line(at depth: Int) -> [UInt8] { [10] + Array(repeating: 32, count: depth * 2) }
         while index < end, let byte = current {
             switch byte {
             case UInt8(ascii: "\""):
@@ -305,9 +340,40 @@ private struct JSONMemberScanner {
                 skipString()
                 let string = try JSONDecoder().decode(String.self, from: Data(bytes[start ..< index]))
                 let data = try JSONSerialization.data(withJSONObject: string, options: [.fragmentsAllowed, .withoutEscapingSlashes])
-                rendered.append(contentsOf: data)
+                if pretty {
+                    for unit in String(decoding: data, as: UTF8.self).utf16 {
+                        if unit < 127 { rendered.append(UInt8(unit)) }
+                        else { rendered.append(contentsOf: String(format: "\\u%04x", unit).utf8) }
+                    }
+                } else {
+                    rendered.append(contentsOf: data)
+                }
             case 32, 9, 10, 13:
                 index += 1
+            case 123 where pretty, 91 where pretty:
+                rendered.append(byte)
+                depth += 1
+                index += 1
+                skipWhitespace()
+                if current != (byte == 123 ? 125 : 93) { rendered += line(at: depth) }
+            case 125 where pretty, 93 where pretty:
+                depth -= 1
+                if rendered.last != (byte == 125 ? 123 : 91) { rendered += line(at: depth) }
+                rendered.append(byte)
+                index += 1
+            case 44 where pretty:
+                rendered.append(byte)
+                rendered += line(at: depth)
+                index += 1
+            case 45 where pretty, 48 ... 57 where pretty:
+                let start = index
+                while index < end, let digit = current, (48 ... 57).contains(digit)
+                    || [43, 45, 46, 69, 101].contains(digit) { index += 1 }
+                let number = String(decoding: bytes[start ..< index], as: UTF8.self)
+                let canonical = number.contains(where: { ".eE".contains($0) })
+                    ? Double(number).map { String($0) } ?? number
+                    : (number == "-0" ? "0" : number)
+                rendered.append(contentsOf: canonical.utf8)
             default:
                 rendered.append(byte)
                 if !compact, byte == UInt8(ascii: ",") || byte == UInt8(ascii: ":") { rendered.append(32) }

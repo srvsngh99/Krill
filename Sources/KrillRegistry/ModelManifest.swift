@@ -253,6 +253,7 @@ public enum ModelFamily: String, Codable, Sendable, CaseIterable {
 
     /// Detect model family from HuggingFace config.json's `architectures` field.
     public static func detect(from configJSON: [String: Any]) -> ModelFamily? {
+        if configJSON["model_type"] as? String == "dm_jepa" { return .decision }
         if configJSON["reader"] is [String: Any], configJSON["head"] is [String: Any], configJSON["pooling"] != nil {
             return .decision
         }

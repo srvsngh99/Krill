@@ -345,6 +345,34 @@ final class PullerTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: config, encoding: .utf8), files[1].1)
     }
 
+    func testPullDMJEPAFetchesOnlyWeightsConfigAndModernBERTTokenizer() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let registry = Registry(baseDir: tempDir)
+        let config = #"{"model_type":"dm_jepa","torch_dtype":"float32","max_state_length":16384}"#
+        let files = ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"]
+        let published = files.prefix(2) + ["pytorch_model.bin", "modeling_dm_jepa.py", "djepa/model/extra.safetensors"]
+        let listing = try JSONSerialization.data(withJSONObject: ["siblings": published.map { ["rfilename": $0] }])
+        let client = MockPullerHTTPClient(
+            tempDir: tempDir,
+            dataResponses: [.init(statusCode: 200, body: listing)],
+            downloadResponses: [config, "weights", "{}", "{}"].map { .init(statusCode: 200, body: Data($0.utf8)) }
+        )
+        let puller = Puller(registry: registry, httpClient: client, tokenProvider: { nil }, sleeper: { _ in })
+        let resolved = try XCTUnwrap(AliasMap.resolve("DangerLabs/DM-JEPA"))
+        let manifest = try await puller.pull(resolved)
+        XCTAssertEqual(manifest.name, "dm-jepa")
+        XCTAssertEqual(manifest.family, .decision)
+        XCTAssertEqual(manifest.quant, "fp32")
+        XCTAssertEqual(manifest.context, 16384)
+        XCTAssertEqual(manifest.files.map(\.path), files)
+        XCTAssertEqual(ModelFamily.detect(from: ["model_type": "dm_jepa"]), .decision)
+        let urls = client.recordedDownloadRequests().compactMap(\.url)
+        XCTAssertEqual(urls.map(\.lastPathComponent), files)
+        XCTAssertTrue(urls.prefix(2).allSatisfy { $0.path.hasPrefix("/DangerLabs/DM-JEPA/resolve/") })
+        XCTAssertTrue(urls.suffix(2).allSatisfy { $0.path.hasPrefix("/answerdotai/ModernBERT-base/resolve/") })
+    }
+
     func testIsEssentialFileAcceptsAllTokenizerArtifacts() {
         // Merged tokenizer form.
         XCTAssertTrue(Puller.isEssentialFile("tokenizer.json"))
