@@ -160,7 +160,7 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
         throw ModelLoadError.invalidConfig("Cannot parse config.json")
     }
 
-    if isAmber || DecisionModel.isDecisionConfig(configJSON) {
+    if isAmber || DecisionModel.isGlideBundle(directory) || DecisionModel.isDecisionConfig(configJSON) {
         throw ModelLoadError.unsupportedArchitecture(
             "A decision model is not a causal LM. Use `krill decide` or POST /v1/decide instead.")
     }

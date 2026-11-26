@@ -28,6 +28,7 @@ public struct AliasMap: Sendable {
         if let entry = aliases[normalized] {
             return entry
         }
+        if normalized == "fastino/glide-0.4b" { return aliases["glide-0.4b"] }
 
         // Catalog fallback: a model added via `krill catalog` without
         // a binary rebuild. Only consulted when a store is supplied.
@@ -93,7 +94,9 @@ public struct ResolvedModel: Sendable {
 
 private let aliases: [String: ResolvedModel] = [
     "dm-jepa": AliasMap.dmjepa,
-
+    "glide-0.4b": ResolvedModel(
+        repo: "fastino/GLiDE-0.4B",
+        name: "glide-0.4b", family: .decision, params: "0.4B", quant: "bf16", context: 7999),
     // Llama 3.2
     "llama-3.2-1b": ResolvedModel(
         repo: "mlx-community/Llama-3.2-1B-Instruct-4bit",

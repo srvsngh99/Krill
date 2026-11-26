@@ -11,9 +11,10 @@ the Ollama-compatible `POST /v1/systemone`. Both endpoints use the same runtime.
 A bundle is recognised as a decision model when its `config.json` has a `reader` and a
 `head` section (both objects) and a `pooling` entry. Amber 0.4B v2 uses `uni_config.json`,
 `model.safetensors`, and the tokenizer and encoder config under `encoder/`.
+GLiDE 0.4B uses `decision_config.json`, `readout.safetensors`, and a sharded ModernBERT encoder.
 DM-JEPA 1.1 uses `model_type: "dm_jepa"` in `config.json`, fp32 `model.safetensors`,
 and the ModernBERT-base tokenizer. The pull fetches its two tokenizer files into the same
-directory. All three formats register as the `decision` model family.
+directory. All four formats register as the `decision` model family.
 
 ## CLI
 
@@ -24,10 +25,17 @@ krill pull MLukauskas/amber-0.4b-v2
 krill decide --model amber-0.4b-v2 --text "My card was charged twice." \
   --question "Classify the banking intent." \
   --option "duplicate charge" --option "password reset"
+
+krill pull fastino/GLiDE-0.4B
+krill decide --model glide-0.4b --text "My card was charged twice." \
+  --question "Classify the banking intent." \
+  --option "duplicate charge" --option "password reset"
 ```
 
-Amber reads the question, text and options together. Its probabilities sum to one across the
-given options, and `p_none` is zero. Use `amber-0.4b-v2` as the model name on either HTTP endpoint.
+Amber and GLiDE read the question, text and options together. Their probabilities sum to one
+across the given options, and `p_none` is zero. Use `amber-0.4b-v2` or `glide-0.4b` as the model
+name on either HTTP endpoint. GLiDE's System One prompt includes both the criterion key and its
+description in the order they appear in the request.
 
 ```sh
 krill pull DangerLabs/DM-JEPA
@@ -81,13 +89,13 @@ curl -s http://127.0.0.1:57455/v1/decide -H 'Content-Type: application/json' -d 
 ```
 
 When "none of these" wins, `label` and `index` are `null` (`scores` and `p_none` are still given);
-`allow_none: false` always picks an option. Amber and DM-JEPA always pick an option.
+`allow_none: false` always picks an option. Amber, GLiDE, and DM-JEPA always pick an option.
 
 Errors are `{"error": "..."}`, like the embeddings and rerank routes:
 
 | Status | When |
 |---|---|
-| 400 | malformed JSON; missing `model`; no `text` / `texts` (or both); no `options` / `yes_no` (or both); empty `options`; wrong field types; an empty text or option; more than 256 texts or 128 options; text or option over the bundle's token limit; a `yes_no` question with `question`; `model` is not a decision model |
+| 400 | malformed JSON; missing `model`; no `text` / `texts` (or both); no `options` / `yes_no` (or both); empty `options`; wrong field types; an empty option; more than 256 texts or more options than the model supports; text or option rejected by the bundle's input limits; a `yes_no` question with `question`; `model` is not a decision model |
 | 401 | missing or wrong bearer key, when the server has one |
 | 404 | unknown model name |
 | 500 | the model failed to load or run (the body says only "decide failed"; details go to the server log) |
@@ -102,10 +110,14 @@ Krill decision bundles only. Krill cannot load Ollama's Nimble, Tev1, or Clef we
 
 ## Input limits
 
-A `/v1/decide` request may carry up to 256 texts and 128 options (`DecisionModel.maxTexts`, `maxOptions`).
+A `/v1/decide` request may carry up to 256 texts and 128 options, or 255 options with GLiDE.
 A `/v1/systemone` choice may carry up to 255 options. Amber allows up to 7,999 tokens per
 question, including the instructions, state, options and markers. Its yes/no options are
 `yes` and `no`.
+
+GLiDE runs in bf16 and reads the final prompt token before `[SEP]`. Prompts that exceed 7,999
+encoder tokens keep the first 1,024 prompt tokens and the tail, including the answer cue, with
+room for `[CLS]` and `[SEP]`.
 
 DM-JEPA allows 16,384 tokens for the rendered state and instructions, and 512 tokens per
 rendered option. These limits include tags and tokenizer special tokens.
@@ -125,6 +137,11 @@ Amber's 200-question parity gate compares options and probabilities and reports 
 scoring latency after a warmup. Set `KRILL_AMBER_MODEL_PATH`, `KRILL_AMBER_INPUTS`, and
 `KRILL_AMBER_RESULTS` to the local bundle and the two JSONL files. Build the release tests and
 Metal library, then run `python3 scripts/amber_parity.py`.
+
+GLiDE's gate requires at least 198 matching choices out of 200 and reports the maximum absolute
+probability difference and median native scoring latency. Set `KRILL_GLIDE_MODEL_PATH`,
+`KRILL_GLIDE_INPUTS`, and `KRILL_GLIDE_RESULTS` to the local bundle and benchmark JSONL files.
+Build the release tests and Metal library, then run `python3 scripts/glide_parity.py`.
 
 DM-JEPA's parity gate requires at least 198 of 200 reference choices to agree and reports
 the maximum absolute probability difference and median native scoring time after a warmup.
