@@ -126,10 +126,13 @@ public final class Puller: @unchecked Sendable {
         progress?(totalSize, totalSize, "done")
 
         let isAmber = fm.fileExists(atPath: destDir.appendingPathComponent("uni_config.json").path)
+        let isGlide = ["decision_config.json", "readout.safetensors"].allSatisfy {
+            fm.fileExists(atPath: destDir.appendingPathComponent($0).path)
+        }
         let configURL = destDir.appendingPathComponent(isAmber ? "encoder/config.json" : "config.json")
         let configJSON = (try? Data(contentsOf: configURL))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-        let family: ModelFamily = isAmber ? .decision : configJSON.flatMap(ModelFamily.detect(from:)) ?? resolved.family
+        let family: ModelFamily = isAmber || isGlide ? .decision : configJSON.flatMap(ModelFamily.detect(from:)) ?? resolved.family
 
         // Detect context length from config
         var context = resolved.context
@@ -138,7 +141,7 @@ public final class Puller: @unchecked Sendable {
         }
 
         let quant: String
-        if isAmber {
+        if isAmber || isGlide {
             quant = "bf16"
         } else if family == .decision {
             switch (configJSON?["dtype"] as? String)?.lowercased() {
@@ -321,6 +324,9 @@ extension Puller {
         case "config.json", "generation_config.json", "calibration.json":
             return true
         case "uni_config.json", "encoder/config.json", "encoder/tokenizer.json", "encoder/tokenizer_config.json":
+            return true
+        case "decision_config.json", "render_tokenizer/tokenizer.json",
+             "render_tokenizer/tokenizer_config.json", "render_tokenizer/chat_template.jinja":
             return true
         // Tokenizer payloads. `tokenizer.json` is the merged HF form;
         // `vocab.json` + `merges.txt` is the older BPE form some

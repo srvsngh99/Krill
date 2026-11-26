@@ -358,6 +358,34 @@ final class PullerTests: XCTestCase {
         XCTAssertTrue(Puller.isEssentialFile("merges.txt"))
     }
 
+    func testPullRegistersGlideAndKeepsRenderTokenizerNested() async throws {
+        let tempDir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let registry = Registry(baseDir: tempDir)
+        let paths = ["config.json", "decision_config.json", "model.safetensors.index.json",
+                     "model-00001-of-00001.safetensors", "readout.safetensors", "tokenizer.json",
+                     "render_tokenizer/tokenizer.json", "render_tokenizer/tokenizer_config.json",
+                     "render_tokenizer/chat_template.jinja"]
+        let listing = try JSONSerialization.data(withJSONObject: ["siblings": (paths + ["glide/model.py"])
+            .map { ["rfilename": $0] }])
+        let config = #"{"model_type":"modernbert","max_position_embeddings":7999,"torch_dtype":"float32"}"#
+        let client = MockPullerHTTPClient(
+            tempDir: tempDir,
+            dataResponses: [.init(statusCode: 200, body: listing)],
+            downloadResponses: paths.map { .init(statusCode: 200, body: Data(($0 == "config.json" ? config : "{}").utf8)) }
+        )
+        let puller = Puller(registry: registry, httpClient: client, tokenProvider: { nil }, sleeper: { _ in })
+        let resolved = try XCTUnwrap(AliasMap.resolve("fastino/GLiDE-0.4B"))
+        let manifest = try await puller.pull(resolved)
+        XCTAssertEqual(manifest.name, "glide-0.4b")
+        XCTAssertEqual(manifest.family, .decision)
+        XCTAssertEqual(manifest.quant, "bf16")
+        XCTAssertEqual(manifest.context, 7999)
+        XCTAssertEqual(Set(manifest.files.map(\.path)), Set(paths))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: registry.modelPath(manifest.name)
+            .appendingPathComponent("render_tokenizer/chat_template.jinja").path))
+    }
+
     func testIsEssentialFileAcceptsExternalChatTemplateInBothForms() {
         // Two co-existing on-disk forms today, both must ride along
         // or the tokenizer raises "chat_template is not set":

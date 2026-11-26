@@ -20,6 +20,12 @@ struct SystemOneRequest: Sendable {
         let instructions: String
         let keys: [String]
         let options: [String]
+        let glideNoulDescriptions: [String]?
+
+        func scoringOptions(isGlide: Bool) -> [String] {
+            guard isGlide else { return options }
+            return zip(keys, glideNoulDescriptions ?? options).map { key, option in key == option ? key : "\(key): \(option)" }
+        }
 
         func answer(_ scores: [Float]) throws -> [String: Any] {
             let total = scores.reduce(0.0) { $0 + Double($1) }
@@ -49,6 +55,7 @@ struct SystemOneRequest: Sendable {
     let keepAlive: Int?
     private let state: String
     let amberState: String?
+    let glideState: String?
     private let questions: [String: Question]
 
     init(_ body: ByteBuffer) throws {
@@ -83,9 +90,10 @@ struct SystemOneRequest: Sendable {
         let schema = try JSONSerialization.data(withJSONObject: rawQuestions, options: [.withoutEscapingSlashes])
         guard state.utf8.count + schema.count <= Self.maxTextSize else { throw ParseError.textTooLarge }
         let choiceNames = Set(rawQuestions.keys.filter { rawQuestions[$0]?["type"] as? String == Kind.choice.rawValue })
-        let (orderedKeys, amberState) = try Self.orderedFields(
+        let (orderedKeys, amberState, glideState) = try Self.orderedFields(
             in: body.readableBytesView, names: choiceNames, structuredState: structuredState)
         self.amberState = amberState
+        self.glideState = glideState
         var questions: [String: Question] = [:]
         for (name, raw) in rawQuestions {
             guard name.wholeMatch(of: #/[A-Za-z0-9_.-]{1,100}/#) != nil else {
@@ -108,6 +116,7 @@ struct SystemOneRequest: Sendable {
         }
         let keys: [String]
         let options: [String]
+        var glideNoulDescriptions: [String]?
         switch kind {
         case .choice:
             let maxOptions = DecisionModel.maxSystemOneOptions
@@ -124,13 +133,14 @@ struct SystemOneRequest: Sendable {
                 return option
             }
         case .noul:
-            keys = []
+            keys = ["true", "false"]
             if let value = raw["criteria"] {
                 guard let criteria = value as? [String: String],
                       criteria.allSatisfy({ ["true", "false"].contains($0.key) && nonblank($0.value) != nil }) else {
                     throw ParseError.invalid("Noul '\(name)' criteria must map 'true' and/or 'false' to non-blank descriptions")
                 }
                 options = [criteria["true"] ?? "true", criteria["false"] ?? "false"]
+                glideNoulDescriptions = [criteria["true"] ?? "Yes", criteria["false"] ?? "No"]
             } else {
                 options = []
             }
@@ -142,14 +152,15 @@ struct SystemOneRequest: Sendable {
             options = criteria
             keys = options.indices.map { String($0) }
         }
-        return Question(kind: kind, instructions: instructions, keys: keys, options: options)
+        return Question(kind: kind, instructions: instructions, keys: keys, options: options,
+                        glideNoulDescriptions: glideNoulDescriptions)
     }
 
     func response(using engine: DecisionEngine, model loaded: DecisionModel) throws -> [String: Any] {
-        let state = (loaded.isAmber ? amberState : nil) ?? self.state
+        let state = (loaded.isAmber ? amberState : loaded.isGlide ? glideState : nil) ?? self.state
         var answers: [String: [String: Any]] = [:]
         var inputTokens = 0
-        for (options, group) in Dictionary(grouping: questions, by: { $0.value.options }) {
+        for (options, group) in Dictionary(grouping: questions, by: { $0.value.scoringOptions(isGlide: loaded.isGlide) }) {
             if options.isEmpty {
                 for (instructions, sameQuestion) in Dictionary(grouping: group, by: { $0.value.instructions }) {
                     let result = try engine.yesNo(loaded, [state], question: instructions)[0]
@@ -171,14 +182,17 @@ struct SystemOneRequest: Sendable {
     }
 
     private static func orderedFields(in bytes: ByteBufferView, names: Set<String>, structuredState: Bool) throws
-        -> (keys: [String: [String]], amberState: String?)
+        -> (keys: [String: [String]], amberState: String?, glideState: String?)
     {
-        guard structuredState || !names.isEmpty else { return ([:], nil) }
+        guard structuredState || !names.isEmpty else { return ([:], nil, nil) }
         var scanner = JSONMemberScanner(bytes)
         var keys: [String: [String]] = [:]
         var amberState: String?
+        var glideState: String?
         try scanner.object(uniqueKeys: !names.isEmpty) { key, root in
             if key == "state", structuredState {
+                var value = root
+                glideState = try value.renderJSON()
                 amberState = try root.renderState()
                 return
             }
@@ -197,7 +211,7 @@ struct SystemOneRequest: Sendable {
                 }
             }
         }
-        return (keys, amberState)
+        return (keys, amberState, glideState)
     }
 }
 
@@ -253,7 +267,8 @@ private struct JSONMemberScanner {
         return array == "[]" ? "" : array
     }
 
-    private mutating func renderJSON() throws -> String {
+    mutating func renderJSON() throws -> String {
+        skipWhitespace()
         let start = index
         skipValue()
         let end = index
