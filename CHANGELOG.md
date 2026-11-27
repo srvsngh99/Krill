@@ -9,6 +9,12 @@ reverse chronological order. Versioning follows
 > Merged and awaiting a release. See [`docs/RELEASING.md`](docs/RELEASING.md)
 > for the pending-work ledger and the release procedure.
 
+### Added
+
+- Fine-tune installed reader decision models on choice, abstention, and yes/no
+  examples with `krill tune` or `POST /v1/tune`. Accepted tunes install as new
+  local models and include a before-and-after evaluation report.
+
 ## [0.29.0] - 2026-11-26
 
 ### Added

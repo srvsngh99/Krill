@@ -159,10 +159,13 @@ public final class Registry: Sendable {
 
     public enum RegistryError: Error, CustomStringConvertible {
         case invalidModelName(String)
+        case modelAlreadyExists(String)
         public var description: String {
             switch self {
             case .invalidModelName(let n):
                 return "Invalid model name '\(n)': must not contain path separators, '..', or leading '.'"
+            case .modelAlreadyExists(let n):
+                return "Model '\(n)' already exists"
             }
         }
     }
@@ -195,17 +198,61 @@ public final class Registry: Sendable {
         return FileManager.default.fileExists(atPath: manifestURL.path)
     }
 
+    public func requireAvailableModelName(_ name: String) throws {
+        try Self.requireValidName(name)
+        if hasModel(name) || FileManager.default.fileExists(atPath: modelPath(name).path) {
+            throw RegistryError.modelAlreadyExists(name)
+        }
+    }
+
     /// Save a model manifest after pulling.
     public func saveManifest(_ manifest: ModelManifest) throws {
         try Self.requireValidName(manifest.name)
         try ensureDirectories()
+        let url = manifestsDir.appendingPathComponent("\(manifest.name).json")
+        try encodeManifest(manifest).write(to: url)
+        logger.info("Saved manifest for \(manifest.name)")
+    }
+
+    private func encodeManifest(_ manifest: ModelManifest) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(manifest)
-        let url = manifestsDir.appendingPathComponent("\(manifest.name).json")
-        try data.write(to: url)
-        logger.info("Saved manifest for \(manifest.name)")
+        return try encoder.encode(manifest)
+    }
+
+    public func installTunedDecision(named name: String, from base: ModelManifest, stagedBundle: URL) throws {
+        try requireAvailableModelName(name)
+        let fm = FileManager.default
+        let bundle = stagedBundle.resolvingSymlinksInPath()
+        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
+        guard let contents = fm.enumerator(atPath: bundle.path) else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        var files: [ModelFile] = []
+        for case let path as String in contents {
+            let url = bundle.appendingPathComponent(path)
+            let values = try url.resourceValues(forKeys: Set(keys))
+            guard values.isRegularFile == true else { continue }
+            files.append(ModelFile(path: path, sha256: try incrementalSHA256(of: url),
+                                   sizeBytes: Int64(values.fileSize ?? 0)))
+        }
+        let manifest = ModelManifest(
+            name: name, family: .decision, params: base.params, quant: base.quant, source: base.source,
+            context: base.context, files: files.sorted { $0.path < $1.path }, chatTemplate: base.chatTemplate,
+            sizeBytes: files.reduce(0) { $0 + $1.sizeBytes })
+        let stagedManifest = manifestsDir.appendingPathComponent(".tune-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: stagedManifest) }
+        try encodeManifest(manifest).write(to: stagedManifest)
+        let destination = modelPath(name)
+        try fm.moveItem(at: bundle, to: destination)
+        do {
+            try fm.moveItem(at: stagedManifest, to: manifestsDir.appendingPathComponent("\(name).json"))
+        } catch {
+            try? fm.removeItem(at: destination)
+            throw error
+        }
+        logger.info("Installed model \(name)")
     }
 
     /// Remove a model (manifest + blob directory).

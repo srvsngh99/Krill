@@ -521,22 +521,17 @@ extension Puller {
 
         throw lastError
     }
+}
 
-    /// Compute SHA256 of a file by reading it in 1 MB chunks.
-    func incrementalSHA256(of fileURL: URL) throws -> String {
-        let chunkSize = 1024 * 1024  // 1 MB
-        let handle = try FileHandle(forReadingFrom: fileURL)
-        defer { try? handle.close() }
+func incrementalSHA256(of fileURL: URL) throws -> String {
+    let handle = try FileHandle(forReadingFrom: fileURL)
+    defer { try? handle.close() }
 
-        var hasher = SHA256()
-        while true {
-            guard let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty else { break }
-            hasher.update(data: chunk)
-        }
-
-        let digest = hasher.finalize()
-        return digest.map { String(format: "%02x", $0) }.joined()
+    var hasher = SHA256()
+    while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+        hasher.update(data: chunk)
     }
+    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
 }
 
 // MARK: - Errors

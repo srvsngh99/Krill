@@ -119,9 +119,8 @@ final class PullerTests: XCTestCase {
         let file = tempDir.appendingPathComponent("known-bytes.bin")
         try Data("abc".utf8).write(to: file)
 
-        let puller = Puller(registry: Registry(baseDir: tempDir))
         XCTAssertEqual(
-            try puller.incrementalSHA256(of: file),
+            try incrementalSHA256(of: file),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         )
     }
