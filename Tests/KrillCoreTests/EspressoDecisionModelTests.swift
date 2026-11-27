@@ -40,7 +40,7 @@ final class EspressoDecisionModelTests: XCTestCase {
         }
         try MLXMetalRuntime.validateForNativeInference()
         let model = try await DecisionModel.load(directory: URL(fileURLWithPath: path))
-        XCTAssertTrue(model.isEspresso)
+        XCTAssertEqual(model.family, .espresso)
         try checkDecisionReferenceParity(model, name: "Espresso", dataPath: dataPath)
     }
 }

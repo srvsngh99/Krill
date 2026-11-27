@@ -151,20 +151,16 @@ public func loadModel(from directory: URL) throws -> LoadedModel {
     // memory_ratio). Idempotent; safe to call on every load.
     MLXMemoryConfig.apply()
 
-    let isAmber = AmberDecisionModel.isBundle(directory)
-    let isEspresso = EspressoDecisionModel.isBundle(directory)
-    let configURL = isEspresso ? EspressoDecisionModel.configURL(in: directory)
-        : directory.appendingPathComponent(isAmber ? AmberDecisionModel.configFile : "config.json")
+    if DecisionFamily.detect(directory) != nil {
+        throw ModelLoadError.unsupportedArchitecture(
+            "A decision model is not a causal LM. Use `krill decide` or POST /v1/decide instead.")
+    }
+    let configURL = directory.appendingPathComponent("config.json")
     let configData = try Data(contentsOf: configURL)
 
     // Parse raw JSON to detect architecture
     guard let configJSON = try JSONSerialization.jsonObject(with: configData) as? [String: Any] else {
         throw ModelLoadError.invalidConfig("Cannot parse config.json")
-    }
-
-    if isAmber || isEspresso || DecisionModel.isGlideBundle(directory) || DecisionModel.isDecisionConfig(configJSON) {
-        throw ModelLoadError.unsupportedArchitecture(
-            "A decision model is not a causal LM. Use `krill decide` or POST /v1/decide instead.")
     }
 
     // Detect the architecture and dispatch to the matching family loader.

@@ -36,7 +36,7 @@ final class DMJEPADecisionModelTests: XCTestCase {
         let directory = URL(fileURLWithPath: path)
         XCTAssertTrue(DecisionModel.isBundle(directory))
         let model = try await DecisionModel.load(directory: directory)
-        XCTAssertTrue(model.isDMJEPA)
+        XCTAssertEqual(model.family, .dmjepa)
         let tokenizer = try await KrillTokenizer(from: directory)
         XCTAssertEqual(tokenizer.encode(DMJEPAPrompt.state("", instructions: "Pick an intent.")),
                        [50281, 29, 93, 3409, 49651, 187, 15422, 187, 29, 93, 6839, 6477, 49651, 187, 36942, 271, 6860, 15, 50282])

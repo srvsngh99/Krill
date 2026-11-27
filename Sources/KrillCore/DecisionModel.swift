@@ -155,58 +155,80 @@ protocol DecisionScoring {
     func yesNo(texts: [String], question: String) throws -> [DecisionYesNo]
 }
 
-/// Callers serialize inference. The reader-based model caches option states.
-public final class DecisionModel: @unchecked Sendable {
-    private let scorer: any DecisionScoring
+public enum DecisionFamily: Equatable, Sendable {
+    case reader, amber, glide, dmjepa, espresso
 
-    public static let maxTexts = 256
-    public static let maxOptions = 128
-    public static let maxSystemOneOptions = 255
+    public var choiceOptionLimit: Int {
+        switch self {
+        case .glide, .espresso: return DecisionModel.maxSystemOneOptions
+        case .reader, .amber, .dmjepa: return DecisionModel.maxOptions
+        }
+    }
 
-    public var isAmber: Bool { scorer is AmberDecisionModel }
-    public var isGlide: Bool { scorer is GlideDecisionModel }
-    public var isDMJEPA: Bool { scorer is DMJEPADecisionModel }
-    public var isEspresso: Bool { scorer is EspressoDecisionModel }
+    public var hasIndependentCandidateProbabilities: Bool {
+        switch self {
+        case .dmjepa: return true
+        case .reader, .amber, .glide, .espresso: return false
+        }
+    }
 
-    public static func isDecisionConfig(_ json: [String: Any]) -> Bool {
-        DMJEPADecisionModel.isConfig(json)
-            || (json["reader"] is [String: Any] && json["head"] is [String: Any] && json["pooling"] != nil)
+    public static func detect(_ directory: URL) -> DecisionFamily? {
+        if AmberDecisionModel.isBundle(directory) { return .amber }
+        if GlideDecisionModel.isBundle(directory) { return .glide }
+        if EspressoDecisionModel.isBundle(directory) { return .espresso }
+        return configJSON(in: directory).flatMap(detectConfig)
+    }
+
+    fileprivate static func detectConfig(_ json: [String: Any]) -> DecisionFamily? {
+        if DMJEPADecisionModel.isConfig(json) { return .dmjepa }
+        if json["reader"] is [String: Any], json["head"] is [String: Any], json["pooling"] != nil { return .reader }
+        return nil
     }
 
     private static func configJSON(in directory: URL) -> [String: Any]? {
         guard let data = try? Data(contentsOf: directory.appendingPathComponent("config.json")) else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
+}
 
-    public static func isBundle(_ directory: URL) -> Bool {
-        AmberDecisionModel.isBundle(directory) || isGlideBundle(directory)
-            || EspressoDecisionModel.isBundle(directory)
-            || configJSON(in: directory).map(isDecisionConfig) == true
+/// Callers serialize inference. The reader-based model caches option states.
+public final class DecisionModel: @unchecked Sendable {
+    private let scorer: any DecisionScoring
+    public let family: DecisionFamily
+
+    public static let maxTexts = 256
+    public static let maxOptions = 128
+    public static let maxSystemOneOptions = 255
+
+    public static func isDecisionConfig(_ json: [String: Any]) -> Bool {
+        DecisionFamily.detectConfig(json) != nil
     }
 
-    public static func isGlideBundle(_ directory: URL) -> Bool { GlideDecisionModel.isBundle(directory) }
+    public static func isBundle(_ directory: URL) -> Bool {
+        DecisionFamily.detect(directory) != nil
+    }
 
     public static func choiceOptionLimit(for directory: URL) -> Int {
-        isGlideBundle(directory) || EspressoDecisionModel.isBundle(directory) ? maxSystemOneOptions : maxOptions
+        DecisionFamily.detect(directory)?.choiceOptionLimit ?? maxOptions
     }
 
     public static func load(directory: URL) async throws -> DecisionModel {
-        if AmberDecisionModel.isBundle(directory) {
-            return DecisionModel(scorer: try await AmberDecisionModel.load(directory: directory))
+        let family = DecisionFamily.detect(directory) ?? .reader
+        let scorer: any DecisionScoring
+        switch family {
+        case .reader: scorer = try await ReaderDecisionModel.load(directory: directory)
+        case .amber: scorer = try await AmberDecisionModel.load(directory: directory)
+        case .glide: scorer = try await GlideDecisionModel.load(directory: directory)
+        case .dmjepa: scorer = try await DMJEPADecisionModel.load(directory: directory)
+        case .espresso: scorer = try await EspressoDecisionModel.load(directory: directory)
         }
-        if isGlideBundle(directory) {
-            return DecisionModel(scorer: try await GlideDecisionModel.load(directory: directory))
-        }
-        if EspressoDecisionModel.isBundle(directory) {
-            return DecisionModel(scorer: try await EspressoDecisionModel.load(directory: directory))
-        }
-        if let json = configJSON(in: directory), DMJEPADecisionModel.isConfig(json) {
-            return DecisionModel(scorer: try await DMJEPADecisionModel.load(directory: directory))
-        }
-        return DecisionModel(scorer: try await ReaderDecisionModel.load(directory: directory))
+        return DecisionModel(family: family, scorer: scorer)
     }
 
-    private init(scorer: any DecisionScoring) { self.scorer = scorer }
+    private init(family: DecisionFamily, scorer: any DecisionScoring) {
+        self.family = family
+        self.scorer = scorer
+    }
 
     public static func checkCounts(texts: Int, options: Int, optionLimit: Int = maxOptions) throws {
         guard (1 ... maxTexts).contains(texts) else { throw DecisionError.invalid("provide 1 to \(maxTexts) texts") }
@@ -216,8 +238,7 @@ public final class DecisionModel: @unchecked Sendable {
     public func choose(_ texts: [String], options: [String], question: String? = nil,
                        allowNone: Bool = true) throws -> [DecisionChoice] {
         guard !options.isEmpty else { throw DecisionError.invalid("options must not be empty") }
-        try Self.checkCounts(texts: texts.count, options: options.count,
-                             optionLimit: isGlide || isEspresso ? Self.maxSystemOneOptions : Self.maxOptions)
+        try Self.checkCounts(texts: texts.count, options: options.count, optionLimit: family.choiceOptionLimit)
         return try scorer.choose(texts, options: options, question: question, allowNone: allowNone)
     }
 

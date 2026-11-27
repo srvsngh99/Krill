@@ -30,7 +30,7 @@ final class AmberDecisionModelTests: XCTestCase {
         }
         try MLXMetalRuntime.validateForNativeInference()
         let model = try await DecisionModel.load(directory: URL(fileURLWithPath: path))
-        XCTAssertTrue(model.isAmber)
+        XCTAssertEqual(model.family, .amber)
         try checkDecisionReferenceParity(model, name: "Amber", dataPath: dataPath)
     }
 }
