@@ -17,6 +17,7 @@ section, then delete the rows.
 
 | Merged | PR | What | Why it matters at release time |
 |---|---|---|---|
+| 2026-11-27 | #382 | `DecisionFamily` replaces the per-model decision flags (refactor) | No user-facing change; rerun the four decision parity scripts on the release build. |
 
 ### Known-open, NOT yet merged
 
