@@ -133,6 +133,7 @@ final class TinyDecisionModelTests: XCTestCase {
 
     func testBundleDetectionNeedsReaderHeadAndPooling() throws {
         XCTAssertTrue(DecisionModel.isBundle(bundle))
+        XCTAssertEqual(DecisionFamily.detect(bundle), .reader)
         XCTAssertFalse(DecisionModel.isDecisionConfig(["reader": 1, "head": 2, "pooling": "cls"]))
         XCTAssertFalse(DecisionModel.isDecisionConfig(["reader": [String: Any](), "head": [String: Any]()]))
     }

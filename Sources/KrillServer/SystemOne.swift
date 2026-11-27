@@ -43,11 +43,18 @@ struct SystemOneRequest: Sendable {
             return Candidates(options: kind == .noul ? [] : options)
         }
 
-        func answer(_ scores: [Float], isDMJEPA: Bool) throws -> [String: Any] {
+        func answer(_ scores: [Float], family: DecisionFamily) throws -> [String: Any] {
             let total = scores.reduce(0.0) { $0 + Double($1) }
             guard total.isFinite, total > 0 else { throw ScoreError.invalidProbabilities }
-            let p = isDMJEPA ? scores.map(Double.init) : scores.map { Double($0) / total }
-            if kind == .noul { return ["type": kind.rawValue, "noul": p[isDMJEPA ? 1 : 0]] }
+            let p = family.hasIndependentCandidateProbabilities ? scores.map(Double.init) : scores.map { Double($0) / total }
+            if kind == .noul {
+                let index: Int
+                switch family {
+                case .dmjepa: index = 1
+                case .reader, .amber, .glide, .espresso: index = 0
+                }
+                return ["type": kind.rawValue, "noul": p[index]]
+            }
             let entropy = -p.filter { $0 > 0 }.reduce(0) { $0 + $1 * log($1) }
             var result: [String: Any] = [
                 "type": kind.rawValue,
@@ -189,17 +196,21 @@ struct SystemOneRequest: Sendable {
     func response(using engine: DecisionEngine, model loaded: DecisionModel) throws -> [String: Any] {
         let state: String
         let candidatesFor: (Question) -> Candidates
-        if loaded.isDMJEPA {
+        switch loaded.family {
+        case .dmjepa:
             state = dmjepaState ?? self.state
             candidatesFor = { $0.dmjepa }
-        } else if loaded.isEspresso {
+        case .espresso:
             state = espressoState ?? self.state
             candidatesFor = { $0.espressoCandidates }
-        } else if loaded.isGlide {
+        case .glide:
             state = glideState ?? self.state
             candidatesFor = { $0.glideCandidates }
-        } else {
-            state = (loaded.isAmber ? amberState : nil) ?? self.state
+        case .amber:
+            state = amberState ?? self.state
+            candidatesFor = { Candidates(options: $0.options) }
+        case .reader:
+            state = self.state
             candidatesFor = { Candidates(options: $0.options) }
         }
         var answers: [String: [String: Any]] = [:]
@@ -219,7 +230,7 @@ struct SystemOneRequest: Sendable {
                     options: candidates.options, optionLabels: candidates.labels, choiceKeys: candidates.choiceKeys)
                 inputTokens += scored.inputTokens
                 for ((name, question), p) in zip(group, scored.probabilities) {
-                    answers[name] = try question.answer(p, isDMJEPA: loaded.isDMJEPA)
+                    answers[name] = try question.answer(p, family: loaded.family)
                 }
             }
         }

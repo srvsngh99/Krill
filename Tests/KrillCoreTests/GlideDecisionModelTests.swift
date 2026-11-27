@@ -42,7 +42,7 @@ final class GlideDecisionModelTests: XCTestCase {
         let directory = URL(fileURLWithPath: path)
         XCTAssertTrue(DecisionModel.isBundle(directory))
         let model = try await DecisionModel.load(directory: directory)
-        XCTAssertTrue(model.isGlide)
+        XCTAssertEqual(model.family, .glide)
         try checkDecisionReferenceParity(model, name: "GLiDE", dataPath: dataPath)
     }
 }
