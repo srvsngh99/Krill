@@ -581,6 +581,9 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         case (.POST, "/v1/decide"):
             guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleDecide(context: context, body: body)
+        case (.POST, "/v1/tune"):
+            guard compat.openAIEnabled else { return sendCompatDisabled(context: context, path: path) }
+            handleTune(context: context, body: body)
         case (.POST, SystemOneRequest.path):
             guard compat.ollamaEnabled else { return sendCompatDisabled(context: context, path: path) }
             handleSystemOne(context: context, body: body)
@@ -2992,7 +2995,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let allowNone = json["allow_none"] as? Bool ?? true
 
         runDecision(context: context, name: name, route: "decide",
-                    keepAliveOverride: KeepAliveParse.seconds(from: json["keep_alive"])) { decide, model, modelName in
+                    keepAliveOverride: KeepAliveParse.seconds(from: json["keep_alive"])) { decide, model, manifest in
             let results: [[String: Any]]
             if let yesNo {
                 results = try decide.yesNo(model, texts, question: yesNo).map { ["answer": $0.answer, "p_yes": $0.pYes] }
@@ -3003,7 +3006,34 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                          "scores": $0.scores, "p_none": $0.pNone]
                     }
             }
-            return ["model": modelName, "results": results]
+            return ["model": manifest.name, "results": results]
+        }
+    }
+
+    private func handleTune(context: ChannelHandlerContext, body: ByteBuffer) {
+        func fail(_ message: String) {
+            sendJSON(context: context, status: .badRequest, body: ["error": message])
+        }
+        guard let json = parseJSON(body) else { return fail("Invalid JSON") }
+        guard let model = json["model"] as? String, !model.isEmpty else { return fail("Missing 'model' field") }
+        guard let name = json["name"] as? String, !name.isEmpty else { return fail("Missing 'name' field") }
+        guard let rows = json["examples"] as? [Any] else { return fail("'examples' must be an array") }
+        let options = DecisionTuneOptions()
+        let registry = self.registry
+        do {
+            let examples = try rows.enumerated().map {
+                try DecisionTuneExample(json: $0.element as? [String: Any], number: $0.offset + 1)
+            }
+            try options.validate(examples: examples)
+            try registry.requireAvailableModelName(name)
+            runDecision(context: context, name: model, route: "tune", keepAliveOverride: nil, forTuning: true) {
+                decide, model, manifest in
+                let report = try decide.tune(model, base: manifest, name: name, examples: examples,
+                                             options: options, registry: registry)
+                return ["name": report.accepted ? name as Any : NSNull(), "report": report.jsonObject]
+            }
+        } catch {
+            fail(String(describing: error))
         }
     }
 
@@ -3025,8 +3055,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func runDecision(
-        context: ChannelHandlerContext, name: String, route: String, keepAliveOverride: Int?,
-        score: @escaping @Sendable (DecisionEngine, DecisionModel, String) throws -> [String: Any]
+        context: ChannelHandlerContext, name: String, route: String, keepAliveOverride: Int?, forTuning: Bool = false,
+        score: @escaping @Sendable (DecisionEngine, DecisionModel, ModelManifest) throws -> [String: Any]
     ) {
         guard let manifest = registry.getModel(name) else {
             return sendJSON(context: context, status: .notFound, body: ["error": "decision model not found"])
@@ -3056,11 +3086,14 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
             }
             do {
-                let model = try await decide.load(directory: dir)
-                let response = try score(decide, model, modelName)
+                let model = try await decide.load(directory: dir, forTuning: forTuning)
+                let response = try score(decide, model, manifest)
                 self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .ok,
                                     body: response)
             } catch let e as DecisionError {
+                self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .badRequest,
+                                    body: ["error": e.description])
+            } catch let e as Registry.RegistryError {
                 self.sendJSONOnLoop(context: ctx, eventLoop: eventLoop, status: .badRequest,
                                     body: ["error": e.description])
             } catch {

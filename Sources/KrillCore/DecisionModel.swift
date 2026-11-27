@@ -14,12 +14,18 @@ struct DecisionConfig: Decodable {
     struct Tau: Decodable {
         let rule: String
         let tau: Float
+
+        func isNone(_ probability: Float, best: Float) -> Bool {
+            (rule == "p_none" ? probability : probability - best) >= tau
+        }
     }
     struct NoneRule: Decodable {
         let longList: Int
         let short: Tau
         let long: Tau
         enum CodingKeys: String, CodingKey { case longList = "long_list", short, long }
+
+        func rule(for count: Int) -> Tau { count > longList ? long : short }
     }
     private struct ReaderIds: Decodable {
         let padTokenId: Int
@@ -52,7 +58,7 @@ struct DecisionConfig: Decodable {
         optionMaxTokens = try c.decode(Int.self, forKey: .optionMaxTokens)
         head = try c.decode(Head.self, forKey: .head)
         none = try c.decode(NoneRule.self, forKey: .none)
-        for rule in [none.short.rule, none.long.rule] where !["p_none", "margin"].contains(rule) {
+        for rule in [none.short.rule, none.long.rule] where !["p_none", "margin", "gap"].contains(rule) {
             throw DecodingError.dataCorruptedError(forKey: .none, in: c, debugDescription: "unknown none rule")
         }
     }
@@ -82,10 +88,18 @@ final class DecisionHead: Module {
     @ModuleInfo(key: "none_mlp") var noneMLP: DecisionMLP
     @ModuleInfo(key: "interaction_proj") var interactionProj: Linear
 
-    init(hidden: Int, mlp: Int, interaction: Int) {
+    init(config: DecisionConfig) {
+        let hidden = config.reader.hiddenSize
+        let mlp = config.head.mlpHidden
+        let interaction = config.head.interactionDim
         _optionMLP = ModuleInfo(wrappedValue: DecisionMLP(3 + interaction, mlp), key: "option_mlp")
         _noneMLP = ModuleInfo(wrappedValue: DecisionMLP(hidden + 6, mlp), key: "none_mlp")
         _interactionProj = ModuleInfo(wrappedValue: Linear(hidden, interaction), key: "interaction_proj")
+    }
+
+    static func parameterKey(for key: String) -> String {
+        key.replacingOccurrences(of: "_mlp.0.", with: "_mlp.first.")
+            .replacingOccurrences(of: "_mlp.2.", with: "_mlp.last.")
     }
 
     func options(maxsim: MLXArray, extra: MLXArray, interaction: MLXArray) -> MLXArray {
@@ -93,17 +107,22 @@ final class DecisionHead: Module {
         return optionMLP(x).squeezed(axis: -1)
     }
 
-    func none(_ logits: MLXArray, statePooled: MLXArray) -> MLXArray {
-        let n = logits.dim(0)
-        let sorted = MLX.sorted(logits)
-        let top = sorted[n - 1]
-        let top2 = n > 1 ? sorted[n - 2] : MLXArray(Float(0))
-        let std = n > 1 ? MLX.sqrt(MLX.variance(logits)) : MLXArray(Float(0))
+    func choiceLogits(_ logits: MLXArray, statePooled: MLXArray) -> MLXArray {
+        let n = logits.dim(-1)
+        // Gathering routes each rank's gradient back to the selected option.
+        let sorted = takeAlong(logits, argSort(-logits, axis: -1), axis: -1)
+        let top = sorted[.ellipsis, 0]
+        let top2 = n > 1 ? sorted[.ellipsis, 1] : MLXArray.zeros(like: top)
+        let variance = MLX.variance(logits, axis: -1)
+        let positive = variance .> 0
+        let std = which(positive, MLX.sqrt(which(positive, variance, 1)), 0)
         let p = softmax(logits, axis: -1)
-        let ent = -(p * MLX.log(MLX.maximum(p, 1e-9))).sum() / log(Float(max(n, 2)))
-        let agg = stacked([top, logits.mean(), std, top - top2, ent, MLXArray(log(Float(n + 1)))])
-        let state = statePooled / MLX.maximum(MLX.sqrt((statePooled * statePooled).sum()), 1e-9)
-        return noneMLP(concatenated([state, agg])).squeezed()
+        let ent = -(p * MLX.log(MLX.maximum(p, 1e-9))).sum(axis: -1) / log(Float(max(n, 2)))
+        let length = MLXArray.zeros(like: top) + log(Float(n + 1))
+        let agg = stacked([top, logits.mean(axis: -1), std, top - top2, ent, length], axis: -1)
+        let state = l2Normalized(statePooled, epsilon: 1e-9)
+        let none = noneMLP(concatenated([state, agg], axis: -1))
+        return concatenated([logits, none], axis: -1)
     }
 }
 
@@ -134,8 +153,12 @@ public struct DecisionYesNo: Sendable {
     public let inputTokens: Int
 }
 
-func l2Normalized(_ x: MLXArray) -> MLXArray {
-    x / MLX.maximum(MLX.sqrt((x * x).sum(axis: -1, keepDims: true)), 1e-12)
+func l2Normalized(_ x: MLXArray, epsilon: Float = 1e-12) -> MLXArray {
+    x / MLX.maximum(MLX.sqrt((x * x).sum(axis: -1, keepDims: true)), epsilon)
+}
+
+func decisionMaxSimilarity(_ options: MLXArray, _ state: MLXArray) -> MLXArray {
+    matmul(options, state.T).max(axis: -1)
 }
 
 func paddedDecisionTokens(_ ids: [[Int]], lengths: [Int], longest: Int, padId: Int)
@@ -212,6 +235,23 @@ public final class DecisionModel: @unchecked Sendable {
         DecisionFamily.detect(directory)?.choiceOptionLimit ?? maxOptions
     }
 
+    public static func requireTunable(_ family: DecisionFamily?) throws {
+        guard let family else { throw DecisionError.invalid("not a decision-model bundle") }
+        guard family == .reader else {
+            throw DecisionError.invalid("only reader decision models support tuning (this bundle is \(family))")
+        }
+    }
+
+    public func tune(examples: [DecisionTuneExample], options: DecisionTuneOptions = .init(), output: URL) throws
+        -> DecisionTuneReport
+    {
+        try Self.requireTunable(family)
+        guard let reader = scorer as? ReaderDecisionModel else {
+            throw DecisionError.invalid("only reader decision models support tuning")
+        }
+        return try reader.tune(examples: examples, options: options, output: output)
+    }
+
     public static func load(directory: URL) async throws -> DecisionModel {
         let family = DecisionFamily.detect(directory) ?? .reader
         let scorer: any DecisionScoring
@@ -264,7 +304,7 @@ public final class DecisionModel: @unchecked Sendable {
     }
 }
 
-private final class ReaderDecisionModel: DecisionScoring {
+final class ReaderDecisionModel: DecisionScoring {
     private struct OptionStates {
         let tokens: MLXArray
         let mask: MLXArray
@@ -273,11 +313,12 @@ private final class ReaderDecisionModel: DecisionScoring {
         let tokenCount: Int
     }
 
-    private let config: DecisionConfig
+    let config: DecisionConfig
+    let directory: URL
     private let reader: ModernBertEmbeddingModel
     private let head: DecisionHead
-    private let tokenizer: KrillTokenizer
-    private let yesNoOffset: Float
+    let tokenizer: KrillTokenizer
+    private let calibrationOffset: Float
     private var optionCache: [[String]: OptionStates] = [:]
     private var cachedOptions = 0
 
@@ -288,17 +329,18 @@ private final class ReaderDecisionModel: DecisionScoring {
         let config = try JSONDecoder().decode(
             DecisionConfig.self, from: Data(contentsOf: directory.appendingPathComponent("config.json")))
         let reader = ModernBertEmbeddingModel(config.reader)
-        let head = DecisionHead(
-            hidden: config.reader.hiddenSize, mlp: config.head.mlpHidden, interaction: config.head.interactionDim)
+        let calibration = (try? Data(contentsOf: directory.appendingPathComponent("calibration.json")))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let offsets = calibration?["yes_no_logit_offset"] as? [String: Any]
+        let offset = (offsets?["default"] as? NSNumber)?.floatValue ?? 0
+        let head = DecisionHead(config: config)
 
         var readerWeights: [String: MLXArray] = [:]
         var headWeights: [String: MLXArray] = [:]
         for (key, value) in try loadWeightArrays(from: directory) {
             let fp32 = value.asType(.float32)
             if key.hasPrefix("option_mlp.") || key.hasPrefix("none_mlp.") || key.hasPrefix("interaction_proj.") {
-                let renamed = key.replacingOccurrences(of: "_mlp.0.", with: "_mlp.first.")
-                    .replacingOccurrences(of: "_mlp.2.", with: "_mlp.last.")
-                headWeights[renamed] = fp32
+                headWeights[DecisionHead.parameterKey(for: key)] = fp32
             } else {
                 readerWeights[key] = fp32
             }
@@ -308,32 +350,36 @@ private final class ReaderDecisionModel: DecisionScoring {
         try head.update(parameters: ModuleParameters.unflattened(headWeights), verify: strict)
         eval(reader, head)
 
-        let offsets = (try? Data(contentsOf: directory.appendingPathComponent("calibration.json")))
-            .flatMap { try? JSONDecoder().decode([String: [String: Float]].self, from: $0) }?["yes_no_logit_offset"]
         return ReaderDecisionModel(
-            config: config, reader: reader, head: head,
-            tokenizer: try await KrillTokenizer(from: directory), yesNoOffset: offsets?["default"] ?? 0)
+            config: config, directory: directory, reader: reader, head: head,
+            tokenizer: try await KrillTokenizer(from: directory), calibrationOffset: offset)
     }
 
-    private init(config: DecisionConfig, reader: ModernBertEmbeddingModel, head: DecisionHead,
-                 tokenizer: KrillTokenizer, yesNoOffset: Float) {
+    private init(config: DecisionConfig, directory: URL, reader: ModernBertEmbeddingModel, head: DecisionHead,
+                 tokenizer: KrillTokenizer, calibrationOffset: Float) {
         self.config = config
+        self.directory = directory
         self.reader = reader
         self.head = head
         self.tokenizer = tokenizer
-        self.yesNoOffset = yesNoOffset
+        self.calibrationOffset = calibrationOffset
     }
 
     private func read(_ texts: [String], limit: Int, what: String) throws
         -> (states: MLXArray, lengths: [Int], pooled: MLXArray)
     {
         let ids = texts.map { tokenizer.encode($0) }
-        let lengths = ids.map(\.count)
         guard !texts.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
             throw DecisionError.invalid("\(what) must not be empty")
         }
-        let longest = lengths.max() ?? 0
+        let longest = ids.map(\.count).max() ?? 0
         guard longest <= limit else { throw DecisionError.tooLong(what: what, tokens: longest, limit: limit) }
+        return read(ids)
+    }
+
+    func read(_ ids: [[Int]]) -> (states: MLXArray, lengths: [Int], pooled: MLXArray) {
+        let lengths = ids.map(\.count)
+        let longest = lengths.max() ?? 0
         let (tokens, mask) = paddedDecisionTokens(ids, lengths: lengths, longest: longest, padId: config.padId)
         let hasPadding = lengths.contains { $0 != longest }
         let states = reader.hiddenStates(tokens, attentionMask: hasPadding ? mask : nil)
@@ -359,7 +405,7 @@ private final class ReaderDecisionModel: DecisionScoring {
     }
 
     private func optionLogits(_ opts: OptionStates, state: MLXArray, pooled: MLXArray) -> MLXArray {
-        let sims = matmul(opts.tokens, l2Normalized(state).T).max(axis: -1)
+        let sims = decisionMaxSimilarity(opts.tokens, l2Normalized(state))
         let maxsim = (sims * opts.mask).sum(axis: 1) / MLX.maximum(opts.mask.sum(axis: 1), 1)
         let optionPooled = l2Normalized(opts.pooled)
         let statePooled = l2Normalized(pooled)
@@ -391,15 +437,16 @@ private final class ReaderDecisionModel: DecisionScoring {
     func choose(_ texts: [String], options: [String], question: String?, allowNone: Bool) throws -> [DecisionChoice] {
         let states = question.map { q in texts.map { Self.condition($0, on: q) } } ?? texts
         let (logits, pooled, _) = try score(states, options: options)
-        let t = options.count > config.none.longList ? config.none.long : config.none.short
+        let t = config.none.rule(for: options.count)
         return logits.enumerated().map { i, lg in
-            let all = concatenated([lg, head.none(lg, statePooled: pooled[i]).reshaped(1)])
+            let all = head.choiceLogits(lg, statePooled: pooled[i])
             let p = softmax(all, axis: -1).asArray(Float.self)
             let real = Array(p.dropLast())
             let best = real.indices.reduce(0) { real[$1] > real[$0] ? $1 : $0 }
             let pNone = p[p.count - 1]
-            let gap = t.rule == "p_none" ? pNone : pNone - real[best]
-            if allowNone && gap >= t.tau { return DecisionChoice(label: nil, index: nil, scores: real, pNone: pNone) }
+            if allowNone && t.isNone(pNone, best: real[best]) {
+                return DecisionChoice(label: nil, index: nil, scores: real, pNone: pNone)
+            }
             return DecisionChoice(label: options[best], index: best, scores: real, pNone: pNone)
         }
     }
@@ -413,6 +460,10 @@ private final class ReaderDecisionModel: DecisionScoring {
         return (result.logits.map { softmax($0, axis: -1).asArray(Float.self) }, result.inputTokens.reduce(0, +))
     }
 
+    func yesNoLogit(_ logits: MLXArray) -> MLXArray {
+        logits[.ellipsis, 1] - logits[.ellipsis, 0] + calibrationOffset
+    }
+
     func yesNo(texts: [String], question: String) throws -> [DecisionYesNo] {
         let options = ["no: \(question)", "yes: \(question)"]
         let longest = options.map { tokenizer.encode($0).count }.max() ?? 0
@@ -421,9 +472,8 @@ private final class ReaderDecisionModel: DecisionScoring {
                                         limit: config.optionMaxTokens)
         }
         let result = try score(texts, options: options)
-        return zip(result.logits, result.inputTokens).map { row, inputTokens in
-            let lg = row.asArray(Float.self)
-            let pYes = 1 / (1 + exp(-(lg[1] - lg[0] + yesNoOffset)))
+        let probabilities = MLX.sigmoid(yesNoLogit(stacked(result.logits))).asArray(Float.self)
+        return zip(probabilities, result.inputTokens).map { pYes, inputTokens in
             return DecisionYesNo(answer: pYes > 0.5 ? "yes" : "no", pYes: pYes, inputTokens: inputTokens)
         }
     }

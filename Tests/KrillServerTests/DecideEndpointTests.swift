@@ -92,6 +92,35 @@ final class DecideEndpointTests: XCTestCase {
 
     private let options = ["billing question", "password reset", "shipping delay"]
 
+    func testTuneRequiresAuthAndValidInlineExamples() async throws {
+        channel = await makeChannel(apiKey: "secret")
+        let body: [String: Any] = ["model": "base", "name": "tuned", "examples": [["text": "hello", "options": ["a"]]]]
+        let denied = try await post("/v1/tune", body)
+        XCTAssertEqual(denied.status, 401)
+        let invalid = try await post("/v1/tune", body, bearer: "secret")
+        XCTAssertEqual(invalid.status, 400)
+        XCTAssertEqual(invalid.json["error"] as? String, "example 1: label must be one of the options or null")
+    }
+
+    func testTuneInstallsNewDecisionModel() async throws {
+        try installTiny()
+        let response = try await post("/v1/tune", [
+            "model": "decider", "name": "tuned",
+            "examples": [["text": "The card was charged twice.", "question": "Is this about a payment?", "answer": "yes"]],
+        ])
+        XCTAssertEqual(response.status, 200)
+        XCTAssertEqual(response.json["name"] as? String, "tuned")
+        let report = try XCTUnwrap(response.json["report"] as? [String: Any])
+        XCTAssertEqual(report["accepted"] as? Bool, true)
+        let model = try XCTUnwrap(registry.getModel("tuned"))
+        XCTAssertEqual(model.family, .decision)
+        XCTAssertTrue(model.files.contains { $0.path == "head.safetensors" && $0.sha256.count == 64 })
+        let decision = try await post("/v1/decide", [
+            "model": "tuned", "text": "The card was charged twice.", "yes_no": "Is this about a payment?",
+        ])
+        XCTAssertEqual(decision.status, 200)
+    }
+
     // MARK: - Results
 
     func testChoiceByRegisteredName() async throws {

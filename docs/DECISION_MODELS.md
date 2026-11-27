@@ -82,6 +82,65 @@ krill decide --model <bundle> --text "The invoice was paid in full." --yes-no "I
 - `--json-in <file|->` reads JSON lines (`text`, `question`, `options`, `allow_none`, `yes_no`)
   and prints one result per line, loading the model once.
 
+## Fine-tune a reader decision model
+
+Start with an installed reader bundle. Tuning updates the decision head with a
+frozen reader and a fixed yes/no logit offset. The tuned bundle copies the base
+`calibration.json` unchanged. Amber, GLiDE, DM-JEPA, and Espresso do not support
+tuning.
+
+Put one example per line in a JSONL file. A choice needs a nonempty list of
+options and a label that matches one option exactly. Use `null` to teach
+abstention. A choice can include a question. A yes/no example needs a question
+and an answer of `"yes"` or `"no"`.
+
+```jsonl
+{"text":"I was charged twice.","options":["billing","access"],"label":"billing"}
+{"text":"Thanks for your help.","options":["billing","access"],"label":null}
+{"text":"I can sign in again.","question":"Is access restored?","answer":"yes"}
+```
+
+```sh
+krill tune --model reader-base --data examples.jsonl --name reader-custom
+krill decide --model reader-custom --text "My card was charged twice." \
+  --option billing --option access
+```
+
+The defaults are `--epochs 30 --lr 0.003 --holdout 0.2 --seed 0`. Krill uses a
+deterministic holdout for datasets with at least 20 examples. It ranks
+checkpoints by held-out accuracy, breaks ties with lower loss, and stops after
+five epochs without a better checkpoint. Set `--holdout 0` to evaluate on the
+training set. The report includes
+before and after accuracy, loss, abstention precision and recall, and recall for
+up to ten of the rarest labels. If held-out accuracy drops, the command prints
+the report and exits with an error. Use `--force` to install that result.
+An accepted tune installs a new bundle and leaves the base bundle intact.
+
+`POST /v1/tune` uses the same defaults and accepts inline examples. The request
+waits for tuning to finish. Include your normal bearer token if the server
+requires one.
+
+```json
+{
+  "model": "reader-base",
+  "name": "reader-custom",
+  "examples": [
+    {"text": "I was charged twice.", "options": ["billing", "access"], "label": "billing"}
+  ]
+}
+```
+
+The response contains `name` and `report`. A held-out regression returns
+`name: null` and `report.accepted: false`.
+
+For cross-runtime checks, run `scripts/tune_parity.py` with `KRILL_TUNE_BASE`
+pointing to a reader bundle and `KRILL_TUNE_DATA` pointing to a JSONL file with
+at least 20 examples. Set `KRILL_TUNE_REFERENCE` to the importable Python
+reference package and use a Python environment with its dependencies installed.
+The script requires scores for both tuned bundles to agree across runtimes
+within 0.001 and held-out accuracies to agree within one percentage point. It
+uses `.build/release/krill` by default.
+
 ## HTTP: `POST /v1/decide`
 
 `model` is the name of an installed decision model, as for embeddings and rerank; a path is not
